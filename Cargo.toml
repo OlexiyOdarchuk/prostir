@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = ["proto", "host", "client"]
+default-members = ["proto", "host", "client"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[profile.release]
+lto = "thin"
+debug = 1

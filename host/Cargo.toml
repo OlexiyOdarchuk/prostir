@@ -1,0 +1,25 @@
+[package]
+name = "qmon-host"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "questmon-host"
+path = "src/main.rs"
+
+[[bin]]
+name = "questmon-probe"
+path = "src/bin/probe.rs"
+
+[dependencies]
+qmon-proto = { path = "../proto" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+log = "0.4"
+env_logger = "0.11"
+libc = "0.2"
+gstreamer = "0.25"
+gstreamer-app = "0.25"
+gstreamer-video = "0.25"
+wayland-client = "0.31"
+wayland-protocols-plasma = { version = "0.3", features = ["client"] }
