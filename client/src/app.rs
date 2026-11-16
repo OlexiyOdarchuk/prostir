@@ -241,7 +241,13 @@ fn run(app: &AndroidApp) -> Result<()> {
     let controls = Controls::new(&instance, &session)?;
 
     let (net_tx, net_rx) = mpsc::channel();
-    net::spawn(net_tx, app.external_data_path().map(|p| p.join("host.txt")));
+    net::spawn(
+        net_tx,
+        net::Discovery {
+            host_file: app.external_data_path().map(|p| p.join("host.txt")),
+            last_host_file: data_dir.join("last_host"),
+        },
+    );
 
     // SAFETY: the VM pointer is valid for the life of the process.
     let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) }?;

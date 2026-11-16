@@ -187,8 +187,12 @@ impl Displays {
     }
 }
 
-fn serve_client(stream: TcpStream, displays: &Displays) -> Result<()> {
+/// Validates the client's greeting before anything (like creating monitors) happens.
+fn handshake(stream: &TcpStream) -> Result<BufReader<TcpStream>> {
     stream.set_nodelay(true)?;
+    // Over Wi-Fi a vanished headset would otherwise block writes for minutes and
+    // keep a reconnecting headset waiting in the accept queue.
+    stream.set_write_timeout(Some(Duration::from_secs(3)))?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     let mut reader = BufReader::new(stream.try_clone()?);
     match ClientMsg::read(&mut reader)? {
@@ -197,6 +201,10 @@ fn serve_client(stream: TcpStream, displays: &Displays) -> Result<()> {
         other => bail!("unexpected first message {other:?}"),
     }
     stream.set_read_timeout(None)?;
+    Ok(reader)
+}
+
+fn serve_client(stream: TcpStream, mut reader: BufReader<TcpStream>, displays: &Displays) -> Result<()> {
     let mut writer = BufWriter::with_capacity(1 << 20, stream.try_clone()?);
     HostMsg::Welcome { version: PROTOCOL_VERSION }.write(&mut writer)?;
     writer.flush()?;
@@ -272,11 +280,45 @@ fn spawn_discovery(port: u16) -> Result<()> {
     let beacon = qmon_proto::encode_beacon(port, &hostname());
     std::thread::Builder::new().name("discovery".into()).spawn(move || {
         loop {
-            let _ = socket.send_to(&beacon, (Ipv4Addr::BROADCAST, qmon_proto::DISCOVERY_PORT));
+            // 255.255.255.255 only leaves through the default route, so also send to the
+            // broadcast address of every interface (Wi-Fi, Ethernet, hotspot).
+            let mut targets = broadcast_addresses();
+            targets.push(Ipv4Addr::BROADCAST);
+            for ip in targets {
+                let _ = socket.send_to(&beacon, (ip, qmon_proto::DISCOVERY_PORT));
+            }
             std::thread::sleep(Duration::from_secs(1));
         }
     })?;
     Ok(())
+}
+
+/// IPv4 broadcast addresses of all interfaces that are up.
+fn broadcast_addresses() -> Vec<Ipv4Addr> {
+    let mut out = Vec::new();
+    let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: getifaddrs fills `list`, which is walked read-only and freed once.
+    unsafe {
+        if libc::getifaddrs(&mut list) != 0 {
+            return out;
+        }
+        let mut cur = list;
+        while let Some(ifa) = cur.as_ref() {
+            let flags = ifa.ifa_flags;
+            let up = flags & libc::IFF_UP as u32 != 0 && flags & libc::IFF_BROADCAST as u32 != 0 && flags & libc::IFF_LOOPBACK as u32 == 0;
+            let addr = ifa.ifa_ifu; // broadcast address when IFF_BROADCAST is set
+            if up && !addr.is_null() && i32::from((*addr).sa_family) == libc::AF_INET {
+                let sin = &*(addr as *const libc::sockaddr_in);
+                let ip = Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
+                if !out.contains(&ip) {
+                    out.push(ip);
+                }
+            }
+            cur = ifa.ifa_next;
+        }
+        libc::freeifaddrs(list);
+    }
+    out
 }
 
 /// Keeps `adb reverse` set up so a headset on USB reaches the host via 127.0.0.1.
@@ -326,7 +368,15 @@ fn main() -> Result<()> {
         match listener.accept() {
             Ok((stream, addr)) => {
                 stream.set_nonblocking(false)?;
-                info!("headset connected from {addr}");
+                let reader = match handshake(&stream) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        warn!("rejected connection from {addr}: {e:#}");
+                        continue;
+                    }
+                };
+                let via = if addr.ip().is_loopback() { "USB" } else { "Wi-Fi" };
+                info!("headset connected via {via} from {addr}");
                 if displays.as_ref().is_some_and(|d| !d.healthy()) {
                     displays = None;
                 }
@@ -339,7 +389,7 @@ fn main() -> Result<()> {
                         }
                     }
                 }
-                if let Err(e) = serve_client(stream, displays.as_ref().unwrap()) {
+                if let Err(e) = serve_client(stream, reader, displays.as_ref().unwrap()) {
                     warn!("session ended: {e:#}");
                 } else {
                     info!("headset disconnected");
