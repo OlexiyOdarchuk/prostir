@@ -26,13 +26,29 @@ fn check(result: xr::sys::Result, what: &str) -> Result<()> {
 
 impl Passthrough {
     pub fn new<G: xr::Graphics>(session: &xr::Session<G>, running: bool) -> Result<Self> {
-        let fp = *session.instance().exts().fb_passthrough.as_ref().context("XR_FB_passthrough is not enabled")?;
-        let flags = if running { xr::PassthroughFlagsFB::IS_RUNNING_AT_CREATION } else { xr::PassthroughFlagsFB::EMPTY };
+        let fp = *session
+            .instance()
+            .exts()
+            .fb_passthrough
+            .as_ref()
+            .context("XR_FB_passthrough is not enabled")?;
+        let flags = if running {
+            xr::PassthroughFlagsFB::IS_RUNNING_AT_CREATION
+        } else {
+            xr::PassthroughFlagsFB::EMPTY
+        };
 
-        let info = xr::sys::PassthroughCreateInfoFB { ty: xr::sys::PassthroughCreateInfoFB::TYPE, next: ptr::null(), flags };
+        let info = xr::sys::PassthroughCreateInfoFB {
+            ty: xr::sys::PassthroughCreateInfoFB::TYPE,
+            next: ptr::null(),
+            flags,
+        };
         let mut feature = xr::sys::PassthroughFB::NULL;
         // SAFETY: valid session, create info and out-pointer.
-        check(unsafe { (fp.create_passthrough)(session.as_raw(), &info, &mut feature) }, "xrCreatePassthroughFB")?;
+        check(
+            unsafe { (fp.create_passthrough)(session.as_raw(), &info, &mut feature) },
+            "xrCreatePassthroughFB",
+        )?;
 
         let info = xr::sys::PassthroughLayerCreateInfoFB {
             ty: xr::sys::PassthroughLayerCreateInfoFB::TYPE,
@@ -49,7 +65,12 @@ impl Passthrough {
             unsafe { (fp.destroy_passthrough)(feature) };
             return Err(e);
         }
-        Ok(Self { fp, feature, layer, running })
+        Ok(Self {
+            fp,
+            feature,
+            layer,
+            running,
+        })
     }
 
     pub fn running(&self) -> bool {
@@ -68,11 +89,23 @@ impl Passthrough {
         // SAFETY: both handles are alive for the lifetime of `self`.
         unsafe {
             if on {
-                check((self.fp.passthrough_start)(self.feature), "xrPassthroughStartFB")?;
-                check((self.fp.passthrough_layer_resume)(self.layer), "xrPassthroughLayerResumeFB")?;
+                check(
+                    (self.fp.passthrough_start)(self.feature),
+                    "xrPassthroughStartFB",
+                )?;
+                check(
+                    (self.fp.passthrough_layer_resume)(self.layer),
+                    "xrPassthroughLayerResumeFB",
+                )?;
             } else {
-                check((self.fp.passthrough_layer_pause)(self.layer), "xrPassthroughLayerPauseFB")?;
-                check((self.fp.passthrough_pause)(self.feature), "xrPassthroughPauseFB")?;
+                check(
+                    (self.fp.passthrough_layer_pause)(self.layer),
+                    "xrPassthroughLayerPauseFB",
+                )?;
+                check(
+                    (self.fp.passthrough_pause)(self.feature),
+                    "xrPassthroughPauseFB",
+                )?;
             }
         }
         self.running = on;

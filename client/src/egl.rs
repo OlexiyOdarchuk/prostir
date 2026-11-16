@@ -22,6 +22,7 @@ impl EglContext {
         // SAFETY: DEFAULT_DISPLAY is always a valid argument.
         let display = unsafe { egl.get_display(egl::DEFAULT_DISPLAY) }.context("eglGetDisplay")?;
         egl.initialize(display).context("eglInitialize")?;
+        #[rustfmt::skip]
         let attribs = [
             egl::RED_SIZE, 8,
             egl::GREEN_SIZE, 8,
@@ -31,11 +32,28 @@ impl EglContext {
             egl::SURFACE_TYPE, egl::PBUFFER_BIT,
             egl::NONE,
         ];
-        let config = egl.choose_first_config(display, &attribs)?.context("no EGL config")?;
-        let context = egl.create_context(display, config, None, &[egl::CONTEXT_CLIENT_VERSION, 3, egl::NONE])?;
-        let surface = egl.create_pbuffer_surface(display, config, &[egl::WIDTH, 16, egl::HEIGHT, 16, egl::NONE])?;
+        let config = egl
+            .choose_first_config(display, &attribs)?
+            .context("no EGL config")?;
+        let context = egl.create_context(
+            display,
+            config,
+            None,
+            &[egl::CONTEXT_CLIENT_VERSION, 3, egl::NONE],
+        )?;
+        let surface = egl.create_pbuffer_surface(
+            display,
+            config,
+            &[egl::WIDTH, 16, egl::HEIGHT, 16, egl::NONE],
+        )?;
         egl.make_current(display, Some(surface), Some(surface), Some(context))?;
-        Ok(Self { egl, display, config, context, surface })
+        Ok(Self {
+            egl,
+            display,
+            config,
+            context,
+            surface,
+        })
     }
 }
 

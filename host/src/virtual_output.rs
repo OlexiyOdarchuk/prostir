@@ -138,15 +138,7 @@ impl VirtualOutputs {
                     i,
                 )
             } else {
-                screencast.stream_virtual_output(
-                    name,
-                    w,
-                    h,
-                    spec.scale,
-                    POINTER_EMBEDDED,
-                    &qh,
-                    i,
-                )
+                screencast.stream_virtual_output(name, w, h, spec.scale, POINTER_EMBEDDED, &qh, i)
             };
             streams.push(stream);
         }
@@ -246,7 +238,10 @@ impl Drop for VirtualOutputs {
 fn apply_scale(output: &str, scale: f64) {
     let arg = format!("output.{output}.scale.{scale}");
     for _ in 0..5 {
-        match std::process::Command::new("kscreen-doctor").arg(&arg).output() {
+        match std::process::Command::new("kscreen-doctor")
+            .arg(&arg)
+            .output()
+        {
             Ok(out) if out.status.success() => {
                 info!("{output}: scale {scale}");
                 return;

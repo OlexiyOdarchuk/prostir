@@ -58,10 +58,17 @@ fn parse_monitor(s: &str) -> Result<MonitorSpec, String> {
     let (w, h) = size.split_once(['x', 'X']).ok_or("expected WIDTHxHEIGHT")?;
     let width: u32 = w.parse().map_err(|e| format!("bad width: {e}"))?;
     let height: u32 = h.parse().map_err(|e| format!("bad height: {e}"))?;
-    if !(320..=7680).contains(&width) || !(240..=4320).contains(&height) || !(0.5..=4.0).contains(&scale) {
+    if !(320..=7680).contains(&width)
+        || !(240..=4320).contains(&height)
+        || !(0.5..=4.0).contains(&scale)
+    {
         return Err("monitor size or scale out of range".into());
     }
-    Ok(MonitorSpec { width, height, scale })
+    Ok(MonitorSpec {
+        width,
+        height,
+        scale,
+    })
 }
 
 /// Per-stream delivery state for the currently connected client.
@@ -85,8 +92,18 @@ struct RouterInner {
 
 impl Router {
     fn new(codec: Codec, count: usize) -> Self {
-        let streams = (0..count).map(|_| StreamSlot { size: None, announced: false, need_keyframe: true }).collect();
-        Self { codec, inner: Mutex::new(RouterInner { tx: None, streams }), failed: AtomicBool::new(false) }
+        let streams = (0..count)
+            .map(|_| StreamSlot {
+                size: None,
+                announced: false,
+                need_keyframe: true,
+            })
+            .collect();
+        Self {
+            codec,
+            inner: Mutex::new(RouterInner { tx: None, streams }),
+            failed: AtomicBool::new(false),
+        }
     }
 
     fn attach(&self, tx: SyncSender<HostMsg>) {
@@ -120,10 +137,16 @@ impl Router {
                 self.failed.store(true, Ordering::Relaxed);
                 false
             }
-            EncoderEvent::Frame { pts_us, keyframe, data } => {
+            EncoderEvent::Frame {
+                pts_us,
+                keyframe,
+                data,
+            } => {
                 let Some(sender) = tx else { return false };
                 if !slot.announced {
-                    let Some((width, height)) = slot.size else { return true };
+                    let Some((width, height)) = slot.size else {
+                        return true;
+                    };
                     let start = HostMsg::StreamStart {
                         id: id as u8,
                         width,
@@ -140,7 +163,12 @@ impl Router {
                 if slot.need_keyframe && !keyframe {
                     return true;
                 }
-                match sender.try_send(HostMsg::Frame { id: id as u8, pts_us, keyframe, data }) {
+                match sender.try_send(HostMsg::Frame {
+                    id: id as u8,
+                    pts_us,
+                    keyframe,
+                    data,
+                }) {
                     Ok(()) => {
                         slot.need_keyframe = false;
                         false
@@ -170,20 +198,42 @@ struct Displays {
 
 impl Displays {
     fn create(args: &Args) -> Result<Self> {
-        let codec = if args.software { Codec::H264 } else { match args.codec { CodecArg::H264 => Codec::H264, CodecArg::H265 => Codec::H265 } };
+        let codec = if args.software {
+            Codec::H264
+        } else {
+            match args.codec {
+                CodecArg::H264 => Codec::H264,
+                CodecArg::H265 => Codec::H265,
+            }
+        };
         let outputs = VirtualOutputs::create(&args.monitors)?;
         let router = Arc::new(Router::new(codec, args.monitors.len()));
-        let cfg = EncoderConfig { codec, bitrate_kbps: args.bitrate * 1000, software: args.software };
+        let cfg = EncoderConfig {
+            codec,
+            bitrate_kbps: args.bitrate * 1000,
+            software: args.software,
+        };
         let mut encoders = Vec::new();
         for (id, &node) in outputs.nodes.iter().enumerate() {
             let router = router.clone();
-            encoders.push(Encoder::start(node, &cfg, move |ev| router.on_event(id, ev))?);
+            encoders.push(Encoder::start(node, &cfg, move |ev| {
+                router.on_event(id, ev)
+            })?);
         }
-        Ok(Self { encoders, outputs, router })
+        Ok(Self {
+            encoders,
+            outputs,
+            router,
+        })
     }
 
     fn healthy(&self) -> bool {
-        !self.router.failed.load(Ordering::Relaxed) && !self.outputs.closed.iter().any(|c| c.load(Ordering::Relaxed))
+        !self.router.failed.load(Ordering::Relaxed)
+            && !self
+                .outputs
+                .closed
+                .iter()
+                .any(|c| c.load(Ordering::Relaxed))
     }
 }
 
@@ -197,49 +247,62 @@ fn handshake(stream: &TcpStream) -> Result<BufReader<TcpStream>> {
     let mut reader = BufReader::new(stream.try_clone()?);
     match ClientMsg::read(&mut reader)? {
         ClientMsg::Hello { version } if version == PROTOCOL_VERSION => {}
-        ClientMsg::Hello { version } => bail!("client speaks protocol v{version}, host v{PROTOCOL_VERSION}"),
+        ClientMsg::Hello { version } => {
+            bail!("client speaks protocol v{version}, host v{PROTOCOL_VERSION}")
+        }
         other => bail!("unexpected first message {other:?}"),
     }
     stream.set_read_timeout(None)?;
     Ok(reader)
 }
 
-fn serve_client(stream: TcpStream, mut reader: BufReader<TcpStream>, displays: &Displays) -> Result<()> {
+fn serve_client(
+    stream: TcpStream,
+    mut reader: BufReader<TcpStream>,
+    displays: &Displays,
+) -> Result<()> {
     let mut writer = BufWriter::with_capacity(1 << 20, stream.try_clone()?);
-    HostMsg::Welcome { version: PROTOCOL_VERSION }.write(&mut writer)?;
+    HostMsg::Welcome {
+        version: PROTOCOL_VERSION,
+    }
+    .write(&mut writer)?;
     writer.flush()?;
 
     let (tx, rx) = mpsc::sync_channel::<HostMsg>(16);
     let writer_thread = {
         let stream = stream.try_clone()?;
-        std::thread::Builder::new().name("net-writer".into()).spawn(move || {
-            let result = (|| -> std::io::Result<()> {
-                while let Ok(msg) = rx.recv() {
-                    msg.write(&mut writer)?;
-                    while let Ok(msg) = rx.try_recv() {
+        std::thread::Builder::new()
+            .name("net-writer".into())
+            .spawn(move || {
+                let result = (|| -> std::io::Result<()> {
+                    while let Ok(msg) = rx.recv() {
                         msg.write(&mut writer)?;
+                        while let Ok(msg) = rx.try_recv() {
+                            msg.write(&mut writer)?;
+                        }
+                        writer.flush()?;
                     }
-                    writer.flush()?;
+                    Ok(())
+                })();
+                if let Err(e) = result {
+                    info!("connection closed while sending: {e}");
                 }
-                Ok(())
-            })();
-            if let Err(e) = result {
-                info!("connection closed while sending: {e}");
-            }
-            let _ = stream.shutdown(Shutdown::Both);
-        })?
+                let _ = stream.shutdown(Shutdown::Both);
+            })?
     };
 
     let (msg_tx, msg_rx) = mpsc::channel::<std::io::Result<ClientMsg>>();
-    std::thread::Builder::new().name("net-reader".into()).spawn(move || {
-        loop {
-            let msg = ClientMsg::read(&mut reader);
-            let stop = msg.is_err();
-            if msg_tx.send(msg).is_err() || stop {
-                break;
+    std::thread::Builder::new()
+        .name("net-reader".into())
+        .spawn(move || {
+            loop {
+                let msg = ClientMsg::read(&mut reader);
+                let stop = msg.is_err();
+                if msg_tx.send(msg).is_err() || stop {
+                    break;
+                }
             }
-        }
-    })?;
+        })?;
 
     displays.router.attach(tx);
     for e in &displays.encoders {
@@ -271,25 +334,29 @@ fn serve_client(stream: TcpStream, mut reader: BufReader<TcpStream>, displays: &
 }
 
 fn hostname() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/hostname").map(|s| s.trim().to_string()).unwrap_or_else(|_| "linux".into())
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| "linux".into())
 }
 
 fn spawn_discovery(port: u16) -> Result<()> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
     socket.set_broadcast(true)?;
     let beacon = qmon_proto::encode_beacon(port, &hostname());
-    std::thread::Builder::new().name("discovery".into()).spawn(move || {
-        loop {
-            // 255.255.255.255 only leaves through the default route, so also send to the
-            // broadcast address of every interface (Wi-Fi, Ethernet, hotspot).
-            let mut targets = broadcast_addresses();
-            targets.push(Ipv4Addr::BROADCAST);
-            for ip in targets {
-                let _ = socket.send_to(&beacon, (ip, qmon_proto::DISCOVERY_PORT));
+    std::thread::Builder::new()
+        .name("discovery".into())
+        .spawn(move || {
+            loop {
+                // 255.255.255.255 only leaves through the default route, so also send to the
+                // broadcast address of every interface (Wi-Fi, Ethernet, hotspot).
+                let mut targets = broadcast_addresses();
+                targets.push(Ipv4Addr::BROADCAST);
+                for ip in targets {
+                    let _ = socket.send_to(&beacon, (ip, qmon_proto::DISCOVERY_PORT));
+                }
+                std::thread::sleep(Duration::from_secs(1));
             }
-            std::thread::sleep(Duration::from_secs(1));
-        }
-    })?;
+        })?;
     Ok(())
 }
 
@@ -305,7 +372,9 @@ fn broadcast_addresses() -> Vec<Ipv4Addr> {
         let mut cur = list;
         while let Some(ifa) = cur.as_ref() {
             let flags = ifa.ifa_flags;
-            let up = flags & libc::IFF_UP as u32 != 0 && flags & libc::IFF_BROADCAST as u32 != 0 && flags & libc::IFF_LOOPBACK as u32 == 0;
+            let up = flags & libc::IFF_UP as u32 != 0
+                && flags & libc::IFF_BROADCAST as u32 != 0
+                && flags & libc::IFF_LOOPBACK as u32 == 0;
             let addr = ifa.ifa_ifu; // broadcast address when IFF_BROADCAST is set
             if up && !addr.is_null() && i32::from((*addr).sa_family) == libc::AF_INET {
                 let sin = &*(addr as *const libc::sockaddr_in);
@@ -323,28 +392,30 @@ fn broadcast_addresses() -> Vec<Ipv4Addr> {
 
 /// Keeps `adb reverse` set up so a headset on USB reaches the host via 127.0.0.1.
 fn spawn_adb_reverse(port: u16) {
-    let _ = std::thread::Builder::new().name("adb-reverse".into()).spawn(move || {
-        let mut connected = false;
-        loop {
-            let spec = format!("tcp:{port}");
-            let ok = std::process::Command::new("adb")
-                .args(["reverse", &spec, &spec])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .map(|s| s.success());
-            match ok {
-                Err(_) => return, // no adb installed
-                Ok(true) if !connected => {
-                    info!("USB headset detected, adb reverse {spec} active");
-                    connected = true;
+    let _ = std::thread::Builder::new()
+        .name("adb-reverse".into())
+        .spawn(move || {
+            let mut connected = false;
+            loop {
+                let spec = format!("tcp:{port}");
+                let ok = std::process::Command::new("adb")
+                    .args(["reverse", &spec, &spec])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .map(|s| s.success());
+                match ok {
+                    Err(_) => return, // no adb installed
+                    Ok(true) if !connected => {
+                        info!("USB headset detected, adb reverse {spec} active");
+                        connected = true;
+                    }
+                    Ok(false) => connected = false,
+                    _ => {}
                 }
-                Ok(false) => connected = false,
-                _ => {}
+                std::thread::sleep(Duration::from_secs(3));
             }
-            std::thread::sleep(Duration::from_secs(3));
-        }
-    });
+        });
 }
 
 fn main() -> Result<()> {
@@ -352,7 +423,8 @@ fn main() -> Result<()> {
     let args = Args::parse();
     gstreamer::init().context("GStreamer init")?;
 
-    let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, args.port)).with_context(|| format!("cannot listen on port {}", args.port))?;
+    let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, args.port))
+        .with_context(|| format!("cannot listen on port {}", args.port))?;
     listener.set_nonblocking(true)?;
     info!("waiting for the headset on port {}", args.port);
     if !args.no_discovery {
@@ -375,7 +447,11 @@ fn main() -> Result<()> {
                         continue;
                     }
                 };
-                let via = if addr.ip().is_loopback() { "USB" } else { "Wi-Fi" };
+                let via = if addr.ip().is_loopback() {
+                    "USB"
+                } else {
+                    "Wi-Fi"
+                };
                 info!("headset connected via {via} from {addr}");
                 if displays.as_ref().is_some_and(|d| !d.healthy()) {
                     displays = None;

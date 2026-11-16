@@ -18,8 +18,16 @@ pub struct Frame {
 
 pub enum NetEvent {
     Connected(SocketAddr),
-    StreamStart { id: u8, width: u32, height: u32, codec: Codec, frames: Receiver<Frame> },
-    StreamEnd { id: u8 },
+    StreamStart {
+        id: u8,
+        width: u32,
+        height: u32,
+        codec: Codec,
+        frames: Receiver<Frame>,
+    },
+    StreamEnd {
+        id: u8,
+    },
     Disconnected,
 }
 
@@ -65,17 +73,27 @@ fn try_connect(addr: SocketAddr) -> Option<TcpStream> {
 fn read_addr(path: &PathBuf) -> Option<SocketAddr> {
     let text = std::fs::read_to_string(path).ok()?;
     let text = text.trim();
-    text.parse::<SocketAddr>()
-        .ok()
-        .or_else(|| text.parse::<IpAddr>().ok().map(|ip| SocketAddr::new(ip, qmon_proto::TCP_PORT)))
+    text.parse::<SocketAddr>().ok().or_else(|| {
+        text.parse::<IpAddr>()
+            .ok()
+            .map(|ip| SocketAddr::new(ip, qmon_proto::TCP_PORT))
+    })
 }
 
 fn connect(beacon: Option<&UdpSocket>, discovery: &Discovery) -> Option<TcpStream> {
-    if let Some(stream) = discovery.host_file.as_ref().and_then(read_addr).and_then(try_connect) {
+    if let Some(stream) = discovery
+        .host_file
+        .as_ref()
+        .and_then(read_addr)
+        .and_then(try_connect)
+    {
         return Some(stream);
     }
     // USB: the host keeps `adb reverse` active, so localhost reaches the PC.
-    if let Some(stream) = try_connect(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), qmon_proto::TCP_PORT)) {
+    if let Some(stream) = try_connect(SocketAddr::new(
+        Ipv4Addr::LOCALHOST.into(),
+        qmon_proto::TCP_PORT,
+    )) {
         return Some(stream);
     }
     if let Some(stream) = read_addr(&discovery.last_host_file).and_then(try_connect) {
@@ -102,7 +120,10 @@ fn connect(beacon: Option<&UdpSocket>, discovery: &Discovery) -> Option<TcpStrea
 fn local_ipv4() -> Option<Ipv4Addr> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
     // UDP connect only picks a route; nothing is sent.
-    socket.connect((Ipv4Addr::new(10, 255, 255, 254), 9)).or_else(|_| socket.connect((Ipv4Addr::new(192, 168, 255, 254), 9))).ok()?;
+    socket
+        .connect((Ipv4Addr::new(10, 255, 255, 254), 9))
+        .or_else(|_| socket.connect((Ipv4Addr::new(192, 168, 255, 254), 9)))
+        .ok()?;
     match socket.local_addr().ok()?.ip() {
         IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_unspecified() => Some(ip),
         _ => None,
@@ -125,7 +146,10 @@ fn scan_subnet() -> Option<TcpStream> {
         }
     });
     let stream = found.into_inner().unwrap()?;
-    info!("found host by scanning {a}.{b}.{c}.0/24: {:?}", stream.peer_addr());
+    info!(
+        "found host by scanning {a}.{b}.{c}.0/24: {:?}",
+        stream.peer_addr()
+    );
     Some(stream)
 }
 
@@ -138,7 +162,10 @@ fn run_session(stream: TcpStream, events: &Sender<NetEvent>) -> std::io::Result<
     stream.set_nodelay(true)?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     let mut writer = stream.try_clone()?;
-    ClientMsg::Hello { version: PROTOCOL_VERSION }.write(&mut writer)?;
+    ClientMsg::Hello {
+        version: PROTOCOL_VERSION,
+    }
+    .write(&mut writer)?;
     let mut reader = BufReader::with_capacity(1 << 20, stream.try_clone()?);
     match HostMsg::read(&mut reader)? {
         HostMsg::Welcome { .. } => {}
@@ -157,21 +184,50 @@ fn run_session(stream: TcpStream, events: &Sender<NetEvent>) -> std::io::Result<
             Err(e) => break Err(e),
         };
         match msg {
-            HostMsg::StreamStart { id, width, height, codec, name } => {
+            HostMsg::StreamStart {
+                id,
+                width,
+                height,
+                codec,
+                name,
+            } => {
                 info!("monitor {name}: {width}x{height} {codec:?}");
                 if streams.remove(&id).is_some() {
                     let _ = events.send(NetEvent::StreamEnd { id });
                 }
                 let (tx, rx) = mpsc::sync_channel(32);
-                streams.insert(id, StreamSlot { tx, waiting_for_keyframe: true });
-                let _ = events.send(NetEvent::StreamStart { id, width, height, codec, frames: rx });
+                streams.insert(
+                    id,
+                    StreamSlot {
+                        tx,
+                        waiting_for_keyframe: true,
+                    },
+                );
+                let _ = events.send(NetEvent::StreamStart {
+                    id,
+                    width,
+                    height,
+                    codec,
+                    frames: rx,
+                });
             }
-            HostMsg::Frame { id, pts_us, keyframe, data } => {
-                let Some(slot) = streams.get_mut(&id) else { continue };
+            HostMsg::Frame {
+                id,
+                pts_us,
+                keyframe,
+                data,
+            } => {
+                let Some(slot) = streams.get_mut(&id) else {
+                    continue;
+                };
                 if slot.waiting_for_keyframe && !keyframe {
                     continue;
                 }
-                match slot.tx.try_send(Frame { pts_us, keyframe, data }) {
+                match slot.tx.try_send(Frame {
+                    pts_us,
+                    keyframe,
+                    data,
+                }) {
                     Ok(()) => slot.waiting_for_keyframe = false,
                     Err(TrySendError::Full(_)) => {
                         warn!("decoder {id} is behind, dropping until next keyframe");

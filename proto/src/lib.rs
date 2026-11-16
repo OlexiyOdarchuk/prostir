@@ -39,12 +39,27 @@ impl Codec {
 #[derive(Debug, Clone, PartialEq)]
 pub enum HostMsg {
     /// Sent once after the handshake.
-    Welcome { version: u32 },
+    Welcome {
+        version: u32,
+    },
     /// A virtual monitor appeared. `width`/`height` are in pixels.
-    StreamStart { id: u8, width: u32, height: u32, codec: Codec, name: String },
+    StreamStart {
+        id: u8,
+        width: u32,
+        height: u32,
+        codec: Codec,
+        name: String,
+    },
     /// One encoded access unit (Annex-B byte stream, parameter sets in-band on keyframes).
-    Frame { id: u8, pts_us: u64, keyframe: bool, data: Vec<u8> },
-    StreamEnd { id: u8 },
+    Frame {
+        id: u8,
+        pts_us: u64,
+        keyframe: bool,
+        data: Vec<u8>,
+    },
+    StreamEnd {
+        id: u8,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -120,14 +135,32 @@ impl HostMsg {
     pub fn write(&self, w: &mut impl Write) -> io::Result<()> {
         match self {
             HostMsg::Welcome { version } => write_frame(w, tag::WELCOME, &[&version.to_le_bytes()]),
-            HostMsg::StreamStart { id, width, height, codec, name } => write_frame(
+            HostMsg::StreamStart {
+                id,
+                width,
+                height,
+                codec,
+                name,
+            } => write_frame(
                 w,
                 tag::STREAM_START,
-                &[&[*id, *codec as u8], &width.to_le_bytes(), &height.to_le_bytes(), name.as_bytes()],
+                &[
+                    &[*id, *codec as u8],
+                    &width.to_le_bytes(),
+                    &height.to_le_bytes(),
+                    name.as_bytes(),
+                ],
             ),
-            HostMsg::Frame { id, pts_us, keyframe, data } => {
-                write_frame(w, tag::FRAME, &[&[*id, *keyframe as u8], &pts_us.to_le_bytes(), data])
-            }
+            HostMsg::Frame {
+                id,
+                pts_us,
+                keyframe,
+                data,
+            } => write_frame(
+                w,
+                tag::FRAME,
+                &[&[*id, *keyframe as u8], &pts_us.to_le_bytes(), data],
+            ),
             HostMsg::StreamEnd { id } => write_frame(w, tag::STREAM_END, &[&[*id]]),
         }
     }
@@ -143,14 +176,25 @@ impl HostMsg {
                 let width = c.u32()?;
                 let height = c.u32()?;
                 let name = String::from_utf8_lossy(c.rest()).into_owned();
-                HostMsg::StreamStart { id, width, height, codec, name }
+                HostMsg::StreamStart {
+                    id,
+                    width,
+                    height,
+                    codec,
+                    name,
+                }
             }
             tag::FRAME => {
                 let id = c.u8()?;
                 let keyframe = c.u8()? != 0;
                 let pts_us = c.u64()?;
                 let data = c.rest().to_vec();
-                HostMsg::Frame { id, pts_us, keyframe, data }
+                HostMsg::Frame {
+                    id,
+                    pts_us,
+                    keyframe,
+                    data,
+                }
             }
             tag::STREAM_END => HostMsg::StreamEnd { id: c.u8()? },
             _ => return Err(invalid("unknown host message")),
@@ -200,8 +244,19 @@ mod tests {
     fn roundtrip() {
         let msgs = vec![
             HostMsg::Welcome { version: 1 },
-            HostMsg::StreamStart { id: 2, width: 2560, height: 1440, codec: Codec::H265, name: "Quest-1".into() },
-            HostMsg::Frame { id: 2, pts_us: 123456789, keyframe: true, data: vec![0, 0, 0, 1, 0x40] },
+            HostMsg::StreamStart {
+                id: 2,
+                width: 2560,
+                height: 1440,
+                codec: Codec::H265,
+                name: "Quest-1".into(),
+            },
+            HostMsg::Frame {
+                id: 2,
+                pts_us: 123456789,
+                keyframe: true,
+                data: vec![0, 0, 0, 1, 0x40],
+            },
             HostMsg::StreamEnd { id: 2 },
         ];
         let mut buf = Vec::new();
@@ -214,8 +269,13 @@ mod tests {
         }
 
         let mut buf = Vec::new();
-        ClientMsg::RequestKeyframe { id: 7 }.write(&mut buf).unwrap();
-        assert_eq!(ClientMsg::read(&mut buf.as_slice()).unwrap(), ClientMsg::RequestKeyframe { id: 7 });
+        ClientMsg::RequestKeyframe { id: 7 }
+            .write(&mut buf)
+            .unwrap();
+        assert_eq!(
+            ClientMsg::read(&mut buf.as_slice()).unwrap(),
+            ClientMsg::RequestKeyframe { id: 7 }
+        );
 
         let b = encode_beacon(47830, "desk");
         assert_eq!(decode_beacon(&b), Some((47830, "desk".into())));

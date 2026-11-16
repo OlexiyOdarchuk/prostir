@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use log::{error, info, warn};
-use ndk::media::media_codec::{DequeuedInputBufferResult, DequeuedOutputBufferInfoResult, MediaCodec, MediaCodecDirection};
+use ndk::media::media_codec::{
+    DequeuedInputBufferResult, DequeuedOutputBufferInfoResult, MediaCodec, MediaCodecDirection,
+};
 use ndk::media::media_format::MediaFormat;
 use ndk::native_window::NativeWindow;
 use qmon_proto::Codec;
@@ -36,9 +38,17 @@ pub fn spawn(
         .expect("spawn decoder thread")
 }
 
-fn run(codec: Codec, width: u32, height: u32, window: &NativeWindow, frames: &Receiver<Frame>, stop: &AtomicBool) -> Result<()> {
+fn run(
+    codec: Codec,
+    width: u32,
+    height: u32,
+    window: &NativeWindow,
+    frames: &Receiver<Frame>,
+    stop: &AtomicBool,
+) -> Result<()> {
     let mime = codec.mime();
-    let decoder = MediaCodec::from_decoder_type(mime).with_context(|| format!("no decoder for {mime}"))?;
+    let decoder =
+        MediaCodec::from_decoder_type(mime).with_context(|| format!("no decoder for {mime}"))?;
     let mut format = MediaFormat::new();
     format.set_str("mime", mime);
     format.set_i32("width", width as i32);
@@ -49,9 +59,14 @@ fn run(codec: Codec, width: u32, height: u32, window: &NativeWindow, frames: &Re
     format.set_i32("vendor.qti-ext-dec-low-latency.enable", 1);
     format.set_i32("vendor.qti-ext-dec-picture-order.enable", 1);
     format.set_i32("priority", 0);
-    decoder.configure(&format, Some(window), MediaCodecDirection::Decoder).context("configure decoder")?;
+    decoder
+        .configure(&format, Some(window), MediaCodecDirection::Decoder)
+        .context("configure decoder")?;
     decoder.start().context("start decoder")?;
-    info!("decoder {} started for {width}x{height}", decoder.name().unwrap_or_default());
+    info!(
+        "decoder {} started for {width}x{height}",
+        decoder.name().unwrap_or_default()
+    );
 
     let result = (|| -> Result<()> {
         while !stop.load(Ordering::Relaxed) {
@@ -74,7 +89,11 @@ fn queue(decoder: &MediaCodec, frame: &Frame) -> Result<()> {
             DequeuedInputBufferResult::Buffer(mut buffer) => {
                 let dst = buffer.buffer_mut();
                 if frame.data.len() > dst.len() {
-                    bail!("frame of {} bytes does not fit the {} byte input buffer", frame.data.len(), dst.len());
+                    bail!(
+                        "frame of {} bytes does not fit the {} byte input buffer",
+                        frame.data.len(),
+                        dst.len()
+                    );
                 }
                 for (d, s) in dst.iter_mut().zip(&frame.data) {
                     d.write(*s);
@@ -86,16 +105,22 @@ fn queue(decoder: &MediaCodec, frame: &Frame) -> Result<()> {
             DequeuedInputBufferResult::TryAgainLater => drain(decoder)?,
         }
     }
-    warn!("decoder stalled, dropping a frame (keyframe: {})", frame.keyframe);
+    warn!(
+        "decoder stalled, dropping a frame (keyframe: {})",
+        frame.keyframe
+    );
     Ok(())
 }
 
 fn drain(decoder: &MediaCodec) -> Result<()> {
     loop {
         match decoder.dequeue_output_buffer(Duration::ZERO)? {
-            DequeuedOutputBufferInfoResult::Buffer(buffer) => decoder.release_output_buffer(buffer, true)?,
+            DequeuedOutputBufferInfoResult::Buffer(buffer) => {
+                decoder.release_output_buffer(buffer, true)?
+            }
             DequeuedOutputBufferInfoResult::TryAgainLater => return Ok(()),
-            DequeuedOutputBufferInfoResult::OutputFormatChanged | DequeuedOutputBufferInfoResult::OutputBuffersChanged => {}
+            DequeuedOutputBufferInfoResult::OutputFormatChanged
+            | DequeuedOutputBufferInfoResult::OutputBuffersChanged => {}
         }
     }
 }
