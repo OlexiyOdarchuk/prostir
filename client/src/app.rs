@@ -179,6 +179,11 @@ impl Scene {
 
     /// Lays everything out by the chosen preset.
     fn arrange_all(&mut self) {
+        if self.settings.cinema {
+            self.placements = layout::cinema(&self.quest_sizes(), self.primary);
+            self.grabs = [None, None];
+            return;
+        }
         let mirror_place = self.placements.get(&MIRROR_ID).copied();
         self.placements = layout::arrange(
             self.settings.preset,
@@ -771,7 +776,10 @@ fn run(app: &AndroidApp) -> Result<()> {
                 (input.grab.pressed, input.grab.released)
             };
 
-            if end_grab && let Some(released) = scene.grabs[hand].take() {
+            if end_grab
+                && let Some(released) = scene.grabs[hand].take()
+                && !scene.settings.cinema
+            {
                 layout::save(&scene.layout_path, &scene.placements);
                 // Dropped somewhere else in the row: KDE's order follows what the eyes see.
                 if released.id != PANEL_ID && released.id != MIRROR_ID {
@@ -1172,7 +1180,7 @@ fn handle_net_event(
                             swapchain,
                         },
                     );
-                    if !scene.placements.contains_key(&id) {
+                    if !scene.placements.contains_key(&id) && !scene.settings.cinema {
                         if id == MIRROR_ID {
                             // Only the mirror is new: put it under the primary monitor.
                             let all = layout::arrange(
@@ -1229,6 +1237,23 @@ fn handle_action(
             }
         }
         Action::Tab(tab) => scene.tab = tab,
+        Action::Cinema(on) => {
+            scene.settings.cinema = on;
+            scene.settings.save(settings_path);
+            if on {
+                scene.arrange_all();
+            } else {
+                // Back to the desk layout as it was saved.
+                scene.placements = layout::load(&scene.layout_path);
+                if scene
+                    .monitors
+                    .keys()
+                    .any(|id| !scene.placements.contains_key(id))
+                {
+                    scene.arrange_all();
+                }
+            }
+        }
         Action::Focus(on) => {
             scene.settings.focus = on;
             scene.settings.save(settings_path);

@@ -96,6 +96,7 @@ pub enum Action {
     Background(Background),
     Hands(HandMode),
     Focus(bool),
+    Cinema(bool),
     Tab(Tab),
     /// Connect to the n-th PC in `UiState::found`.
     ConnectTo(usize),
@@ -988,6 +989,40 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
             ),
         ],
     );
+    segmented(
+        items,
+        rx,
+        rw,
+        &mut y,
+        l.t("Режим", "Mode"),
+        vec![
+            (
+                l.t("Робочий стіл", "Desk"),
+                Action::Cinema(false),
+                !st.cinema,
+                true,
+            ),
+            (
+                l.t("Кінотеатр", "Cinema"),
+                Action::Cinema(true),
+                st.cinema,
+                true,
+            ),
+        ],
+    );
+    if st.cinema {
+        items.push(text(
+            rx,
+            y - 12.0,
+            19.0,
+            false,
+            MUTED,
+            l.t(
+                "Видно лише головний монітор, великий і далі.",
+                "Only the primary monitor, big and further away.",
+            ),
+        ));
+    }
 }
 
 /// Background and hands on the left, focus mode on the right.

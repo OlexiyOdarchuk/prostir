@@ -80,6 +80,30 @@ pub fn order_by_direction(placements: &HashMap<u8, Placement>, ids: &[u8]) -> Ve
     v.into_iter().map(|(_, id)| id).collect()
 }
 
+/// Cinema: only the primary monitor (else the first), big and further away,
+/// straight ahead at eye level; the others are not shown.
+pub fn cinema(monitors: &[(u8, u32, u32)], primary: Option<u8>) -> HashMap<u8, Placement> {
+    const DISTANCE: f32 = 3.0;
+    /// About 56° wide, like a good seat in a cinema.
+    const WIDTH: f32 = 3.2;
+    let id = primary
+        .filter(|p| monitors.iter().any(|m| m.0 == *p))
+        .or_else(|| monitors.first().map(|m| m.0));
+    let mut out = HashMap::new();
+    if let Some(id) = id {
+        let position = Vec3::new(0.0, -0.05, -DISTANCE);
+        out.insert(
+            id,
+            Placement {
+                position,
+                rotation: facing(position, Vec3::new(0.0, -0.05, 0.0)),
+                width: WIDTH,
+            },
+        );
+    }
+    out
+}
+
 pub fn arrange(
     preset: Preset,
     monitors: &[(u8, u32, u32)],
@@ -529,5 +553,16 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn cinema_shows_only_the_primary() {
+        let monitors = [(0, 2560, 1440), (1, 2560, 1440), (2, 1440, 2560)];
+        let out = cinema(&monitors, Some(1));
+        assert_eq!(out.keys().copied().collect::<Vec<_>>(), vec![1]);
+        assert!(out[&1].position.z < -2.0, "further away than the desk");
+        // Unknown primary: the first monitor.
+        assert!(cinema(&monitors, Some(9)).contains_key(&0));
+        assert!(cinema(&[], None).is_empty());
     }
 }
