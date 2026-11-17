@@ -461,12 +461,15 @@ impl Scene {
     }
 
     /// Puts the menu button just under the primary monitor's bottom-left corner, and
-    /// left of the laptop mirror hanging there so it never covers it.
+    /// left of the laptop mirror hanging there so it never covers it. When the primary
+    /// is not shown (cinema on another screen), under the first monitor that is: with
+    /// hands, the button is the only way back to the menu.
     fn place_button(&mut self) {
+        let shown = |id: &u8| self.placements.contains_key(id);
         let anchor = self
             .primary
-            .filter(|id| self.monitors.contains_key(id))
-            .or_else(|| self.quest_sizes().first().map(|m| m.0));
+            .filter(shown)
+            .or_else(|| self.quest_sizes().iter().map(|m| m.0).find(|id| shown(id)));
         let mirror = self
             .monitors
             .contains_key(&MIRROR_ID)
@@ -664,6 +667,7 @@ fn run(app: &AndroidApp) -> Result<()> {
     exts.khr_composition_layer_equirect2 = available.khr_composition_layer_equirect2;
     exts.ext_hand_interaction = available.ext_hand_interaction;
     exts.ext_hand_tracking = available.ext_hand_tracking;
+    exts.fb_hand_tracking_aim = available.fb_hand_tracking_aim;
     exts.fb_triangle_mesh = available.fb_triangle_mesh;
     exts.khr_composition_layer_color_scale_bias = available.khr_composition_layer_color_scale_bias;
     let instance = entry.create_instance(
@@ -730,6 +734,8 @@ fn run(app: &AndroidApp) -> Result<()> {
     let mut cursor_layer = ImageLayer::new(&session, format, CURSOR_PX, CURSOR_PX, true)?;
     cursor_layer.upload(&gl, &ui::cursor_image(CURSOR_PX))?;
     let mut button_hovered = false;
+    // The left hand's menu gesture as last seen, to act once per gesture.
+    let mut menu_gesture_held = false;
     button_layer.upload(&gl, &ui::menu_button_image(BUTTON_PX, false))?;
     let mut panel = Panel::new();
     // Tracked hands and pointer rays, drawn on top of everything.
@@ -1028,7 +1034,16 @@ fn run(app: &AndroidApp) -> Result<()> {
             scene.open_panel(head, forward, hands_in_view);
             scene.offline_since = None;
         }
-        if controls.menu_pressed(&session) {
+        // The left hand's menu gesture counts as the menu button.
+        let gesture = match &hand_trackers {
+            Some(t) if exts.fb_hand_tracking_aim => {
+                xrutil::hand_menu_gesture(&instance, &t[0], &local, time)
+            }
+            _ => false,
+        };
+        let gesture_pressed = gesture && !menu_gesture_held;
+        menu_gesture_held = gesture;
+        if controls.menu_pressed(&session) || gesture_pressed {
             if scene.panel_open {
                 scene.panel_open = false;
             } else {

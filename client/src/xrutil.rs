@@ -299,3 +299,50 @@ impl ImageLayer {
         }
     }
 }
+
+/// Whether the left hand makes the menu gesture (palm towards the face, pinch), which
+/// the Quest reports through `XR_FB_hand_tracking_aim`. The plain hand profile has no
+/// menu button, so without this a user with hands only cannot open the menu when no
+/// menu button is in view.
+pub fn hand_menu_gesture(
+    instance: &xr::Instance,
+    tracker: &xr::HandTracker,
+    space: &xr::Space,
+    time: xr::Time,
+) -> bool {
+    let Some(ext) = instance.exts().ext_hand_tracking.as_ref() else {
+        return false;
+    };
+    let mut aim = xr::sys::HandTrackingAimStateFB {
+        ty: xr::sys::HandTrackingAimStateFB::TYPE,
+        next: ptr::null_mut(),
+        status: xr::sys::HandTrackingAimFlagsFB::EMPTY,
+        aim_pose: xr::Posef::IDENTITY,
+        pinch_strength_index: 0.0,
+        pinch_strength_middle: 0.0,
+        pinch_strength_ring: 0.0,
+        pinch_strength_little: 0.0,
+    };
+    let mut joints = [xr::sys::HandJointLocationEXT::default(); 26];
+    let mut locations = xr::sys::HandJointLocationsEXT {
+        ty: xr::sys::HandJointLocationsEXT::TYPE,
+        next: (&mut aim as *mut xr::sys::HandTrackingAimStateFB).cast(),
+        is_active: xr::sys::FALSE,
+        joint_count: joints.len() as u32,
+        joint_locations: joints.as_mut_ptr(),
+    };
+    let info = xr::sys::HandJointsLocateInfoEXT {
+        ty: xr::sys::HandJointsLocateInfoEXT::TYPE,
+        next: ptr::null(),
+        base_space: space.as_raw(),
+        time,
+    };
+    // SAFETY: live tracker and space; `locations` points at 26 joints and chains a
+    // properly typed aim state, all of which outlive the call.
+    let result = unsafe { (ext.locate_hand_joints)(tracker.as_raw(), &info, &mut locations) };
+    result.into_raw() >= 0
+        && locations.is_active == xr::sys::TRUE
+        && aim
+            .status
+            .contains(xr::sys::HandTrackingAimFlagsFB::MENU_PRESSED)
+}
