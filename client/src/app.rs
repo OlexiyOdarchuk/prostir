@@ -77,7 +77,13 @@ struct Poke {
     pressed: bool,
     /// Dragging the menu: the touched point in the menu's own plane.
     drag: Option<Vec2>,
+    /// The last touch: pulling the hand back often closes thumb and index into a
+    /// pinch, which must not click whatever this hand's ray points at.
+    touched_at: Option<Instant>,
 }
+
+/// Pinches of a hand that just touched the menu are ignored this long.
+const AFTER_TOUCH: Duration = Duration::from_millis(600);
 
 #[unsafe(no_mangle)]
 pub fn android_main(app: AndroidApp) {
@@ -970,7 +976,10 @@ fn run(app: &AndroidApp) -> Result<()> {
         for h in 0..2 {
             let poke = &mut pokes[h];
             let Some(tip) = tips[h].filter(|_| scene.panel_open) else {
-                *poke = Poke::default();
+                *poke = Poke {
+                    touched_at: poke.touched_at,
+                    ..Poke::default()
+                };
                 continue;
             };
             let place = scene.panel_place;
@@ -978,7 +987,10 @@ fn run(app: &AndroidApp) -> Result<()> {
             let (half_w, half_h) = (PANEL_WIDTH / 2.0, panel_height() / 2.0);
             if let Some(anchor) = poke.drag {
                 if l.z > POKE_RELEASE {
-                    *poke = Poke::default();
+                    *poke = Poke {
+                        touched_at: poke.touched_at,
+                        ..Poke::default()
+                    };
                     continue;
                 }
                 // The touched point follows the finger; pushing deeper moves it away.
@@ -1007,8 +1019,13 @@ fn run(app: &AndroidApp) -> Result<()> {
                 poke.pressed = false;
             }
             let arrived = poke.last_z.is_some_and(|z| z >= POKE_PRESS);
-            if !poke.pressed && arrived && l.z < POKE_PRESS {
+            // Hand tracking jitters: a finger "bouncing" off the menu is not a second tap.
+            let settled = poke
+                .touched_at
+                .is_none_or(|t| t.elapsed() > Duration::from_millis(400));
+            if !poke.pressed && arrived && settled && l.z < POKE_PRESS {
                 poke.pressed = true;
+                poke.touched_at = Some(Instant::now());
                 panel.hover(Some(px));
                 match panel.hovered_action() {
                     Some(action) => {
@@ -1052,7 +1069,16 @@ fn run(app: &AndroidApp) -> Result<()> {
 
         #[allow(clippy::needless_range_loop)] // `hand` indexes several per-hand arrays
         for hand in 0..2 {
-            let input = controls.state[hand];
+            let mut input = controls.state[hand];
+            // A hand that just touched the menu: its next pinch is the hand pulling
+            // back, not a click.
+            if input.is_hand
+                && pokes[hand]
+                    .touched_at
+                    .is_some_and(|t| t.elapsed() < AFTER_TOUCH)
+            {
+                input.select.pressed = false;
+            }
             if input.select.pressed {
                 let mut clicked = false;
                 match picks[hand] {

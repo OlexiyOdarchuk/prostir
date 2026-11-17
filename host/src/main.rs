@@ -328,6 +328,7 @@ fn serve_client(
                 displays.save();
             }
             Ok(Ok(ClientMsg::SetPrimary { id })) => {
+                info!("headset made Prostir-{} the primary monitor", id + 1);
                 displays.set_primary(id);
                 displays.save();
                 displays::sync_wallpapers();
