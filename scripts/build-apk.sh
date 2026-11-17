@@ -40,12 +40,19 @@ echo ">> packaging with $(basename "$BUILD_TOOLS") / $(basename "$PLATFORM")"
 (cd "$STAGE" && zip -q -r "$OUT/unaligned.apk" lib)
 "$BUILD_TOOLS/zipalign" -f -p 4 "$OUT/unaligned.apk" "$OUT/aligned.apk"
 
+# Release signing: KEYSTORE, KEYSTORE_PASS, KEY_ALIAS (and KEY_PASS) from the environment.
+# Without them the Android debug key is used (created if missing).
 KEYSTORE="${KEYSTORE:-$HOME/.android/debug.keystore}"
+KEYSTORE_PASS="${KEYSTORE_PASS:-android}"
+KEY_ALIAS="${KEY_ALIAS:-androiddebugkey}"
+KEY_PASS="${KEY_PASS:-$KEYSTORE_PASS}"
 if [[ ! -f "$KEYSTORE" ]]; then
-    keytool -genkeypair -keystore "$KEYSTORE" -storepass android -keypass android -alias androiddebugkey \
+    mkdir -p "$(dirname "$KEYSTORE")"
+    keytool -genkeypair -keystore "$KEYSTORE" -storepass "$KEYSTORE_PASS" -keypass "$KEY_PASS" -alias "$KEY_ALIAS" \
         -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
 fi
-"$BUILD_TOOLS/apksigner" sign --ks "$KEYSTORE" --ks-pass pass:android --key-pass pass:android \
+"$BUILD_TOOLS/apksigner" sign --ks "$KEYSTORE" --ks-key-alias "$KEY_ALIAS" \
+    --ks-pass "pass:$KEYSTORE_PASS" --key-pass "pass:$KEY_PASS" \
     --out "$OUT/prostir.apk" "$OUT/aligned.apk"
 rm -f "$OUT/unaligned.apk" "$OUT/aligned.apk" "$OUT/prostir.apk.idsig"
 echo ">> $OUT/prostir.apk"

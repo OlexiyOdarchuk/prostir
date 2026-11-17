@@ -1,97 +1,221 @@
-# Quest Monitors
+# Prostir
 
-Віртуальні монітори KDE Plasma у Meta Quest 3.
+**Extra KDE Plasma monitors floating around you in a Meta Quest 3.**
 
-KWin створює справжні додаткові виходи. Вони з'являються в «Параметри системи → Дисплей», на них можна перетягувати вікна, туди ж переходить курсор миші. Зображення кожного виходу кодується апаратно й передається на шолом, де висить у просторі як окремий екран.
+[Українська версія](README.uk.md)
 
-```
-KWin (zkde_screencast.stream_virtual_output)
-  └─ PipeWire ─ vapostproc ─ vah265enc (VA-API) ─┐
-                                                 │ TCP, USB (adb reverse) або Wi-Fi
-Quest 3:  MediaCodec ─ Android Surface ─ OpenXR quad-шар компоновника
-```
+Prostir (Ukrainian *простір*, "space") turns a Quest headset into a multi-monitor
+setup for a KDE Plasma laptop or desktop. Every monitor you see in the headset is a
+real output in KWin: it shows up in System Settings → Display, windows can be
+moved and maximized onto it, the Plasma panel can live there, and the mouse crosses
+from one screen to the next exactly where the screens meet in front of you.
 
-На шоломі кадри декодуються одразу в поверхні компоновника (`XR_KHR_android_surface_swapchain`), застосунок не перемальовує пікселі. Для чіткості тексту увімкнено супер-семплінг шару (`XR_FB_composition_layer_settings`).
+<!-- Screenshot: put a headset capture in docs/ and link it here. -->
 
-## Збірка
+## Features
 
-ПК (Plasma 6 на Wayland, GStreamer з `va`, `pipewire`, `x264`):
+- **Real virtual monitors** created by KWin — any number up to six, any size
+  (1080p, 1440p, 4K, ultrawide, portrait), added and removed from the headset.
+- **Sharp text**: frames are decoded straight into the Quest compositor's own layers
+  (OpenXR `XR_KHR_android_surface_swapchain`) with compositor supersampling — no
+  intermediate 2D window.
+- **Low latency**: hardware HEVC encoding on the PC (VA-API, Intel/AMD), hardware
+  decoding on the Quest. ~14 ms from encoded frame to shown on Wi-Fi in testing.
+- **Layouts** that match KDE: arc, grid, column, overhead (for lying down), monitors
+  meeting edge to edge like one big screen; drag a monitor to another place in the
+  row and KDE's arrangement follows.
+- **Curved monitors** (gentle or strong), with seams that still line up.
+- **Laptop screen mirror** under the main monitor, tilted towards you — so you never
+  need to take the headset off. Disappears when the lid closes.
+- **Backgrounds**: black, your room (passthrough), four built-in panoramas or your
+  own picture.
+- **Hands**: see your tracked hands (e.g. over the keyboard), optionally point,
+  pinch to click and pinch-and-hold to drag.
+- **Tray icon** on the PC: connection status, video quality, start with the session.
+- Works over **Wi-Fi** (automatic discovery) or **USB**.
 
-```sh
-cargo build --release -p qmon-host
-```
+## Status
 
-Шолом (Android SDK з NDK і build-tools, `rustup target add aarch64-linux-android`):
+Version 0.1 — early, but used daily by its author. Tested with KDE Plasma 6.8
+(Wayland) on Intel Arc graphics and a Meta Quest 3.
 
-```sh
-./scripts/build-apk.sh             # → build/questmon.apk
-./scripts/build-apk.sh --install   # + adb install і запуск
-```
+## Requirements
 
-Скрипт сам завантажить Khronos OpenXR loader з Maven Central і підпише APK debug-ключем. На Quest має бути увімкнений режим розробника.
+**PC**
 
-## Запуск
+- KDE Plasma 6 on Wayland (KWin provides the virtual outputs).
+- PipeWire and GStreamer ≥ 1.22 with the `va` plugin (gst-plugins-bad) and the
+  PipeWire GStreamer plugin.
+- A GPU with a VA-API HEVC or H.264 encoder (Intel, AMD). Without one, run with
+  `--software` (x264 on the CPU).
+- `kscreen-doctor` (part of Plasma). Optional: `qdbus6` for matching wallpapers,
+  `adb` for USB.
 
-```sh
-./target/release/questmon-host                                # один монітор 2560x1440
-./target/release/questmon-host -m 2560x1440 -m 1920x1080@1.25 # два, другий з масштабом 125 %
-```
-
-Потім відкрийте **Quest Monitors** у шоломі (розділ «Невідомі джерела»). Шолом шукає ПК сам, у такому порядку:
-
-1. Адреса з `host.txt`, якщо файл є:
-   `adb shell 'echo 192.168.1.10 > /sdcard/Android/data/dev.questmon.client/files/host.txt'`
-2. **USB.** Сервер тримає `adb reverse`, тож з'єднання йде кабелем.
-3. **Wi-Fi.** Спершу ПК, до якого шолом підключався минулого разу. Потім UDP-маяк, який сервер щосекунди розсилає в усі мережі (порт 47831). Якщо мережа блокує broadcast, шолом перебирає адреси своєї підмережі /24 на порту 47830.
-
-Wi-Fi — основний режим: шолом вимикає енергозбереження радіо (`WIFI_MODE_FULL_LOW_LATENCY`), і на Quest 3 від закодованого кадру до показу виходить ~14 мс проти ~20 мс через USB (тунель adb сам додає затримку). Кабель потрібен хіба що для живлення.
-
-Ставити оновлення APK теж можна без кабелю: один раз по USB виконайте `adb tcpip 5555`, далі `adb connect <IP шолома>:5555` і `./scripts/build-apk.sh --install` (якщо підключено кілька пристроїв, задайте `ANDROID_SERIAL=<IP>:5555`).
-
-Для Wi-Fi ПК і шолом мають бути в одній мережі, без ізоляції клієнтів (її вмикають у гостьових мережах і деяких точках доступу), а фаєрвол має пропускати TCP 47830 і UDP 47831. Найкраще працює роутер 5/6 ГГц, до якого ПК підключений кабелем.
-
-Віртуальні монітори створюються, коли шолом підключається, і зникають через `--linger` секунд (типово 30) після відключення. Вікна з них KWin повертає на фізичні екрани. Розташування моніторів відносно основного екрана налаштовується в «Параметри системи → Дисплей».
-
-| Параметр | Типово | |
-|---|---|---|
-| `-m, --monitor WxH[@scale]` | `2560x1440` | можна повторювати |
-| `--codec h264\|h265` | `h265` | |
-| `--bitrate N` | `30` | Мбіт/с на монітор |
-| `--software` | | x264 замість VA-API |
-| `--linger N` | `30` | секунд після відключення |
-| `--no-discovery`, `--no-adb` | | вимкнути маяк / `adb reverse` |
-
-## Керування в шоломі
-
-| Дія | Контролер |
+| Distribution | Packages |
 |---|---|
-| Взяти монітор | навести промінь і стиснути **grip** |
-| Ближче / далі | стік вгору / вниз, тримаючи grip |
-| Більше / менше | стік вправо / вліво, тримаючи grip |
-| Скинути розкладку | **A** |
-| Показати / сховати кімнату (passthrough) | **X** |
-| Перецентрувати | утримати кнопку **Meta** (системне) |
+| Arch | `gstreamer gst-plugins-bad gst-plugin-pipewire` + `intel-media-driver` (Intel) or `libva-mesa-driver` (AMD) |
+| Fedora | `gstreamer1 gstreamer1-plugins-bad-free pipewire-gstreamer` + VA driver |
+| Debian/Ubuntu | `gstreamer1.0-plugins-bad gstreamer1.0-pipewire` + VA driver |
 
-Монітор завжди повертається лицем до користувача. Розкладка зберігається між запусками.
+**Headset**
 
-## Батарея
+- Meta Quest 3 or 3S (Quest 2 and Pro should work, untested).
+- Developer mode enabled (in the Meta Horizon phone app: Devices → Headset settings →
+  Developer mode), to install the app with `adb`.
 
-- За замовчуванням фон чорний, а камери passthrough вимкнені. Кнопка **X** вмикає їх і вимикає разом із зображенням кімнати, тож коли кімнату сховано, камери на батарею не працюють. Вибір запам'ятовується.
-- Застосунок нічого не рендерить сам: шолом лише декодує відео й складає готові шари.
-- Підключення кабелем одночасно живить шолом. Від USB-порту ПК струму часто менше, ніж шолом витрачає під навантаженням, тому розряд сповільнюється, але може не зупинитися зовсім.
+## Install
 
-## Діагностика
+### From a release
+
+1. Download `prostir-<version>-x86_64-linux.tar.gz` and `prostir-<version>.apk` from
+   the [releases](../../releases).
+2. PC:
+   ```sh
+   tar xf prostir-*-x86_64-linux.tar.gz && cd prostir-*/
+   ./install.sh             # into ~/.local, no root; add --autostart to start with Plasma
+   ```
+3. Headset (USB cable, developer mode on):
+   ```sh
+   adb install prostir-*.apk
+   ```
+
+### From source
 
 ```sh
-adb logcat -s questmon            # лог шолома
-questmon-host                     # раз на 5 с пише затримку «закодовано → показано в шоломі»
-RUST_LOG=debug questmon-host      # детальніше, включно з GStreamer-конвеєром
-PROFILE=debug ./scripts/build-apk.sh --install   # APK із замірами декодера в logcat
-questmon-probe 127.0.0.1:47830 10 /tmp   # тестовий клієнт: статистика + дамп потоку
+# PC part
+cargo build --release -p prostir-host
+./scripts/install.sh
+
+# Quest part: Android SDK with NDK and build-tools, plus the Rust target
+rustup target add aarch64-linux-android
+./scripts/build-apk.sh --install   # builds build/prostir.apk and installs it via adb
 ```
 
-## Структура
+## Use
 
-- `proto/`: формат повідомлень між ПК і шоломом.
-- `host/`: сервер для ПК (`virtual_output.rs` для KWin, `encoder.rs` для GStreamer/VA-API) і `questmon-probe`.
-- `client/`: застосунок для Quest (`app.rs`: OpenXR-цикл, `decoder.rs`: MediaCodec, `net.rs`: пошук ПК і з'єднання, `layout.rs`: розкладка й перетягування).
+1. Start **Prostir** on the PC (application menu, or `prostir`). An icon appears in
+   the system tray.
+2. On the headset open **Prostir** (Library → Unknown sources).
+3. The headset finds the PC by itself: over USB if the cable is plugged in,
+   otherwise over Wi-Fi. With several PCs around, pick one in the menu — or type
+   the IP on the keypad.
+4. The monitors appear in front of you. Press **A** to line them up.
+
+The monitors stay in KDE for 30 s after the headset disconnects (`--linger`), then
+windows move back to the laptop screen.
+
+### Controls
+
+| | Controller | Hands (menu → Hands → "and control") |
+|---|---|---|
+| Open the menu | ☰ or **X** on the left controller, or the round ☰ button under the main monitor | pinch the ☰ button |
+| Click | trigger | pinch |
+| Move a monitor or the menu | hold **grip** and point | pinch and hold for ~0.3 s |
+| Nearer / farther | thumbstick up/down while holding | reach out / pull your hand in |
+| Bigger / smaller | thumbstick left/right while holding | — |
+| Line monitors up | **A** | menu → Layout |
+| Recenter | hold the Meta button (system) | system gesture |
+
+### Menu
+
+- **Monitors**: add (1920×1080, 2560×1440, 3840×2160, 3440×1440, 1440×2560), remove,
+  make primary (gets the Plasma panel), move left/right in the row, show or hide the
+  laptop screen.
+- **Layout**: arc, grid, column, overhead. **Curve**: flat, gentle, strong.
+- **Background**: black, room (passthrough), night, sunset, space, aurora, or your own
+  photo — copy an equirectangular `background.jpg`/`.png` to
+  `/sdcard/Android/data/dev.prostir.client/files/`.
+- **Hands**: hidden, shown, or shown and used for pointing.
+
+### Tray (PC)
+
+Connection status, number of monitors, **video quality** (15/30/50 Mbit/s per monitor,
+applied immediately), **start with the session**, quit.
+
+### Command line
+
+```
+prostir [--monitor WxH[@scale]]... [--codec h265|h264] [--bitrate MBPS] [--software]
+        [--keep-primary] [--linger SECONDS] [--port PORT] [--no-discovery] [--no-adb]
+```
+
+Without `--monitor` the set from the last session is used. Settings live in
+`~/.config/prostir/monitors.txt`.
+
+## Performance and battery
+
+Measured with three 2560×1440 monitors and the laptop mirror:
+
+- **PC**: about 2 % of one CPU core and 250 MB of RAM. Encoding runs on the GPU's
+  video engine, and only when a screen changes.
+- **Network**: up to the chosen bitrate per monitor while it changes, almost nothing
+  when it is still.
+- **Headset**: each monitor costs one hardware decoder (idle when the screen is still)
+  and one compositor layer drawn every frame. Fewer or smaller monitors, the black
+  background and hidden hands save the most battery. The room background keeps the
+  passthrough cameras running.
+
+## Security
+
+The connection is **neither authenticated nor encrypted**: anyone on the same network
+can connect and see the virtual monitors. Use Prostir on a trusted network (or USB).
+Ports: TCP 47830 (stream), UDP 47831 (discovery broadcast).
+
+## Troubleshooting
+
+- **Headset log**: `adb logcat -s prostir`
+- **PC log**: run `prostir` in a terminal; `RUST_LOG=debug prostir` for details,
+  including the GStreamer pipeline and encoder timings.
+- `prostir-probe [HOST:PORT] [SECONDS] [DIR]` connects like the headset and dumps
+  the streams — handy to check the PC side without a headset.
+- **Not found over Wi-Fi**: PC and headset must be on the same network without client
+  isolation (guest networks often isolate); try the keypad with the PC's IP, or USB.
+- **Screenshots in 16:9 are black**: the Quest's landscape capture leaves out the
+  compositor layers Prostir uses; switch captures to square in the Quest camera
+  settings.
+
+## How it works
+
+```
+KWin: zkde_screencast stream_virtual_output  →  PipeWire  →  VA-API HEVC encoder
+                                                                    │ TCP (Wi-Fi / USB)
+Quest: MediaCodec (hardware) → Android Surface owned by the compositor
+       → OpenXR quad/cylinder layer (+ menu, cursor, hands and panorama layers)
+```
+
+The PC part (`host/`) also lays the outputs out in KDE with `kscreen-doctor`, keeps the
+wallpapers in sync through Plasma's scripting API and mirrors the physical display with
+`stream_output`. The headset part (`client/`) is a native OpenXR app written in Rust;
+the only thing it renders itself is the hands overlay. See `proto/` for the wire format.
+
+## Similar projects
+
+- [qwayland](https://github.com/jboero/qwayland) — the same idea with 2D Horizon OS
+  panels and NVIDIA encoding.
+- [WiVRn](https://github.com/WiVRn/WiVRn) + [wlx-overlay-s](https://github.com/galister/wlx-overlay-s)
+  — general OpenXR streaming with desktop overlays.
+- [Breezy Desktop](https://github.com/wheaney/breezy-desktop) — virtual displays for
+  AR glasses on KDE and GNOME.
+- Immersed — proprietary, cross-platform.
+
+## Development
+
+```
+proto/    wire protocol (shared)
+host/     PC: virtual outputs, encoders, tray, discovery
+client/   Quest: OpenXR app (app.rs main loop, ui.rs menu, layout.rs geometry, …)
+scripts/  build-apk.sh, install.sh, package-release.sh
+```
+
+`cargo test` runs the protocol, layout and menu tests on the PC.
+`cargo run -p prostir-client --example panel_preview -- menu.png` renders the headset
+menu to a PNG; `--example sky_preview -- DIR` renders the panoramas.
+
+## License
+
+[GPL-3.0-or-later](LICENSE). The bundled Noto Sans font is under the
+[SIL Open Font License 1.1](client/assets/OFL-NotoSans.txt).
+
+Meta and Meta Quest are trademarks of Meta Platforms, Inc. KDE and Plasma are
+trademarks of KDE e.V. Prostir is an independent project, not affiliated with or
+endorsed by either.

@@ -7,7 +7,9 @@
 #   ./scripts/install.sh --uninstall  remove everything installed here
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+# Release archive: install.sh sits next to the binary. Source tree: in scripts/.
+if [[ -x "$HERE/prostir" ]]; then ROOT="$HERE"; else ROOT="$(cd "$HERE/.." && pwd)"; fi
 BIN="$HOME/.local/bin"
 DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
 CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
@@ -21,8 +23,7 @@ if [[ "${1:-}" == "--uninstall" ]]; then
     exit 0
 fi
 
-if [[ -x "$ROOT/prostir" && ! -f "$ROOT/Cargo.toml" ]]; then
-    # Running from an unpacked release archive.
+if [[ -x "$ROOT/prostir" ]]; then
     built="$ROOT/prostir"
 else
     echo ">> building"
