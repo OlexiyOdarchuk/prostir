@@ -71,6 +71,8 @@ pub struct Settings {
     /// Position in the row of the monitor shown in cinema mode; `None`: the largest
     /// landscape one.
     pub cinema_screen: Option<u8>,
+    /// The first-run tips were shown and dismissed.
+    pub intro_seen: bool,
     pub language: Language,
     /// The language of the PC last connected to (for "like the PC" before connecting).
     pub pc_language: Option<Lang>,
@@ -86,6 +88,7 @@ impl Default for Settings {
             focus: false,
             cinema: false,
             cinema_screen: None,
+            intro_seen: false,
             language: Language::LikePc,
             pc_language: None,
         }
@@ -122,6 +125,7 @@ impl Settings {
                 Some(("focus", v)) => s.focus = v == "on",
                 Some(("cinema", v)) => s.cinema = v == "on",
                 Some(("cinema-screen", v)) => s.cinema_screen = v.parse().ok(),
+                Some(("intro", v)) => s.intro_seen = v == "seen",
                 Some(("language", v)) => {
                     s.language = match v {
                         "uk" => Language::Fixed(Lang::Uk),
@@ -189,7 +193,7 @@ impl Settings {
         let on = |b: bool| if b { "on" } else { "off" };
         format!(
             "preset {preset}\ncurve {curve}\nbackground {background}\nhands {hands}\n\
-             focus {}\ncinema {}\ncinema-screen {}\nlanguage {}\npc-language {}\n",
+             focus {}\ncinema {}\ncinema-screen {}\nlanguage {}\npc-language {}\nintro {}\n",
             on(self.focus),
             on(self.cinema),
             self.cinema_screen
@@ -198,7 +202,8 @@ impl Settings {
                 Language::LikePc => "like-pc",
                 Language::Fixed(l) => l.code(),
             },
-            self.pc_language.map_or("", Lang::code)
+            self.pc_language.map_or("", Lang::code),
+            if self.intro_seen { "seen" } else { "new" }
         )
     }
 }
@@ -220,6 +225,7 @@ mod tests {
             focus: true,
             cinema: true,
             cinema_screen: Some(2),
+            intro_seen: true,
             language: Language::Fixed(Lang::En),
             pc_language: Some(Lang::Uk),
         };

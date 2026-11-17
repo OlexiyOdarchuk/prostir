@@ -65,6 +65,8 @@ pub struct UiState {
     pub confirm_remove: Option<u8>,
     pub tab: Tab,
     pub lang: Lang,
+    /// First run: show the tips page instead of the tabs.
+    pub intro: bool,
     pub profiles: Vec<Profile>,
     /// The profile last switched to (until something is changed by hand).
     pub active_profile: Option<usize>,
@@ -107,6 +109,8 @@ pub enum Action {
     ApplyProfile(usize),
     SaveProfile(usize),
     Tab(Tab),
+    /// The first-run tips were read.
+    IntroDone,
     Language(Language),
     /// Connect to the n-th PC in `UiState::found`.
     ConnectTo(usize),
@@ -240,6 +244,7 @@ impl Panel {
         for item in &items {
             match item {
                 Item::Button { rect: r, label, .. } => {
+                    found.extend(self.missing_glyphs(label));
                     let size = button_font_size(label);
                     let tw = self.text_width(label, size, true);
                     if tw > r.width() - 16.0 {
@@ -258,6 +263,7 @@ impl Panel {
                     text,
                     ..
                 } => {
+                    found.extend(self.missing_glyphs(text));
                     let tw = self.text_width(text, *size, *medium);
                     if x + tw > WIDTH as f32 - 32.0 {
                         found.push(format!("off the panel: {text:?}"));
@@ -278,6 +284,14 @@ impl Panel {
         }
         self.items = items;
         found
+    }
+
+    fn missing_glyphs(&self, text: &str) -> Option<String> {
+        let missing: String = text
+            .chars()
+            .filter(|c| !c.is_whitespace() && self.regular.lookup_glyph_index(*c) == 0)
+            .collect();
+        (!missing.is_empty()).then(|| format!("no glyph for {missing:?} in {text:?}"))
     }
 
     /// Premultiplied RGBA, top row first, when it changed since the last call.
@@ -335,6 +349,10 @@ impl Panel {
         let (rx, rw) = (680.0, 556.0);
         if let Some(p) = &s.pairing {
             self.build_pairing(l, p, &mut items, lx, lw, 150.0);
+            return items;
+        }
+        if s.intro && s.host.is_some() {
+            build_intro(l, &mut items, lx, w - 2.0 * lx);
             return items;
         }
 
@@ -1290,6 +1308,77 @@ fn build_look(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, rx: f32, rw:
     }
 }
 
+/// The first-run page: how to reach the menu, move and line up monitors, and what
+/// happens when the headset comes off.
+fn build_intro(l: Lang, items: &mut Vec<Item>, x: f32, w: f32) {
+    let mut y = 160.0;
+    items.push(text(
+        x,
+        y,
+        28.0,
+        true,
+        TEXT,
+        l.t(
+            "Монітори вже тут. Кілька порад:",
+            "Your monitors are here. A few tips:",
+        ),
+    ));
+    y += 34.0;
+    let tips: [(&str, &str, &str, &str); 5] = [
+        (
+            "Меню",
+            "Menu",
+            "Кругла кнопка під головним монітором або кнопка меню чи X на лівому контролері.",
+            "The round button under the main monitor, or the menu or X button on the left controller.",
+        ),
+        (
+            "Перенести монітор",
+            "Move a monitor",
+            "Тримайте grip і наводьте. Руками: щипок і тримати пів секунди.",
+            "Hold grip and point. With hands: pinch and hold for half a second.",
+        ),
+        (
+            "Вирівняти",
+            "Line up",
+            "Кнопка A ставить усі монітори рівно. Утримання Meta перецентровує.",
+            "The A button lines all monitors up. Holding the Meta button recenters.",
+        ),
+        (
+            "Пальцем",
+            "With a finger",
+            "Коли руки в полі зору, меню можна просто торкатися, як планшет.",
+            "With hands in view, just touch the menu like a tablet.",
+        ),
+        (
+            "Зняли шолом",
+            "Headset off",
+            "Через 10 с вікна, звук і мікрофон повертаються на ноутбук.",
+            "After 10 s, windows, sound and microphone go back to the laptop.",
+        ),
+    ];
+    for (uk_title, en_title, uk, en) in tips {
+        y += 28.0;
+        items.push(Item::Box(rect(x, y, w, 96.0), [255, 255, 255, 12]));
+        items.push(text(
+            x + 24.0,
+            y + 38.0,
+            23.0,
+            true,
+            TEXT,
+            l.t(uk_title, en_title),
+        ));
+        items.push(text(x + 24.0, y + 74.0, 20.0, false, MUTED, l.t(uk, en)));
+        y += 96.0;
+    }
+    y += 36.0;
+    items.push(button(
+        rect(x, y, 280.0, 56.0),
+        l.t("Зрозуміло", "Got it"),
+        Style::Selected,
+        Some(Action::IntroDone),
+    ));
+}
+
 /// "1 монітор", "3 монітори", "5 моніторів" / "1 monitor", "3 monitors".
 fn monitors_count(l: Lang, n: usize) -> String {
     let word = match l {
@@ -1568,6 +1657,7 @@ mod tests {
             confirm_remove: None,
             tab: Tab::Monitors,
             lang: Lang::Uk,
+            intro: false,
             profiles: (0..crate::profiles::SLOTS)
                 .map(Profile::default_for)
                 .collect(),
@@ -1621,6 +1711,10 @@ mod tests {
                     .collect();
                 states.push(st);
             }
+            let mut intro = sample_state();
+            intro.lang = lang;
+            intro.intro = true;
+            states.push(intro);
             let mut offline = sample_state();
             offline.lang = lang;
             offline.host = None;

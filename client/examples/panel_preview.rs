@@ -67,6 +67,7 @@ fn main() {
         curve_available: true,
         error: None,
         confirm_remove: std::env::var("CONFIRM").is_ok().then_some(2),
+        intro: std::env::var("INTRO").is_ok(),
         tab: match std::env::var("TAB").as_deref() {
             Ok("look") => Tab::Look,
             Ok("profiles") => Tab::Profiles,

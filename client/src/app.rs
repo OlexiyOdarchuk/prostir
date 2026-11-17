@@ -430,6 +430,7 @@ impl Scene {
                 .map(|(id, _)| id),
             tab: self.tab,
             lang: self.lang(),
+            intro: !self.settings.intro_seen,
             profiles: self.profiles.to_vec(),
             active_profile: self.active_profile,
         }
@@ -806,8 +807,10 @@ fn run(app: &AndroidApp) -> Result<()> {
         let hands_in_view = tips.iter().any(Option::is_some);
         controls.hands_from_joints(&joints, head, forward);
 
-        // Pairing needs the menu: open it where the user is looking.
-        if scene.pairing.is_some() && !scene.panel_open {
+        // Pairing needs the menu, and so do the first-run tips: open it where the
+        // user is looking.
+        let first_run = !scene.settings.intro_seen && scene.host.is_some();
+        if (scene.pairing.is_some() || first_run) && !scene.panel_open {
             scene.open_panel(head, forward, hands_in_view);
         }
         // Without a PC there is nothing to see: show the connection screen.
@@ -1465,6 +1468,10 @@ fn handle_action(
             }
         }
         Action::Tab(tab) => scene.tab = tab,
+        Action::IntroDone => {
+            scene.settings.intro_seen = true;
+            scene.settings.save(settings_path);
+        }
         Action::Language(language) => {
             scene.settings.language = language;
             scene.settings.save(settings_path);
@@ -1634,6 +1641,13 @@ fn handle_action(
         }
         Action::CancelKeypad => scene.ip_input = None,
         Action::ChangeHost => scene.steering.change_host(),
-        Action::Close => scene.panel_open = false,
+        Action::Close => {
+            scene.panel_open = false;
+            // Closing the tips counts as read, or they would open again right away.
+            if !scene.settings.intro_seen {
+                scene.settings.intro_seen = true;
+                scene.settings.save(settings_path);
+            }
+        }
     }
 }
