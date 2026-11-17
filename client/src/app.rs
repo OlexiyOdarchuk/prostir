@@ -190,6 +190,8 @@ struct Scene {
     confirm_remove: Option<(u8, Instant)>,
     /// Menu page shown.
     tab: Tab,
+    /// The PC speaks another protocol: (the PC is newer, its app version).
+    update_needed: Option<(bool, String)>,
     /// Where layouts are centred and which way they face (head position, yaw).
     center: (Vec3, f32),
     /// The arrangement last sent to the PC.
@@ -590,6 +592,7 @@ impl Scene {
             tab: self.tab,
             lang: self.lang(),
             intro: !self.settings.intro_seen,
+            update: self.update_needed.clone(),
             profiles: self.profiles.to_vec(),
             active_profile: self.active_profile,
         }
@@ -804,6 +807,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         error: None,
         confirm_remove: None,
         tab: Tab::Monitors,
+        update_needed: None,
         center: (Vec3::ZERO, 0.0),
         sent_layout: None,
         pending_layout: None,
@@ -1010,7 +1014,8 @@ fn run(app: &AndroidApp) -> Result<()> {
 
         // Pairing needs the menu, and so do the first-run tips: open it where the
         // user is looking.
-        let first_run = !scene.settings.intro_seen && scene.host.is_some();
+        let first_run =
+            (!scene.settings.intro_seen && scene.host.is_some()) || scene.update_needed.is_some();
         if (scene.pairing.is_some() || first_run) && !scene.panel_open {
             scene.open_panel(head, forward, hands_in_view);
         }
@@ -1615,6 +1620,7 @@ fn handle_net_event(
             }));
             scene.feedback = Some(feedback);
             scene.sent_layout = None;
+            scene.update_needed = None;
             if !scene.worn {
                 scene.tell_presence();
             }
@@ -1638,6 +1644,10 @@ fn handle_net_event(
             }
         }
         NetEvent::Paired => scene.pairing = None,
+        NetEvent::Incompatible { pc_newer, pc_app } => {
+            warn!("the PC runs Prostir {pc_app}: versions differ");
+            scene.update_needed = Some((pc_newer, pc_app));
+        }
         NetEvent::Disconnected => {
             scene.offline_since = Some(Instant::now());
             scene.pairing = None;

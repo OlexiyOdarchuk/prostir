@@ -13,7 +13,7 @@ use std::io::{self, Read, Write};
 
 pub const TCP_PORT: u16 = 47830;
 pub const DISCOVERY_PORT: u16 = 47831;
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 /// PC sound sent to the headset: interleaved signed 16-bit little-endian stereo.
 pub const AUDIO_RATE: u32 = 48_000;
 pub const AUDIO_CHANNELS: u32 = 2;
@@ -117,6 +117,14 @@ pub enum HostMsg {
     MicActive {
         active: bool,
     },
+    /// The headset speaks another protocol version: one side has to be updated. Sent
+    /// instead of [`HostMsg::Welcome`]; the PC closes the connection after it.
+    Incompatible {
+        /// The PC's protocol version.
+        protocol: u32,
+        /// The PC app's version, e.g. `0.2.0`.
+        app: String,
+    },
     /// The monitor the mouse is on ([`NO_FOCUS`] if none of the streamed ones).
     Focus {
         id: u8,
@@ -138,6 +146,8 @@ pub enum HostMsg {
 pub enum ClientMsg {
     Hello {
         version: u32,
+        /// The headset app's version (e.g. `0.2.0`), to say what to update.
+        app: String,
     },
     RequestKeyframe {
         id: u8,
@@ -229,6 +239,7 @@ mod tag {
     pub const MIC_WANTED: u8 = 14;
     pub const MIC_ACTIVE: u8 = 15;
     pub const FOCUS: u8 = 16;
+    pub const INCOMPATIBLE: u8 = 17;
     pub const HELLO: u8 = 101;
     pub const REQUEST_KEYFRAME: u8 = 102;
     pub const FRAME_SHOWN: u8 = 103;
@@ -343,6 +354,11 @@ impl HostMsg {
             HostMsg::PairingRequired => write_frame(w, tag::PAIRING_REQUIRED, &[]),
             HostMsg::Audio { pcm } => write_frame(w, tag::AUDIO, &[pcm]),
             HostMsg::Focus { id } => write_frame(w, tag::FOCUS, &[&[*id]]),
+            HostMsg::Incompatible { protocol, app } => write_frame(
+                w,
+                tag::INCOMPATIBLE,
+                &[&protocol.to_le_bytes(), app.as_bytes()],
+            ),
             HostMsg::MicWanted { enabled } => write_frame(w, tag::MIC_WANTED, &[&[*enabled as u8]]),
             HostMsg::MicActive { active } => write_frame(w, tag::MIC_ACTIVE, &[&[*active as u8]]),
             HostMsg::AudioWanted { enabled } => {
@@ -396,6 +412,10 @@ impl HostMsg {
             tag::PRIMARY_CHANGED => HostMsg::PrimaryChanged { id: c.u8()? },
             tag::PAIRING_REQUIRED => HostMsg::PairingRequired,
             tag::FOCUS => HostMsg::Focus { id: c.u8()? },
+            tag::INCOMPATIBLE => HostMsg::Incompatible {
+                protocol: c.u32()?,
+                app: String::from_utf8_lossy(c.rest()).into_owned(),
+            },
             tag::MIC_WANTED => HostMsg::MicWanted {
                 enabled: c.u8()? != 0,
             },
@@ -432,7 +452,9 @@ impl HostMsg {
 impl ClientMsg {
     pub fn write(&self, w: &mut impl Write) -> io::Result<()> {
         match self {
-            ClientMsg::Hello { version } => write_frame(w, tag::HELLO, &[&version.to_le_bytes()]),
+            ClientMsg::Hello { version, app } => {
+                write_frame(w, tag::HELLO, &[&version.to_le_bytes(), app.as_bytes()])
+            }
             ClientMsg::RequestKeyframe { id } => write_frame(w, tag::REQUEST_KEYFRAME, &[&[*id]]),
             ClientMsg::FrameShown { id, pts_us } => {
                 write_frame(w, tag::FRAME_SHOWN, &[&[*id], &pts_us.to_le_bytes()])
@@ -486,7 +508,11 @@ impl ClientMsg {
         let (t, payload) = read_frame(r)?;
         let mut c = Cursor(&payload);
         Ok(match t {
-            tag::HELLO => ClientMsg::Hello { version: c.u32()? },
+            // Older headsets send only the protocol version.
+            tag::HELLO => ClientMsg::Hello {
+                version: c.u32()?,
+                app: String::from_utf8_lossy(c.rest()).into_owned(),
+            },
             tag::REQUEST_KEYFRAME => ClientMsg::RequestKeyframe { id: c.u8()? },
             tag::FRAME_SHOWN => ClientMsg::FrameShown {
                 id: c.u8()?,
@@ -600,6 +626,10 @@ mod tests {
             HostMsg::MicWanted { enabled: true },
             HostMsg::MicActive { active: true },
             HostMsg::Focus { id: 2 },
+            HostMsg::Incompatible {
+                protocol: 10,
+                app: "0.3.0".into(),
+            },
             HostMsg::PairMsg { msg: vec![4, 5] },
             HostMsg::PairResult {
                 ok: true,

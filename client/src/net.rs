@@ -88,6 +88,11 @@ pub enum NetEvent {
     PairingFailed,
     Paired,
     Disconnected,
+    /// The PC speaks another protocol version: `pc_newer` says which side to update.
+    Incompatible {
+        pc_newer: bool,
+        pc_app: String,
+    },
 }
 
 /// Where to look for the PC, and this headset's keys.
@@ -543,6 +548,7 @@ fn run_session(
     }
     feedback.send(&ClientMsg::Hello {
         version: PROTOCOL_VERSION,
+        app: env!("CARGO_PKG_VERSION").into(),
     })?;
     let language = loop {
         match HostMsg::read(session.reader)? {
@@ -551,10 +557,19 @@ fn run_session(
                 session.pair(trusted)?;
                 feedback.send(&ClientMsg::Hello {
                     version: PROTOCOL_VERSION,
+                    app: env!("CARGO_PKG_VERSION").into(),
                 })?;
             }
-            HostMsg::Error { text } => {
-                let _ = events.send(NetEvent::HostError(text));
+            // The text is for headsets that predate `Incompatible`; this one shows a page.
+            HostMsg::Error { .. } => {}
+            HostMsg::Incompatible { protocol, app } => {
+                let _ = events.send(NetEvent::Incompatible {
+                    pc_newer: protocol > PROTOCOL_VERSION,
+                    pc_app: app,
+                });
+                // Nothing changes until one side is updated: try again only now and then.
+                std::thread::sleep(Duration::from_secs(10));
+                return Ok(());
             }
             other => return Err(std::io::Error::other(format!("unexpected {other:?}"))),
         }
@@ -674,6 +689,7 @@ fn run_session(
                 _recorder = active.then(|| crate::mic::Recorder::start(feedback.clone()));
             }
             HostMsg::Welcome { .. }
+            | HostMsg::Incompatible { .. }
             | HostMsg::PairingRequired
             | HostMsg::PairMsg { .. }
             | HostMsg::PairResult { .. } => {}

@@ -69,6 +69,8 @@ pub struct UiState {
     pub lang: Lang,
     /// First run: show the tips page instead of the tabs.
     pub intro: bool,
+    /// The PC speaks another protocol: (the PC is newer, the PC app's version).
+    pub update: Option<(bool, String)>,
     pub profiles: Vec<Profile>,
     /// The profile last switched to (until something is changed by hand).
     pub active_profile: Option<usize>,
@@ -326,6 +328,7 @@ impl Panel {
             env!("CARGO_PKG_VERSION"),
         ));
         let status = match &s.host {
+            _ if s.update.is_some() => l.t("Потрібне оновлення", "Update needed").to_owned(),
             _ if s.pairing.is_some() => l.t("Сполучення…", "Pairing…").to_owned(),
             Some(h) => format!("{} {h}", l.t("Підключено до", "Connected to")),
             None => l.t("Шукаю ПК…", "Looking for a PC…").to_owned(),
@@ -363,6 +366,10 @@ impl Panel {
         let (rx, rw) = (680.0, 556.0);
         if let Some(p) = &s.pairing {
             self.build_pairing(l, p, &mut items, lx, lw, 150.0);
+            return items;
+        }
+        if let Some((pc_newer, pc_app)) = &s.update {
+            build_update(l, &mut items, lx, w - 2.0 * lx, *pc_newer, pc_app);
             return items;
         }
         if s.intro && s.host.is_some() {
@@ -1356,6 +1363,73 @@ fn build_look(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, rx: f32, rw:
     }
 }
 
+/// The headset and the PC cannot talk: which one to update, and where.
+fn build_update(l: Lang, items: &mut Vec<Item>, x: f32, w: f32, pc_newer: bool, pc_app: &str) {
+    let ours = env!("CARGO_PKG_VERSION");
+    let mut y = 180.0;
+    let title = if pc_newer {
+        l.t(
+            "Оновіть застосунок у шоломі",
+            "Update the app in the headset",
+        )
+    } else {
+        l.t("Оновіть Prostir на ПК", "Update Prostir on the PC")
+    };
+    items.push(text(x, y, 34.0, true, TEXT, title));
+    y += 60.0;
+    let versions = format!(
+        "{} {pc_app}, {} {ours}.",
+        l.t("Версія на ПК:", "The PC has"),
+        l.t("у шоломі:", "the headset has")
+    );
+    items.push(text(x, y, 22.0, false, MUTED, &versions));
+    y += 36.0;
+    items.push(text(
+        x,
+        y,
+        22.0,
+        false,
+        MUTED,
+        l.t(
+            "Різні версії не можуть з'єднатися.",
+            "Different versions cannot connect.",
+        ),
+    ));
+    y += 50.0;
+    items.push(Item::Box(rect(x, y, w, 130.0), [255, 255, 255, 12]));
+    let (how, where_) = if pc_newer {
+        (
+            l.t(
+                "Оновіть Prostir у Meta Horizon Store або встановіть новий APK з",
+                "Update Prostir in the Meta Horizon Store, or install the new APK from",
+            ),
+            "prostir.ishawyha.dev",
+        )
+    } else {
+        (
+            l.t(
+                "Завантажте нову версію для ПК з",
+                "Download the new PC version from",
+            ),
+            "prostir.ishawyha.dev",
+        )
+    };
+    items.push(text(x + 28.0, y + 50.0, 22.0, false, TEXT, how));
+    items.push(text(x + 28.0, y + 100.0, 32.0, true, ACCENT, where_));
+    y += 170.0;
+    items.push(text(
+        x,
+        y,
+        19.0,
+        false,
+        MUTED,
+        l.t(
+            "Шолом сам підключиться, щойно версії зійдуться.",
+            "The headset connects by itself once the versions match.",
+        ),
+    ));
+}
+
 /// Before any PC is found: what Prostir needs and where to get the PC part.
 fn build_welcome(l: Lang, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
     items.push(text(
@@ -1793,6 +1867,7 @@ mod tests {
             tab: Tab::Monitors,
             lang: Lang::Uk,
             intro: false,
+            update: None,
             profiles: (0..crate::profiles::SLOTS)
                 .map(Profile::default_for)
                 .collect(),
@@ -1845,6 +1920,13 @@ mod tests {
                     })
                     .collect();
                 states.push(st);
+            }
+            for pc_newer in [true, false] {
+                let mut update = sample_state();
+                update.lang = lang;
+                update.host = None;
+                update.update = Some((pc_newer, "0.12.3".into()));
+                states.push(update);
             }
             let mut intro = sample_state();
             intro.lang = lang;

@@ -62,8 +62,9 @@ pub fn accept(
     let mut attempts = 0;
     loop {
         match ClientMsg::read(&mut reader)? {
-            ClientMsg::Hello { version } if version != PROTOCOL_VERSION => {
-                bail!("headset speaks protocol v{version}, PC v{PROTOCOL_VERSION}")
+            ClientMsg::Hello { version, app } if version != PROTOCOL_VERSION => {
+                incompatible(&mut writer, version, &app)?;
+                bail!("headset speaks protocol v{version} (app {app}), PC v{PROTOCOL_VERSION}")
             }
             ClientMsg::Hello { .. } if security.trusted.contains(&peer.key) => {
                 HostMsg::Welcome {
@@ -145,6 +146,56 @@ fn obtain_code(headset_shows: bool, tray: Option<&tray::Handle>) -> Option<Strin
         ),
     );
     Some(code)
+}
+
+/// The headset speaks another protocol: tell both the headset and the person at the PC
+/// which side needs the update.
+fn incompatible(writer: &mut SecureWriter, headset: u32, headset_app: &str) -> Result<()> {
+    let ours = env!("CARGO_PKG_VERSION");
+    let headset_app = if headset_app.is_empty() {
+        t("старіша", "older")
+    } else {
+        headset_app
+    };
+    let (title, body) = if headset > PROTOCOL_VERSION {
+        (
+            t("Оновіть Prostir на ПК", "Update Prostir on the PC"),
+            format!(
+                "{} {headset_app}, {} {ours}. prostir.ishawyha.dev",
+                t("Застосунок у шоломі новіший:", "The headset app is newer:"),
+                t("а на ПК", "the PC has")
+            ),
+        )
+    } else {
+        (
+            t("Оновіть Prostir у шоломі", "Update Prostir in the headset"),
+            format!(
+                "{} {headset_app}, {} {ours}.",
+                t("Застосунок у шоломі старіший:", "The headset app is older:"),
+                t("а на ПК", "the PC has")
+            ),
+        )
+    };
+    warn!("{title}: {body}");
+    // Headsets from before `Incompatible` existed still show this text.
+    HostMsg::Error {
+        text: format!("{title}. {body}"),
+    }
+    .write(writer)?;
+    HostMsg::Incompatible {
+        protocol: PROTOCOL_VERSION,
+        app: ours.into(),
+    }
+    .write(writer)?;
+    writer.flush()?;
+    // Once per headset version, not on every reconnection attempt.
+    static TOLD: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+    let mut told = TOLD.lock().unwrap();
+    if !told.contains(&headset) {
+        told.push(headset);
+        notify(title, &body);
+    }
+    Ok(())
 }
 
 fn refuse(writer: &mut SecureWriter, why: &str) -> Result<bool> {
@@ -285,5 +336,48 @@ mod tests {
     #[test]
     fn different_code_pairs_neither() {
         assert_eq!(run("123456", "654321"), (false, false));
+    }
+
+    /// A headset from another protocol version learns which side to update.
+    #[test]
+    fn other_protocol_is_told_to_update() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let h = std::thread::spawn(move || {
+            let stream = TcpStream::connect(addr).unwrap();
+            let dir = std::env::temp_dir().join(format!("prostir-ver-h-{}", std::process::id()));
+            let id = Identity::load_or_create(&dir.join("key")).unwrap();
+            let (r, mut w, _) = secure::handshake(&stream, &id, true).unwrap();
+            let mut r = BufReader::new(r);
+            ClientMsg::Hello {
+                version: PROTOCOL_VERSION + 1,
+                app: "9.9.9".into(),
+            }
+            .write(&mut w)
+            .unwrap();
+            let first = HostMsg::read(&mut r).unwrap();
+            let second = HostMsg::read(&mut r).unwrap();
+            std::fs::remove_dir_all(dir).unwrap();
+            (first, second)
+        });
+        let (s, _) = l.accept().unwrap();
+        let dir = std::env::temp_dir().join(format!("prostir-ver-p-{}", std::process::id()));
+        let mut security = Security {
+            identity: Identity::load_or_create(&dir.join("key")).unwrap(),
+            trusted: TrustStore::load(&dir.join("trusted")),
+        };
+        let refused = accept(&s, &mut security, None);
+        std::fs::remove_dir_all(dir).unwrap();
+        assert!(refused.is_err(), "the session must not start");
+        let (first, second) = h.join().unwrap();
+        // Older headsets show this text; it names the side to update.
+        assert!(matches!(first, HostMsg::Error { ref text } if text.contains("Prostir")));
+        assert_eq!(
+            second,
+            HostMsg::Incompatible {
+                protocol: PROTOCOL_VERSION,
+                app: env!("CARGO_PKG_VERSION").into(),
+            }
+        );
     }
 }

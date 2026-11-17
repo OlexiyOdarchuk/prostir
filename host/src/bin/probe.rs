@@ -81,6 +81,7 @@ fn main() -> Result<()> {
     }
     ClientMsg::Hello {
         version: PROTOCOL_VERSION,
+        app: env!("CARGO_PKG_VERSION").into(),
     }
     .write(&mut w)?;
     loop {
@@ -93,6 +94,7 @@ fn main() -> Result<()> {
                 pair(&mut r, &mut w, &identity, &peer)?;
                 ClientMsg::Hello {
                     version: PROTOCOL_VERSION,
+                    app: env!("CARGO_PKG_VERSION").into(),
                 }
                 .write(&mut w)?;
             }
@@ -163,6 +165,10 @@ fn main() -> Result<()> {
             HostMsg::MicWanted { enabled } => println!("headset microphone wanted: {enabled}"),
             HostMsg::MicActive { active } => println!("PC is recording: {active}"),
             HostMsg::Focus { id } => println!("mouse on: {id}"),
+            HostMsg::Incompatible { protocol, app } => {
+                println!("PC speaks protocol v{protocol} (app {app}): update one side");
+                break;
+            }
             HostMsg::PairingRequired | HostMsg::PairMsg { .. } | HostMsg::PairResult { .. } => {}
             HostMsg::Welcome { .. } => {}
         }

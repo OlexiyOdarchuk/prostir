@@ -69,6 +69,9 @@ fn main() {
         error: None,
         confirm_remove: std::env::var("CONFIRM").is_ok().then_some(2),
         intro: std::env::var("INTRO").is_ok(),
+        update: std::env::var("UPDATE")
+            .ok()
+            .map(|v| (v == "pc", "0.2.0".into())),
         tab: match std::env::var("TAB").as_deref() {
             Ok("look") => Tab::Look,
             Ok("profiles") => Tab::Profiles,

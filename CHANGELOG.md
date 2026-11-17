@@ -51,3 +51,5 @@ First public version.
 - KDE arranges the monitors in rows the way they stand in the headset, so the mouse
   crosses up and down too.
 - A start screen in the headset explains where to get the PC part.
+- When the headset and the PC run versions that cannot talk, both say which one to
+  update: a page in the headset, a notification on the PC.
