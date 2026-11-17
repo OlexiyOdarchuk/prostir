@@ -6,6 +6,8 @@
 //! can make it.
 
 pub mod layout;
+pub mod settings;
+pub mod ui;
 
 #[cfg(target_os = "android")]
 mod app;
