@@ -13,8 +13,9 @@ use log::{debug, error, info, warn};
 use prostir_proto::{Codec, HostMsg, LayoutRow, MIRROR_ID};
 
 use crate::audio::{AudioOut, MicIn};
-use crate::encoder::{Encoder, EncoderConfig, EncoderEvent};
-use crate::virtual_output::{self, MonitorSpec, Screencast, VirtualOutput};
+use crate::desktop::{Desktop, Output};
+use crate::encoder::{Encoder, EncoderConfig, EncoderEvent, Input};
+use crate::virtual_output::{self, MonitorSpec, Screencast};
 
 /// More streams than this overwhelm the headset's hardware decoders.
 pub const MAX_MONITORS: usize = 6;
@@ -248,7 +249,7 @@ impl Router {
 struct Monitor {
     // Field order matters: the encoder must stop before the output goes away.
     encoder: Encoder,
-    output: VirtualOutput,
+    output: Output,
     spec: MonitorSpec,
 }
 
@@ -256,8 +257,8 @@ struct Monitor {
 struct Mirror {
     // Field order matters: encoder, then stream, then its own KWin connection.
     encoder: Encoder,
-    output: VirtualOutput,
-    _connection: Screencast,
+    output: Output,
+    _connection: Option<Screencast>,
 }
 
 /// Saved monitor set: one `WIDTHxHEIGHT[@scale]` per line, `*` marks the primary one;
@@ -380,7 +381,7 @@ pub struct Displays {
     primary_checked: Instant,
     /// When Plasma was last nudged to follow the primary output.
     primary_nudged: Option<Instant>,
-    screencast: Screencast,
+    desktop: Desktop,
     pub router: Arc<Router>,
     cfg: EncoderConfig,
     primary: Option<u8>,
@@ -390,6 +391,9 @@ pub struct Displays {
 
 impl Displays {
     pub fn create(saved: &SavedMonitors, cfg: EncoderConfig, manage_primary: bool) -> Result<Self> {
+        let desktop = Desktop::connect()?;
+        // Only KDE has a primary output.
+        let manage_primary = manage_primary && desktop.is_kde();
         let mut displays = Self {
             monitors: BTreeMap::new(),
             order: Vec::new(),
@@ -407,7 +411,7 @@ impl Displays {
             woke_display_at: None,
             primary_checked: Instant::now(),
             primary_nudged: None,
-            screencast: Screencast::connect()?,
+            desktop,
             router: Arc::new(Router::new(cfg.codec)),
             cfg,
             primary: None,
@@ -452,8 +456,9 @@ impl Displays {
         let id = (0..=u8::MAX)
             .find(|id| !self.monitors.contains_key(id))
             .unwrap();
-        let output = self.screencast.create(u32::from(id) + 1, &spec)?;
-        let encoder = self.start_encoder(id, output.node)?;
+        let mut output = self.desktop.create(u32::from(id) + 1, &spec)?;
+        let encoder = self.start_encoder(id, &output.input())?;
+        output.attach(&encoder, self.cfg.software)?;
         self.monitors.insert(
             id,
             Monitor {
@@ -470,10 +475,10 @@ impl Displays {
         Ok(id)
     }
 
-    fn start_encoder(&self, id: u8, node: u32) -> Result<Encoder> {
+    fn start_encoder(&self, id: u8, input: &Input) -> Result<Encoder> {
         self.router.add_stream(id);
         let router = self.router.clone();
-        Encoder::start(node, &self.cfg, move |ev| router.on_event(id, ev))
+        Encoder::start(input, &self.cfg, move |ev| router.on_event(id, ev))
             .inspect_err(|_| self.router.remove_stream(id))
     }
 
@@ -496,19 +501,22 @@ impl Displays {
             return;
         }
         self.mirror_retry = Instant::now() + Duration::from_secs(2);
-        let Some(name) = self.screencast.physical_output() else {
+        let Some(name) = self.desktop.physical_output() else {
             self.wake_physical_display();
             return;
         };
-        let started = Screencast::connect().and_then(|connection| {
-            let output = connection.mirror(u32::from(MIRROR_ID) + 1, &name)?;
-            let encoder = self.start_encoder(MIRROR_ID, output.node)?;
-            Ok(Mirror {
-                encoder,
-                output,
-                _connection: connection,
-            })
-        });
+        let started = self
+            .desktop
+            .mirror(u32::from(MIRROR_ID) + 1, &name)
+            .and_then(|(mut output, connection)| {
+                let encoder = self.start_encoder(MIRROR_ID, &output.input())?;
+                output.attach(&encoder, self.cfg.software)?;
+                Ok(Mirror {
+                    encoder,
+                    output,
+                    _connection: connection,
+                })
+            });
         match started {
             Ok(m) => {
                 m.encoder.force_keyframe();
@@ -529,7 +537,7 @@ impl Displays {
         let Some(m) = self.primary.and_then(|id| self.monitors.get(&id)) else {
             return;
         };
-        let geometries = virtual_output::output_geometries();
+        let geometries = self.desktop.geometries();
         let ours = m.output.output_name();
         let kde_primary = geometries
             .iter()
@@ -575,6 +583,7 @@ impl Displays {
         if self
             .woke_display_at
             .is_some_and(|t| t.elapsed() < Duration::from_secs(30))
+            || !self.desktop.is_kde()
             || !virtual_output::lid_open()
         {
             return;
@@ -786,7 +795,7 @@ impl Displays {
     fn apply_kde_layout(&self) {
         /// A monitor in a row: id, KDE output name, (width, height) in pixels.
         type Member = (u8, String, (i32, i32));
-        let geometries = virtual_output::output_geometries();
+        let geometries = self.desktop.geometries();
         let size = |name: &str, spec: Option<&MonitorSpec>| {
             geometries.get(name).map(|g| (g.w, g.h)).or_else(|| {
                 spec.map(|s| {
@@ -829,17 +838,12 @@ impl Displays {
         }
         // KDE wants the desktop to start at 0,0.
         let left = planned.iter().map(|p| p.2).min().unwrap_or(0);
-        let mut settings = Vec::new();
         // Every applied change makes KWin reconfigure its outputs, which also cuts the
-        // laptop mirror's stream: only send what actually differs.
-        let mut position = |name: &str, x: i32, y: i32| {
-            if geometries.get(name).is_none_or(|g| (g.x, g.y) != (x, y)) {
-                settings.push(format!("output.{name}.position.{x},{y}"));
-            }
-        };
+        // laptop mirror's stream: `place` only sends what actually differs.
+        let mut positions = Vec::new();
         let mut placed = HashMap::new();
         for (id, name, x, y, w, _) in &planned {
-            position(name, x - left, *y);
+            positions.push((name.clone(), x - left, *y));
             placed.insert(*id, (x - left, *w));
         }
         // The laptop screen under the primary monitor, below every row.
@@ -848,18 +852,15 @@ impl Displays {
         {
             let name = mirror.output.output_name();
             if let Some((w, _)) = size(name, None) {
-                position(name, (px + (pw - w) / 2).max(0), top);
+                positions.push((name.to_owned(), (px + (pw - w) / 2).max(0), top));
             }
         }
-        if self.manage_primary
-            && let Some(m) = self.primary.and_then(|p| self.monitors.get(&p))
-            && geometries
-                .get(m.output.output_name())
-                .is_none_or(|g| g.priority != Some(1))
-        {
-            settings.push(format!("output.{}.priority.1", m.output.output_name()));
-        }
-        virtual_output::kscreen_apply(&settings);
+        let primary = self
+            .primary
+            .and_then(|p| self.monitors.get(&p))
+            .filter(|_| self.manage_primary)
+            .map(|m| m.output.output_name());
+        self.desktop.place(&positions, primary, &geometries);
     }
 
     /// Changes the left-to-right order (ids of all current monitors).
@@ -1076,6 +1077,9 @@ impl Displays {
 /// wallpapers per screen, so new monitors would otherwise show the default one.
 /// Runs a little later because Plasma sets up desktops for new screens asynchronously.
 pub fn sync_wallpapers() {
+    if crate::hyprland::running() {
+        return;
+    }
     const SCRIPT: &str = r#"
         var src = desktopForScreen(0);
         if (src) {

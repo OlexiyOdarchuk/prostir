@@ -1,11 +1,14 @@
 // Every unsafe block says why it is sound.
 #![deny(clippy::undocumented_unsafe_blocks)]
 mod audio;
+mod desktop;
 mod displays;
 mod encoder;
 mod focus;
+mod hyprland;
 mod i18n;
 mod pairing;
+mod screencopy;
 mod tray;
 mod usage;
 mod virtual_output;

@@ -250,12 +250,22 @@ fn ask_code() -> Option<String> {
         "Шолом хоче підключитися.\nВведіть код, який він показує:",
         "A headset wants to connect.\nType the code it shows:",
     );
-    let attempts: [(&str, Vec<&str>); 2] = [
+    // Launchers in dmenu mode (common on Hyprland and Sway) print what was typed; they
+    // show one line, so the prompt is shorter.
+    let prompt = t("Код із шолома: ", "Code from the headset: ");
+    let attempts: [(&str, Vec<&str>); 5] = [
         ("kdialog", vec!["--title", "Prostir", "--inputbox", text]),
         ("zenity", vec!["--entry", "--title=Prostir", "--text", text]),
+        ("fuzzel", vec!["--dmenu", "--lines=0", "--prompt", prompt]),
+        ("wofi", vec!["--dmenu", "--lines=1", "--prompt", prompt]),
+        ("rofi", vec!["-dmenu", "-l", "0", "-p", prompt]),
     ];
     for (program, args) in attempts {
-        match Command::new(program).args(&args).output() {
+        let child = Command::new(program)
+            .args(&args)
+            .stdin(std::process::Stdio::null())
+            .output();
+        match child {
             Ok(out) if out.status.success() => {
                 let code: String = String::from_utf8_lossy(&out.stdout)
                     .chars()
@@ -267,7 +277,9 @@ fn ask_code() -> Option<String> {
             Err(_) => continue,   // not installed
         }
     }
-    warn!("neither kdialog nor zenity is installed: cannot ask for the pairing code");
+    warn!(
+        "no dialog program (kdialog, zenity, fuzzel, wofi, rofi): cannot ask for the pairing code"
+    );
     None
 }
 

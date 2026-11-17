@@ -1,0 +1,805 @@
+//! Captures an output with `wlr-screencopy` (Hyprland, Sway) and feeds the frames to
+//! the encoder's `appsrc`.
+//!
+//! Frames go into GPU buffers (dmabuf) allocated with a layout (modifier) the VA-API
+//! converter can read directly, so nothing is copied through the CPU. Without such a
+//! layout (or with `--software`), frames go through shared memory instead.
+
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{Seek, SeekFrom};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result, anyhow, bail};
+use gstreamer as gst;
+use gstreamer_allocators::prelude::*;
+use gstreamer_app as gst_app;
+use gstreamer_video as gst_video;
+use log::{debug, info, warn};
+use wayland_client::globals::{GlobalList, GlobalListContents, registry_queue_init};
+use wayland_client::protocol::{wl_buffer, wl_output, wl_registry, wl_shm, wl_shm_pool};
+use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle, WEnum, delegate_noop};
+use wayland_protocols::wp::linux_dmabuf::zv1::client::{
+    zwp_linux_buffer_params_v1::{self, ZwpLinuxBufferParamsV1},
+    zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
+};
+use wayland_protocols_wlr::screencopy::v1::client::{
+    zwlr_screencopy_frame_v1::{self, ZwlrScreencopyFrameV1},
+    zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
+};
+
+/// Buffers captured into in turn; the encoder holds at most a few at a time.
+const SLOTS: usize = 4;
+/// With nothing changing on screen, the last frame is sent again this often (the
+/// headset treats 10 s of silence as a dead link, PipeWire in KDE does the same).
+const KEEPALIVE: Duration = Duration::from_millis(500);
+
+/// A running capture of one output.
+pub struct Capture {
+    stop: Arc<AtomicBool>,
+    closed: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Capture {
+    /// Starts capturing `output` (its compositor name) into `appsrc`. While `paused`
+    /// is set nothing is captured.
+    pub fn start(
+        output: String,
+        appsrc: gst_app::AppSrc,
+        paused: Arc<AtomicBool>,
+        dmabuf: bool,
+    ) -> Result<Self> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let closed = Arc::new(AtomicBool::new(false));
+        let thread = {
+            let (stop, closed) = (stop.clone(), closed.clone());
+            std::thread::Builder::new()
+                .name(format!("capture-{output}"))
+                .spawn(move || {
+                    if let Err(e) = run(&output, &appsrc, &paused, &stop, dmabuf) {
+                        warn!("capture of {output} stopped: {e:#}");
+                    }
+                    closed.store(true, Ordering::Relaxed);
+                })?
+        };
+        Ok(Self {
+            stop,
+            closed,
+            thread: Some(thread),
+        })
+    }
+
+    /// The output is gone or cannot be captured any more.
+    pub fn closed(&self) -> bool {
+        self.closed.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for Capture {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+/// What the compositor offers for the frame being captured.
+#[derive(Default)]
+struct Frame {
+    shm: Option<(wl_shm::Format, u32, u32, u32)>,
+    dmabuf: Option<(u32, u32, u32)>,
+    described: bool,
+    y_invert: bool,
+    ready: bool,
+    failed: bool,
+}
+
+#[derive(Default)]
+struct State {
+    /// Outputs by registry name: proxy and connector name.
+    outputs: HashMap<u32, (wl_output::WlOutput, Option<String>)>,
+    frame: Frame,
+}
+
+impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
+    fn event(
+        _: &mut Self,
+        _: &wl_registry::WlRegistry,
+        _: wl_registry::Event,
+        _: &GlobalListContents,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<wl_output::WlOutput, u32> for State {
+    fn event(
+        state: &mut Self,
+        _: &wl_output::WlOutput,
+        event: wl_output::Event,
+        global: &u32,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_output::Event::Name { name } = event
+            && let Some(entry) = state.outputs.get_mut(global)
+        {
+            entry.1 = Some(name);
+        }
+    }
+}
+
+impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &ZwlrScreencopyFrameV1,
+        event: zwlr_screencopy_frame_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        use zwlr_screencopy_frame_v1::Event;
+        let f = &mut state.frame;
+        match event {
+            Event::Buffer {
+                format: WEnum::Value(format),
+                width,
+                height,
+                stride,
+            } => f.shm = Some((format, width, height, stride)),
+            Event::LinuxDmabuf {
+                format,
+                width,
+                height,
+            } => f.dmabuf = Some((format, width, height)),
+            Event::BufferDone => f.described = true,
+            Event::Flags {
+                flags: WEnum::Value(flags),
+            } => f.y_invert = flags.contains(zwlr_screencopy_frame_v1::Flags::YInvert),
+            Event::Ready { .. } => f.ready = true,
+            Event::Failed => f.failed = true,
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ZwpLinuxBufferParamsV1, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &ZwpLinuxBufferParamsV1,
+        event: zwp_linux_buffer_params_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let zwp_linux_buffer_params_v1::Event::Failed = event {
+            warn!("the compositor refused a capture buffer");
+        }
+    }
+}
+
+delegate_noop!(State: ignore ZwlrScreencopyManagerV1);
+delegate_noop!(State: ignore ZwpLinuxDmabufV1);
+delegate_noop!(State: ignore wl_shm::WlShm);
+delegate_noop!(State: ignore wl_shm_pool::WlShmPool);
+delegate_noop!(State: ignore wl_buffer::WlBuffer);
+
+/// Reads pending events, waiting at most `timeout` for new ones.
+fn wait(
+    conn: &Connection,
+    queue: &mut EventQueue<State>,
+    state: &mut State,
+    timeout: Duration,
+) -> Result<()> {
+    queue.dispatch_pending(state)?;
+    conn.flush()?;
+    if let Some(guard) = queue.prepare_read() {
+        let mut pfd = libc::pollfd {
+            fd: guard.connection_fd().as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one valid pollfd for the duration of the call.
+        let n = unsafe { libc::poll(&mut pfd, 1, timeout.as_millis() as i32) };
+        if n > 0 {
+            match guard.read() {
+                Ok(_) => {}
+                Err(wayland_client::backend::WaylandError::Io(e))
+                    if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+    queue.dispatch_pending(state)?;
+    Ok(())
+}
+
+/// Binds every output and waits (up to 3 s, it may have just been created) for the
+/// one called `name`.
+fn find_output(
+    conn: &Connection,
+    globals: &GlobalList,
+    queue: &mut EventQueue<State>,
+    state: &mut State,
+    name: &str,
+) -> Result<wl_output::WlOutput> {
+    let qh = queue.handle();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        for g in globals.contents().clone_list() {
+            if g.interface == "wl_output" && g.version >= 4 && !state.outputs.contains_key(&g.name)
+            {
+                let output = globals
+                    .registry()
+                    .bind::<wl_output::WlOutput, _, _>(g.name, 4, &qh, g.name);
+                state.outputs.insert(g.name, (output, None));
+            }
+        }
+        queue.roundtrip(state)?;
+        if let Some((output, _)) = state
+            .outputs
+            .values()
+            .find(|(_, n)| n.as_deref() == Some(name))
+        {
+            return Ok(output.clone());
+        }
+        if Instant::now() > deadline {
+            bail!("output {name} did not appear");
+        }
+        wait(conn, queue, state, Duration::from_millis(100))?;
+    }
+}
+
+/// `XR24` and the like, from a DRM fourcc code.
+fn fourcc_name(code: u32) -> String {
+    code.to_le_bytes().iter().map(|&b| b as char).collect()
+}
+
+/// DRM formats and modifiers `vapostproc` imports, e.g. `("AR24", 0x0100000000000009)`.
+fn va_dmabuf_formats() -> Vec<(String, u64)> {
+    let Some(factory) = gst::ElementFactory::find("vapostproc") else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for template in factory.static_pad_templates() {
+        if template.direction() != gst::PadDirection::Sink {
+            continue;
+        }
+        let caps = template.caps();
+        for (s, features) in caps.iter_with_features() {
+            if !features.contains("memory:DMABuf") {
+                continue;
+            }
+            let Ok(value) = s.value("drm-format") else {
+                continue;
+            };
+            let mut names = Vec::new();
+            if let Ok(list) = value.get::<gst::List>() {
+                names.extend(list.iter().filter_map(|v| v.get::<String>().ok()));
+            } else if let Ok(one) = value.get::<String>() {
+                names.push(one);
+            }
+            for n in names {
+                let (fourcc, modifier) = match n.split_once(':') {
+                    Some((f, m)) => (
+                        f,
+                        u64::from_str_radix(m.trim_start_matches("0x"), 16).unwrap_or(0),
+                    ),
+                    None => (n.as_str(), 0),
+                };
+                found.push((fourcc.to_owned(), modifier));
+            }
+        }
+    }
+    found
+}
+
+/// The modifiers the encoder can read for frames of `fourcc`, with the name to give
+/// the format in the caps. A format without alpha is read as its alpha twin (same
+/// bytes; the converter ignores alpha).
+fn modifiers_for(fourcc: &str, available: &[(String, u64)]) -> Vec<(String, u64)> {
+    let twin = fourcc.replacen('X', "A", 1);
+    available
+        .iter()
+        .filter(|(f, _)| f == fourcc || *f == twin)
+        .cloned()
+        .collect()
+}
+
+fn render_node() -> Result<File> {
+    let path = match std::env::var("PROSTIR_RENDER_NODE") {
+        Ok(p) => p,
+        Err(_) => {
+            let mut nodes: Vec<_> = std::fs::read_dir("/dev/dri")?
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with("renderD"))
+                })
+                .collect();
+            nodes.sort();
+            nodes
+                .first()
+                .context("no GPU render node in /dev/dri")?
+                .to_string_lossy()
+                .into_owned()
+        }
+    };
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("cannot open {path}"))
+}
+
+struct DmaSlot {
+    buffer: wl_buffer::WlBuffer,
+    memory: gst::Memory,
+    offset: usize,
+    stride: i32,
+    _bo: gbm::BufferObject<()>,
+}
+
+struct ShmSlot {
+    buffer: wl_buffer::WlBuffer,
+    offset: usize,
+}
+
+enum Slots {
+    Dma(Vec<DmaSlot>),
+    Shm {
+        slots: Vec<ShmSlot>,
+        map: *mut u8,
+        len: usize,
+        stride: usize,
+        format: gst_video::VideoFormat,
+        _pool: wl_shm_pool::WlShmPool,
+        _file: File,
+    },
+}
+
+/// The buffer descriptions a frame came with: dmabuf and shared memory.
+type Offer = (
+    Option<(u32, u32, u32)>,
+    Option<(wl_shm::Format, u32, u32, u32)>,
+);
+
+/// The buffers of one frame size and format.
+struct Pool {
+    /// What the compositor offered when this pool was made.
+    key: Offer,
+    width: u32,
+    height: u32,
+    slots: Slots,
+}
+
+impl Drop for Pool {
+    fn drop(&mut self) {
+        match &self.slots {
+            Slots::Dma(slots) => slots.iter().for_each(|s| s.buffer.destroy()),
+            Slots::Shm {
+                slots, map, len, ..
+            } => {
+                slots.iter().for_each(|s| s.buffer.destroy());
+                // SAFETY: `map` came from mmap with this length and is not used after.
+                unsafe { libc::munmap(map.cast(), *len) };
+            }
+        }
+    }
+}
+
+struct Wayland<'a> {
+    qh: &'a QueueHandle<State>,
+    shm: &'a wl_shm::WlShm,
+    dmabuf: Option<&'a ZwpLinuxDmabufV1>,
+}
+
+impl Pool {
+    fn dmabuf(
+        wl: &Wayland,
+        gpu: &gbm::Device<File>,
+        va: &[(String, u64)],
+        format: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<(Self, gst::Caps)> {
+        let dmabuf = wl.dmabuf.context("no zwp_linux_dmabuf_v1")?;
+        let fourcc = fourcc_name(format);
+        let usable = modifiers_for(&fourcc, va);
+        if usable.is_empty() {
+            bail!("the encoder reads no layout of {fourcc}");
+        }
+        let gbm_format =
+            gbm::Format::try_from(format).map_err(|_| anyhow!("unknown format {fourcc}"))?;
+        let allocator = gstreamer_allocators::DmaBufAllocator::new();
+        let mut slots = Vec::new();
+        let mut caps_name = None;
+        for _ in 0..SLOTS {
+            let bo = gpu.create_buffer_object_with_modifiers2::<()>(
+                width,
+                height,
+                gbm_format,
+                usable.iter().map(|(_, m)| gbm::Modifier::from(*m)),
+                gbm::BufferObjectFlags::RENDERING,
+            )?;
+            if bo.plane_count() != 1 {
+                bail!("{} planes", bo.plane_count());
+            }
+            let modifier = u64::from(bo.modifier());
+            let (name, _) = usable
+                .iter()
+                .find(|(_, m)| *m == modifier)
+                .context("GBM picked a layout the encoder cannot read")?;
+            caps_name = Some(if modifier == 0 {
+                name.clone()
+            } else {
+                format!("{name}:{modifier:#018x}")
+            });
+            let offset = bo.offset(0);
+            let stride = bo.stride();
+            let fd: OwnedFd = bo.fd()?;
+            let params = dmabuf.create_params(wl.qh, ());
+            params.add(
+                fd.as_fd(),
+                0,
+                offset,
+                stride,
+                (modifier >> 32) as u32,
+                modifier as u32,
+            );
+            let buffer = params.create_immed(
+                width as i32,
+                height as i32,
+                format,
+                zwp_linux_buffer_params_v1::Flags::empty(),
+                wl.qh,
+                (),
+            );
+            params.destroy();
+            let mut file = File::from(bo.fd()?);
+            let size = file.seek(SeekFrom::End(0))? as usize;
+            // SAFETY: `file` is a dmabuf of `size` bytes that GStreamer now owns.
+            let memory = unsafe { allocator.alloc_dmabuf(file, size)? };
+            slots.push(DmaSlot {
+                buffer,
+                memory,
+                offset: offset as usize,
+                stride: stride as i32,
+                _bo: bo,
+            });
+        }
+        let caps = gst::Caps::builder("video/x-raw")
+            .features(["memory:DMABuf"])
+            .field("format", "DMA_DRM")
+            .field("drm-format", caps_name.unwrap_or_default())
+            .field("width", width as i32)
+            .field("height", height as i32)
+            .field("framerate", gst::Fraction::new(0, 1))
+            .build();
+        Ok((
+            Self {
+                key: (None, None),
+                width,
+                height,
+                slots: Slots::Dma(slots),
+            },
+            caps,
+        ))
+    }
+
+    fn shm(
+        wl: &Wayland,
+        format: wl_shm::Format,
+        width: u32,
+        height: u32,
+        stride: u32,
+    ) -> Result<(Self, gst::Caps)> {
+        let video_format = match format {
+            wl_shm::Format::Xrgb8888 => gst_video::VideoFormat::Bgrx,
+            wl_shm::Format::Argb8888 => gst_video::VideoFormat::Bgra,
+            wl_shm::Format::Xbgr8888 => gst_video::VideoFormat::Rgbx,
+            wl_shm::Format::Abgr8888 => gst_video::VideoFormat::Rgba,
+            other => bail!("unsupported shared-memory format {other:?}"),
+        };
+        let frame = stride as usize * height as usize;
+        let len = frame * SLOTS;
+        // SAFETY: a fresh anonymous file; the name is a valid C string.
+        let fd = unsafe { libc::memfd_create(c"prostir-capture".as_ptr(), libc::MFD_CLOEXEC) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        // SAFETY: `fd` was just created and is owned by nobody else.
+        let file = unsafe { File::from_raw_fd(fd) };
+        file.set_len(len as u64)?;
+        // SAFETY: maps the whole file, which stays open as long as the mapping.
+        let map = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        if map == libc::MAP_FAILED {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let pool = wl.shm.create_pool(file.as_fd(), len as i32, wl.qh, ());
+        let slots = (0..SLOTS)
+            .map(|i| ShmSlot {
+                buffer: pool.create_buffer(
+                    (i * frame) as i32,
+                    width as i32,
+                    height as i32,
+                    stride as i32,
+                    format,
+                    wl.qh,
+                    (),
+                ),
+                offset: i * frame,
+            })
+            .collect();
+        let caps = gst_video::VideoInfo::builder(video_format, width, height)
+            .fps(gst::Fraction::new(0, 1))
+            .build()?
+            .to_caps()?;
+        Ok((
+            Self {
+                key: (None, None),
+                width,
+                height,
+                slots: Slots::Shm {
+                    slots,
+                    map: map.cast(),
+                    len,
+                    stride: stride as usize,
+                    format: video_format,
+                    _pool: pool,
+                    _file: file,
+                },
+            },
+            caps,
+        ))
+    }
+
+    fn buffer(&self, slot: usize) -> &wl_buffer::WlBuffer {
+        match &self.slots {
+            Slots::Dma(s) => &s[slot].buffer,
+            Slots::Shm { slots, .. } => &slots[slot].buffer,
+        }
+    }
+
+    /// A GStreamer buffer showing what `slot` holds.
+    fn frame(&self, slot: usize, y_invert: bool) -> Result<gst::Buffer> {
+        let buffer = match &self.slots {
+            Slots::Dma(slots) => {
+                let s = &slots[slot];
+                let mut buffer = gst::Buffer::new();
+                let b = buffer.get_mut().expect("new buffer");
+                b.append_memory(s.memory.clone());
+                gst_video::VideoMeta::add_full(
+                    b,
+                    gst_video::VideoFrameFlags::empty(),
+                    gst_video::VideoFormat::DmaDrm,
+                    self.width,
+                    self.height,
+                    &[s.offset],
+                    &[s.stride],
+                )?;
+                buffer
+            }
+            Slots::Shm {
+                slots,
+                map,
+                stride,
+                format,
+                ..
+            } => {
+                let size = stride * self.height as usize;
+                // SAFETY: the slot lies inside the mapping, and the compositor is done
+                // writing it (the frame is ready).
+                let src = unsafe { std::slice::from_raw_parts(map.add(slots[slot].offset), size) };
+                let data = if y_invert {
+                    src.chunks_exact(*stride).rev().flatten().copied().collect()
+                } else {
+                    src.to_vec()
+                };
+                let mut buffer = gst::Buffer::from_mut_slice(data);
+                gst_video::VideoMeta::add_full(
+                    buffer.get_mut().expect("new buffer"),
+                    gst_video::VideoFrameFlags::empty(),
+                    *format,
+                    self.width,
+                    self.height,
+                    &[0],
+                    &[*stride as i32],
+                )?;
+                buffer
+            }
+        };
+        Ok(buffer)
+    }
+}
+
+fn run(
+    name: &str,
+    appsrc: &gst_app::AppSrc,
+    paused: &AtomicBool,
+    stop: &AtomicBool,
+    want_dmabuf: bool,
+) -> Result<()> {
+    let conn = Connection::connect_to_env().context("no Wayland display")?;
+    let (globals, mut queue) = registry_queue_init::<State>(&conn)?;
+    let qh = queue.handle();
+    let manager: ZwlrScreencopyManagerV1 = globals
+        .bind(&qh, 1..=3, ())
+        .context("the compositor has no wlr-screencopy")?;
+    let shm: wl_shm::WlShm = globals.bind(&qh, 1..=1, ())?;
+    let dmabuf: Option<ZwpLinuxDmabufV1> = globals.bind(&qh, 3..=4, ()).ok();
+    let mut state = State::default();
+    let output = find_output(&conn, &globals, &mut queue, &mut state, name)?;
+    let wl = Wayland {
+        qh: &qh,
+        shm: &shm,
+        dmabuf: dmabuf.as_ref(),
+    };
+    let va = if want_dmabuf {
+        va_dmabuf_formats()
+    } else {
+        Vec::new()
+    };
+    let gpu = if va.is_empty() {
+        None
+    } else {
+        match render_node().and_then(|f| Ok(gbm::Device::new(f)?)) {
+            Ok(d) => Some(d),
+            Err(e) => {
+                warn!("no GPU buffers for capture, using shared memory: {e:#}");
+                None
+            }
+        }
+    };
+    let mut dmabuf_broken = gpu.is_none();
+
+    let mut pool: Option<Pool> = None;
+    let mut next = 0;
+    let mut last: Option<usize> = None;
+    let mut last_push = Instant::now();
+    let mut failures = 0;
+    while !stop.load(Ordering::Relaxed) {
+        if paused.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
+        }
+        state.frame = Frame::default();
+        let frame = manager.capture_output(1, &output, &qh, ());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !(state.frame.described || state.frame.failed) && Instant::now() < deadline {
+            wait(&conn, &mut queue, &mut state, Duration::from_millis(100))?;
+            // Version 1 and 2 frames describe one buffer and send no `buffer_done`.
+            if manager_version(&manager) < 3 && state.frame.shm.is_some() {
+                state.frame.described = true;
+            }
+        }
+        if !state.frame.described {
+            frame.destroy();
+            failures += 1;
+            if failures >= 5 {
+                bail!("the compositor stopped answering");
+            }
+            continue;
+        }
+        let key = (state.frame.dmabuf, state.frame.shm);
+        if pool.as_ref().is_none_or(|p| p.key != key) {
+            last = None;
+            // Free the old buffers before making new ones.
+            drop(pool.take());
+            let made = match (&gpu, state.frame.dmabuf) {
+                (Some(gpu), Some((format, w, h))) if !dmabuf_broken => {
+                    Pool::dmabuf(&wl, gpu, &va, format, w, h)
+                        .inspect_err(|e| {
+                            warn!("{name}: GPU buffers unusable, using shared memory: {e:#}")
+                        })
+                        .ok()
+                }
+                _ => None,
+            };
+            let made = match made {
+                Some(m) => m,
+                None => {
+                    dmabuf_broken = true;
+                    let (format, w, h, stride) =
+                        state.frame.shm.context("no shared-memory buffer offered")?;
+                    Pool::shm(&wl, format, w, h, stride)?
+                }
+            };
+            info!(
+                "capturing {name} at {}x{} via {}",
+                made.0.width,
+                made.0.height,
+                if matches!(made.0.slots, Slots::Dma(_)) {
+                    "GPU buffers"
+                } else {
+                    "shared memory"
+                }
+            );
+            debug!("{name}: caps {}", made.1);
+            appsrc.set_caps(Some(&made.1));
+            let mut made = made.0;
+            made.key = key;
+            pool = Some(made);
+        }
+        let p = pool.as_ref().expect("pool made above");
+        let slot = next;
+        next = (next + 1) % SLOTS;
+        frame.copy_with_damage(p.buffer(slot));
+        while !(state.frame.ready || state.frame.failed) && !stop.load(Ordering::Relaxed) {
+            wait(&conn, &mut queue, &mut state, Duration::from_millis(100))?;
+            if last_push.elapsed() >= KEEPALIVE
+                && !paused.load(Ordering::Relaxed)
+                && let Some(l) = last
+            {
+                let _ = appsrc.push_buffer(p.frame(l, false)?);
+                last_push = Instant::now();
+            }
+        }
+        frame.destroy();
+        if state.frame.ready {
+            failures = 0;
+            let _ = appsrc.push_buffer(p.frame(slot, state.frame.y_invert)?);
+            last = Some(slot);
+            last_push = Instant::now();
+        } else if state.frame.failed {
+            failures += 1;
+            if failures >= 5 {
+                bail!("{name} cannot be captured (gone?)");
+            }
+            if matches!(p.slots, Slots::Dma(_)) && failures >= 2 {
+                warn!("{name}: the compositor rejects GPU buffers, using shared memory");
+                dmabuf_broken = true;
+                pool = None;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    Ok(())
+}
+
+fn manager_version(m: &ZwlrScreencopyManagerV1) -> u32 {
+    wayland_client::Proxy::version(m)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_fourcc_codes() {
+        assert_eq!(fourcc_name(0x3432_5258), "XR24");
+    }
+
+    #[test]
+    fn reads_alpha_twin_layouts() {
+        let va = vec![
+            ("AR24".to_owned(), 0x0100_0000_0000_0009),
+            ("NV12".to_owned(), 0),
+            ("XB24".to_owned(), 0x0100_0000_0000_0009),
+        ];
+        assert_eq!(
+            modifiers_for("XR24", &va),
+            vec![("AR24".to_owned(), 0x0100_0000_0000_0009)]
+        );
+        assert_eq!(modifiers_for("XB24", &va).len(), 1);
+        assert!(modifiers_for("AR30", &va).is_empty());
+    }
+}

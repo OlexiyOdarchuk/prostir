@@ -53,3 +53,8 @@ First public version.
 - A start screen in the headset explains where to get the PC part.
 - When the headset and the PC run versions that cannot talk, both say which one to
   update: a page in the headset, a notification on the PC.
+- Hyprland: headless outputs captured with wlr-screencopy straight into GPU buffers,
+  the layout set with monitor rules (Lua or `hyprland.conf`), focus mode from the
+  focused monitor. GNOME is next if people want it (issue #1).
+- The pairing code can be typed into fuzzel, wofi or rofi when neither kdialog nor
+  zenity is installed.

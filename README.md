@@ -5,14 +5,14 @@
 <h1 align="center">Prostir</h1>
 
 <p align="center">
-  Extra KDE Plasma monitors around you in a Meta Quest 3.
+  Extra monitors for KDE Plasma and Hyprland around you in a Meta Quest 3.
 </p>
 
 <p align="center">
   <a href="https://github.com/OlexiyOdarchuk/prostir/actions/workflows/ci.yml"><img src="https://github.com/OlexiyOdarchuk/prostir/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/OlexiyOdarchuk/prostir/releases"><img src="https://img.shields.io/github/v/release/OlexiyOdarchuk/prostir?include_prereleases&label=release" alt="Release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--or--later-blue" alt="License: GPL-3.0-or-later"></a>
-  <img src="https://img.shields.io/badge/KDE%20Plasma-6%20%C2%B7%20Wayland-1d99f3" alt="KDE Plasma 6, Wayland">
+  <img src="https://img.shields.io/badge/KDE%20Plasma%206%20%C2%B7%20Hyprland-Wayland-1d99f3" alt="KDE Plasma 6 and Hyprland, Wayland">
   <img src="https://img.shields.io/badge/Meta%20Quest-3%20%C2%B7%203S-1c1e20" alt="Meta Quest 3 and 3S">
 </p>
 
@@ -26,11 +26,12 @@
 
 ---
 
-Prostir (Ukrainian for "space") puts extra monitors for your KDE Plasma laptop or
-desktop into a Quest headset. They are real KWin outputs, not pictures of windows:
-they show up in System Settings → Display, you can drag and maximize windows onto
-them, the Plasma panel can live there, and the mouse moves from one screen to the
-next where they meet in front of you.
+Prostir (Ukrainian for "space") puts extra monitors for your KDE Plasma or Hyprland
+laptop or desktop into a Quest headset. They are real outputs of the compositor, not
+pictures of windows: in KDE they show up in System Settings → Display, in Hyprland in
+`hyprctl monitors`. You can drag and maximize windows onto them, keep a panel or
+workspaces there, and the mouse moves from one screen to the next where they meet in
+front of you.
 
 I wrote it because I wanted three big monitors on a laptop without carrying them
 around. I use it every day on KDE Plasma 6.8 (Wayland) with Intel Arc graphics and a
@@ -111,13 +112,17 @@ with.
 
 **PC**
 
-- KDE Plasma 6 on Wayland. KWin provides the virtual outputs.
+- KDE Plasma 6 on Wayland, or Hyprland (tested with 0.57, Lua and `hyprland.conf`
+  configs both work). KWin streams its virtual outputs itself; on Hyprland Prostir
+  creates headless outputs and captures them with `wlr-screencopy` straight into GPU
+  buffers.
 - PipeWire with `pw-cli` and `pw-loopback`, and GStreamer 1.22 or newer with the `va`
   plugin (gst-plugins-bad) plus the PipeWire and PulseAudio plugins.
 - A GPU with a VA-API HEVC or H.264 encoder (Intel, AMD). Without one, start with
   `--software` to encode with x264 on the CPU.
-- `kscreen-doctor`, which comes with Plasma. Optional: `qdbus6` for matching
-  wallpapers, `adb` for USB, `kdialog` or `zenity` for the pairing dialog.
+- On KDE, `kscreen-doctor`, which comes with Plasma. Optional: `qdbus6` for matching
+  wallpapers, `adb` for USB, and one of `kdialog`, `zenity`, `fuzzel`, `wofi` or `rofi`
+  for the pairing dialog. On Hyprland, a bar with a tray (Waybar) shows the tray menu.
 
 | Distribution | Packages |
 |---|---|
@@ -142,6 +147,11 @@ with.
    tar xf prostir-*-x86_64-linux.tar.gz && cd prostir-*/
    ./install.sh             # installs into ~/.local without root; --autostart starts it with Plasma
    ```
+   On Hyprland without uwsm, add it to the config to start it with the session:
+   `hl.on("hyprland.start", function () hl.exec_cmd("prostir") end)` in `hyprland.lua`, or
+   `exec-once = prostir` in `hyprland.conf`. With `ecosystem:enforce_permissions` on,
+   also allow it to capture the screen:
+   `hl.permission("/usr/(local/)?bin/prostir|.*/\\.local/bin/prostir", "screencopy", "allow")`.
 3. On the headset, connected with a USB cable:
    ```sh
    adb install prostir-*.apk
@@ -226,8 +236,10 @@ stored in `~/.config/prostir/monitors.txt`.
 
 ## Limitations
 
-- KDE Plasma 6 on Wayland only. The virtual monitors come from KWin's screencast
-  protocol, so GNOME, other compositors and X11 sessions are not supported.
+- KDE Plasma 6 and Hyprland on Wayland. GNOME is not supported yet: if you want it,
+  add a 👍 to [issue #1](https://github.com/OlexiyOdarchuk/prostir/issues/1). X11 sessions are not supported.
+- Hyprland has no primary monitor, so "Make primary" there only picks the monitor the
+  headset puts in front of you.
 - Hardware encoding needs VA-API, which means Intel or AMD graphics. NVIDIA cards do not
   offer VA-API encoding; `--software` works there, but encodes on the CPU.
 - Tested on Quest 3. Quest 3S should behave the same; Quest 2 and Pro are untested.
@@ -286,8 +298,9 @@ contains only the PC's host name.
 
 ```mermaid
 flowchart LR
-  subgraph PC["PC · KDE Plasma"]
+  subgraph PC["PC · KDE Plasma or Hyprland"]
     KWin["KWin virtual outputs<br/>(zkde_screencast)"] --> PW[PipeWire] --> Enc["VA-API HEVC encoder"]
+    Hypr["Hyprland headless outputs<br/>(wlr-screencopy, dmabuf)"] --> Enc
     Snd["Virtual sound card"] --> Net
     Enc --> Net(("encrypted TCP"))
   end
@@ -307,6 +320,11 @@ client/   the Quest app: OpenXR loop (app.rs), menu (ui.rs), layouts (layout.rs)
 scripts/  build-apk.sh, install.sh, package-release.sh
 docs/     pictures for this README
 ```
+
+On Hyprland the same jobs go through its IPC socket: `output create headless`, monitor
+rules (Lua `eval` or `keyword`) for the layout, and the focused monitor for focus mode.
+Frames are captured into GPU buffers with a tiling the VA-API converter reads directly,
+so nothing passes through the CPU.
 
 Besides streaming, the PC side arranges the outputs in KDE with `kscreen-doctor`,
 copies the wallpaper to every monitor through Plasma's scripting API, mirrors the

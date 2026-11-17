@@ -50,12 +50,37 @@ pub struct Encoder {
     pipeline: gst::Pipeline,
     sink: gst_app::AppSink,
     stop: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
     bus_thread: Option<JoinHandle<()>>,
 }
 
-fn pipeline_description(node: u32, cfg: &EncoderConfig) -> String {
-    let source =
-        format!("pipewiresrc path={node} do-timestamp=true keepalive-time=500 always-copy=false");
+/// Where the frames come from.
+pub enum Input {
+    /// A PipeWire node (KWin streams its outputs this way).
+    PipeWire(u32),
+    /// Frames pushed into the pipeline's `appsrc` (Hyprland, see `screencopy.rs`).
+    Pushed(String),
+}
+
+impl Input {
+    fn label(&self) -> String {
+        match self {
+            Self::PipeWire(node) => format!("node {node}"),
+            Self::Pushed(name) => name.clone(),
+        }
+    }
+}
+
+fn pipeline_description(input: &Input, cfg: &EncoderConfig) -> String {
+    let source = match input {
+        Input::PipeWire(node) => format!(
+            "pipewiresrc path={node} do-timestamp=true keepalive-time=500 always-copy=false"
+        ),
+        // Caps are set by the capture once it knows the frame size and format.
+        Input::Pushed(_) => "appsrc name=src is-live=true format=time do-timestamp=true \
+             max-buffers=2 leaky-type=downstream"
+            .to_owned(),
+    };
     let (encoder, parser, caps) = match (cfg.codec, cfg.software) {
         (Codec::H264, true) => (
             format!(
@@ -95,11 +120,12 @@ fn pipeline_description(node: u32, cfg: &EncoderConfig) -> String {
 impl Encoder {
     /// `on_event` returns `true` when the receiver needs a keyframe (e.g. it had to drop frames).
     pub fn start(
-        node: u32,
+        input: &Input,
         cfg: &EncoderConfig,
         on_event: impl Fn(EncoderEvent) -> bool + Send + Sync + 'static,
     ) -> Result<Self> {
-        let desc = pipeline_description(node, cfg);
+        let desc = pipeline_description(input, cfg);
+        let node = input.label();
         debug!("pipeline: {desc}");
         let pipeline = gst::parse::launch(&desc)
             .context("failed to build GStreamer pipeline (are gst-plugins-bad with VA and gst-plugin-pipewire installed?)")?
@@ -127,6 +153,7 @@ impl Encoder {
         }
         {
             let on_event = on_event.clone();
+            let node = node.clone();
             sink.set_callbacks(
                 gst_app::AppSinkCallbacks::builder()
                     .new_sample(move |sink| {
@@ -154,7 +181,7 @@ impl Encoder {
                         let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
                         let keyframe = !buffer.flags().contains(gst::BufferFlags::DELTA_UNIT);
                         let pts_us = buffer.pts().map(|t| t.useconds()).unwrap_or(0);
-                        probe.lock().unwrap().left(node);
+                        probe.lock().unwrap().left(&node);
                         if on_event(EncoderEvent::Frame {
                             pts_us,
                             keyframe,
@@ -185,12 +212,12 @@ impl Encoder {
                         match msg.view() {
                             gst::MessageView::Error(e) => {
                                 let text = format!("{} ({:?})", e.error(), e.debug());
-                                error!("encoder for node {node}: {text}");
+                                error!("encoder for {node}: {text}");
                                 on_event(EncoderEvent::Failed(text));
                                 break;
                             }
                             gst::MessageView::Warning(w) => {
-                                warn!("encoder for node {node}: {}", w.error())
+                                warn!("encoder for {node}: {}", w.error())
                             }
                             gst::MessageView::Eos(_) => {
                                 on_event(EncoderEvent::Failed("stream ended".into()));
@@ -209,8 +236,21 @@ impl Encoder {
             pipeline,
             sink,
             stop,
+            paused: Arc::new(AtomicBool::new(false)),
             bus_thread: Some(bus_thread),
         })
+    }
+
+    /// The `appsrc` to push frames into, for [`Input::Pushed`].
+    pub fn appsrc(&self) -> Option<gst_app::AppSrc> {
+        self.pipeline
+            .by_name("src")
+            .and_then(|e| e.downcast::<gst_app::AppSrc>().ok())
+    }
+
+    /// Set while the encoder is paused, so a capture can rest too.
+    pub fn paused(&self) -> Arc<AtomicBool> {
+        self.paused.clone()
     }
 
     /// Changes the target bitrate while running.
@@ -237,6 +277,7 @@ impl Encoder {
         } else {
             gst::State::Playing
         };
+        self.paused.store(paused, Ordering::Relaxed);
         let _ = self.pipeline.set_state(state);
         if !paused {
             self.force_keyframe();
@@ -292,7 +333,7 @@ impl Probe {
         self.inside.push_back(now);
     }
 
-    fn left(&mut self, node: u32) {
+    fn left(&mut self, node: &str) {
         let Some(t0) = self.inside.pop_front() else {
             return;
         };
@@ -302,14 +343,14 @@ impl Probe {
         self.max_ms = self.max_ms.max(ms);
         if ms > 30.0 {
             debug!(
-                "node {node}: frame spent {ms:.0} ms in the encoder, {} still inside",
+                "{node}: frame spent {ms:.0} ms in the encoder, {} still inside",
                 self.inside.len()
             );
         }
         let since = *self.since.get_or_insert_with(Instant::now);
         if since.elapsed().as_secs() >= 5 {
             debug!(
-                "node {node}: {} frames, encoder avg {:.1} max {:.1} ms, longest gap between captured frames {:.0} ms",
+                "{node}: {} frames, encoder avg {:.1} max {:.1} ms, longest gap between captured frames {:.0} ms",
                 self.frames,
                 self.sum_ms / f64::from(self.frames),
                 self.max_ms,

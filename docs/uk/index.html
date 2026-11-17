@@ -3,12 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Prostir: додаткові монітори KDE Plasma в Meta Quest 3</title>
-  <meta name="description" content="Prostir додає ноутбуку чи ПК з KDE Plasma додаткові монітори в шоломі Meta Quest 3. Це справжні виходи KWin, по Wi-Fi або USB. Вільна програма з відкритим кодом.">
+  <title>Prostir: додаткові монітори KDE Plasma і Hyprland у Meta Quest 3</title>
+  <meta name="description" content="Prostir додає ноутбуку чи ПК з KDE Plasma або Hyprland додаткові монітори в шоломі Meta Quest 3. Це справжні виходи робочого столу, по Wi-Fi або USB. Вільна програма з відкритим кодом.">
   <link rel="icon" href="../icon.svg" type="image/svg+xml">
   <link rel="alternate" hreflang="en" href="https://prostir.ishawyha.dev/">
   <meta property="og:title" content="Prostir">
-  <meta property="og:description" content="Додаткові монітори KDE Plasma навколо вас у Meta Quest 3.">
+  <meta property="og:description" content="Додаткові монітори KDE Plasma і Hyprland навколо вас у Meta Quest 3.">
   <meta property="og:image" content="https://prostir.ishawyha.dev/headset.jpg">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -36,10 +36,10 @@
   <div class="wrap">
     <div class="hero">
       <div>
-        <h1>Додаткові монітори для KDE Plasma у шоломі Quest 3</h1>
-        <p class="lead">Справжні виходи KWin навколо вас. Вікна, панель і миша ходять по них так, ніби монітори стоять на столі.</p>
+        <h1>Додаткові монітори для KDE Plasma і Hyprland у шоломі Quest 3</h1>
+        <p class="lead">Справжні виходи робочого столу навколо вас. Вікна, панелі й миша ходять по них так, ніби монітори стоять на столі.</p>
         <div class="actions">
-          <a class="button primary" href="https://github.com/OlexiyOdarchuk/prostir/releases">Завантажити для KDE Plasma</a>
+          <a class="button primary" href="https://github.com/OlexiyOdarchuk/prostir/releases">Завантажити для Linux</a>
           <a class="button" href="https://github.com/OlexiyOdarchuk/prostir">Вихідний код</a>
         </div>
         <p class="downloads" id="downloads" aria-live="polite"></p>
@@ -133,7 +133,8 @@ cd prostir-*/
         <div>
           <h3>ПК</h3>
           <ul>
-            <li>KDE Plasma 6 на Wayland. GNOME і сеанси X11 не підтримуються.</li>
+            <li>KDE Plasma 6 або Hyprland, на Wayland. Сеанси X11 не підтримуються.</li>
+            <li>GNOME поки не підтримується. <a href="https://github.com/OlexiyOdarchuk/prostir/issues/1">Хочете його? Проголосуйте 👍 на GitHub.</a></li>
             <li>Графіка Intel або AMD з кодуванням VA-API. NVIDIA працює лише з <code>--software</code>, тоді кодує процесор.</li>
             <li>PipeWire і GStreamer 1.22 або новіший з плагіном <code>va</code>.</li>
           </ul>

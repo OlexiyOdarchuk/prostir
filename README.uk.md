@@ -5,14 +5,14 @@
 <h1 align="center">Prostir</h1>
 
 <p align="center">
-  Додаткові монітори KDE Plasma навколо вас у Meta Quest 3.
+  Додаткові монітори для KDE Plasma і Hyprland навколо вас у Meta Quest 3.
 </p>
 
 <p align="center">
   <a href="https://github.com/OlexiyOdarchuk/prostir/actions/workflows/ci.yml"><img src="https://github.com/OlexiyOdarchuk/prostir/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/OlexiyOdarchuk/prostir/releases"><img src="https://img.shields.io/github/v/release/OlexiyOdarchuk/prostir?include_prereleases&label=release" alt="Реліз"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--or--later-blue" alt="Ліцензія GPL-3.0-or-later"></a>
-  <img src="https://img.shields.io/badge/KDE%20Plasma-6%20%C2%B7%20Wayland-1d99f3" alt="KDE Plasma 6, Wayland">
+  <img src="https://img.shields.io/badge/KDE%20Plasma%206%20%C2%B7%20Hyprland-Wayland-1d99f3" alt="KDE Plasma 6 і Hyprland, Wayland">
   <img src="https://img.shields.io/badge/Meta%20Quest-3%20%C2%B7%203S-1c1e20" alt="Meta Quest 3 і 3S">
 </p>
 
@@ -26,7 +26,7 @@
 
 ---
 
-Prostir додає ноутбуку чи ПК із KDE Plasma додаткові монітори, які ви бачите в шоломі
+Prostir додає ноутбуку чи ПК із KDE Plasma або Hyprland додаткові монітори, які ви бачите в шоломі
 Quest. Це справжні виходи KWin, а не картинки вікон: вони є в «Параметри системи →
 Дисплей», на них можна переносити й розгортати вікна, туди можна поставити панель
 Plasma, а миша переходить з екрана на екран саме там, де вони стикаються перед вами.
@@ -108,7 +108,9 @@ Plasma, а миша переходить з екрана на екран сам�
 
 **ПК**
 
-- KDE Plasma 6 на Wayland. Віртуальні виходи дає KWin.
+- KDE Plasma 6 на Wayland або Hyprland (перевірено на 0.57, працюють і конфіги Lua, і
+  `hyprland.conf`). KWin транслює віртуальні виходи сам; у Hyprland Prostir створює
+  headless-виходи й захоплює їх через `wlr-screencopy` просто в буфери відеокарти.
 - PipeWire з `pw-cli` і `pw-loopback` та GStreamer 1.22 або новіший із плагіном `va`
   (gst-plugins-bad) і плагінами PipeWire та PulseAudio.
 - Відеокарта з VA-API-кодером HEVC або H.264 (Intel, AMD). Без нього запускайте з
@@ -139,6 +141,11 @@ Plasma, а миша переходить з екрана на екран сам�
    tar xf prostir-*-x86_64-linux.tar.gz && cd prostir-*/
    ./install.sh             # у ~/.local, без root; --autostart запускає разом із Plasma
    ```
+   У Hyprland без uwsm додайте автозапуск у конфіг:
+   `hl.on("hyprland.start", function () hl.exec_cmd("prostir") end)` у `hyprland.lua` або
+   `exec-once = prostir` у `hyprland.conf`. Якщо ввімкнено `ecosystem:enforce_permissions`,
+   дозвольте ще захоплення екрана:
+   `hl.permission("/usr/(local/)?bin/prostir|.*/\\.local/bin/prostir", "screencopy", "allow")`.
 3. На шолом, підключений кабелем USB:
    ```sh
    adb install prostir-*.apk
@@ -222,8 +229,10 @@ prostir [--monitor WxH[@scale]]... [--codec h265|h264] [--bitrate MBPS] [--softw
 
 ## Обмеження
 
-- Лише KDE Plasma 6 на Wayland. Віртуальні монітори дає протокол трансляції KWin, тож
-  GNOME, інші компоновники й сеанси X11 не підтримуються.
+- KDE Plasma 6 і Hyprland на Wayland. GNOME поки не підтримується: якщо він вам
+  потрібен, поставте 👍 в [issue #1](https://github.com/OlexiyOdarchuk/prostir/issues/1). Сеанси X11 не підтримуються.
+- У Hyprland немає головного монітора, тож «Зробити головним» там лише вибирає, який
+  монітор шолом ставить перед вами.
 - Апаратне кодування потребує VA-API, тобто графіки Intel або AMD. Карти NVIDIA
   кодування через VA-API не мають; там працює `--software`, але кодує процесор.
 - Перевірено на Quest 3. Quest 3S має поводитися так само; Quest 2 і Pro не перевірялися.
@@ -282,8 +291,9 @@ BLAKE2s). Після нього картинка, звук і мікрофон �
 
 ```mermaid
 flowchart LR
-  subgraph PC["ПК · KDE Plasma"]
+  subgraph PC["ПК · KDE Plasma або Hyprland"]
     KWin["Віртуальні виходи KWin<br/>(zkde_screencast)"] --> PW[PipeWire] --> Enc["Кодер VA-API HEVC"]
+    Hypr["Headless-виходи Hyprland<br/>(wlr-screencopy, dmabuf)"] --> Enc
     Snd["Віртуальна звукова карта"] --> Net
     Enc --> Net(("шифрований TCP"))
   end

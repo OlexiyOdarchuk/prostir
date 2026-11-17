@@ -2,16 +2,17 @@
 pkgname=prostir-bin
 pkgver=@VERSION@
 pkgrel=1
-pkgdesc="Extra KDE Plasma monitors in a Meta Quest 3 headset (PC part)"
+pkgdesc="Extra KDE Plasma and Hyprland monitors in a Meta Quest 3 headset (PC part)"
 arch=('x86_64')
 url="https://prostir.ishawyha.dev"
 license=('GPL-3.0-or-later')
 depends=('glibc' 'gcc-libs' 'gstreamer' 'gst-plugins-base-libs' 'gst-plugins-good'
-         'gst-plugins-bad' 'gst-plugin-pipewire' 'pipewire' 'kscreen' 'curl')
-optdepends=('intel-media-driver: hardware encoding on Intel graphics'
+         'gst-plugins-bad' 'gst-plugin-pipewire' 'pipewire' 'mesa' 'curl')
+optdepends=('kscreen: arranging the monitors on KDE Plasma'
+            'intel-media-driver: hardware encoding on Intel graphics'
             'libva-mesa-driver: hardware encoding on AMD graphics'
             'android-tools: connecting the headset over USB'
-            'kdialog: the pairing dialog'
+            'kdialog: the pairing dialog (or zenity, fuzzel, wofi, rofi)'
             'libnotify: notifications'
             'qt6-tools: matching wallpapers on every monitor (qdbus6)')
 provides=('prostir')
