@@ -112,6 +112,8 @@ pub enum Action {
     ApplyProfile(usize),
     SaveProfile(usize),
     Tab(Tab),
+    /// Lay everything out again in front of the user, where they look now.
+    Recenter,
     /// The first-run tips were read.
     IntroDone,
     Language(Language),
@@ -948,7 +950,17 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
         note,
         (label, style, Action::SetMirror(!s.mirror_wanted)),
     );
-    y + 70.0
+    y += 82.0;
+    items.push(button(
+        rect(lx, y, lw, 52.0),
+        l.t(
+            "Поставити все перед собою",
+            "Bring everything in front of me",
+        ),
+        Style::Normal,
+        Some(Action::Recenter),
+    ));
+    y + 52.0
 }
 
 /// A row with a title, a muted note and one button on the right.
@@ -1392,8 +1404,8 @@ fn build_intro(l: Lang, items: &mut Vec<Item>, x: f32, w: f32) {
         (
             "Вирівняти",
             "Line up",
-            "Кнопка A ставить усі монітори рівно. Утримання Meta перецентровує.",
-            "The A button lines all monitors up. Holding the Meta button recenters.",
+            "Кнопка A ставить монітори рівно. «Поставити все перед собою» в меню розверне їх до вас.",
+            "The A button lines monitors up. \"Bring everything in front of me\" in the menu turns them to you.",
         ),
         (
             "Пальцем",

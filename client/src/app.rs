@@ -168,6 +168,12 @@ struct Scene {
     confirm_remove: Option<(u8, Instant)>,
     /// Menu page shown.
     tab: Tab,
+    /// Where layouts are centred and which way they face (head position, yaw).
+    center: (Vec3, f32),
+    /// Head position and gaze this frame.
+    head: (Vec3, Vec3),
+    /// Tracked hands are in view this frame (the menu then opens within reach).
+    hands_in_view: bool,
     /// Where the keyboard window lies (set the first time it is shown).
     keyboard_place: Option<Placement>,
     keyboard_path: PathBuf,
@@ -226,13 +232,13 @@ impl Scene {
 
     /// Puts the laptop mirror back under the primary monitor, leaving the rest alone.
     fn place_mirror(&mut self) {
-        let all = layout::arrange_curved(
+        let all = self.around_user(layout::arrange_curved(
             self.settings.preset,
             &self.quest_sizes(),
             self.primary,
             self.mirror_size(),
             self.curve_radius(),
-        );
+        ));
         if let Some(p) = all.get(&MIRROR_ID) {
             self.placements.insert(MIRROR_ID, *p);
         }
@@ -243,20 +249,35 @@ impl Scene {
     }
 
     /// Lays everything out by the chosen preset.
+    /// Layouts are worked out around the origin facing -Z; this moves them to where
+    /// the user sat and looked when they last asked to bring everything in front.
+    fn around_user(&self, mut placements: HashMap<u8, Placement>) -> HashMap<u8, Placement> {
+        let (center, yaw) = self.center;
+        let turn = glam::Quat::from_rotation_y(yaw);
+        for p in placements.values_mut() {
+            p.position = center + turn * p.position;
+            p.rotation = turn * p.rotation;
+        }
+        placements
+    }
+
     fn arrange_all(&mut self) {
         if self.settings.cinema {
-            self.placements = layout::cinema(&self.quest_sizes(), self.settings.cinema_screen);
+            self.placements = self.around_user(layout::cinema(
+                &self.quest_sizes(),
+                self.settings.cinema_screen,
+            ));
             self.grabs = [None, None];
             return;
         }
         let mirror_place = self.placements.get(&MIRROR_ID).copied();
-        self.placements = layout::arrange_curved(
+        self.placements = self.around_user(layout::arrange_curved(
             self.settings.preset,
             &self.quest_sizes(),
             self.primary,
             self.mirror_size(),
             self.curve_radius(),
-        );
+        ));
         // Keep the mirror's spot while the laptop lid is closed.
         if let (Some(p), false) = (mirror_place, self.placements.contains_key(&MIRROR_ID)) {
             self.placements.insert(MIRROR_ID, p);
@@ -667,6 +688,9 @@ fn run(app: &AndroidApp) -> Result<()> {
         error: None,
         confirm_remove: None,
         tab: Tab::Monitors,
+        center: (Vec3::ZERO, 0.0),
+        head: (Vec3::ZERO, -Vec3::Z),
+        hands_in_view: false,
         keyboard_place: layout::load(&data_dir.join("keyboard.txt")).remove(&0),
         keyboard_path: data_dir.join("keyboard.txt"),
         system_lang: crate::i18n::system(),
@@ -819,6 +843,8 @@ fn run(app: &AndroidApp) -> Result<()> {
                 )
             });
 
+        scene.head = (head, forward);
+
         // Tracked hands: joints for drawing, fingertips for touching the menu.
         let joints: [Option<[(Vec3, f32); 26]>; 2] = match &hand_trackers {
             Some(trackers) if scene.settings.hands != HandMode::Hidden => {
@@ -834,6 +860,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         };
         let tips: [Option<Vec3>; 2] = std::array::from_fn(|h| joints[h].map(|j| j[INDEX_TIP].0));
         let hands_in_view = tips.iter().any(Option::is_some);
+        scene.hands_in_view = hands_in_view;
         controls.hands_from_joints(&joints, head, forward);
 
         // Pairing needs the menu, and so do the first-run tips: open it where the
@@ -1533,6 +1560,15 @@ fn handle_action(
             }
         }
         Action::Tab(tab) => scene.tab = tab,
+        Action::Recenter => {
+            let (head, forward) = scene.head;
+            let flat = Vec3::new(forward.x, 0.0, forward.z).normalize_or(-Vec3::Z);
+            scene.center = (head, (-flat.x).atan2(-flat.z));
+            scene.arrange_all();
+            // The menu comes along, in front again.
+            let touch = scene.hands_in_view;
+            scene.open_panel(head, forward, touch);
+        }
         Action::IntroDone => {
             scene.settings.intro_seen = true;
             scene.settings.save(settings_path);
