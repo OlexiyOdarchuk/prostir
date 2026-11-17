@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Prostir: додаткові монітори KDE Plasma в Meta Quest 3</title>
+  <meta name="description" content="Prostir додає ноутбуку чи ПК з KDE Plasma додаткові монітори в шоломі Meta Quest 3. Це справжні виходи KWin, по Wi-Fi або USB. Вільна програма з відкритим кодом.">
+  <link rel="icon" href="../icon.svg" type="image/svg+xml">
+  <link rel="alternate" hreflang="en" href="https://prostir.ishawyha.dev/">
+  <meta property="og:title" content="Prostir">
+  <meta property="og:description" content="Додаткові монітори KDE Plasma навколо вас у Meta Quest 3.">
+  <meta property="og:image" content="https://prostir.ishawyha.dev/headset.jpg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600&family=Noto+Sans+Mono&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../site.css">
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="./"><img src="../icon.svg" alt="" width="32" height="32">Prostir</a>
+    <nav aria-label="Розділи">
+      <a href="#install">Встановлення</a>
+      <a href="#requirements">Вимоги</a>
+      <a href="https://github.com/OlexiyOdarchuk/prostir">GitHub</a>
+      <a href="../" hreflang="en" lang="en">English</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <div class="wrap">
+    <div class="hero">
+      <div>
+        <h1>Додаткові монітори для KDE Plasma у шоломі Quest 3</h1>
+        <p class="lead">Prostir перетворює шолом на багатомоніторне робоче місце для ноутбука чи ПК. Монітори справжні, це виходи KWin: на них переносяться вікна, туди можна поставити панель Plasma, а миша переходить з одного на інший там, де вони стикаються перед вами.</p>
+        <div class="actions">
+          <a class="button primary" href="https://github.com/OlexiyOdarchuk/prostir/releases">Завантажити для KDE Plasma</a>
+          <a class="button" href="https://github.com/OlexiyOdarchuk/prostir">Вихідний код</a>
+        </div>
+        <p class="downloads" id="downloads" aria-live="polite"></p>
+      </div>
+      <div>
+        <video src="../demo.mp4" poster="../demo.jpg" autoplay muted loop playsinline aria-label="У шоломі: дотик пальцем до меню, зміна розміру монітора двома руками, режим фокусу і вікно на справжню клавіатуру"></video>
+        <img class="poster" src="../demo.jpg" alt="Prostir у шоломі: монітори навколо й меню">
+      </div>
+    </div>
+  </div>
+
+  <section>
+    <div class="wrap">
+      <figure>
+        <img src="../headset.jpg" width="1920" height="1080" loading="lazy" alt="Знімок із шолома: три віртуальні монітори, праворуч параметри дисплея KDE з виходами Prostir, під головним монітором екран ноутбука">
+        <figcaption>Знімок із шолома. На правому моніторі параметри дисплея KDE: три монітори там звичайні виходи.</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h2>Що він уміє</h2>
+      <div class="split">
+        <div>
+          <p>Монітори додаються, прибираються й переставляються прямо з шолома: 1080p, 1440p, 4K, широкий чи портретний, до шести. KDE розставляє свої дисплеї так, як ви їх бачите, поруч і один над одним, тож миша виходить з одного монітора там, де починається наступний.</p>
+          <p>Текст чіткий, бо відео потрапляє просто в шари компоновника Quest, а не в пласке вікно застосунку. ПК кодує відеокартою (VA-API на Intel чи AMD), Quest декодує апаратно; по Wi-Fi кадр іде від кодера до показу приблизно 14 мс.</p>
+          <p>Коли руки в полі зору, меню відкривається на відстані витягнутої руки й працює як сенсорний екран.</p>
+        </div>
+        <img src="menu-monitors.png" width="1280" height="960" loading="lazy" alt="Меню в шоломі, вкладка «Монітори»: список моніторів, розміри, розкладка, вигин і режим">
+      </div>
+      <ul class="points">
+        <li><h3>І екран ноутбука</h3><p>Висить під головним монітором без шва і зникає, коли кришку закрито.</p></li>
+        <li><h3>Профілі</h3><p>«Робота», «Кіно» й «Лежачи» перемикають усе одним натиском; у будь-який можна зберегти своє.</p></li>
+        <li><h3>Режим фокусу</h3><p>Усі монітори, крім того, де миша, темнішають.</p></li>
+        <li><h3>Звук і мікрофон</h3><p>Звук із ПК грає в шоломі, а програми на ПК чують мікрофон шолома, поки записують.</p></li>
+        <li><h3>Зняли шолом</h3><p>Через 10 секунд вікна, панель і звук повертаються на ноутбук. Вдягнули, і все повертається.</p></li>
+        <li><h3>Вікно на клавіатуру</h3><p>Прямокутник, який кладете на справжню клавіатуру, показує стіл через камери на будь-якому фоні.</p></li>
+        <li><h3>Сполучення й шифрування</h3><p>Noise і SPAKE2: ПК нічого не транслює шолому, з яким не сполучений.</p></li>
+        <li><h3>Українська й англійська</h3><p>Шолом бере мову ПК, якщо не вибрати іншу.</p></li>
+      </ul>
+    </div>
+  </section>
+
+  <section id="install">
+    <div class="wrap">
+      <h2>Встановлення</h2>
+      <div class="steps">
+        <div>
+          <h3>На ПК</h3>
+          <ol>
+            <li>Завантажте <code>prostir-&lt;версія&gt;-x86_64-linux.tar.gz</code> з <a href="https://github.com/OlexiyOdarchuk/prostir/releases">релізів</a>.</li>
+            <li>Розпакуйте й запустіть встановлення. Воно ставить у <code>~/.local</code> і не потребує root.
+<pre><code>tar xf prostir-*-x86_64-linux.tar.gz
+cd prostir-*/
+./install.sh --autostart</code></pre></li>
+            <li>Запустіть Prostir з меню застосунків. У треї з'явиться іконка.</li>
+          </ol>
+        </div>
+        <div>
+          <h3>На шоломі</h3>
+          <ol>
+            <li>Увімкніть режим розробника в застосунку Meta Horizon на телефоні: Пристрої → Налаштування шолома → Режим розробника.</li>
+            <li>Підключіть шолом кабелем USB і встановіть APK з того самого релізу:
+<pre><code>adb install prostir-*.apk</code></pre></li>
+            <li>Відкрийте Prostir: Бібліотека → Невідомі джерела. Шолом знайде ПК у тій самій мережі Wi-Fi або через кабель; уперше введіть 6-значний код, який він покаже, у віконці на ПК.</li>
+          </ol>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="requirements">
+    <div class="wrap">
+      <h2>Вимоги й обмеження</h2>
+      <div class="needs">
+        <div>
+          <h3>ПК</h3>
+          <ul>
+            <li>KDE Plasma 6 на Wayland. GNOME і сеанси X11 не підтримуються.</li>
+            <li>Графіка Intel або AMD з кодуванням VA-API. NVIDIA працює лише з <code>--software</code>, тоді кодує процесор.</li>
+            <li>PipeWire і GStreamer 1.22 або новіший з плагіном <code>va</code>.</li>
+          </ul>
+        </div>
+        <div>
+          <h3>Шолом</h3>
+          <ul>
+            <li>Meta Quest 3, на ньому перевірено; Quest 3S має працювати так само. Quest 2 і Pro не перевірялися.</li>
+            <li>Режим розробника, щоб встановити застосунок; у Horizon Store його ще немає.</li>
+            <li>Один шолом на ПК водночас.</li>
+          </ul>
+        </div>
+      </div>
+      <p class="muted">Версія 0.1, автор користується нею щодня на Plasma 6.8 з графікою Intel Arc. Проблеми й ідеї пишіть в <a href="https://github.com/OlexiyOdarchuk/prostir/issues">issues на GitHub</a>.</p>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <p>Prostir є вільною програмою під <a href="https://github.com/OlexiyOdarchuk/prostir/blob/main/LICENSE">GPL-3.0-or-later</a> з <a href="https://github.com/OlexiyOdarchuk/prostir/blob/main/LICENSE-EXCEPTION.md">додатковим дозволом</a> для Meta Platform SDK. <a href="privacy.html">Конфіденційність</a>.</p>
+    <p>Meta і Meta Quest є торговими марками Meta Platforms, Inc. KDE і Plasma є торговими марками KDE e.V. Prostir незалежний і не пов'язаний із ними.</p>
+  </div>
+</footer>
+<script src="../site.js" defer></script>
+</body>
+</html>

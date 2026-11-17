@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Prostir: extra KDE Plasma monitors in a Meta Quest 3</title>
+  <meta name="description" content="Prostir puts extra monitors for a KDE Plasma laptop or desktop into a Meta Quest 3. They are real KWin outputs, streamed over Wi-Fi or USB. Free and open source.">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="alternate" hreflang="uk" href="https://prostir.ishawyha.dev/uk/">
+  <meta property="og:title" content="Prostir">
+  <meta property="og:description" content="Extra KDE Plasma monitors around you in a Meta Quest 3.">
+  <meta property="og:image" content="https://prostir.ishawyha.dev/headset.jpg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600&family=Noto+Sans+Mono&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="site.css">
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="./"><img src="icon.svg" alt="" width="32" height="32">Prostir</a>
+    <nav aria-label="Sections">
+      <a href="#install">Install</a>
+      <a href="#requirements">Requirements</a>
+      <a href="https://github.com/OlexiyOdarchuk/prostir">GitHub</a>
+      <a href="uk/" hreflang="uk" lang="uk">Українською</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <div class="wrap">
+    <div class="hero">
+      <div>
+        <h1>Extra monitors for KDE Plasma, inside a Quest 3</h1>
+        <p class="lead">Prostir turns the headset into a multi-monitor desk for your laptop or desktop. The monitors are real KWin outputs: windows move onto them, the Plasma panel can live there, and the mouse crosses from one to the next where they meet in front of you.</p>
+        <div class="actions">
+          <a class="button primary" href="https://github.com/OlexiyOdarchuk/prostir/releases">Download for KDE Plasma</a>
+          <a class="button" href="https://github.com/OlexiyOdarchuk/prostir">Source code</a>
+        </div>
+        <p class="downloads" id="downloads" aria-live="polite"></p>
+      </div>
+      <div>
+        <video src="demo.mp4" poster="demo.jpg" autoplay muted loop playsinline aria-label="In the headset: touching the menu with a finger, resizing a monitor with both hands, focus mode dimming the other monitors, and a window onto the real keyboard"></video>
+        <img class="poster" src="demo.jpg" alt="Prostir in the headset: monitors around the user and the menu">
+      </div>
+    </div>
+  </div>
+
+  <section>
+    <div class="wrap">
+      <figure>
+        <img src="headset.jpg" width="1920" height="1080" loading="lazy" alt="A capture from the headset: three virtual monitors around the user, KDE's display settings on the right listing them as Prostir outputs, and the laptop screen below the main monitor">
+        <figcaption>A capture from the headset. The monitor on the right shows KDE's display settings: the three monitors are ordinary outputs there.</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h2>What it does</h2>
+      <div class="split">
+        <div>
+          <p>You add, remove and reorder monitors from inside the headset: 1080p, 1440p, 4K, ultrawide or portrait, up to six. KDE arranges its displays the way you see them, side by side and above or below each other, so the mouse always leaves one monitor where the next one begins.</p>
+          <p>Text stays sharp because the video goes straight into the Quest compositor's own layers instead of a flat window inside an app. The PC encodes on the GPU (VA-API on Intel or AMD) and the Quest decodes in hardware; over Wi-Fi a frame takes about 14 ms from encoder to display.</p>
+          <p>With your hands in view, the menu opens within reach and works like a touchscreen.</p>
+        </div>
+        <img src="menu-monitors.png" width="1280" height="960" loading="lazy" alt="The headset menu, Monitors tab: the monitor list, sizes to add, layout, curve and mode">
+      </div>
+      <ul class="points">
+        <li><h3>The laptop screen too</h3><p>It hangs under the main monitor without a seam and disappears when you close the lid.</p></li>
+        <li><h3>Profiles</h3><p>Work, Cinema and Lying down switch the whole setup in one press; save your own into any of them.</p></li>
+        <li><h3>Focus mode</h3><p>Every monitor except the one with the mouse gets darker.</p></li>
+        <li><h3>Sound and microphone</h3><p>PC sound plays in the headset, and PC apps hear the headset microphone while they record.</p></li>
+        <li><h3>Headset off, desk back</h3><p>Take it off and after 10 seconds windows, panel and sound return to the laptop. Put it on and they come back.</p></li>
+        <li><h3>Keyboard window</h3><p>A rectangle you place over the real keyboard shows the desk through the cameras, on any background.</p></li>
+        <li><h3>Paired and encrypted</h3><p>Noise and SPAKE2: a PC streams nothing to a headset it has not been paired with.</p></li>
+        <li><h3>Ukrainian and English</h3><p>The headset follows the PC's language unless you pick one.</p></li>
+      </ul>
+    </div>
+  </section>
+
+  <section id="install">
+    <div class="wrap">
+      <h2>Install</h2>
+      <div class="steps">
+        <div>
+          <h3>On the PC</h3>
+          <ol>
+            <li>Download <code>prostir-&lt;version&gt;-x86_64-linux.tar.gz</code> from <a href="https://github.com/OlexiyOdarchuk/prostir/releases">Releases</a>.</li>
+            <li>Unpack it and run the installer. It installs into <code>~/.local</code> and needs no root.
+<pre><code>tar xf prostir-*-x86_64-linux.tar.gz
+cd prostir-*/
+./install.sh --autostart</code></pre></li>
+            <li>Start Prostir from the application menu. Its icon appears in the tray.</li>
+          </ol>
+        </div>
+        <div>
+          <h3>On the headset</h3>
+          <ol>
+            <li>Turn on developer mode in the Meta Horizon phone app: Devices → Headset settings → Developer mode.</li>
+            <li>Connect the headset with a USB cable and install the APK from the same release:
+<pre><code>adb install prostir-*.apk</code></pre></li>
+            <li>Open Prostir from Library → Unknown sources. The headset finds the PC on the same Wi-Fi network or over the cable; the first time, type the 6-digit code it shows into the dialog on the PC.</li>
+          </ol>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="requirements">
+    <div class="wrap">
+      <h2>Requirements and limits</h2>
+      <div class="needs">
+        <div>
+          <h3>PC</h3>
+          <ul>
+            <li>KDE Plasma 6 on Wayland. GNOME and X11 sessions are not supported.</li>
+            <li>Intel or AMD graphics with VA-API encoding. NVIDIA works only with <code>--software</code>, which encodes on the CPU.</li>
+            <li>PipeWire and GStreamer 1.22 or newer with the <code>va</code> plugin.</li>
+          </ul>
+        </div>
+        <div>
+          <h3>Headset</h3>
+          <ul>
+            <li>Meta Quest 3, where it is tested; Quest 3S should behave the same. Quest 2 and Pro are untested.</li>
+            <li>Developer mode to install the app; it is not in the Horizon Store yet.</li>
+            <li>One headset per PC at a time.</li>
+          </ul>
+        </div>
+      </div>
+      <p class="muted">Version 0.1, used every day by its author on Plasma 6.8 with Intel Arc graphics. Problems and ideas go to <a href="https://github.com/OlexiyOdarchuk/prostir/issues">GitHub issues</a>.</p>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <p>Prostir is free software under the <a href="https://github.com/OlexiyOdarchuk/prostir/blob/main/LICENSE">GPL-3.0-or-later</a> with an <a href="https://github.com/OlexiyOdarchuk/prostir/blob/main/LICENSE-EXCEPTION.md">additional permission</a> for the Meta Platform SDK. <a href="privacy.html">Privacy</a>.</p>
+    <p>Meta and Meta Quest are trademarks of Meta Platforms, Inc. KDE and Plasma are trademarks of KDE e.V. Prostir is independent and not affiliated with or endorsed by either.</p>
+  </div>
+</footer>
+<script src="site.js" defer></script>
+</body>
+</html>

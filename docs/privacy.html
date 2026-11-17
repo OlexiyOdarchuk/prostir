@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Prostir privacy policy</title>
+  <meta name="description" content="What Prostir does with your data: it collects nothing and has no servers.">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="alternate" hreflang="uk" href="https://prostir.ishawyha.dev/uk/privacy.html">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="site.css">
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="./"><img src="icon.svg" alt="" width="32" height="32">Prostir</a>
+    <nav aria-label="Sections">
+      <a href="./">Home</a>
+      <a href="uk/privacy.html" hreflang="uk" lang="uk">Українською</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <article class="doc">
+    <h1>Privacy policy</h1>
+    <p class="muted">Last updated: 17 November 2026.</p>
+
+    <p>Prostir is two programs: one on your PC and one on your Meta Quest headset. They talk only to each other. Prostir has no accounts, no servers, no analytics and no telemetry, and it does not send anything about you to its author or to anyone else.</p>
+
+    <h2>What travels between the headset and your PC</h2>
+    <p>The picture of your virtual monitors, PC sound, the headset microphone (see below), which monitor has the mouse, and the settings you change in the headset menu. All of it goes directly between your two devices, over your local network or a USB cable, encrypted with the Noise protocol. To find your PC, the PC broadcasts its host name on the local network.</p>
+
+    <h2>Microphone</h2>
+    <p>The headset records only while an app on your PC is recording from the "Prostir headset microphone" device, and only if you allowed microphone access. The sound goes to your PC and nowhere else. You can turn this off in the menu under Sound, language.</p>
+
+    <h2>Cameras and hand tracking</h2>
+    <p>The room background and the keyboard window use the Quest's passthrough. The headset system draws the camera image; Prostir never receives camera images. Hand tracking data is used on the headset to draw your hands and to let you point and touch the menu. It is not stored or sent anywhere.</p>
+
+    <h2>What is stored</h2>
+    <p>On the headset, inside the app: your settings, profiles, monitor positions and the keys of paired PCs. On the PC, in <code>~/.config/prostir</code>: the monitor setup, settings and the keys of paired headsets. To delete everything, uninstall the app from the headset and delete that folder on the PC; the tray item "Forget paired headsets" removes the pairings only.</p>
+
+    <h2>Meta Horizon Store</h2>
+    <p>If you install Prostir from the Meta Horizon Store, the app asks Meta's platform whether your account owns it when it starts. That check is between the headset and Meta, under <a href="https://www.meta.com/legal/privacy-policy/">Meta's privacy policy</a>; Prostir does not see or keep its result anywhere else.</p>
+
+    <h2>This website</h2>
+    <p>The site is hosted on GitHub Pages, which keeps server logs under <a href="https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement">GitHub's privacy statement</a>. The download count on the home page is read by your browser from GitHub's public API. Fonts load from Google Fonts. The site sets no cookies and runs no analytics.</p>
+
+    <h2>Questions</h2>
+    <p>Open an issue at <a href="https://github.com/OlexiyOdarchuk/prostir/issues">github.com/OlexiyOdarchuk/prostir</a>. If this policy changes, the date at the top changes with it.</p>
+  </article>
+</main>
+
+<footer>
+  <div class="wrap"><p><a href="./">Prostir</a> · free software under the GPL-3.0-or-later.</p></div>
+</footer>
+</body>
+</html>

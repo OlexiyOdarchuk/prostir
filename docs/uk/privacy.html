@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Prostir: політика конфіденційності</title>
+  <meta name="description" content="Що Prostir робить із вашими даними: нічого не збирає і не має серверів.">
+  <link rel="icon" href="../icon.svg" type="image/svg+xml">
+  <link rel="alternate" hreflang="en" href="https://prostir.ishawyha.dev/privacy.html">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../site.css">
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="./"><img src="../icon.svg" alt="" width="32" height="32">Prostir</a>
+    <nav aria-label="Розділи">
+      <a href="./">Головна</a>
+      <a href="../privacy.html" hreflang="en" lang="en">English</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <article class="doc">
+    <h1>Політика конфіденційності</h1>
+    <p class="muted">Оновлено 17 листопада 2026 року.</p>
+
+    <p>Prostir складається з двох програм: на вашому ПК і на шоломі Meta Quest. Вони спілкуються лише між собою. У Prostir немає акаунтів, серверів, аналітики й телеметрії, і він нічого про вас не надсилає ні авторові, ні комусь іще.</p>
+
+    <h2>Що передається між шоломом і ПК</h2>
+    <p>Зображення віртуальних моніторів, звук ПК, мікрофон шолома (див. нижче), на якому моніторі миша, і налаштування, які ви змінюєте в меню шолома. Усе це йде напряму між вашими пристроями, через локальну мережу або кабель USB, і шифрується протоколом Noise. Щоб шолом знайшов ПК, ПК розсилає своє ім'я в локальній мережі.</p>
+
+    <h2>Мікрофон</h2>
+    <p>Шолом записує лише тоді, коли програма на ПК записує з пристрою «Prostir — мікрофон шолома», і лише якщо ви дозволили доступ до мікрофона. Звук іде на ваш ПК і більше нікуди. Вимкнути можна в меню, вкладка «Звук і мова».</p>
+
+    <h2>Камери й відстеження рук</h2>
+    <p>Фон «Кімната» і вікно на клавіатуру використовують passthrough Quest. Зображення з камер малює система шолома; Prostir його ніколи не отримує. Дані відстеження рук використовуються в шоломі, щоб малювати руки й дозволяти наводити та торкатися меню. Вони ніде не зберігаються й нікуди не надсилаються.</p>
+
+    <h2>Що зберігається</h2>
+    <p>У шоломі, всередині застосунку: налаштування, профілі, розташування моніторів і ключі сполучених ПК. На ПК, у <code>~/.config/prostir</code>: набір моніторів, налаштування й ключі сполучених шоломів. Щоб видалити все, видаліть застосунок із шолома й цю папку на ПК; пункт трею «Забути сполучені шоломи» прибирає лише сполучення.</p>
+
+    <h2>Meta Horizon Store</h2>
+    <p>Якщо ви встановили Prostir із Meta Horizon Store, під час запуску застосунок питає платформу Meta, чи ваш акаунт ним володіє. Ця перевірка відбувається між шоломом і Meta відповідно до <a href="https://www.meta.com/legal/privacy-policy/">політики конфіденційності Meta</a>; Prostir ніде не зберігає її результат.</p>
+
+    <h2>Цей сайт</h2>
+    <p>Сайт розміщено на GitHub Pages, який веде журнали сервера відповідно до <a href="https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement">заяви про конфіденційність GitHub</a>. Кількість завантажень на головній ваш браузер бере з публічного API GitHub. Шрифти завантажуються з Google Fonts. Сайт не ставить cookies і не має аналітики.</p>
+
+    <h2>Питання</h2>
+    <p>Відкрийте issue на <a href="https://github.com/OlexiyOdarchuk/prostir/issues">github.com/OlexiyOdarchuk/prostir</a>. Якщо ця політика зміниться, зміниться й дата вгорі.</p>
+  </article>
+</main>
+
+<footer>
+  <div class="wrap"><p><a href="./">Prostir</a> · вільна програма під GPL-3.0-or-later.</p></div>
+</footer>
+</body>
+</html>
