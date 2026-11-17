@@ -27,3 +27,11 @@ First public version.
   until it is worn again. A headset that vanishes is noticed within about 10 s.
 - Ukrainian and English, in the headset and on the PC.
 - The headset menu is split into tabs: Monitors, Profiles, Look, Sound and language.
+- With hands in view, the menu opens within arm's reach and works like a touchscreen;
+  touch an empty spot to drag it.
+- Keyboard window: the real desk seen through a rectangle placed over the keyboard.
+- First-run tips in the headset.
+- Tray: sharper text (slower encoder preset, about 2 ms more per frame).
+- Cinema mode lets you pick the monitor; by default the largest landscape one.
+- The laptop screen meets the monitor above it without a seam, flat or curved.
+- Hand input works even when the Quest is slow to switch from controllers to hands.

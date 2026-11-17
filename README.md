@@ -68,16 +68,17 @@ The PC encodes with the GPU's video engine (VA-API HEVC on Intel or AMD) and the
 decodes in hardware. Over Wi-Fi a frame takes about 14 ms from the encoder to the
 display on my setup.
 
-Monitors can sit on an arc, in a grid, in a column, or above your head for lying down (the "Lying down" layout).
+Monitors can sit on an arc, in a grid, in a column, or above your head for lying down.
 They can be flat or curved, and on an arc they touch edge to edge, so three of them
-read as one wide screen. The laptop's own screen can float below the main monitor,
-tilted towards you, so you can see it without taking the headset off. It disappears
-when you close the lid.
+read as one wide screen. The laptop's own screen can hang below the main monitor
+without a seam, so you can see it without taking the headset off. It disappears when
+you close the lid.
 
 Profiles switch the whole setup at once. Out of the box there is "Work" (three 1440p
 monitors and the laptop screen), "Cinema" (one 4K screen, big and far away, the rest
 hidden) and "Lying down" (two monitors overhead). Save your own setup into any of them.
 Monitors that are the same size in both profiles stay, so their windows do not move.
+In cinema mode you pick which monitor becomes the big screen.
 
 Focus mode dims every monitor except the one with the mouse.
 
@@ -91,6 +92,9 @@ the laptop. Put the headset back on and everything comes back.
 The background can be black, your room through the passthrough cameras, one of four
 built-in panoramas, or a photo of your own. Your hands can be shown (handy over a
 keyboard) and, if you want, used for pointing: pinch to click, pinch and hold to drag.
+With your hands in view, the menu opens within arm's reach and works like a
+touchscreen. A keyboard window can show your real desk through a rectangle you place
+over the keyboard, on any background.
 
 The headset and the PC speak Ukrainian or English. The headset follows the PC's
 language unless you pick one in the menu.
@@ -206,7 +210,9 @@ interface language.
 
 The tray shows whether the headset is connected and how many monitors there are. From
 it you can set the video quality (15, 30 or 50 Mbit/s per monitor, applied right away),
-start Prostir with the session, forget paired headsets, and quit.
+turn on sharper text (a slower encoder preset: clearer small text at the same bitrate
+for about 2 ms more per frame), start Prostir with the session, forget paired headsets,
+and quit.
 
 ### Command line
 
@@ -217,6 +223,17 @@ prostir [--monitor WxH[@scale]]... [--codec h265|h264] [--bitrate MBPS] [--softw
 
 Without `--monitor`, Prostir brings back the monitors from the last session. They are
 stored in `~/.config/prostir/monitors.txt`.
+
+## Limitations
+
+- KDE Plasma 6 on Wayland only. The virtual monitors come from KWin's screencast
+  protocol, so GNOME, other compositors and X11 sessions are not supported.
+- Hardware encoding needs VA-API, which means Intel or AMD graphics. NVIDIA cards do not
+  offer VA-API encoding; `--software` works there, but encodes on the CPU.
+- Tested on Quest 3. Quest 3S should behave the same; Quest 2 and Pro are untested.
+- Not in the Meta Horizon Store: you install it in developer mode with `adb`, and the
+  Quest lists it under Unknown sources by its package name, `dev.prostir.client`.
+- One headset per PC at a time.
 
 ## Performance and battery
 
