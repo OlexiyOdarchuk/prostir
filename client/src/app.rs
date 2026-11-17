@@ -114,6 +114,56 @@ fn create_surface_swapchain(
     Ok((swapchain, window))
 }
 
+/// Keeps Wi-Fi out of power save while the app runs. Without it the headset's
+/// radio naps between beacons and downlink frames wait at the router.
+fn acquire_low_latency_wifi(app: &AndroidApp, vm: &jni::JavaVM) -> Result<jni::objects::GlobalRef> {
+    use jni::objects::{JObject, JValue};
+    /// WifiManager.WIFI_MODE_FULL_LOW_LATENCY (API 29).
+    const WIFI_MODE_FULL_LOW_LATENCY: i32 = 4;
+    let mut env = vm.attach_current_thread_permanently()?;
+    let result = (|| -> jni::errors::Result<jni::objects::GlobalRef> {
+        // SAFETY: the activity reference stays valid while the app runs.
+        let activity = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
+        let context = env
+            .call_method(
+                &activity,
+                "getApplicationContext",
+                "()Landroid/content/Context;",
+                &[],
+            )?
+            .l()?;
+        let service = env.new_string("wifi")?;
+        let wifi = env
+            .call_method(
+                &context,
+                "getSystemService",
+                "(Ljava/lang/String;)Ljava/lang/Object;",
+                &[JValue::Object(&service)],
+            )?
+            .l()?;
+        let tag = env.new_string("questmon")?;
+        let lock = env
+            .call_method(
+                &wifi,
+                "createWifiLock",
+                "(ILjava/lang/String;)Landroid/net/wifi/WifiManager$WifiLock;",
+                &[
+                    JValue::Int(WIFI_MODE_FULL_LOW_LATENCY),
+                    JValue::Object(&tag),
+                ],
+            )?
+            .l()?;
+        env.call_method(&lock, "setReferenceCounted", "(Z)V", &[JValue::Bool(0)])?;
+        env.call_method(&lock, "acquire", "()V", &[])?;
+        env.new_global_ref(lock)
+    })();
+    if result.is_err() {
+        let _ = env.exception_describe();
+        let _ = env.exception_clear();
+    }
+    Ok(result?)
+}
+
 /// Views a raw `XrCompositionLayer*` struct as the base type `FrameStream::end` takes.
 fn as_layer<'a, T>(layer: &'a T) -> &'a xr::CompositionLayerBase<'a, Gfx> {
     // SAFETY: only called with XrCompositionLayer* structs, which all begin with the
@@ -307,6 +357,10 @@ fn run(app: &AndroidApp) -> Result<()> {
 
     // SAFETY: the VM pointer is valid for the life of the process.
     let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) }?;
+    let _wifi_lock = acquire_low_latency_wifi(app, &vm)
+        .inspect(|_| info!("Wi-Fi low-latency mode on"))
+        .inspect_err(|e| warn!("Wi-Fi low-latency lock unavailable: {e:#}"))
+        .ok();
     let layout_path = data_dir.join("layout.txt");
     let mut placements = layout::load(&layout_path);
     let mut monitors: HashMap<u8, Monitor> = HashMap::new();
@@ -376,6 +430,7 @@ fn run(app: &AndroidApp) -> Result<()> {
                     height,
                     codec,
                     frames,
+                    feedback,
                 } => {
                     monitors.remove(&id);
                     match create_surface_swapchain(&session, &vm, width, height) {
@@ -388,6 +443,7 @@ fn run(app: &AndroidApp) -> Result<()> {
                                 height,
                                 window,
                                 frames,
+                                feedback,
                                 stop.clone(),
                             );
                             monitors.insert(

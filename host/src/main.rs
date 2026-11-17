@@ -1,6 +1,7 @@
 mod encoder;
 mod virtual_output;
 
+use std::collections::HashMap;
 use std::io::{BufReader, BufWriter, ErrorKind, Write};
 use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -76,6 +77,36 @@ struct StreamSlot {
     size: Option<(u32, u32)>,
     announced: bool,
     need_keyframe: bool,
+    /// pts → when the encoded frame was queued for sending.
+    sent: HashMap<u64, Instant>,
+    latency: LatencyStats,
+}
+
+/// Encoded on the PC → handed to the headset's compositor, as reported back by the headset.
+#[derive(Default)]
+struct LatencyStats {
+    frames: u32,
+    sum_ms: f64,
+    max_ms: f64,
+    since: Option<Instant>,
+}
+
+impl LatencyStats {
+    fn add(&mut self, monitor: usize, ms: f64) {
+        self.frames += 1;
+        self.sum_ms += ms;
+        self.max_ms = self.max_ms.max(ms);
+        let since = *self.since.get_or_insert_with(Instant::now);
+        if since.elapsed() >= Duration::from_secs(5) {
+            info!(
+                "monitor {monitor}: encoded → shown in headset avg {:.1} ms, max {:.1} ms ({} frames)",
+                self.sum_ms / f64::from(self.frames),
+                self.max_ms,
+                self.frames
+            );
+            *self = Self::default();
+        }
+    }
 }
 
 /// Delivers encoder output to whichever client is connected.
@@ -97,6 +128,8 @@ impl Router {
                 size: None,
                 announced: false,
                 need_keyframe: true,
+                sent: HashMap::new(),
+                latency: LatencyStats::default(),
             })
             .collect();
         Self {
@@ -112,6 +145,16 @@ impl Router {
         for s in &mut inner.streams {
             s.announced = false;
             s.need_keyframe = true;
+        }
+    }
+
+    fn frame_shown(&self, id: u8, pts_us: u64) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(slot) = inner.streams.get_mut(id as usize)
+            && let Some(sent) = slot.sent.remove(&pts_us)
+        {
+            slot.latency
+                .add(id as usize + 1, sent.elapsed().as_secs_f64() * 1e3);
         }
     }
 
@@ -171,6 +214,10 @@ impl Router {
                 }) {
                     Ok(()) => {
                         slot.need_keyframe = false;
+                        if slot.sent.len() > 256 {
+                            slot.sent.clear();
+                        }
+                        slot.sent.insert(pts_us, Instant::now());
                         false
                     }
                     Err(TrySendError::Full(_)) => {
@@ -316,6 +363,7 @@ fn serve_client(
                     e.force_keyframe();
                 }
             }
+            Ok(Ok(ClientMsg::FrameShown { id, pts_us })) => displays.router.frame_shown(id, pts_us),
             Ok(Ok(other)) => warn!("ignoring {other:?}"),
             Ok(Err(e)) if e.kind() == ErrorKind::UnexpectedEof => break Ok(()),
             Ok(Err(e)) => break Err(e.into()),

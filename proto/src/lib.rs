@@ -8,7 +8,7 @@ use std::io::{self, Read, Write};
 
 pub const TCP_PORT: u16 = 47830;
 pub const DISCOVERY_PORT: u16 = 47831;
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 /// Prefix of the UDP discovery beacon: `MAGIC ++ tcp_port (u16 LE) ++ hostname (utf-8)`.
 pub const BEACON_MAGIC: &[u8; 8] = b"QMONHOST";
 
@@ -64,8 +64,17 @@ pub enum HostMsg {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClientMsg {
-    Hello { version: u32 },
-    RequestKeyframe { id: u8 },
+    Hello {
+        version: u32,
+    },
+    RequestKeyframe {
+        id: u8,
+    },
+    /// The decoder handed the frame with this `pts_us` to the compositor.
+    FrameShown {
+        id: u8,
+        pts_us: u64,
+    },
 }
 
 mod tag {
@@ -75,6 +84,7 @@ mod tag {
     pub const STREAM_END: u8 = 4;
     pub const HELLO: u8 = 101;
     pub const REQUEST_KEYFRAME: u8 = 102;
+    pub const FRAME_SHOWN: u8 = 103;
 }
 
 fn invalid(msg: &str) -> io::Error {
@@ -207,6 +217,9 @@ impl ClientMsg {
         match self {
             ClientMsg::Hello { version } => write_frame(w, tag::HELLO, &[&version.to_le_bytes()]),
             ClientMsg::RequestKeyframe { id } => write_frame(w, tag::REQUEST_KEYFRAME, &[&[*id]]),
+            ClientMsg::FrameShown { id, pts_us } => {
+                write_frame(w, tag::FRAME_SHOWN, &[&[*id], &pts_us.to_le_bytes()])
+            }
         }
     }
 
@@ -216,6 +229,10 @@ impl ClientMsg {
         Ok(match t {
             tag::HELLO => ClientMsg::Hello { version: c.u32()? },
             tag::REQUEST_KEYFRAME => ClientMsg::RequestKeyframe { id: c.u8()? },
+            tag::FRAME_SHOWN => ClientMsg::FrameShown {
+                id: c.u8()?,
+                pts_us: c.u64()?,
+            },
             _ => return Err(invalid("unknown client message")),
         })
     }
@@ -276,6 +293,14 @@ mod tests {
             ClientMsg::read(&mut buf.as_slice()).unwrap(),
             ClientMsg::RequestKeyframe { id: 7 }
         );
+
+        let mut buf = Vec::new();
+        let shown = ClientMsg::FrameShown {
+            id: 1,
+            pts_us: 3_600_000_000_123,
+        };
+        shown.write(&mut buf).unwrap();
+        assert_eq!(ClientMsg::read(&mut buf.as_slice()).unwrap(), shown);
 
         let b = encode_beacon(47830, "desk");
         assert_eq!(decode_beacon(&b), Some((47830, "desk".into())));

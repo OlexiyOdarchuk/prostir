@@ -5,6 +5,7 @@ use std::io::{BufReader, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use log::{info, warn};
@@ -18,6 +19,20 @@ pub struct Frame {
     pub data: Vec<u8>,
 }
 
+/// Sends small messages back to the host from any thread (net, decoders).
+#[derive(Clone)]
+pub struct Feedback(Arc<Mutex<TcpStream>>);
+
+impl Feedback {
+    pub fn send(&self, msg: &ClientMsg) -> std::io::Result<()> {
+        let mut stream = self.0.lock().unwrap();
+        // One write per message: TCP_NODELAY sends it right away.
+        let mut buf = Vec::with_capacity(16);
+        msg.write(&mut buf)?;
+        stream.write_all(&buf)
+    }
+}
+
 pub enum NetEvent {
     Connected(SocketAddr),
     StreamStart {
@@ -26,6 +41,7 @@ pub enum NetEvent {
         height: u32,
         codec: Codec,
         frames: Receiver<Frame>,
+        feedback: Feedback,
     },
     StreamEnd {
         id: u8,
@@ -163,11 +179,10 @@ struct StreamSlot {
 fn run_session(stream: TcpStream, events: &Sender<NetEvent>) -> std::io::Result<()> {
     stream.set_nodelay(true)?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-    let mut writer = stream.try_clone()?;
-    ClientMsg::Hello {
+    let feedback = Feedback(Arc::new(Mutex::new(stream.try_clone()?)));
+    feedback.send(&ClientMsg::Hello {
         version: PROTOCOL_VERSION,
-    }
-    .write(&mut writer)?;
+    })?;
     let mut reader = BufReader::with_capacity(1 << 20, stream.try_clone()?);
     match HostMsg::read(&mut reader)? {
         HostMsg::Welcome { .. } => {}
@@ -211,6 +226,7 @@ fn run_session(stream: TcpStream, events: &Sender<NetEvent>) -> std::io::Result<
                     height,
                     codec,
                     frames: rx,
+                    feedback: feedback.clone(),
                 });
             }
             HostMsg::Frame {
@@ -235,8 +251,7 @@ fn run_session(stream: TcpStream, events: &Sender<NetEvent>) -> std::io::Result<
                     Err(TrySendError::Full(_)) => {
                         warn!("decoder {id} is behind, dropping until next keyframe");
                         slot.waiting_for_keyframe = true;
-                        ClientMsg::RequestKeyframe { id }.write(&mut writer)?;
-                        writer.flush()?;
+                        feedback.send(&ClientMsg::RequestKeyframe { id })?;
                     }
                     Err(TrySendError::Disconnected(_)) => {}
                 }

@@ -15,11 +15,12 @@ use ndk::media::media_codec::{
 };
 use ndk::media::media_format::MediaFormat;
 use ndk::native_window::NativeWindow;
-use qmon_proto::Codec;
+use qmon_proto::{ClientMsg, Codec};
 
-use crate::net::Frame;
+use crate::net::{Feedback, Frame};
 
 /// Decodes `frames` into `window` until the channel closes or `stop` is set.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn(
     id: u8,
     codec: Codec,
@@ -27,12 +28,13 @@ pub fn spawn(
     height: u32,
     window: NativeWindow,
     frames: Receiver<Frame>,
+    feedback: Feedback,
     stop: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
     std::thread::Builder::new()
         .name(format!("decoder-{id}"))
         .spawn(move || {
-            if let Err(e) = run(codec, width, height, &window, &frames, &stop) {
+            if let Err(e) = run(id, codec, width, height, &window, &frames, &feedback, &stop) {
                 error!("decoder {id}: {e:#}");
             }
             info!("decoder {id} stopped");
@@ -40,12 +42,15 @@ pub fn spawn(
         .expect("spawn decoder thread")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run(
+    id: u8,
     codec: Codec,
     width: u32,
     height: u32,
     window: &NativeWindow,
     frames: &Receiver<Frame>,
+    feedback: &Feedback,
     stop: &AtomicBool,
 ) -> Result<()> {
     let mime = codec.mime();
@@ -70,7 +75,11 @@ fn run(
         decoder.name().unwrap_or_default()
     );
 
-    let mut timing = Timing::default();
+    let mut timing = Timing {
+        id,
+        feedback: Some(feedback.clone()),
+        ..Default::default()
+    };
     let result = (|| -> Result<()> {
         while !stop.load(Ordering::Relaxed) {
             match frames.recv_timeout(Duration::from_millis(4)) {
@@ -134,6 +143,9 @@ fn drain(decoder: &MediaCodec, timing: &mut Timing) -> Result<()> {
 /// Where time goes per frame: network arrival → decoder input → decoded output.
 #[derive(Default)]
 struct Timing {
+    id: u8,
+    /// Reports shown frames so the host can measure the whole trip.
+    feedback: Option<Feedback>,
     /// pts → (received, queued) for frames inside the decoder.
     in_flight: HashMap<u64, (Instant, Instant)>,
     frames: u32,
@@ -154,6 +166,12 @@ impl Timing {
     }
 
     fn decoded(&mut self, pts_us: u64) {
+        if let Some(f) = &self.feedback {
+            let _ = f.send(&ClientMsg::FrameShown {
+                id: self.id,
+                pts_us,
+            });
+        }
         let Some((received, queued)) = self.in_flight.remove(&pts_us) else {
             return;
         };
