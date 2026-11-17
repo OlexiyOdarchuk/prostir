@@ -37,8 +37,10 @@ around. I use it every day on KDE Plasma 6.8 (Wayland) with Intel Arc graphics a
 Quest 3. It is version 0.1, so expect rough edges, and please open an issue when you
 hit one.
 
-<!-- A capture from the headset goes here: docs/headset.jpg. Use square captures
-     (Quest camera settings); landscape ones leave the monitors out. -->
+<p align="center">
+  <img src="docs/headset.jpg" alt="In the headset: three virtual monitors around the user, KDE's display settings on the right listing them as Prostir outputs, and the laptop screen below the main monitor">
+</p>
+<p align="center"><sub>A capture from the headset: the right monitor shows KDE's display settings with the three Prostir outputs.</sub></p>
 
 <table>
   <tr>
@@ -254,8 +256,8 @@ contains only the PC's host name.
 - The headset does not find the PC over Wi-Fi: both must be on the same network, and
   the network must not isolate clients (guest networks often do). Type the PC's IP on
   the keypad or use a cable.
-- Landscape captures on the Quest come out black: they leave out the compositor layers
-  Prostir draws with. Switch captures to square in the Quest camera settings.
+- A capture on the Quest comes out black: some capture modes leave out the compositor
+  layers Prostir draws with. Switch the capture format in the Quest camera settings.
 
 ## How it works
 
