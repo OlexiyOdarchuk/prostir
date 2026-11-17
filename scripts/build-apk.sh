@@ -40,8 +40,18 @@ echo ">> packaging with $(basename "$BUILD_TOOLS") / $(basename "$PLATFORM")"
 (cd "$STAGE" && zip -q -r "$OUT/unaligned.apk" lib)
 "$BUILD_TOOLS/zipalign" -f -p 4 "$OUT/unaligned.apk" "$OUT/aligned.apk"
 
-# Release signing: KEYSTORE, KEYSTORE_PASS, KEY_ALIAS (and KEY_PASS) from the environment.
-# Without them the Android debug key is used (created if missing).
+# Signing key, first found wins:
+#   1. KEYSTORE, KEYSTORE_PASS, KEY_ALIAS (and KEY_PASS) from the environment (CI);
+#   2. a release key in ~/.config/prostir-release/ (prostir-release.jks, password, alias),
+#      so local builds can update an installed release and the other way round;
+#   3. the Android debug key (created if missing).
+RELEASE_KEY_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/prostir-release"
+if [[ -z "${KEYSTORE:-}" && -f "$RELEASE_KEY_DIR/prostir-release.jks" ]]; then
+    KEYSTORE="$RELEASE_KEY_DIR/prostir-release.jks"
+    KEYSTORE_PASS="$(cat "$RELEASE_KEY_DIR/password")"
+    KEY_ALIAS="$(cat "$RELEASE_KEY_DIR/alias")"
+    echo ">> signing with the release key"
+fi
 KEYSTORE="${KEYSTORE:-$HOME/.android/debug.keystore}"
 KEYSTORE_PASS="${KEYSTORE_PASS:-android}"
 KEY_ALIAS="${KEY_ALIAS:-androiddebugkey}"
