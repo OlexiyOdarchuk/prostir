@@ -6,10 +6,10 @@ use std::collections::HashMap;
 use fontdue::{Font, FontSettings, Metrics};
 use tiny_skia::{FillRule, Paint, Path, PathBuilder, Pixmap, Rect, Transform};
 
-use crate::settings::{Background, Curve, Preset, Settings};
+use crate::settings::{Background, Curve, Preset, Settings, Sky};
 
 pub const WIDTH: u32 = 1280;
-pub const HEIGHT: u32 = 900;
+pub const HEIGHT: u32 = 960;
 /// Same limit as the host's.
 pub const MAX_MONITORS: usize = 6;
 
@@ -36,6 +36,8 @@ pub struct UiState {
     pub settings: Settings,
     pub room_available: bool,
     pub panorama_available: bool,
+    /// The user put a `background.jpg/png` on the headset.
+    pub custom_available: bool,
     pub curve_available: bool,
     pub error: Option<String>,
     /// Monitor whose "×" was pressed once and now asks for confirmation.
@@ -369,8 +371,13 @@ impl Panel {
                          y: &mut f32,
                          title: &str,
                          options: Vec<(&str, Action, bool, bool)>| {
-            items.push(text(rx, *y, 21.0, false, MUTED, title));
-            *y += 18.0;
+            if !title.is_empty() {
+                items.push(text(rx, *y, 21.0, false, MUTED, title));
+                *y += 18.0;
+            } else {
+                // Second row of the previous group.
+                *y -= 30.0;
+            }
             let n = options.len() as f32;
             let bw = (rw - 10.0 * (n - 1.0)) / n;
             for (i, (label, action, selected, enabled)) in options.into_iter().enumerate() {
@@ -426,30 +433,42 @@ impl Panel {
                 ),
             ],
         );
+        let bg = |b: Background| (Action::Background(b), st.background == b);
+        let (a1, s1) = bg(Background::Black);
+        let (a2, s2) = bg(Background::Room);
+        let (a3, s3) = bg(Background::Custom);
         segmented(
             &mut items,
             &mut y,
             "Фон",
             vec![
+                ("Чорний", a1, s1, true),
+                ("Кімната", a2, s2, s.room_available),
                 (
-                    "Чорний",
-                    Action::Background(Background::Black),
-                    st.background == Background::Black,
-                    true,
-                ),
-                (
-                    "Кімната",
-                    Action::Background(Background::Room),
-                    st.background == Background::Room,
-                    s.room_available,
-                ),
-                (
-                    "Панорама",
-                    Action::Background(Background::Panorama),
-                    st.background == Background::Panorama,
-                    s.panorama_available,
+                    "Своє фото",
+                    a3,
+                    s3,
+                    s.panorama_available && s.custom_available,
                 ),
             ],
+        );
+        let skies = [
+            ("Ніч", Sky::Night),
+            ("Захід", Sky::Sunset),
+            ("Космос", Sky::Space),
+            ("Сяйво", Sky::Aurora),
+        ];
+        segmented(
+            &mut items,
+            &mut y,
+            "",
+            skies
+                .iter()
+                .map(|(label, sky)| {
+                    let (a, sel) = bg(Background::Sky(*sky));
+                    (*label, a, sel, s.panorama_available)
+                })
+                .collect(),
         );
         segmented(
             &mut items,
@@ -694,6 +713,7 @@ mod tests {
             settings: Settings::default(),
             room_available: true,
             panorama_available: true,
+            custom_available: false,
             curve_available: true,
             error: None,
             confirm_remove: None,

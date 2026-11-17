@@ -269,7 +269,7 @@ impl Scene {
         self.error = Some((text, Instant::now()));
     }
 
-    fn ui_state(&self, room: bool, panorama: bool) -> UiState {
+    fn ui_state(&self, room: bool, panorama: bool, custom: bool) -> UiState {
         UiState {
             host: self.host.clone(),
             monitors: self
@@ -283,6 +283,7 @@ impl Scene {
             settings: self.settings,
             room_available: room,
             panorama_available: panorama,
+            custom_available: custom,
             curve_available: self.curve_supported,
             error: self
                 .error
@@ -298,14 +299,23 @@ impl Scene {
 }
 
 /// The user's own panorama (`background.jpg`/`.png` next to `host.txt`), else the night sky.
-fn load_panorama(dir: Option<PathBuf>) -> (u32, u32, Vec<u8>) {
-    let custom = dir.and_then(|d| {
-        ["background.jpg", "background.jpeg", "background.png"]
-            .iter()
-            .map(|n| d.join(n))
-            .find(|p| p.exists())
-    });
-    if let Some(path) = custom {
+/// The user's own panorama (`background.jpg/.png` next to `host.txt`), if there is one.
+fn custom_panorama_path(dir: Option<&Path>) -> Option<PathBuf> {
+    let d = dir?;
+    ["background.jpg", "background.jpeg", "background.png"]
+        .iter()
+        .map(|n| d.join(n))
+        .find(|p| p.exists())
+}
+
+/// Width, height and RGBA pixels of a panorama.
+type Panorama = (u32, u32, Vec<u8>);
+
+/// Pixels for a panorama background: generated sky or the user's picture.
+fn load_panorama(choice: Background, dir: Option<PathBuf>) -> Panorama {
+    if choice == Background::Custom
+        && let Some(path) = custom_panorama_path(dir.as_deref())
+    {
         match image::open(&path) {
             Ok(img) => {
                 let img = if img.width() > 4096 {
@@ -320,10 +330,14 @@ fn load_panorama(dir: Option<PathBuf>) -> (u32, u32, Vec<u8>) {
             Err(e) => warn!("cannot read {}: {e}", path.display()),
         }
     }
+    let sky = match choice {
+        Background::Sky(sky) => sky,
+        _ => background::Sky::Night,
+    };
     (
         background::WIDTH,
         background::HEIGHT,
-        background::night_sky(),
+        background::generate(sky),
     )
 }
 
@@ -412,9 +426,12 @@ fn run(app: &AndroidApp) -> Result<()> {
     let mut button_hovered = false;
     button_layer.upload(&gl, &ui::menu_button_image(BUTTON_PX, false))?;
     let mut panel = Panel::new();
-    let mut pano_layer: Option<ImageLayer> = None;
-    let mut pano_job: Option<JoinHandle<(u32, u32, Vec<u8>)>> = None;
+    // The panorama shown and the background it was made for.
+    let mut pano_layer: Option<(Background, ImageLayer)> = None;
+    let mut pano_job: Option<(Background, JoinHandle<Panorama>)> = None;
     let external_dir = app.external_data_path();
+    let mut custom_pano = custom_panorama_path(external_dir.as_deref()).is_some();
+    let mut panel_was_open = false;
 
     let (net_tx, net_rx) = mpsc::channel();
     net::spawn(
@@ -515,21 +532,27 @@ fn run(app: &AndroidApp) -> Result<()> {
             handle_net_event(&mut scene, &session, &vm, event);
         }
 
-        // Panorama: generated or decoded off the main thread, uploaded once.
-        if scene.settings.background == Background::Panorama
+        // Panorama: generated or decoded off the main thread, uploaded once per choice.
+        let wanted = scene.settings.background;
+        let wants_pano = matches!(wanted, Background::Sky(_) | Background::Custom);
+        if wants_pano
             && exts.khr_composition_layer_equirect2
-            && pano_layer.is_none()
+            && pano_layer.as_ref().is_none_or(|(b, _)| *b != wanted)
             && pano_job.is_none()
         {
             let dir = external_dir.clone();
-            pano_job = Some(std::thread::spawn(move || load_panorama(dir)));
+            pano_job = Some((
+                wanted,
+                std::thread::spawn(move || load_panorama(wanted, dir)),
+            ));
         }
-        if pano_job.as_ref().is_some_and(|j| j.is_finished()) {
-            match pano_job.take().unwrap().join() {
+        if pano_job.as_ref().is_some_and(|(_, j)| j.is_finished()) {
+            let (made_for, job) = pano_job.take().unwrap();
+            match job.join() {
                 Ok((w, h, pixels)) => {
                     let mut layer = ImageLayer::new(&session, format, w, h, true)?;
                     layer.upload(&gl, &pixels)?;
-                    pano_layer = Some(layer);
+                    pano_layer = Some((made_for, layer));
                 }
                 Err(_) => warn!("panorama generation panicked"),
             }
@@ -659,9 +682,17 @@ fn run(app: &AndroidApp) -> Result<()> {
         }
 
         // Menu contents.
+        if scene.panel_open && !panel_was_open {
+            // The user may have copied a picture onto the headset meanwhile.
+            custom_pano = custom_panorama_path(external_dir.as_deref()).is_some();
+        }
+        panel_was_open = scene.panel_open;
         if scene.panel_open {
-            let ui_state =
-                scene.ui_state(passthrough.is_some(), exts.khr_composition_layer_equirect2);
+            let ui_state = scene.ui_state(
+                passthrough.is_some(),
+                exts.khr_composition_layer_equirect2,
+                custom_pano,
+            );
             panel.set_state(&ui_state);
             if let Some(pixels) = panel.render_if_dirty() {
                 panel_layer.upload(&gl, pixels)?;
@@ -706,8 +737,8 @@ fn run(app: &AndroidApp) -> Result<()> {
         });
         let pano = pano_layer
             .as_ref()
-            .filter(|_| scene.settings.background == Background::Panorama)
-            .map(|l| xr::sys::CompositionLayerEquirect2KHR {
+            .filter(|(b, _)| *b == scene.settings.background)
+            .map(|(_, l)| xr::sys::CompositionLayerEquirect2KHR {
                 ty: xr::sys::CompositionLayerEquirect2KHR::TYPE,
                 next: ptr::null(),
                 layer_flags: xr::CompositionLayerFlags::EMPTY,

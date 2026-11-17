@@ -1,13 +1,23 @@
-//! Renders the generated panorama to a PNG: cargo run -p qmon-client --example sky_preview -- sky.png
+//! Renders the built-in panoramas to PNGs:
+//! cargo run --release -p qmon-client --example sky_preview -- DIR
+use questmon::background::{self, Sky};
+
 fn main() {
-    let out = std::env::args().nth(1).unwrap_or_else(|| "sky.png".into());
-    let px = questmon::background::night_sky();
-    let size =
-        tiny_skia::IntSize::from_wh(questmon::background::WIDTH, questmon::background::HEIGHT)
+    let dir = std::path::PathBuf::from(std::env::args().nth(1).unwrap_or_else(|| ".".into()));
+    for (sky, name) in [
+        (Sky::Night, "night"),
+        (Sky::Sunset, "sunset"),
+        (Sky::Space, "space"),
+        (Sky::Aurora, "aurora"),
+    ] {
+        let t = std::time::Instant::now();
+        let px = background::generate(sky);
+        let size = tiny_skia::IntSize::from_wh(background::WIDTH, background::HEIGHT).unwrap();
+        let path = dir.join(format!("{name}.png"));
+        tiny_skia::Pixmap::from_vec(px, size)
+            .unwrap()
+            .save_png(&path)
             .unwrap();
-    tiny_skia::Pixmap::from_vec(px, size)
-        .unwrap()
-        .save_png(&out)
-        .unwrap();
-    println!("{out}");
+        println!("{} in {:?}", path.display(), t.elapsed());
+    }
 }

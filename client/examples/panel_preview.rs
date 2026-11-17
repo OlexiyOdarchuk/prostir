@@ -36,6 +36,7 @@ fn main() {
         settings: Settings::default(),
         room_available: true,
         panorama_available: true,
+        custom_available: false,
         curve_available: true,
         error: Some("Максимум 6 моніторів".into()),
         confirm_remove: Some(2),

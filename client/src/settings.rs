@@ -2,6 +2,8 @@
 
 use std::path::Path;
 
+pub use crate::background::Sky;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Preset {
     /// Side by side on an arc around the user.
@@ -37,7 +39,10 @@ pub enum Background {
     Black,
     /// Passthrough cameras.
     Room,
-    Panorama,
+    /// A built-in panorama.
+    Sky(Sky),
+    /// The user's own `background.jpg/png`.
+    Custom,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,7 +93,11 @@ impl Settings {
                 Some(("background", v)) => {
                     s.background = match v {
                         "room" => Background::Room,
-                        "panorama" => Background::Panorama,
+                        "custom" => Background::Custom,
+                        "panorama" | "sky-night" => Background::Sky(Sky::Night),
+                        "sky-sunset" => Background::Sky(Sky::Sunset),
+                        "sky-space" => Background::Sky(Sky::Space),
+                        "sky-aurora" => Background::Sky(Sky::Aurora),
                         _ => Background::Black,
                     }
                 }
@@ -113,7 +122,11 @@ impl Settings {
         let background = match self.background {
             Background::Black => "black",
             Background::Room => "room",
-            Background::Panorama => "panorama",
+            Background::Custom => "custom",
+            Background::Sky(Sky::Night) => "sky-night",
+            Background::Sky(Sky::Sunset) => "sky-sunset",
+            Background::Sky(Sky::Space) => "sky-space",
+            Background::Sky(Sky::Aurora) => "sky-aurora",
         };
         let hands = if self.hands { "on" } else { "off" };
         let text =
@@ -136,7 +149,7 @@ mod tests {
         let s = Settings {
             preset: Preset::Overhead,
             curve: Curve::Gentle,
-            background: Background::Panorama,
+            background: Background::Sky(Sky::Aurora),
             hands: true,
         };
         s.save(&path);
