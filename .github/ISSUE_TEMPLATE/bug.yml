@@ -1,0 +1,66 @@
+name: Bug report
+description: Something does not work or works wrong.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Prostir version
+      description: From the release name, or `git rev-parse --short HEAD` when built from source.
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: plasma
+    attributes:
+      label: KDE Plasma version and distribution
+      description: System Settings → About this System, or `plasmashell --version`.
+      placeholder: Plasma 6.4, Arch Linux
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: Graphics card and driver
+      description: The encoder runs on it. `vainfo | head -5` shows the driver.
+      placeholder: Intel Arc A370M, intel-media-driver 25.2
+    validations:
+      required: true
+  - type: dropdown
+    id: headset
+    attributes:
+      label: Headset
+      options:
+        - Meta Quest 3
+        - Meta Quest 3S
+        - Meta Quest Pro
+        - Meta Quest 2
+    validations:
+      required: true
+  - type: dropdown
+    id: connection
+    attributes:
+      label: Connection
+      options:
+        - Wi-Fi
+        - USB
+        - Both
+  - type: textarea
+    id: pc-log
+    attributes:
+      label: PC log
+      description: Start `RUST_LOG=debug prostir` in a terminal, reproduce the problem, and paste the output. Check it for anything private first.
+      render: text
+  - type: textarea
+    id: headset-log
+    attributes:
+      label: Headset log
+      description: "`adb logcat -d -s prostir` after reproducing the problem."
+      render: text
