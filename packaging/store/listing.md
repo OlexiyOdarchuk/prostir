@@ -8,15 +8,15 @@ Text for the Developer Dashboard. Art: `python3 packaging/store/make_art.py CAPT
 
 **Short description**
 
-Extra monitors for a KDE Plasma PC, around you in the headset. Real desktop outputs:
-windows, the panel and the mouse move across them. Needs the free Prostir app on a PC
-with KDE Plasma 6.
+Extra monitors for a Linux PC, around you in the headset. Real desktop outputs:
+windows, panels and the mouse move across them. Needs the free Prostir app on a PC
+with KDE Plasma 6 or Hyprland.
 
 **Long description**
 
-Prostir puts extra monitors for your KDE Plasma laptop or desktop around you in Quest.
-They are real outputs of the PC: drag windows onto them, maximize them, keep the Plasma
-panel there. The mouse moves from one monitor to the next where they meet in front of
+Prostir puts extra monitors for your Linux laptop or desktop (KDE Plasma or Hyprland)
+around you in Quest. They are real outputs of the PC: drag windows onto them, maximize
+them, keep a panel or workspaces there. The mouse moves from one monitor to the next where they meet in front of
 you, sideways and up or down.
 
 Add, remove and arrange monitors from the headset: 1080p, 1440p, 4K, ultrawide or
@@ -34,7 +34,7 @@ of a flat window, and the PC encodes it on the GPU.
 - Wi-Fi or USB; encrypted, and paired with your PC once
 - English and Ukrainian
 
-Requirements: a PC with KDE Plasma 6 on Wayland, Intel or AMD graphics, and the free
+Requirements: a PC with KDE Plasma 6 or Hyprland on Wayland, Intel or AMD graphics, and the free
 Prostir app for the PC from prostir.ishawyha.dev. Prostir is free software (GPL-3.0).
 
 ## Українською
@@ -43,15 +43,15 @@ Prostir app for the PC from prostir.ishawyha.dev. Prostir is free software (GPL-
 
 **Короткий опис**
 
-Додаткові монітори для ПК з KDE Plasma навколо вас у шоломі. Справжні виходи робочого
-столу: вікна, панель і миша ходять по них. Потрібна безкоштовна програма Prostir на ПК
-з KDE Plasma 6.
+Додаткові монітори для ПК з Linux навколо вас у шоломі. Справжні виходи робочого
+столу: вікна, панелі й миша ходять по них. Потрібна безкоштовна програма Prostir на ПК
+з KDE Plasma 6 або Hyprland.
 
 **Повний опис**
 
-Prostir ставить навколо вас у Quest додаткові монітори для ноутбука чи ПК з KDE
-Plasma. Це справжні виходи ПК: переносьте на них вікна, розгортайте, тримайте там панель
-Plasma. Миша переходить з одного монітора на інший там, де вони стикаються перед вами,
+Prostir ставить навколо вас у Quest додаткові монітори для ноутбука чи ПК з Linux (KDE
+Plasma або Hyprland). Це справжні виходи ПК: переносьте на них вікна, розгортайте,
+тримайте там панель чи робочі столи. Миша переходить з одного монітора на інший там, де вони стикаються перед вами,
 вбік і вгору чи вниз.
 
 Додавайте, прибирайте й розставляйте монітори прямо з шолома: 1080p, 1440p, 4K, широкі
@@ -69,7 +69,7 @@ Plasma. Миша переходить з одного монітора на ін
 - Wi-Fi або USB; шифрування й одноразове сполучення з ПК
 - Українська й англійська
 
-Вимоги: ПК з KDE Plasma 6 на Wayland, графіка Intel або AMD і безкоштовна програма
+Вимоги: ПК з KDE Plasma 6 або Hyprland на Wayland, графіка Intel або AMD і безкоштовна програма
 Prostir для ПК з prostir.ishawyha.dev. Prostir є вільною програмою (GPL-3.0).
 
 ## Trailer

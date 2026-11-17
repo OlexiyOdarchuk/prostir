@@ -1430,6 +1430,10 @@ fn build_update(l: Lang, items: &mut Vec<Item>, x: f32, w: f32, pc_newer: bool, 
     ));
 }
 
+/// The desktops the PC part supports, as the headset names them (Ukrainian, English).
+/// Add new ones here.
+pub const DESKTOPS: (&str, &str) = ("KDE Plasma 6 або Hyprland", "KDE Plasma 6 or Hyprland");
+
 /// Before any PC is found: what Prostir needs and where to get the PC part.
 fn build_welcome(l: Lang, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
     items.push(text(
@@ -1450,9 +1454,10 @@ fn build_welcome(l: Lang, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
         19.0,
         false,
         MUTED,
-        l.t(
-            "Потрібен ПК з KDE Plasma 6 і програма Prostir на ньому.",
-            "It needs a PC with KDE Plasma 6 and Prostir running on it.",
+        &format!(
+            "{} {}.",
+            l.t("Потрібен ПК з", "It needs a PC with"),
+            l.t(DESKTOPS.0, DESKTOPS.1),
         ),
     ));
     y += 30.0;

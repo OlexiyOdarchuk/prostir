@@ -30,7 +30,7 @@ use encoder::EncoderConfig;
 use virtual_output::MonitorSpec;
 
 #[derive(Parser, Debug)]
-#[command(about = "Virtual KDE Plasma monitors streamed to a Meta Quest 3")]
+#[command(about = "Virtual monitors for KDE Plasma and Hyprland, streamed to a Meta Quest 3")]
 struct Args {
     /// Monitor in pixels, optionally with KWin scale: 2560x1440 or 3840x2160@1.5. Repeat for
     /// several monitors. Without it, the set from the last session (changed from the headset

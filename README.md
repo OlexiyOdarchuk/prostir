@@ -34,8 +34,8 @@ workspaces there, and the mouse moves from one screen to the next where they mee
 front of you.
 
 I wrote it because I wanted three big monitors on a laptop without carrying them
-around. I use it every day on KDE Plasma 6.8 (Wayland) with Intel Arc graphics and a
-Quest 3. It is version 0.1, so expect rough edges, and please open an issue when you
+around. I use it every day on KDE Plasma 6.8 and Hyprland 0.57 with Intel Arc graphics
+and a Quest 3. It is version 0.1, so expect rough edges, and please open an issue when you
 hit one.
 
 <p align="center">
@@ -59,9 +59,9 @@ hit one.
 ## What it does
 
 You add, remove and reorder monitors from inside the headset: 1080p, 1440p, 4K,
-ultrawide or portrait, up to six. KDE rearranges its displays to match the order you
-see, so the mouse always leaves one screen where the next one begins. The monitor in
-the middle is the primary one and gets the Plasma panel.
+ultrawide or portrait, up to six. The desktop rearranges its displays to match the
+order you see, so the mouse always leaves one screen where the next one begins. In KDE
+the monitor in the middle is the primary one and gets the Plasma panel.
 
 Text stays sharp because the video goes straight into the Quest compositor's own
 layers (`XR_KHR_android_surface_swapchain`) instead of a flat window inside an app.

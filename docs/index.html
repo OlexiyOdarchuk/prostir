@@ -99,8 +99,8 @@
       <div class="band reveal">
         <div class="copy">
           <h3>Real monitors, not pictures of windows</h3>
-          <p>Each one is an output in System Settings → Display. Drag windows onto it, maximize them, put the Plasma panel there.</p>
-          <p>Lift a monitor above another in the headset and KDE puts it above too, so the mouse goes up where you look.</p>
+          <p>Each one is an output of the desktop: in KDE's System Settings → Display, in <code>hyprctl monitors</code> on Hyprland. Drag windows onto it, maximize them, put a panel or workspaces there.</p>
+          <p>Lift a monitor above another in the headset and the desktop puts it above too, so the mouse goes up where you look.</p>
         </div>
         <img src="headset.jpg" width="1920" height="1080" loading="lazy" alt="A capture from the headset: three virtual monitors around the user, KDE's display settings on the right listing them as Prostir outputs, and the laptop screen below the main monitor">
       </div>
@@ -153,7 +153,7 @@
 <pre><code>tar xf prostir-*-x86_64-linux.tar.gz
 cd prostir-*/
 ./install.sh --autostart</code></pre></li>
-            <li>Start Prostir from the application menu. Its icon appears in the tray.</li>
+            <li>Start Prostir from the application menu. Its icon appears in the tray. On Hyprland, add <code>prostir</code> to the config's autostart; the README shows the line.</li>
           </ol>
         </div>
         <div>
@@ -191,7 +191,7 @@ cd prostir-*/
           </ul>
         </div>
       </div>
-      <p class="muted">Version 0.1, used every day by its author on Plasma 6.8 with Intel Arc graphics. Problems and ideas go to <a href="https://github.com/OlexiyOdarchuk/prostir/issues">GitHub issues</a>.</p>
+      <p class="muted">Version 0.1, used every day by its author on Plasma 6.8 and Hyprland 0.57 with Intel Arc graphics. Problems and ideas go to <a href="https://github.com/OlexiyOdarchuk/prostir/issues">GitHub issues</a>.</p>
     </div>
   </section>
 </main>
