@@ -136,7 +136,10 @@ pub fn arrange(
         } else {
             -EYE_DROP
         };
-        out.insert(id, on_cylinder(yaw, bottom - h / 2.0, w));
+        // Tilted back towards the eyes like a laptop lid, since it sits below them.
+        let mut p = on_cylinder(yaw, bottom - h / 2.0, w);
+        p.rotation = facing(p.position, Vec3::ZERO);
+        out.insert(id, p);
     }
 
     if preset == Preset::Overhead {
@@ -390,6 +393,8 @@ mod tests {
         assert!(m.position.y < p.position.y - 0.5);
         assert!((m.position.x - p.position.x).abs() < 1e-3);
         assert!(m.width <= MIRROR_MAX_WIDTH + 1e-6);
+        // Leans back to face the eyes.
+        assert!((m.rotation * Vec3::Z).y > 0.2);
     }
 
     #[test]

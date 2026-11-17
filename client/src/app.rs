@@ -37,6 +37,7 @@ const BUTTON_SIZE: f32 = 0.075;
 const CURSOR_PX: u32 = 64;
 const BUTTON_PX: u32 = 128;
 const ERROR_SHOWN_FOR: Duration = Duration::from_secs(8);
+const CONFIRM_FOR: Duration = Duration::from_secs(4);
 
 #[unsafe(no_mangle)]
 pub fn android_main(app: AndroidApp) {
@@ -105,6 +106,8 @@ struct Scene {
     host: Option<String>,
     feedback: Option<Feedback>,
     error: Option<(String, Instant)>,
+    /// "×" pressed once on this monitor; a second press within a few seconds removes it.
+    confirm_remove: Option<(u8, Instant)>,
     layout_path: PathBuf,
     settings_path: PathBuf,
 }
@@ -262,6 +265,10 @@ impl Scene {
                 .as_ref()
                 .filter(|(_, at)| at.elapsed() < ERROR_SHOWN_FOR)
                 .map(|(t, _)| t.clone()),
+            confirm_remove: self
+                .confirm_remove
+                .filter(|(_, at)| at.elapsed() < CONFIRM_FOR)
+                .map(|(id, _)| id),
         }
     }
 }
@@ -371,6 +378,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         session.create_reference_space(xr::ReferenceSpaceType::LOCAL, xr::Posef::IDENTITY)?;
     let view = session.create_reference_space(xr::ReferenceSpaceType::VIEW, xr::Posef::IDENTITY)?;
     let mut controls = Controls::new(&instance, &session, exts.ext_hand_interaction)?;
+    controls.hands_enabled = settings.hands;
 
     let format = xrutil::color_format(&session);
     let mut panel_layer = ImageLayer::new(&session, format, ui::WIDTH, ui::HEIGHT, false)?;
@@ -419,6 +427,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         host: None,
         feedback: None,
         error: None,
+        confirm_remove: None,
         layout_path,
         settings_path,
     };
@@ -569,7 +578,7 @@ fn run(app: &AndroidApp) -> Result<()> {
                         panel.hover(Some(panel_point(&hit)));
                         if let Some(action) = panel.hovered_action() {
                             controls.pulse(&session, hand);
-                            handle_action(&mut scene, action, &mut passthrough);
+                            handle_action(&mut scene, action, &mut passthrough, &mut controls);
                         }
                     }
                     Some((Target::MenuButton, _)) => {
@@ -877,11 +886,27 @@ fn handle_action(
     scene: &mut Scene,
     action: Action,
     passthrough: &mut Option<passthrough::Passthrough>,
+    controls: &mut Controls,
 ) {
     let settings_path: &Path = &scene.settings_path.clone();
     match action {
         Action::Add { width, height } => scene.send(ClientMsg::AddMonitor { width, height }),
-        Action::Remove(id) => scene.send(ClientMsg::RemoveMonitor { id }),
+        Action::Remove(id) => {
+            let confirmed = scene
+                .confirm_remove
+                .is_some_and(|(c, at)| c == id && at.elapsed() < CONFIRM_FOR);
+            if confirmed {
+                scene.confirm_remove = None;
+                scene.send(ClientMsg::RemoveMonitor { id });
+            } else {
+                scene.confirm_remove = Some((id, Instant::now()));
+            }
+        }
+        Action::Hands(enabled) => {
+            scene.settings.hands = enabled;
+            scene.settings.save(settings_path);
+            controls.hands_enabled = enabled;
+        }
         Action::MakePrimary(id) => scene.send(ClientMsg::SetPrimary { id }),
         Action::SetMirror(enabled) => {
             scene.mirror_wanted = enabled;

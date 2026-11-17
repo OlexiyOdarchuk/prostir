@@ -262,6 +262,8 @@ impl Screencast {
     }
 
     /// Streams an existing display (e.g. the laptop panel) without creating anything.
+    /// KWin streams a given display only once per connection, so use a fresh
+    /// [`Screencast`] for every mirror.
     pub fn mirror(&self, number: u32, output_name: &str) -> Result<VirtualOutput> {
         let output = self
             .shared
@@ -280,7 +282,13 @@ impl Screencast {
         let stream = self
             .screencast
             .stream_output(&output, POINTER_EMBEDDED, &self.qh, number);
-        let mirror = self.wait_for_node(number, stream, output_name.to_owned())?;
+        // Normally ~10 ms; never hold up the headset's requests for long.
+        let mirror = self.wait_for_node(
+            number,
+            stream,
+            output_name.to_owned(),
+            Duration::from_secs(2),
+        )?;
         info!("mirroring {output_name}, PipeWire node {}", mirror.node);
         Ok(mirror)
     }
@@ -290,9 +298,10 @@ impl Screencast {
         number: u32,
         stream: ZkdeScreencastStreamUnstableV1,
         name: String,
+        timeout: Duration,
     ) -> Result<VirtualOutput> {
         self.conn.flush()?;
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + timeout;
         let mut streams = self.shared.streams.lock().unwrap();
         let node = loop {
             let s = streams.get(&number).expect("stream state");
@@ -362,7 +371,12 @@ impl Screencast {
                 number,
             )
         };
-        let output = self.wait_for_node(number, stream, format!("Virtual-Quest-{number}"))?;
+        let output = self.wait_for_node(
+            number,
+            stream,
+            format!("Virtual-Quest-{number}"),
+            Duration::from_secs(10),
+        )?;
         info!("Quest-{number}: {spec}, PipeWire node {}", output.node);
         if (spec.scale - 1.0).abs() > f64::EPSILON {
             kscreen(output.output_name(), &format!("scale.{}", spec.scale));

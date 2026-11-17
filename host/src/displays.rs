@@ -56,14 +56,22 @@ impl LatencyStats {
         let since = *self.since.get_or_insert_with(Instant::now);
         if since.elapsed() >= Duration::from_secs(5) {
             info!(
-                "Quest-{}: encoded → shown in headset avg {:.1} ms, max {:.1} ms ({} frames)",
-                monitor + 1,
+                "{}: encoded → shown in headset avg {:.1} ms, max {:.1} ms ({} frames)",
+                stream_name(monitor),
                 self.sum_ms / f64::from(self.frames),
                 self.max_ms,
                 self.frames
             );
             *self = Self::default();
         }
+    }
+}
+
+fn stream_name(id: u8) -> String {
+    if id == MIRROR_ID {
+        "mirror".into()
+    } else {
+        format!("Quest-{}", id + 1)
     }
 }
 
@@ -153,14 +161,14 @@ impl Router {
         };
         match event {
             EncoderEvent::Size { width, height } => {
-                info!("Quest-{}: streaming {width}x{height}", id + 1);
+                info!("{}: streaming {width}x{height}", stream_name(id));
                 slot.size = Some((width, height));
                 slot.announced = false;
                 slot.need_keyframe = true;
                 true
             }
             EncoderEvent::Failed(reason) => {
-                error!("Quest-{}: {reason}", id + 1);
+                error!("{}: {reason}", stream_name(id));
                 self.failed.store(true, Ordering::Relaxed);
                 false
             }
@@ -179,7 +187,7 @@ impl Router {
                         width,
                         height,
                         codec: self.codec,
-                        name: format!("Quest-{}", id + 1),
+                        name: stream_name(id),
                     };
                     if sender.send(start).is_err() {
                         *tx = None;
@@ -229,9 +237,10 @@ struct Monitor {
 
 /// The physical display (laptop panel) streamed as-is.
 struct Mirror {
-    // Field order matters: the encoder must stop before the stream goes away.
+    // Field order matters: encoder, then stream, then its own KWin connection.
     encoder: Encoder,
     output: VirtualOutput,
+    _connection: Screencast,
 }
 
 /// Saved monitor set: one `WIDTHxHEIGHT[@scale]` per line, `*` marks the primary one;
@@ -361,13 +370,15 @@ impl Displays {
         let Some(name) = self.screencast.physical_output() else {
             return;
         };
-        let started = self
-            .screencast
-            .mirror(u32::from(MIRROR_ID) + 1, &name)
-            .and_then(|output| {
-                let encoder = self.start_encoder(MIRROR_ID, output.node)?;
-                Ok(Mirror { encoder, output })
-            });
+        let started = Screencast::connect().and_then(|connection| {
+            let output = connection.mirror(u32::from(MIRROR_ID) + 1, &name)?;
+            let encoder = self.start_encoder(MIRROR_ID, output.node)?;
+            Ok(Mirror {
+                encoder,
+                output,
+                _connection: connection,
+            })
+        });
         match started {
             Ok(m) => {
                 m.encoder.force_keyframe();

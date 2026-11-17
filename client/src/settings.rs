@@ -45,6 +45,9 @@ pub struct Settings {
     pub preset: Preset,
     pub curve: Curve,
     pub background: Background,
+    /// Hands drive the pointer too. Off by default: hands over a keyboard would
+    /// otherwise click and drag things while typing.
+    pub hands: bool,
 }
 
 impl Default for Settings {
@@ -53,6 +56,7 @@ impl Default for Settings {
             preset: Preset::Arc,
             curve: Curve::Flat,
             background: Background::Black,
+            hands: false,
         }
     }
 }
@@ -80,6 +84,7 @@ impl Settings {
                         _ => Curve::Flat,
                     }
                 }
+                Some(("hands", v)) => s.hands = v == "on",
                 Some(("background", v)) => {
                     s.background = match v {
                         "room" => Background::Room,
@@ -110,7 +115,9 @@ impl Settings {
             Background::Room => "room",
             Background::Panorama => "panorama",
         };
-        let text = format!("preset {preset}\ncurve {curve}\nbackground {background}\n");
+        let hands = if self.hands { "on" } else { "off" };
+        let text =
+            format!("preset {preset}\ncurve {curve}\nbackground {background}\nhands {hands}\n");
         if let Err(e) = std::fs::write(path, text) {
             log::warn!("cannot save settings to {}: {e}", path.display());
         }
@@ -130,6 +137,7 @@ mod tests {
             preset: Preset::Overhead,
             curve: Curve::Gentle,
             background: Background::Panorama,
+            hands: true,
         };
         s.save(&path);
         assert_eq!(Settings::load(&path), s);

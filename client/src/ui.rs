@@ -9,7 +9,7 @@ use tiny_skia::{FillRule, Paint, Path, PathBuilder, Pixmap, Rect, Transform};
 use crate::settings::{Background, Curve, Preset, Settings};
 
 pub const WIDTH: u32 = 1280;
-pub const HEIGHT: u32 = 820;
+pub const HEIGHT: u32 = 900;
 /// Same limit as the host's.
 pub const MAX_MONITORS: usize = 6;
 
@@ -38,17 +38,24 @@ pub struct UiState {
     pub panorama_available: bool,
     pub curve_available: bool,
     pub error: Option<String>,
+    /// Monitor whose "×" was pressed once and now asks for confirmation.
+    pub confirm_remove: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Action {
-    Add { width: u32, height: u32 },
+    Add {
+        width: u32,
+        height: u32,
+    },
     Remove(u8),
     MakePrimary(u8),
     SetMirror(bool),
     Preset(Preset),
     Curve(Curve),
     Background(Background),
+    /// Let tracked hands point and click.
+    Hands(bool),
     Close,
 }
 
@@ -57,6 +64,8 @@ enum Style {
     Normal,
     Selected,
     Danger,
+    /// Asking to confirm a destructive action.
+    Armed,
     Disabled,
 }
 
@@ -217,6 +226,22 @@ impl Panel {
             ));
             let remove = rect(lx + lw - 58.0, y + 7.0, 48.0, 48.0);
             let primary = rect(lx + lw - 58.0 - 10.0 - 236.0, y + 7.0, 236.0, 48.0);
+            if s.confirm_remove == Some(m.id) {
+                let both = rect(
+                    primary.left(),
+                    y + 7.0,
+                    remove.right() - primary.left(),
+                    48.0,
+                );
+                items.push(button(
+                    both,
+                    "Прибрати? Ще раз",
+                    Style::Armed,
+                    Some(Action::Remove(m.id)),
+                ));
+                y += 70.0;
+                continue;
+            }
             if s.primary == Some(m.id) {
                 items.push(button(primary, "Головний", Style::Selected, None));
             } else {
@@ -273,8 +298,8 @@ impl Panel {
         // Hints under the list.
         y = y.max(560.0) + 30.0;
         for line in [
-            "Наведіть промінь і натисніть курок або зведіть пальці",
-            "Grip або кулак — перенести монітор",
+            "Наведіть промінь контролера і натисніть курок",
+            "Grip — перенести монітор або це меню",
             "Стік, поки тримаєте, — відстань і розмір · A — вирівняти",
         ] {
             items.push(text(lx, y, 19.0, false, MUTED, line));
@@ -318,7 +343,7 @@ impl Panel {
             };
             items.push(button(r, label, style, action));
         }
-        y += 3.0 * 58.0 + 44.0;
+        y += 3.0 * 58.0 + 40.0;
 
         let segmented = |items: &mut Vec<Item>,
                          y: &mut f32,
@@ -342,7 +367,7 @@ impl Panel {
                     (enabled && !selected).then_some(action),
                 ));
             }
-            *y += 48.0 + 50.0;
+            *y += 48.0 + 40.0;
         };
         let st = s.settings;
         segmented(
@@ -406,6 +431,15 @@ impl Panel {
                 ),
             ],
         );
+        segmented(
+            &mut items,
+            &mut y,
+            "Керування руками",
+            vec![
+                ("Вимкнено", Action::Hands(false), !st.hands, true),
+                ("Увімкнено", Action::Hands(true), st.hands, true),
+            ],
+        );
         items
     }
 
@@ -448,6 +482,7 @@ impl Panel {
                     let hovered = self.hovered == Some(i);
                     let (bg, fg) = match (style, hovered) {
                         (Style::Selected, _) => (ACCENT, [255, 255, 255, 255]),
+                        (Style::Armed, _) => ([220, 70, 70, 255], [255, 255, 255, 255]),
                         (Style::Disabled, _) => ([255, 255, 255, 8], [110, 115, 128, 255]),
                         (Style::Danger, true) => ([220, 70, 70, 255], [255, 255, 255, 255]),
                         (_, true) => ([255, 255, 255, 46], [255, 255, 255, 255]),
@@ -637,6 +672,7 @@ mod tests {
             panorama_available: true,
             curve_available: true,
             error: None,
+            confirm_remove: None,
         }
     }
 

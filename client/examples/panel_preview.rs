@@ -38,6 +38,7 @@ fn main() {
         panorama_available: true,
         curve_available: true,
         error: Some("Максимум 6 моніторів".into()),
+        confirm_remove: Some(2),
     };
     let mut panel = Panel::new();
     panel.set_state(&state);

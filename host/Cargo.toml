@@ -23,3 +23,7 @@ gstreamer-app = "0.25"
 gstreamer-video = "0.25"
 wayland-client = "0.31"
 wayland-protocols-plasma = { version = "0.3", features = ["client"] }
+
+[[bin]]
+name = "questmon-mirrortest"
+path = "src/bin/mirrortest.rs"
