@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Prostir
+GenericName=Virtual monitors for Meta Quest
+GenericName[uk]=Віртуальні монітори для Meta Quest
+Comment=Extra KDE Plasma monitors floating in a Meta Quest headset
+Comment[uk]=Додаткові монітори KDE Plasma у шоломі Meta Quest
+Exec=prostir
+Icon=prostir
+Terminal=false
+Categories=Utility;System;
+Keywords=VR;XR;Quest;monitor;display;virtual;

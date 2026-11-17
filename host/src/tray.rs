@@ -1,0 +1,221 @@
+//! System tray icon (StatusNotifierItem): connection status, video quality,
+//! start with the session, quit.
+
+use std::path::PathBuf;
+use std::sync::mpsc::Sender;
+
+use ksni::blocking::TrayMethods;
+use ksni::menu::{CheckmarkItem, RadioGroup, RadioItem, StandardItem, SubMenu};
+use ksni::{MenuItem, ToolTip};
+use log::warn;
+
+/// What the tray asks the main loop to do.
+pub enum Command {
+    SetBitrate(u32),
+    Quit,
+}
+
+/// Video quality presets offered in the menu, Mbit/s per monitor.
+const QUALITIES: [(u32, &str); 3] = [
+    (15, "Економна — 15 Мбіт/с"),
+    (30, "Звичайна — 30 Мбіт/с"),
+    (50, "Висока — 50 Мбіт/с"),
+];
+
+#[derive(Clone, Default, PartialEq)]
+pub struct Status {
+    /// "Wi-Fi" or "USB" while a headset is connected.
+    pub connected: Option<&'static str>,
+    pub monitors: usize,
+    pub mirror: bool,
+}
+
+pub struct Tray {
+    status: Status,
+    bitrate: u32,
+    commands: Sender<Command>,
+}
+
+pub type Handle = ksni::blocking::Handle<Tray>;
+
+/// Shows the tray icon; `None` when the desktop has no tray.
+pub fn spawn(commands: Sender<Command>, bitrate: u32) -> Option<Handle> {
+    let tray = Tray {
+        status: Status::default(),
+        bitrate,
+        commands,
+    };
+    tray.spawn()
+        .inspect_err(|e| warn!("no system tray, running without an icon: {e}"))
+        .ok()
+}
+
+/// Updates what the tray shows.
+pub fn set_status(handle: Option<&Handle>, status: Status) {
+    if let Some(h) = handle {
+        h.update(|t| t.status = status);
+    }
+}
+
+fn autostart_file() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    Some(base.join("autostart").join("prostir.desktop"))
+}
+
+fn autostart_enabled() -> bool {
+    autostart_file().is_some_and(|p| p.exists())
+}
+
+fn set_autostart(enabled: bool) {
+    let Some(path) = autostart_file() else { return };
+    let result = if enabled {
+        let exe = std::env::current_exe()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "prostir".into());
+        let entry = format!(
+            "[Desktop Entry]\nType=Application\nName=Prostir\n\
+             Comment=Virtual monitors for Meta Quest\nExec={exe}\nIcon=prostir\n\
+             Terminal=false\nX-KDE-autostart-phase=2\n"
+        );
+        path.parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(&path, entry))
+    } else {
+        std::fs::remove_file(&path)
+    };
+    if let Err(e) = result {
+        warn!("cannot change autostart ({}): {e}", path.display());
+    }
+}
+
+/// The app icon when installed (see `scripts/install.sh`), otherwise a stock one.
+fn icon() -> String {
+    let installed = std::env::var_os("HOME").is_some_and(|h| {
+        PathBuf::from(h)
+            .join(".local/share/icons/hicolor/scalable/apps/prostir.svg")
+            .exists()
+    }) || PathBuf::from("/usr/share/icons/hicolor/scalable/apps/prostir.svg")
+        .exists();
+    if installed {
+        "prostir"
+    } else {
+        "video-display"
+    }
+    .into()
+}
+
+impl Tray {
+    fn status_line(&self) -> String {
+        match self.status.connected {
+            Some(via) => format!("Шолом підключено ({via})"),
+            None => "Чекаю на шолом…".into(),
+        }
+    }
+
+    fn monitors_line(&self) -> String {
+        let mirror = if self.status.mirror {
+            ", екран ноутбука в шоломі"
+        } else {
+            ""
+        };
+        match self.status.monitors {
+            0 => "Віртуальних моніторів немає".into(),
+            n => format!("Віртуальних моніторів: {n}{mirror}"),
+        }
+    }
+}
+
+impl ksni::Tray for Tray {
+    fn id(&self) -> String {
+        "prostir".into()
+    }
+
+    fn title(&self) -> String {
+        "Prostir".into()
+    }
+
+    fn icon_name(&self) -> String {
+        icon()
+    }
+
+    fn status(&self) -> ksni::Status {
+        // Waiting quietly sits in the tray's overflow; a session is shown.
+        if self.status.connected.is_some() {
+            ksni::Status::Active
+        } else {
+            ksni::Status::Passive
+        }
+    }
+
+    fn tool_tip(&self) -> ToolTip {
+        ToolTip {
+            title: "Prostir".into(),
+            description: format!("{}\n{}", self.status_line(), self.monitors_line()),
+            ..Default::default()
+        }
+    }
+
+    fn menu(&self) -> Vec<MenuItem<Self>> {
+        let selected = QUALITIES
+            .iter()
+            .position(|(m, _)| *m == self.bitrate)
+            .unwrap_or(1);
+        vec![
+            StandardItem {
+                label: self.status_line(),
+                enabled: false,
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
+                label: self.monitors_line(),
+                enabled: false,
+                ..Default::default()
+            }
+            .into(),
+            MenuItem::Separator,
+            SubMenu {
+                label: "Якість відео".into(),
+                submenu: vec![
+                    RadioGroup {
+                        selected,
+                        select: Box::new(|tray: &mut Self, i| {
+                            let mbps = QUALITIES[i].0;
+                            tray.bitrate = mbps;
+                            let _ = tray.commands.send(Command::SetBitrate(mbps));
+                        }),
+                        options: QUALITIES
+                            .iter()
+                            .map(|(_, label)| RadioItem {
+                                label: (*label).into(),
+                                ..Default::default()
+                            })
+                            .collect(),
+                    }
+                    .into(),
+                ],
+                ..Default::default()
+            }
+            .into(),
+            CheckmarkItem {
+                label: "Запускати разом із системою".into(),
+                checked: autostart_enabled(),
+                activate: Box::new(|_: &mut Self| set_autostart(!autostart_enabled())),
+                ..Default::default()
+            }
+            .into(),
+            MenuItem::Separator,
+            StandardItem {
+                label: "Вийти".into(),
+                icon_name: "application-exit".into(),
+                activate: Box::new(|tray: &mut Self| {
+                    let _ = tray.commands.send(Command::Quit);
+                }),
+                ..Default::default()
+            }
+            .into(),
+        ]
+    }
+}

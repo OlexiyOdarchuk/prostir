@@ -249,6 +249,8 @@ pub struct SavedMonitors {
     pub specs: Vec<MonitorSpec>,
     pub primary: Option<usize>,
     pub mirror: bool,
+    /// Mbit/s per monitor, if chosen in the tray.
+    pub bitrate: Option<u32>,
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -269,7 +271,12 @@ pub fn load_saved(parse: impl Fn(&str) -> Result<MonitorSpec, String>) -> Option
     let mut specs = Vec::new();
     let mut primary = None;
     let mut mirror = true;
+    let mut bitrate = None;
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if let Some(v) = line.strip_prefix("bitrate ") {
+            bitrate = v.trim().parse().ok();
+            continue;
+        }
         if let Some(v) = line.strip_prefix("mirror ") {
             mirror = v.trim() != "off";
             continue;
@@ -289,6 +296,7 @@ pub fn load_saved(parse: impl Fn(&str) -> Result<MonitorSpec, String>) -> Option
         specs,
         primary,
         mirror,
+        bitrate,
     })
 }
 
@@ -417,6 +425,22 @@ impl Displays {
         }
         self.tick();
         self.router.send(HostMsg::MirrorWanted { enabled });
+    }
+
+    /// Applies a new bitrate to every running encoder and to monitors added later.
+    pub fn set_bitrate(&mut self, mbps: u32) {
+        self.cfg.bitrate_kbps = mbps * 1000;
+        for (_, e) in self.encoders() {
+            e.set_bitrate(self.cfg.bitrate_kbps);
+        }
+    }
+
+    pub fn monitor_count(&self) -> usize {
+        self.monitors.len()
+    }
+
+    pub fn mirror_active(&self) -> bool {
+        self.mirror.is_some()
     }
 
     pub fn mirror_wanted(&self) -> bool {
@@ -585,8 +609,9 @@ impl Displays {
                 format!("{}{star}\n", m.spec)
             })
             .chain(std::iter::once(format!(
-                "mirror {}\n",
-                if self.mirror_wanted { "on" } else { "off" }
+                "mirror {}\nbitrate {}\n",
+                if self.mirror_wanted { "on" } else { "off" },
+                self.cfg.bitrate_kbps / 1000
             )))
             .collect();
         let result = path

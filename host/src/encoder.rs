@@ -49,7 +49,7 @@ fn pipeline_description(node: u32, cfg: &EncoderConfig) -> String {
     let (encoder, parser, caps) = match (cfg.codec, cfg.software) {
         (Codec::H264, true) => (
             format!(
-                "videoconvert name=enc_in ! video/x-raw,format=I420 ! x264enc tune=zerolatency speed-preset=superfast \
+                "videoconvert name=enc_in ! video/x-raw,format=I420 ! x264enc name=enc tune=zerolatency speed-preset=superfast \
                  bitrate={} key-int-max=600 bframes=0",
                 cfg.bitrate_kbps
             ),
@@ -58,7 +58,7 @@ fn pipeline_description(node: u32, cfg: &EncoderConfig) -> String {
         ),
         (Codec::H264, false) => (
             format!(
-                "vapostproc name=enc_in ! video/x-raw(memory:VAMemory),format=NV12 ! vah264enc rate-control=cbr bitrate={} \
+                "vapostproc name=enc_in ! video/x-raw(memory:VAMemory),format=NV12 ! vah264enc name=enc rate-control=cbr bitrate={} \
                  key-int-max=600 b-frames=0 ref-frames=1 target-usage=6",
                 cfg.bitrate_kbps
             ),
@@ -67,7 +67,7 @@ fn pipeline_description(node: u32, cfg: &EncoderConfig) -> String {
         ),
         (Codec::H265, _) => (
             format!(
-                "vapostproc name=enc_in ! video/x-raw(memory:VAMemory),format=NV12 ! vah265enc rate-control=cbr bitrate={} \
+                "vapostproc name=enc_in ! video/x-raw(memory:VAMemory),format=NV12 ! vah265enc name=enc rate-control=cbr bitrate={} \
                  key-int-max=600 b-frames=0 ref-frames=1 target-usage=6",
                 cfg.bitrate_kbps
             ),
@@ -199,6 +199,13 @@ impl Encoder {
             stop,
             bus_thread: Some(bus_thread),
         })
+    }
+
+    /// Changes the target bitrate while running.
+    pub fn set_bitrate(&self, kbps: u32) {
+        if let Some(enc) = self.pipeline.by_name("enc") {
+            enc.set_property("bitrate", kbps);
+        }
     }
 
     /// Asks the encoder to emit an IDR frame (with parameter sets) as soon as possible.

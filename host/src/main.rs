@@ -1,10 +1,11 @@
 mod displays;
 mod encoder;
+mod tray;
 mod virtual_output;
 
 use std::io::{BufReader, BufWriter, ErrorKind, Write};
 use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream, UdpSocket};
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -30,9 +31,9 @@ struct Args {
     /// Video codec.
     #[arg(long, value_enum, default_value_t = CodecArg::H265)]
     codec: CodecArg,
-    /// Bitrate per monitor, Mbit/s.
-    #[arg(long, default_value_t = 30)]
-    bitrate: u32,
+    /// Bitrate per monitor, Mbit/s (default: the quality chosen in the tray, or 30).
+    #[arg(long)]
+    bitrate: Option<u32>,
     /// Software x264 encoder instead of VA-API (implies --codec h264).
     #[arg(long)]
     software: bool,
@@ -91,10 +92,55 @@ fn handshake(stream: &TcpStream) -> Result<BufReader<TcpStream>> {
     Ok(reader)
 }
 
+/// Tray icon and the commands it sends.
+struct Control {
+    tray: Option<tray::Handle>,
+    commands: Receiver<tray::Command>,
+    bitrate: u32,
+    quit: bool,
+    shown: Option<tray::Status>,
+}
+
+impl Control {
+    /// Applies tray commands; returns `true` when asked to quit.
+    fn poll(&mut self, displays: Option<&mut Displays>) -> bool {
+        let mut displays = displays;
+        while let Ok(cmd) = self.commands.try_recv() {
+            match cmd {
+                tray::Command::SetBitrate(mbps) => {
+                    info!("video quality: {mbps} Mbit/s per monitor");
+                    self.bitrate = mbps;
+                    if let Some(d) = displays.as_deref_mut() {
+                        d.set_bitrate(mbps);
+                        d.save();
+                    }
+                }
+                tray::Command::Quit => self.quit = true,
+            }
+        }
+        self.quit
+    }
+
+    /// Shows the current state in the tray (only when it changed).
+    fn show(&mut self, via: Option<&'static str>, displays: Option<&Displays>) {
+        let status = tray::Status {
+            connected: via,
+            monitors: displays.map_or(0, Displays::monitor_count),
+            mirror: displays.is_some_and(Displays::mirror_active),
+        };
+        if self.shown.as_ref() != Some(&status) {
+            tray::set_status(self.tray.as_ref(), status.clone());
+            self.shown = Some(status);
+        }
+    }
+}
+
 fn serve_client(
     stream: TcpStream,
     mut reader: BufReader<TcpStream>,
     displays: &mut Displays,
+    control: &mut Control,
+    via: &'static str,
 ) -> Result<()> {
     let mut writer = BufWriter::with_capacity(1 << 20, stream.try_clone()?);
     HostMsg::Welcome {
@@ -195,6 +241,10 @@ fn serve_client(
             Ok(Err(e)) if e.kind() == ErrorKind::UnexpectedEof => break Ok(()),
             Ok(Err(e)) => break Err(e.into()),
             Err(RecvTimeoutError::Timeout) => {
+                if control.poll(Some(displays)) {
+                    break Ok(());
+                }
+                control.show(Some(via), Some(displays));
                 displays.tick();
                 if !displays.healthy() {
                     break Err(anyhow::anyhow!("virtual monitor or encoder stopped"));
@@ -307,7 +357,7 @@ fn spawn_adb_reverse(port: u16) {
         });
 }
 
-fn create_displays(args: &Args) -> Result<Displays> {
+fn create_displays(args: &Args, bitrate: u32) -> Result<Displays> {
     let codec = if args.software {
         Codec::H264
     } else {
@@ -318,7 +368,7 @@ fn create_displays(args: &Args) -> Result<Displays> {
     };
     let cfg = EncoderConfig {
         codec,
-        bitrate_kbps: args.bitrate * 1000,
+        bitrate_kbps: bitrate * 1000,
         software: args.software,
     };
     let stored = displays::load_saved(parse_monitor);
@@ -329,11 +379,13 @@ fn create_displays(args: &Args) -> Result<Displays> {
             specs: args.monitors.clone(),
             primary: None,
             mirror,
+            bitrate: None,
         },
         _ => SavedMonitors {
             specs: vec![parse_monitor("2560x1440").expect("valid default")],
             primary: None,
             mirror,
+            bitrate: None,
         },
     };
     let displays = Displays::create(&saved, cfg, !args.keep_primary)?;
@@ -357,9 +409,28 @@ fn main() -> Result<()> {
         spawn_adb_reverse(args.port);
     }
 
+    let bitrate = args
+        .bitrate
+        .or_else(|| displays::load_saved(parse_monitor).and_then(|s| s.bitrate))
+        .unwrap_or(30);
+    let (command_tx, commands) = mpsc::channel();
+    let mut control = Control {
+        tray: tray::spawn(command_tx, bitrate),
+        commands,
+        bitrate,
+        quit: false,
+        shown: None,
+    };
+    control.show(None, None);
+
     let mut displays: Option<Displays> = None;
     let mut idle_since = Instant::now();
     loop {
+        if control.quit {
+            info!("quitting");
+            drop(displays);
+            return Ok(());
+        }
         match listener.accept() {
             Ok((stream, addr)) => {
                 stream.set_nonblocking(false)?;
@@ -380,7 +451,7 @@ fn main() -> Result<()> {
                     displays = None;
                 }
                 if displays.is_none() {
-                    match create_displays(&args) {
+                    match create_displays(&args, control.bitrate) {
                         Ok(d) => displays = Some(d),
                         Err(e) => {
                             error!("{e:#}");
@@ -388,19 +459,29 @@ fn main() -> Result<()> {
                         }
                     }
                 }
-                if let Err(e) = serve_client(stream, reader, displays.as_mut().unwrap()) {
+                control.show(Some(via), displays.as_ref());
+                if let Err(e) = serve_client(
+                    stream,
+                    reader,
+                    displays.as_mut().unwrap(),
+                    &mut control,
+                    via,
+                ) {
                     warn!("session ended: {e:#}");
                 } else {
                     info!("headset disconnected");
                 }
                 idle_since = Instant::now();
+                control.show(None, displays.as_ref());
                 if args.linger > 0 && displays.as_ref().is_some_and(|d| d.healthy()) {
                     info!("keeping virtual monitors for {} s", args.linger);
                 }
             }
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                control.poll(displays.as_mut());
                 if displays.is_some() && idle_since.elapsed() >= Duration::from_secs(args.linger) {
                     displays = None;
+                    control.show(None, None);
                 }
                 std::thread::sleep(Duration::from_millis(200));
             }

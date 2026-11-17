@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Prostir: three screens on an arc around you -->
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5b8cff"/>
+      <stop offset="1" stop-color="#3d6be0"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#161a22"/>
+  <path d="M8 22 L21 19 L21 41 L8 44 Z" fill="url(#g)" opacity="0.75"/>
+  <rect x="24" y="17" width="16" height="26" rx="2" fill="url(#g)"/>
+  <path d="M56 22 L43 19 L43 41 L56 44 Z" fill="url(#g)" opacity="0.75"/>
+  <rect x="25" y="47" width="14" height="4" rx="2" fill="#9aa6c4"/>
+</svg>

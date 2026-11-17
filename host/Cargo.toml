@@ -28,6 +28,7 @@ gstreamer-app = "0.25"
 gstreamer-video = "0.25"
 wayland-client = "0.31"
 wayland-protocols-plasma = { version = "0.3", features = ["client"] }
+ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
 
 [[bin]]
 name = "prostir-mirrortest"
