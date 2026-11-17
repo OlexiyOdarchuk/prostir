@@ -109,6 +109,13 @@ struct Scene {
     button_place: Option<Placement>,
     grabs: [Option<Grab>; 2],
     host: Option<String>,
+    /// PCs announcing themselves while not connected.
+    found: Vec<net::FoundHost>,
+    /// IP typed on the menu keypad.
+    ip_input: Option<String>,
+    steering: net::Steering,
+    /// When the connection was lost (or the app started without one).
+    offline_since: Option<Instant>,
     feedback: Option<Feedback>,
     error: Option<(String, Instant)>,
     /// "×" pressed once on this monitor; a second press within a few seconds removes it.
@@ -275,6 +282,12 @@ impl Scene {
     fn ui_state(&self, room: bool, panorama: bool, custom: bool) -> UiState {
         UiState {
             host: self.host.clone(),
+            found: self
+                .found
+                .iter()
+                .map(|h| (h.name.clone(), h.addr.ip().to_string()))
+                .collect(),
+            ip_input: self.ip_input.clone(),
             monitors: self
                 .quest_sizes()
                 .into_iter()
@@ -451,12 +464,14 @@ fn run(app: &AndroidApp) -> Result<()> {
     let mut panel_was_open = false;
 
     let (net_tx, net_rx) = mpsc::channel();
+    let steering = net::Steering::default();
     net::spawn(
         net_tx,
         net::Discovery {
             host_file: external_dir.as_ref().map(|p| p.join("host.txt")),
             last_host_file: data_dir.join("last_host"),
         },
+        steering.clone(),
     );
 
     // SAFETY: the VM pointer is valid for the life of the process.
@@ -484,6 +499,10 @@ fn run(app: &AndroidApp) -> Result<()> {
         button_place: None,
         grabs: [None, None],
         host: None,
+        found: Vec::new(),
+        ip_input: None,
+        steering,
+        offline_since: Some(Instant::now()),
         feedback: None,
         error: None,
         confirm_remove: None,
@@ -602,6 +621,15 @@ fn run(app: &AndroidApp) -> Result<()> {
                 )
             });
 
+        // Without a PC there is nothing to see: show the connection screen.
+        if !scene.panel_open
+            && scene
+                .offline_since
+                .is_some_and(|t| t.elapsed() > Duration::from_secs(4))
+        {
+            scene.open_panel(head, forward);
+            scene.offline_since = None;
+        }
         if controls.menu_pressed(&session) {
             if scene.panel_open {
                 scene.panel_open = false;
@@ -951,12 +979,26 @@ fn handle_net_event(
     event: NetEvent,
 ) {
     match event {
-        NetEvent::Connected(addr, feedback) => {
-            info!("connected to {addr}");
-            scene.host = Some(addr.ip().to_string());
+        NetEvent::Connected {
+            addr,
+            name,
+            feedback,
+        } => {
+            info!("connected to {addr} ({name:?})");
+            scene.host = Some(name.unwrap_or_else(|| {
+                if addr.ip().is_loopback() {
+                    "ПК (USB)".into()
+                } else {
+                    addr.ip().to_string()
+                }
+            }));
             scene.feedback = Some(feedback);
+            scene.offline_since = None;
+            scene.ip_input = None;
         }
+        NetEvent::Hosts(hosts) => scene.found = hosts,
         NetEvent::Disconnected => {
+            scene.offline_since = Some(Instant::now());
             scene.host = None;
             scene.feedback = None;
         }
@@ -1089,6 +1131,36 @@ fn handle_action(
                 scene.show_error(format!("Камери недоступні: {e:#}"));
             }
         }
+        Action::ConnectTo(i) => {
+            if let Some(h) = scene.found.get(i) {
+                scene.steering.connect_to(h.addr);
+            }
+        }
+        Action::ShowKeypad => scene.ip_input = Some(String::new()),
+        Action::Key(c) => {
+            if let Some(t) = &mut scene.ip_input
+                && t.len() < 21
+            {
+                t.push(c);
+            }
+        }
+        Action::Backspace => {
+            if let Some(t) = &mut scene.ip_input {
+                t.pop();
+            }
+        }
+        Action::ConnectTyped => {
+            let typed = scene.ip_input.clone().unwrap_or_default();
+            match net::parse_addr(&typed) {
+                Some(addr) => {
+                    scene.steering.connect_to(addr);
+                    scene.ip_input = None;
+                }
+                None => scene.show_error(format!("«{typed}» — не IP-адреса")),
+            }
+        }
+        Action::CancelKeypad => scene.ip_input = None,
+        Action::ChangeHost => scene.steering.change_host(),
         Action::Close => scene.panel_open = false,
     }
 }

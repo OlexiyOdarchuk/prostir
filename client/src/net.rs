@@ -2,11 +2,11 @@
 
 use std::collections::HashMap;
 use std::io::{BufReader, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpStream, UdpSocket};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use log::{info, warn};
 use prostir_proto::{ClientMsg, Codec, HostMsg, PROTOCOL_VERSION};
@@ -33,9 +33,22 @@ impl Feedback {
     }
 }
 
+/// A PC announcing itself on the local network.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FoundHost {
+    pub name: String,
+    pub addr: SocketAddr,
+}
+
 pub enum NetEvent {
     /// Connected; the handle sends requests (add monitor…) to the host.
-    Connected(SocketAddr, Feedback),
+    Connected {
+        addr: SocketAddr,
+        name: Option<String>,
+        feedback: Feedback,
+    },
+    /// PCs currently seen on the network (sent when the list changes).
+    Hosts(Vec<FoundHost>),
     PrimaryChanged(u8),
     MirrorWanted(bool),
     /// Left-to-right order of the Quest monitors.
@@ -66,28 +79,78 @@ pub struct Discovery {
     pub last_host_file: PathBuf,
 }
 
-pub fn spawn(events: Sender<NetEvent>, discovery: Discovery) {
+/// Lets the menu choose which PC to use.
+#[derive(Clone, Default)]
+pub struct Steering(Arc<Mutex<Steer>>);
+
+#[derive(Default)]
+struct Steer {
+    /// Picked in the menu (or typed in); tried before anything else.
+    choice: Option<SocketAddr>,
+    /// "Change PC": do not reconnect on our own until the user picks one.
+    picking: bool,
+    current: Option<TcpStream>,
+}
+
+impl Steering {
+    /// Connects to `addr`, dropping the current connection if it is another PC.
+    pub fn connect_to(&self, addr: SocketAddr) {
+        let mut s = self.0.lock().unwrap();
+        s.choice = Some(addr);
+        s.picking = false;
+        if let Some(cur) = &s.current
+            && cur.peer_addr().ok() != Some(addr)
+        {
+            let _ = cur.shutdown(Shutdown::Both);
+        }
+    }
+
+    /// Disconnects and waits for the user to pick a PC in the menu.
+    pub fn change_host(&self) {
+        let mut s = self.0.lock().unwrap();
+        s.choice = None;
+        s.picking = true;
+        if let Some(cur) = s.current.take() {
+            let _ = cur.shutdown(Shutdown::Both);
+        }
+    }
+}
+
+pub fn spawn(events: Sender<NetEvent>, discovery: Discovery, steering: Steering) {
     std::thread::Builder::new()
         .name("net".into())
         .spawn(move || {
             let beacon = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, prostir_proto::DISCOVERY_PORT))
                 .inspect_err(|e| warn!("discovery socket: {e}"))
                 .ok();
+            let mut finder = Finder::default();
+            let mut round = 0u32;
             loop {
-                if let Some(stream) = connect(beacon.as_ref(), &discovery) {
+                round += 1;
+                if let Some(stream) = connect(
+                    beacon.as_ref(),
+                    &discovery,
+                    &steering,
+                    &mut finder,
+                    &events,
+                    round,
+                ) {
                     let peer = stream.peer_addr().ok();
                     if let Some(p) = peer.filter(|p| !p.ip().is_loopback()) {
                         let _ = std::fs::write(&discovery.last_host_file, p.to_string());
                     }
-                    match run_session(stream, &events) {
+                    let name = peer.and_then(|p| finder.name_of(p));
+                    steering.0.lock().unwrap().current = stream.try_clone().ok();
+                    match run_session(stream, &events, name) {
                         Ok(()) => info!("host {peer:?} closed the connection"),
                         Err(e) => warn!("connection to {peer:?} lost: {e}"),
                     }
+                    steering.0.lock().unwrap().current = None;
                     if events.send(NetEvent::Disconnected).is_err() {
                         return;
                     }
                 }
-                std::thread::sleep(Duration::from_millis(500));
+                std::thread::sleep(Duration::from_millis(300));
             }
         })
         .expect("spawn net thread");
@@ -99,7 +162,11 @@ fn try_connect(addr: SocketAddr) -> Option<TcpStream> {
 
 fn read_addr(path: &PathBuf) -> Option<SocketAddr> {
     let text = std::fs::read_to_string(path).ok()?;
-    let text = text.trim();
+    parse_addr(text.trim())
+}
+
+/// `IP` or `IP:PORT`.
+pub fn parse_addr(text: &str) -> Option<SocketAddr> {
     text.parse::<SocketAddr>().ok().or_else(|| {
         text.parse::<IpAddr>()
             .ok()
@@ -107,7 +174,79 @@ fn read_addr(path: &PathBuf) -> Option<SocketAddr> {
     })
 }
 
-fn connect(beacon: Option<&UdpSocket>, discovery: &Discovery) -> Option<TcpStream> {
+/// PCs heard on the network recently.
+#[derive(Default)]
+struct Finder {
+    seen: HashMap<SocketAddr, (String, Instant)>,
+    reported: Vec<FoundHost>,
+}
+
+impl Finder {
+    /// Listens for beacons for a moment and reports changes to the menu.
+    fn listen(&mut self, beacon: &UdpSocket, events: &Sender<NetEvent>) {
+        let until = Instant::now() + Duration::from_millis(1200);
+        let mut buf = [0u8; 512];
+        while let Some(left) = until.checked_duration_since(Instant::now()) {
+            let _ = beacon.set_read_timeout(Some(left.max(Duration::from_millis(1))));
+            let Ok((n, from)) = beacon.recv_from(&mut buf) else {
+                break;
+            };
+            if let Some((port, name)) = prostir_proto::decode_beacon(&buf[..n]) {
+                self.seen
+                    .insert(SocketAddr::new(from.ip(), port), (name, Instant::now()));
+            }
+        }
+        self.seen
+            .retain(|_, (_, at)| at.elapsed() < Duration::from_secs(6));
+        let mut hosts: Vec<FoundHost> = self
+            .seen
+            .iter()
+            .map(|(addr, (name, _))| FoundHost {
+                name: name.clone(),
+                addr: *addr,
+            })
+            .collect();
+        hosts.sort_by(|a, b| a.name.cmp(&b.name).then(a.addr.cmp(&b.addr)));
+        if hosts != self.reported {
+            self.reported = hosts.clone();
+            let _ = events.send(NetEvent::Hosts(hosts));
+        }
+    }
+
+    fn name_of(&self, addr: SocketAddr) -> Option<String> {
+        self.seen.get(&addr).map(|(n, _)| n.clone())
+    }
+}
+
+fn connect(
+    beacon: Option<&UdpSocket>,
+    discovery: &Discovery,
+    steering: &Steering,
+    finder: &mut Finder,
+    events: &Sender<NetEvent>,
+    round: u32,
+) -> Option<TcpStream> {
+    // USB: the host keeps `adb reverse` active, so localhost reaches the PC.
+    if let Some(stream) = try_connect(SocketAddr::new(
+        Ipv4Addr::LOCALHOST.into(),
+        prostir_proto::TCP_PORT,
+    )) {
+        return Some(stream);
+    }
+    let (choice, picking) = {
+        let s = steering.0.lock().unwrap();
+        (s.choice, s.picking)
+    };
+    if let Some(stream) = choice.and_then(try_connect) {
+        return Some(stream);
+    }
+    if let Some(beacon) = beacon {
+        finder.listen(beacon, events);
+    }
+    if picking || choice.is_some() {
+        // The user is choosing (or their choice is unreachable): only listen.
+        return None;
+    }
     if let Some(stream) = discovery
         .host_file
         .as_ref()
@@ -116,31 +255,17 @@ fn connect(beacon: Option<&UdpSocket>, discovery: &Discovery) -> Option<TcpStrea
     {
         return Some(stream);
     }
-    // USB: the host keeps `adb reverse` active, so localhost reaches the PC.
-    if let Some(stream) = try_connect(SocketAddr::new(
-        Ipv4Addr::LOCALHOST.into(),
-        prostir_proto::TCP_PORT,
-    )) {
-        return Some(stream);
-    }
     if let Some(stream) = read_addr(&discovery.last_host_file).and_then(try_connect) {
         return Some(stream);
     }
-    // Wi-Fi: wait for the host's broadcast beacon.
-    if let Some(beacon) = beacon {
-        let _ = beacon.set_read_timeout(Some(Duration::from_millis(1500)));
-        let mut buf = [0u8; 512];
-        if let Ok((n, from)) = beacon.recv_from(&mut buf)
-            && let Some((port, name)) = prostir_proto::decode_beacon(&buf[..n])
-        {
-            info!("found host '{name}' at {}", from.ip());
-            if let Some(stream) = try_connect(SocketAddr::new(from.ip(), port)) {
-                return Some(stream);
-            }
-        }
+    // Exactly one PC around: just use it. Several: wait for a pick in the menu.
+    match finder.reported.as_slice() {
+        [only] => return try_connect(only.addr),
+        [] => {}
+        _ => return None,
     }
-    // Some networks drop broadcasts: probe every address of the local /24.
-    scan_subnet()
+    // Some networks drop broadcasts: now and then probe the local /24.
+    if round % 5 == 1 { scan_subnet() } else { None }
 }
 
 /// The headset's own IPv4 address on the network the default route uses.
@@ -186,7 +311,11 @@ struct StreamSlot {
     waiting_for_keyframe: bool,
 }
 
-fn run_session(stream: TcpStream, events: &Sender<NetEvent>) -> std::io::Result<()> {
+fn run_session(
+    stream: TcpStream,
+    events: &Sender<NetEvent>,
+    name: Option<String>,
+) -> std::io::Result<()> {
     stream.set_nodelay(true)?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     let feedback = Feedback(Arc::new(Mutex::new(stream.try_clone()?)));
@@ -201,7 +330,11 @@ fn run_session(stream: TcpStream, events: &Sender<NetEvent>) -> std::io::Result<
     // The host re-sends the last frame every 500 ms, so 10 s of silence means a dead link.
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     if let Ok(peer) = stream.peer_addr() {
-        let _ = events.send(NetEvent::Connected(peer, feedback.clone()));
+        let _ = events.send(NetEvent::Connected {
+            addr: peer,
+            name,
+            feedback: feedback.clone(),
+        });
     }
 
     let mut streams: HashMap<u8, StreamSlot> = HashMap::new();

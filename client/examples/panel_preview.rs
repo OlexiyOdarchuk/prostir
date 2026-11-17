@@ -12,7 +12,14 @@ fn main() {
         _ => None,
     };
     let state = UiState {
-        host: Some("iShawyha-Laptop".into()),
+        host: std::env::var("OFFLINE")
+            .is_err()
+            .then(|| "iShawyha-Laptop".into()),
+        found: vec![
+            ("iShawyha-Laptop".into(), "192.168.1.167".into()),
+            ("desktop".into(), "192.168.1.20".into()),
+        ],
+        ip_input: std::env::var("KEYPAD").ok(),
         monitors: vec![
             MonitorEntry {
                 id: 0,

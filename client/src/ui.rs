@@ -27,6 +27,10 @@ pub struct MonitorEntry {
 pub struct UiState {
     /// Name of the connected PC, `None` while searching.
     pub host: Option<String>,
+    /// PCs seen on the network while not connected: (name, address).
+    pub found: Vec<(String, String)>,
+    /// IP being typed on the keypad.
+    pub ip_input: Option<String>,
     /// Quest monitors, sorted by id.
     pub monitors: Vec<MonitorEntry>,
     pub primary: Option<u8>,
@@ -62,6 +66,15 @@ pub enum Action {
     Curve(Curve),
     Background(Background),
     Hands(HandMode),
+    /// Connect to the n-th PC in `UiState::found`.
+    ConnectTo(usize),
+    ShowKeypad,
+    Key(char),
+    Backspace,
+    ConnectTyped,
+    CancelKeypad,
+    /// Disconnect and pick another PC.
+    ChangeHost,
     Close,
 }
 
@@ -194,7 +207,23 @@ impl Panel {
             None => "Шукаю ПК…".to_owned(),
         };
         let sw = self.text_width(&status, 21.0, false);
-        items.push(text(w - 120.0 - sw, 66.0, 21.0, false, MUTED, &status));
+        let change_w = if s.host.is_some() { 190.0 } else { 0.0 };
+        items.push(text(
+            w - 120.0 - change_w - sw,
+            66.0,
+            21.0,
+            false,
+            MUTED,
+            &status,
+        ));
+        if s.host.is_some() {
+            items.push(button(
+                rect(w - 98.0 - 170.0, 32.0, 170.0, 48.0),
+                "Змінити ПК",
+                Style::Normal,
+                Some(Action::ChangeHost),
+            ));
+        }
         items.push(button(
             rect(w - 88.0, 28.0, 56.0, 56.0),
             "×",
@@ -206,115 +235,119 @@ impl Panel {
             [255, 255, 255, 18],
         ));
 
-        // Left column: monitor list.
+        // Left column: the connection screen, or the monitor list.
         let (lx, lw) = (44.0, 580.0);
         let mut y = 150.0;
-        items.push(text(lx, y, 21.0, false, MUTED, "Монітори"));
-        y += 18.0;
-        let removable = s.monitors.len() > 1;
-        let count = s.monitors.len();
-        for (i, m) in s.monitors.iter().enumerate() {
-            items.push(Item::Box(rect(lx, y, lw, 62.0), [255, 255, 255, 12]));
-            // Move left / right in the row (also reorders KDE's layout).
-            for (k, (label, delta)) in [("‹", -1), ("›", 1)].into_iter().enumerate() {
-                let enabled = if delta < 0 { i > 0 } else { i + 1 < count };
-                items.push(button(
-                    rect(lx + 8.0 + k as f32 * 48.0, y + 7.0, 44.0, 48.0),
-                    label,
-                    if enabled {
-                        Style::Normal
-                    } else {
-                        Style::Disabled
-                    },
-                    enabled.then_some(Action::Move { id: m.id, delta }),
+        if s.host.is_none() {
+            y = self.build_connection(s, &mut items, lx, lw, y);
+        } else {
+            items.push(text(lx, y, 21.0, false, MUTED, "Монітори"));
+            y += 18.0;
+            let removable = s.monitors.len() > 1;
+            let count = s.monitors.len();
+            for (i, m) in s.monitors.iter().enumerate() {
+                items.push(Item::Box(rect(lx, y, lw, 62.0), [255, 255, 255, 12]));
+                // Move left / right in the row (also reorders KDE's layout).
+                for (k, (label, delta)) in [("‹", -1), ("›", 1)].into_iter().enumerate() {
+                    let enabled = if delta < 0 { i > 0 } else { i + 1 < count };
+                    items.push(button(
+                        rect(lx + 8.0 + k as f32 * 48.0, y + 7.0, 44.0, 48.0),
+                        label,
+                        if enabled {
+                            Style::Normal
+                        } else {
+                            Style::Disabled
+                        },
+                        enabled.then_some(Action::Move { id: m.id, delta }),
+                    ));
+                }
+                items.push(text(
+                    lx + 116.0,
+                    y + 29.0,
+                    22.0,
+                    true,
+                    TEXT,
+                    &format!("Монітор {}", m.id + 1),
                 ));
-            }
-            items.push(text(
-                lx + 116.0,
-                y + 29.0,
-                22.0,
-                true,
-                TEXT,
-                &format!("Монітор {}", m.id + 1),
-            ));
-            items.push(text(
-                lx + 116.0,
-                y + 52.0,
-                16.0,
-                false,
-                MUTED,
-                &format!("{} × {}", m.width, m.height),
-            ));
-            let remove = rect(lx + lw - 58.0, y + 7.0, 48.0, 48.0);
-            let primary = rect(lx + lw - 58.0 - 10.0 - 210.0, y + 7.0, 210.0, 48.0);
-            if s.confirm_remove == Some(m.id) {
-                let both = rect(
-                    primary.left(),
-                    y + 7.0,
-                    remove.right() - primary.left(),
-                    48.0,
-                );
+                items.push(text(
+                    lx + 116.0,
+                    y + 52.0,
+                    16.0,
+                    false,
+                    MUTED,
+                    &format!("{} × {}", m.width, m.height),
+                ));
+                let remove = rect(lx + lw - 58.0, y + 7.0, 48.0, 48.0);
+                let primary = rect(lx + lw - 58.0 - 10.0 - 210.0, y + 7.0, 210.0, 48.0);
+                if s.confirm_remove == Some(m.id) {
+                    let both = rect(
+                        primary.left(),
+                        y + 7.0,
+                        remove.right() - primary.left(),
+                        48.0,
+                    );
+                    items.push(button(
+                        both,
+                        "Прибрати? Ще раз",
+                        Style::Armed,
+                        Some(Action::Remove(m.id)),
+                    ));
+                    y += 70.0;
+                    continue;
+                }
+                if s.primary == Some(m.id) {
+                    items.push(button(primary, "Головний", Style::Selected, None));
+                } else {
+                    items.push(button(
+                        primary,
+                        "Зробити головним",
+                        Style::Normal,
+                        Some(Action::MakePrimary(m.id)),
+                    ));
+                }
+                let style = if removable {
+                    Style::Danger
+                } else {
+                    Style::Disabled
+                };
                 items.push(button(
-                    both,
-                    "Прибрати? Ще раз",
-                    Style::Armed,
-                    Some(Action::Remove(m.id)),
+                    remove,
+                    "×",
+                    style,
+                    removable.then_some(Action::Remove(m.id)),
                 ));
                 y += 70.0;
-                continue;
             }
-            if s.primary == Some(m.id) {
-                items.push(button(primary, "Головний", Style::Selected, None));
+            // Physical display mirror.
+            items.push(Item::Box(rect(lx, y, lw, 62.0), [255, 255, 255, 12]));
+            items.push(text(
+                lx + 20.0,
+                y + 40.0,
+                24.0,
+                true,
+                TEXT,
+                "Екран ноутбука",
+            ));
+            let note = match (s.mirror_wanted, s.mirror_active) {
+                (true, true) => "показано",
+                (true, false) => "кришка закрита",
+                (false, _) => "приховано",
+            };
+            items.push(text(lx + 228.0, y + 40.0, 20.0, false, MUTED, note));
+            let toggle = rect(lx + lw - 10.0 - 160.0, y + 7.0, 160.0, 48.0);
+            let (label, style) = if s.mirror_wanted {
+                ("Приховати", Style::Normal)
             } else {
-                items.push(button(
-                    primary,
-                    "Зробити головним",
-                    Style::Normal,
-                    Some(Action::MakePrimary(m.id)),
-                ));
-            }
-            let style = if removable {
-                Style::Danger
-            } else {
-                Style::Disabled
+                ("Показати", Style::Normal)
             };
             items.push(button(
-                remove,
-                "×",
+                toggle,
+                label,
                 style,
-                removable.then_some(Action::Remove(m.id)),
+                Some(Action::SetMirror(!s.mirror_wanted)),
             ));
             y += 70.0;
         }
-        // Physical display mirror.
-        items.push(Item::Box(rect(lx, y, lw, 62.0), [255, 255, 255, 12]));
-        items.push(text(
-            lx + 20.0,
-            y + 40.0,
-            24.0,
-            true,
-            TEXT,
-            "Екран ноутбука",
-        ));
-        let note = match (s.mirror_wanted, s.mirror_active) {
-            (true, true) => "показано",
-            (true, false) => "кришка закрита",
-            (false, _) => "приховано",
-        };
-        items.push(text(lx + 228.0, y + 40.0, 20.0, false, MUTED, note));
-        let toggle = rect(lx + lw - 10.0 - 160.0, y + 7.0, 160.0, 48.0);
-        let (label, style) = if s.mirror_wanted {
-            ("Приховати", Style::Normal)
-        } else {
-            ("Показати", Style::Normal)
-        };
-        items.push(button(
-            toggle,
-            label,
-            style,
-            Some(Action::SetMirror(!s.mirror_wanted)),
-        ));
-        y += 70.0;
 
         // Hints under the list.
         y = y.max(560.0) + 30.0;
@@ -336,7 +369,7 @@ impl Panel {
         let mut y = 150.0;
         items.push(text(rx, y, 21.0, false, MUTED, "Додати монітор"));
         y += 18.0;
-        let full = s.monitors.len() >= MAX_MONITORS;
+        let full = s.monitors.len() >= MAX_MONITORS || s.host.is_none();
         let sizes = [
             (1920, 1080, "1920 × 1080"),
             (2560, 1440, "2560 × 1440"),
@@ -498,6 +531,110 @@ impl Panel {
         items
     }
 
+    /// PCs found on the network and a keypad for typing an address.
+    fn build_connection(
+        &mut self,
+        s: &UiState,
+        items: &mut Vec<Item>,
+        lx: f32,
+        lw: f32,
+        mut y: f32,
+    ) -> f32 {
+        items.push(text(lx, y, 21.0, false, MUTED, "Підключення до ПК"));
+        y += 40.0;
+        for line in [
+            "Запустіть Prostir на ноутбуці в тій самій мережі Wi‑Fi",
+            "або підключіть шолом кабелем.",
+        ] {
+            items.push(text(lx, y, 19.0, false, TEXT, line));
+            y += 28.0;
+        }
+        y += 12.0;
+        if let Some(typed) = &s.ip_input {
+            let shown = if typed.is_empty() {
+                "192.168.1.10"
+            } else {
+                typed.as_str()
+            };
+            let color = if typed.is_empty() { MUTED } else { TEXT };
+            items.push(Item::Box(rect(lx, y, lw, 56.0), [255, 255, 255, 16]));
+            items.push(text(lx + 20.0, y + 38.0, 26.0, true, color, shown));
+            y += 68.0;
+            let keys = [
+                "1",
+                "2",
+                "3",
+                "4",
+                "5",
+                "6",
+                "7",
+                "8",
+                "9",
+                ".",
+                "0",
+                "Стерти",
+            ];
+            let (kw, kh) = ((lw - 20.0) / 3.0, 50.0);
+            for (i, k) in keys.iter().enumerate() {
+                let r = rect(
+                    lx + (i % 3) as f32 * (kw + 10.0),
+                    y + (i / 3) as f32 * (kh + 8.0),
+                    kw,
+                    kh,
+                );
+                let action = match k.chars().next() {
+                    Some(c) if k.len() == 1 => Action::Key(c),
+                    _ => Action::Backspace,
+                };
+                items.push(button(r, k, Style::Normal, Some(action)));
+            }
+            y += 4.0 * (kh + 8.0) + 4.0;
+            let half = (lw - 10.0) / 2.0;
+            let ready = !typed.is_empty();
+            items.push(button(
+                rect(lx, y, half, 50.0),
+                "Підключитися",
+                if ready {
+                    Style::Selected
+                } else {
+                    Style::Disabled
+                },
+                ready.then_some(Action::ConnectTyped),
+            ));
+            items.push(button(
+                rect(lx + half + 10.0, y, half, 50.0),
+                "Скасувати",
+                Style::Normal,
+                Some(Action::CancelKeypad),
+            ));
+            return y + 62.0;
+        }
+        if s.found.is_empty() {
+            items.push(text(lx, y + 20.0, 21.0, true, MUTED, "Шукаю ПК у мережі…"));
+            y += 48.0;
+        } else {
+            items.push(text(lx, y + 14.0, 21.0, false, MUTED, "Знайдено"));
+            y += 30.0;
+            for (i, (name, addr)) in s.found.iter().enumerate().take(5) {
+                let label = format!("{name}   {addr}");
+                items.push(button(
+                    rect(lx, y, lw, 52.0),
+                    &label,
+                    Style::Normal,
+                    Some(Action::ConnectTo(i)),
+                ));
+                y += 60.0;
+            }
+        }
+        items.push(button(
+            rect(lx, y + 6.0, 280.0, 48.0),
+            "Ввести IP вручну",
+            Style::Normal,
+            Some(Action::ShowKeypad),
+        ));
+        y + 66.0
+    }
+
     fn glyph(&mut self, medium: bool, c: char, size: f32) -> &(Metrics, Vec<u8>) {
         let key = (medium, c, size.to_bits());
         let font = if medium { &self.medium } else { &self.regular };
@@ -547,6 +684,7 @@ impl Panel {
                     let size = match label.as_str() {
                         "×" => 32.0,
                         "‹" | "›" => 34.0,
+                        l if l.len() == 1 => 26.0,
                         _ => 19.0,
                     };
                     let tw = self.text_width(label, size, true);
@@ -706,6 +844,8 @@ mod tests {
     pub fn sample_state() -> UiState {
         UiState {
             host: Some("iShawyha-Laptop".into()),
+            found: Vec::new(),
+            ip_input: None,
             monitors: vec![
                 MonitorEntry {
                     id: 0,
