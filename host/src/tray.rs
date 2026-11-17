@@ -78,6 +78,19 @@ pub fn set_pairing(handle: Option<&Handle>, code: Option<String>) {
     }
 }
 
+/// The label of an on/off item. Plasma draws a checkbox; GTK menus (Waybar's tray)
+/// often draw nothing for an unchecked item, so there the state goes into the text.
+fn with_state(label: &str, on: bool) -> String {
+    let plasma = std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.contains("KDE"));
+    if plasma {
+        label.to_owned()
+    } else if on {
+        format!("{label}: {}", t("увімкнено", "on"))
+    } else {
+        format!("{label}: {}", t("вимкнено", "off"))
+    }
+}
+
 fn autostart_file() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -249,11 +262,13 @@ impl ksni::Tray for Tray {
             }
             .into(),
             CheckmarkItem {
-                label: t(
-                    "Чіткіший текст (кодування на ~2 мс довше)",
-                    "Sharper text (about 2 ms more encoding)",
-                )
-                .into(),
+                label: with_state(
+                    t(
+                        "Чіткіший текст (кодування на ~2 мс довше)",
+                        "Sharper text (about 2 ms more encoding)",
+                    ),
+                    self.sharp,
+                ),
                 checked: self.sharp,
                 activate: Box::new(|tray: &mut Self| {
                     tray.sharp = !tray.sharp;
@@ -263,11 +278,13 @@ impl ksni::Tray for Tray {
             }
             .into(),
             CheckmarkItem {
-                label: t(
-                    "Рахувати цей ПК серед користувачів",
-                    "Count this PC among users",
-                )
-                .into(),
+                label: with_state(
+                    t(
+                        "Рахувати цей ПК серед користувачів",
+                        "Count this PC among users",
+                    ),
+                    crate::usage::enabled(),
+                ),
                 checked: crate::usage::enabled(),
                 visible: crate::usage::available(),
                 activate: Box::new(|tray: &mut Self| {
@@ -282,6 +299,8 @@ impl ksni::Tray for Tray {
             CheckmarkItem {
                 label: t("Запускати разом із системою", "Start with the system").into(),
                 checked: autostart_enabled(),
+                // Hyprland (without uwsm) ignores XDG autostart: its own config starts it.
+                visible: !crate::hyprland::running(),
                 activate: Box::new(|_: &mut Self| set_autostart(!autostart_enabled())),
                 ..Default::default()
             }

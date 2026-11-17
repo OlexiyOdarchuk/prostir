@@ -15,6 +15,7 @@ mod virtual_output;
 
 use std::io::{BufReader, BufWriter, ErrorKind, Write};
 use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream, UdpSocket};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
@@ -511,25 +512,23 @@ fn clean_up_on_signals() {
     }
     // Monitors from a run that crashed: without the headset nobody sees their windows.
     hyprland::remove_leftovers();
-    // SAFETY: plain signal-set manipulation on a local set; blocking the signals here,
-    // before any thread starts, makes every later thread inherit the mask, so only the
-    // sigwait below receives them.
-    let set = unsafe {
-        let mut set: libc::sigset_t = std::mem::zeroed();
-        libc::sigemptyset(&mut set);
-        for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
-            libc::sigaddset(&mut set, sig);
-        }
-        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
-        set
-    };
+    static QUIT: AtomicBool = AtomicBool::new(false);
+    extern "C" fn on_signal(_: libc::c_int) {
+        // Only an atomic store: safe inside a signal handler.
+        QUIT.store(true, Ordering::Relaxed);
+    }
+    for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+        // SAFETY: installs a handler that only stores an atomic. A handler (unlike a
+        // blocked signal mask) is not inherited by child processes such as pw-loopback.
+        unsafe { libc::signal(sig, on_signal as *const () as libc::sighandler_t) };
+    }
     let spawned = std::thread::Builder::new()
         .name("signals".into())
-        .spawn(move || {
-            let mut sig = 0;
-            // SAFETY: `set` is a valid signal set and `sig` a valid out-pointer.
-            unsafe { libc::sigwait(&set, &mut sig) };
-            info!("signal {sig}: removing Prostir's monitors");
+        .spawn(|| {
+            while !QUIT.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            info!("asked to quit: removing Prostir's monitors");
             hyprland::remove_leftovers();
             std::process::exit(0);
         });
