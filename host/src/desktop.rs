@@ -20,6 +20,7 @@ impl Desktop {
         if hyprland::running() {
             log::info!("desktop: Hyprland");
             hyprland::remove_leftovers();
+            hyprland::keep_rules_after_reloads();
             Ok(Self::Hyprland)
         } else {
             Ok(Self::Kde(Screencast::connect()?))

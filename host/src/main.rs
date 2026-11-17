@@ -502,8 +502,45 @@ fn create_displays(args: &Args, bitrate: u32, sharp: bool) -> Result<Displays> {
     Ok(displays)
 }
 
+/// On Hyprland, removes Prostir's monitors left from an earlier run and when asked to quit (SIGTERM, Ctrl+C,
+/// SIGHUP). KWin drops them by itself when the program ends; Hyprland keeps headless
+/// outputs, and the windows on them would stay out of sight.
+fn clean_up_on_signals() {
+    if !hyprland::running() {
+        return;
+    }
+    // Monitors from a run that crashed: without the headset nobody sees their windows.
+    hyprland::remove_leftovers();
+    // SAFETY: plain signal-set manipulation on a local set; blocking the signals here,
+    // before any thread starts, makes every later thread inherit the mask, so only the
+    // sigwait below receives them.
+    let set = unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+            libc::sigaddset(&mut set, sig);
+        }
+        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+        set
+    };
+    let spawned = std::thread::Builder::new()
+        .name("signals".into())
+        .spawn(move || {
+            let mut sig = 0;
+            // SAFETY: `set` is a valid signal set and `sig` a valid out-pointer.
+            unsafe { libc::sigwait(&set, &mut sig) };
+            info!("signal {sig}: removing Prostir's monitors");
+            hyprland::remove_leftovers();
+            std::process::exit(0);
+        });
+    if let Err(e) = spawned {
+        warn!("cannot watch for signals: {e}");
+    }
+}
+
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    clean_up_on_signals();
     let args = Args::parse();
     gstreamer::init().context("GStreamer init")?;
 

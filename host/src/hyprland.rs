@@ -5,10 +5,11 @@
 //! Monitor rules are set with Lua (`eval`) on Lua configs (Hyprland 0.53 and newer)
 //! and with `keyword` on `hyprland.conf` ones.
 
-use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::collections::{BTreeMap, HashMap};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
@@ -27,13 +28,18 @@ pub fn running() -> bool {
 }
 
 fn socket_path() -> Option<PathBuf> {
+    socket("socket")
+}
+
+/// `.socket.sock` takes requests, `.socket2.sock` streams events.
+fn socket(kind: &str) -> Option<PathBuf> {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR")?;
     let instance = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE")?;
     Some(
         PathBuf::from(runtime)
             .join("hypr")
             .join(instance)
-            .join(".socket.sock"),
+            .join(format!(".{kind}.sock")),
     )
 }
 
@@ -134,15 +140,22 @@ pub fn geometries() -> HashMap<String, Geometry> {
         .collect()
 }
 
-/// The display to mirror: the laptop panel if there is one, else the first real output.
+/// The display to mirror: an external monitor if one is on (the one in front of you,
+/// as in KDE where the laptop panel goes off with the lid), else the laptop panel, but
+/// never the panel of a closed laptop.
 pub fn physical_output() -> Option<String> {
-    let mut names: Vec<String> = monitors()
-        .into_iter()
+    pick_physical(&monitors(), crate::virtual_output::lid_open())
+}
+
+fn pick_physical(monitors: &[Monitor], lid_open: bool) -> Option<String> {
+    let mut names: Vec<&str> = monitors
+        .iter()
         .filter(|m| !m.disabled && !m.name.starts_with(PREFIX))
-        .map(|m| m.name)
+        .map(|m| m.name.as_str())
+        .filter(|n| lid_open || !is_panel(n))
         .collect();
-    names.sort_by_key(|n| (!is_panel(n), n.clone()));
-    names.into_iter().next()
+    names.sort_by_key(|n| (is_panel(n), *n));
+    names.first().map(|n| (*n).to_owned())
 }
 
 fn is_panel(name: &str) -> bool {
@@ -191,6 +204,10 @@ impl Rule {
     }
 }
 
+/// Every rule Prostir has set, by output: a config reload drops runtime rules, and
+/// these are put back afterwards.
+static APPLIED: Mutex<BTreeMap<String, Rule>> = Mutex::new(BTreeMap::new());
+
 /// Which way monitor rules are accepted: 0 not known yet, 1 Lua, 2 keyword.
 static DIALECT: AtomicU8 = AtomicU8::new(0);
 
@@ -198,8 +215,68 @@ fn ok(reply: &str) -> bool {
     reply.trim() == "ok" || reply.lines().all(|l| l.trim() == "ok")
 }
 
-/// Applies monitor rules in one request.
+/// Applies monitor rules in one request and remembers them.
 pub fn apply(rules: &[Rule]) {
+    let mut applied = APPLIED.lock().unwrap();
+    for r in rules {
+        applied.insert(r.name.clone(), r.clone());
+    }
+    drop(applied);
+    send(rules);
+}
+
+/// Hyprland re-reads its config whenever the file is saved, which resets our outputs
+/// to its own rules. Watches for that and puts Prostir's layout back.
+pub fn keep_rules_after_reloads() {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        let spawned = std::thread::Builder::new()
+            .name("hyprland-events".into())
+            .spawn(|| {
+                loop {
+                    if let Some(path) = socket("socket2")
+                        && let Ok(stream) = UnixStream::connect(path)
+                    {
+                        for line in BufReader::new(stream).lines() {
+                            let Ok(line) = line else { break };
+                            if line.starts_with("configreloaded>>") {
+                                std::thread::sleep(Duration::from_millis(200));
+                                reapply();
+                            }
+                        }
+                    }
+                    std::thread::sleep(Duration::from_secs(2));
+                }
+            });
+        if let Err(e) = spawned {
+            warn!("cannot watch Hyprland events: {e}");
+        }
+    });
+}
+
+/// Puts back the remembered rules: always for our outputs, and for real displays only
+/// while they are on (the config may have just switched one off, e.g. a closed lid).
+fn reapply() {
+    let present = monitors();
+    let rules: Vec<Rule> = APPLIED
+        .lock()
+        .unwrap()
+        .values()
+        .filter(|r| {
+            r.name.starts_with(PREFIX) || present.iter().any(|m| m.name == r.name && !m.disabled)
+        })
+        .cloned()
+        .collect();
+    if !rules.is_empty() {
+        info!(
+            "Hyprland reloaded its config: restoring {} monitor rules",
+            rules.len()
+        );
+        send(&rules);
+    }
+}
+
+fn send(rules: &[Rule]) {
     if rules.is_empty() {
         return;
     }
@@ -275,6 +352,7 @@ pub fn create(number: u32, spec: &MonitorSpec) -> Result<String> {
 }
 
 pub fn remove(name: &str) {
+    APPLIED.lock().unwrap().remove(name);
     match request(&format!("output remove {name}")) {
         Ok(reply) if ok(&reply) => info!("removed {name}"),
         Ok(reply) => warn!("Hyprland did not remove {name}: {}", reply.trim()),
@@ -287,7 +365,6 @@ pub fn remove(name: &str) {
 pub fn remove_leftovers() {
     for m in monitors() {
         if m.name.starts_with(PREFIX) {
-            info!("{} is left from an earlier run", m.name);
             remove(&m.name);
         }
     }
@@ -356,5 +433,18 @@ mod tests {
             ..r
         };
         assert!(odd.lua().contains("1920x1080@59.951"));
+    }
+
+    #[test]
+    fn mirrors_the_external_monitor_and_never_a_closed_lid() {
+        let mut m = parse_monitors(MONITORS);
+        m.push(Monitor {
+            name: "HDMI-A-1".into(),
+            ..m[0].clone()
+        });
+        assert_eq!(pick_physical(&m, true).as_deref(), Some("HDMI-A-1"));
+        m.pop();
+        assert_eq!(pick_physical(&m, true).as_deref(), Some("eDP-1"));
+        assert_eq!(pick_physical(&m, false), None);
     }
 }
