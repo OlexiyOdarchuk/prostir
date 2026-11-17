@@ -1,0 +1,57 @@
+name: AUR
+
+# Publishing a release (not just drafting it) updates the prostir-bin package on the
+# AUR. Needs the repository secret AUR_SSH_KEY: a private key whose public half is
+# added to the AUR account that owns prostir-bin.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish, e.g. v0.1.0
+        required: true
+
+jobs:
+  aur:
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v4
+      - name: PKGBUILD for this release
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          pacman -Syu --noconfirm --needed git openssh
+          version="${TAG#v}"
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/prostir-${version}-x86_64-linux.tar.gz"
+          sum=$(curl -fsSL "$url" | sha256sum | cut -d' ' -f1)
+          mkdir -p /tmp/aur
+          sed -e "s/@VERSION@/${version}/" -e "s/@SHA256@/${sum}/" \
+            packaging/aur/PKGBUILD.in > /tmp/aur/PKGBUILD
+          useradd -m builder
+          chown -R builder /tmp/aur
+          su builder -c "cd /tmp/aur && makepkg --printsrcinfo > .SRCINFO"
+          cat /tmp/aur/PKGBUILD /tmp/aur/.SRCINFO
+      - name: Push to the AUR
+        env:
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          if [ -z "$AUR_SSH_KEY" ]; then
+            echo "AUR_SSH_KEY is not set; skipping the push."
+            exit 0
+          fi
+          mkdir -p ~/.ssh
+          printf '%s\n' "$AUR_SSH_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan -t ed25519 aur.archlinux.org >> ~/.ssh/known_hosts
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/aur -o IdentitiesOnly=yes"
+          git clone ssh://aur@aur.archlinux.org/prostir-bin.git /tmp/repo
+          cp /tmp/aur/PKGBUILD /tmp/aur/.SRCINFO /tmp/repo/
+          cd /tmp/repo
+          git config user.name "Prostir release bot"
+          git config user.email "prostir-release@users.noreply.github.com"
+          git add PKGBUILD .SRCINFO
+          git commit -m "Update to ${TAG#v}" || { echo "Nothing to update."; exit 0; }
+          git push origin HEAD:master

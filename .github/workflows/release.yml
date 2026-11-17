@@ -44,10 +44,18 @@ jobs:
           [ -n "$KEYSTORE_PASS" ] || unset KEYSTORE_PASS
           [ -n "$KEY_ALIAS" ] || unset KEY_ALIAS
           ./scripts/package-release.sh
+      - name: Debian and RPM packages
+        run: |
+          cargo install --locked cargo-deb cargo-generate-rpm
+          cargo deb -p prostir-host --no-build -o dist/
+          cargo generate-rpm -p host -o dist/
+          (cd dist && sha256sum *.tar.gz *.apk *.deb *.rpm > SHA256SUMS)
       - uses: softprops/action-gh-release@v2
         with:
           draft: true
           files: |
             dist/*.tar.gz
             dist/*.apk
+            dist/*.deb
+            dist/*.rpm
             dist/SHA256SUMS
