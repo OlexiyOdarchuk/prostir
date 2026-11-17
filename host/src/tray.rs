@@ -13,6 +13,8 @@ use log::warn;
 /// What the tray asks the main loop to do.
 pub enum Command {
     SetBitrate(u32),
+    /// Clearer text at about 2 ms more encoding per frame.
+    SetSharp(bool),
     /// Drop all paired headsets: each must pair again.
     ForgetHeadsets,
     Quit,
@@ -40,17 +42,19 @@ pub struct Tray {
     /// Code to type in the headset, while pairing.
     pairing_code: Option<String>,
     bitrate: u32,
+    sharp: bool,
     commands: Sender<Command>,
 }
 
 pub type Handle = ksni::blocking::Handle<Tray>;
 
 /// Shows the tray icon; `None` when the desktop has no tray.
-pub fn spawn(commands: Sender<Command>, bitrate: u32) -> Option<Handle> {
+pub fn spawn(commands: Sender<Command>, bitrate: u32, sharp: bool) -> Option<Handle> {
     let tray = Tray {
         status: Status::default(),
         pairing_code: None,
         bitrate,
+        sharp,
         commands,
     };
     tray.spawn()
@@ -239,6 +243,20 @@ impl ksni::Tray for Tray {
                     }
                     .into(),
                 ],
+                ..Default::default()
+            }
+            .into(),
+            CheckmarkItem {
+                label: t(
+                    "Чіткіший текст (кодування на ~2 мс довше)",
+                    "Sharper text (about 2 ms more encoding)",
+                )
+                .into(),
+                checked: self.sharp,
+                activate: Box::new(|tray: &mut Self| {
+                    tray.sharp = !tray.sharp;
+                    let _ = tray.commands.send(Command::SetSharp(tray.sharp));
+                }),
                 ..Default::default()
             }
             .into(),

@@ -20,6 +20,16 @@ pub struct EncoderConfig {
     pub bitrate_kbps: u32,
     /// Use the software x264 encoder instead of VA-API (H.264 only).
     pub software: bool,
+    /// Slower VA-API preset: clearer small text at the same bitrate for about 2 ms more
+    /// encoding per frame.
+    pub sharp: bool,
+}
+
+impl EncoderConfig {
+    /// VA-API `target-usage`: 4 is clearer, 6 is faster.
+    pub fn target_usage(&self) -> u32 {
+        if self.sharp { 4 } else { 6 }
+    }
 }
 
 pub enum EncoderEvent {
@@ -59,8 +69,9 @@ fn pipeline_description(node: u32, cfg: &EncoderConfig) -> String {
         (Codec::H264, false) => (
             format!(
                 "vapostproc name=enc_in ! video/x-raw(memory:VAMemory),format=NV12 ! vah264enc name=enc rate-control=cbr bitrate={} \
-                 key-int-max=600 b-frames=0 ref-frames=1 target-usage=6",
-                cfg.bitrate_kbps
+                 key-int-max=600 b-frames=0 ref-frames=1 target-usage={}",
+                cfg.bitrate_kbps,
+                cfg.target_usage()
             ),
             "h264parse config-interval=-1",
             "video/x-h264,stream-format=byte-stream,alignment=au",
@@ -68,8 +79,9 @@ fn pipeline_description(node: u32, cfg: &EncoderConfig) -> String {
         (Codec::H265, _) => (
             format!(
                 "vapostproc name=enc_in ! video/x-raw(memory:VAMemory),format=NV12 ! vah265enc name=enc rate-control=cbr bitrate={} \
-                 key-int-max=600 b-frames=0 ref-frames=1 target-usage=6",
-                cfg.bitrate_kbps
+                 key-int-max=600 b-frames=0 ref-frames=1 target-usage={}",
+                cfg.bitrate_kbps,
+                cfg.target_usage()
             ),
             "h265parse config-interval=-1",
             "video/x-h265,stream-format=byte-stream,alignment=au",
@@ -205,6 +217,16 @@ impl Encoder {
     pub fn set_bitrate(&self, kbps: u32) {
         if let Some(enc) = self.pipeline.by_name("enc") {
             enc.set_property("bitrate", kbps);
+        }
+    }
+
+    /// Switches the VA-API speed/quality preset on the fly (no effect on x264).
+    pub fn set_target_usage(&self, value: u32) {
+        if let Some(enc) = self.pipeline.by_name("enc")
+            && enc.find_property("target-usage").is_some()
+        {
+            enc.set_property("target-usage", value);
+            self.force_keyframe();
         }
     }
 

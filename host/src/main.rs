@@ -84,6 +84,7 @@ struct Control {
     security: pairing::Security,
     commands: Receiver<tray::Command>,
     bitrate: u32,
+    sharp: bool,
     quit: bool,
     shown: Option<tray::Status>,
 }
@@ -99,6 +100,14 @@ impl Control {
                     self.bitrate = mbps;
                     if let Some(d) = displays.as_deref_mut() {
                         d.set_bitrate(mbps);
+                        d.save();
+                    }
+                }
+                tray::Command::SetSharp(sharp) => {
+                    info!("clearer text: {sharp}");
+                    self.sharp = sharp;
+                    if let Some(d) = displays.as_deref_mut() {
+                        d.set_sharp(sharp);
                         d.save();
                     }
                 }
@@ -435,7 +444,7 @@ fn spawn_adb_reverse(port: u16) {
         });
 }
 
-fn create_displays(args: &Args, bitrate: u32) -> Result<Displays> {
+fn create_displays(args: &Args, bitrate: u32, sharp: bool) -> Result<Displays> {
     let codec = if args.software {
         Codec::H264
     } else {
@@ -448,6 +457,7 @@ fn create_displays(args: &Args, bitrate: u32) -> Result<Displays> {
         codec,
         bitrate_kbps: bitrate * 1000,
         software: args.software,
+        sharp,
     };
     let stored = displays::load_saved(parse_monitor);
     let mirror = stored.as_ref().is_none_or(|s| s.mirror);
@@ -460,6 +470,7 @@ fn create_displays(args: &Args, bitrate: u32) -> Result<Displays> {
             audio: true,
             mic: true,
             bitrate: None,
+            sharp,
         },
         _ => SavedMonitors {
             specs: vec![parse_monitor("2560x1440").expect("valid default")],
@@ -468,6 +479,7 @@ fn create_displays(args: &Args, bitrate: u32) -> Result<Displays> {
             audio: true,
             mic: true,
             bitrate: None,
+            sharp,
         },
     };
     let displays = Displays::create(&saved, cfg, !args.keep_primary)?;
@@ -495,12 +507,14 @@ fn main() -> Result<()> {
         .bitrate
         .or_else(|| displays::load_saved(parse_monitor).and_then(|s| s.bitrate))
         .unwrap_or(30);
+    let sharp = displays::load_saved(parse_monitor).is_some_and(|s| s.sharp);
     let (command_tx, commands) = mpsc::channel();
     let mut control = Control {
         security: pairing::Security::load()?,
-        tray: tray::spawn(command_tx, bitrate),
+        tray: tray::spawn(command_tx, bitrate, sharp),
         commands,
         bitrate,
+        sharp,
         quit: false,
         shown: None,
     };
@@ -535,7 +549,7 @@ fn main() -> Result<()> {
                     displays = None;
                 }
                 if displays.is_none() {
-                    match create_displays(&args, control.bitrate) {
+                    match create_displays(&args, control.bitrate, control.sharp) {
                         Ok(d) => displays = Some(d),
                         Err(e) => {
                             error!("{e:#}");

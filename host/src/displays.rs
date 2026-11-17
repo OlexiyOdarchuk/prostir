@@ -272,6 +272,8 @@ pub struct SavedMonitors {
     pub mic: bool,
     /// Mbit/s per monitor, if chosen in the tray.
     pub bitrate: Option<u32>,
+    /// Clearer-text encoder preset.
+    pub sharp: bool,
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -295,7 +297,12 @@ pub fn load_saved(parse: impl Fn(&str) -> Result<MonitorSpec, String>) -> Option
     let mut audio = true;
     let mut mic = true;
     let mut bitrate = None;
+    let mut sharp = false;
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if let Some(v) = line.strip_prefix("sharp ") {
+            sharp = v.trim() == "on";
+            continue;
+        }
         if let Some(v) = line.strip_prefix("bitrate ") {
             bitrate = v.trim().parse().ok();
             continue;
@@ -330,6 +337,7 @@ pub fn load_saved(parse: impl Fn(&str) -> Result<MonitorSpec, String>) -> Option
         audio,
         mic,
         bitrate,
+        sharp,
     })
 }
 
@@ -511,6 +519,15 @@ impl Displays {
         }
         self.tick();
         self.router.send(HostMsg::MirrorWanted { enabled });
+    }
+
+    /// Clearer text (slower preset) for every running encoder and monitors added later.
+    pub fn set_sharp(&mut self, sharp: bool) {
+        self.cfg.sharp = sharp;
+        let value = self.cfg.target_usage();
+        for (_, e) in self.encoders() {
+            e.set_target_usage(value);
+        }
     }
 
     /// Applies a new bitrate to every running encoder and to monitors added later.
@@ -874,11 +891,12 @@ impl Displays {
                 format!("{}{star}\n", m.spec)
             })
             .chain(std::iter::once(format!(
-                "mirror {}\naudio {}\nmic {}\nbitrate {}\n",
+                "mirror {}\naudio {}\nmic {}\nbitrate {}\nsharp {}\n",
                 if self.mirror_wanted { "on" } else { "off" },
                 if self.audio_wanted { "on" } else { "off" },
                 if self.mic_wanted { "on" } else { "off" },
-                self.cfg.bitrate_kbps / 1000
+                self.cfg.bitrate_kbps / 1000,
+                if self.cfg.sharp { "on" } else { "off" }
             )))
             .collect();
         let result = path
