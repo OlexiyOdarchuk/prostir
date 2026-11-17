@@ -7,6 +7,7 @@ use fontdue::{Font, FontSettings, Metrics};
 use tiny_skia::{FillRule, Paint, Path, PathBuilder, Pixmap, Rect, Transform};
 
 use crate::i18n::Lang;
+use crate::profiles::Profile;
 use crate::settings::{Background, Curve, HandMode, Preset, Settings, Sky};
 
 pub const WIDTH: u32 = 1280;
@@ -64,6 +65,9 @@ pub struct UiState {
     pub confirm_remove: Option<u8>,
     pub tab: Tab,
     pub lang: Lang,
+    pub profiles: Vec<Profile>,
+    /// The profile last switched to (until something is changed by hand).
+    pub active_profile: Option<usize>,
 }
 
 /// Pages of the menu.
@@ -71,6 +75,7 @@ pub struct UiState {
 pub enum Tab {
     #[default]
     Monitors,
+    Profiles,
     Look,
     Sound,
 }
@@ -97,6 +102,8 @@ pub enum Action {
     Hands(HandMode),
     Focus(bool),
     Cinema(bool),
+    ApplyProfile(usize),
+    SaveProfile(usize),
     Tab(Tab),
     /// Connect to the n-th PC in `UiState::found`.
     ConnectTo(usize),
@@ -281,6 +288,7 @@ impl Panel {
         // Tabs.
         let tabs = [
             (Tab::Monitors, l.t("Монітори", "Monitors")),
+            (Tab::Profiles, l.t("Профілі", "Profiles")),
             (Tab::Look, l.t("Вигляд", "Look")),
             (Tab::Sound, l.t("Звук", "Sound")),
         ];
@@ -303,6 +311,9 @@ impl Panel {
                     hints(l, &mut items, lx, y.max(640.0) + 30.0);
                 }
                 build_monitor_options(s, &mut items, rx, rw, top);
+            }
+            Tab::Profiles => {
+                build_profiles(s, &mut items, lx, rx + rw - lx, top - 12.0);
             }
             Tab::Look => {
                 build_look(s, &mut items, lx, lw, rx, rw, top);
@@ -1134,6 +1145,109 @@ fn build_look(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, rx: f32, rw:
     }
 }
 
+/// "1 монітор", "3 монітори", "5 моніторів" / "1 monitor", "3 monitors".
+fn monitors_count(l: Lang, n: usize) -> String {
+    let word = match l {
+        Lang::En if n == 1 => "monitor",
+        Lang::En => "monitors",
+        Lang::Uk if n % 10 == 1 && n % 100 != 11 => "монітор",
+        Lang::Uk if (2..=4).contains(&(n % 10)) && !(12..=14).contains(&(n % 100)) => "монітори",
+        Lang::Uk => "моніторів",
+    };
+    format!("{n} {word}")
+}
+
+/// One card per profile: switch to it, or store the current setup in it.
+fn build_profiles(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
+    let l = s.lang;
+    let names = [
+        l.t("Робота", "Work"),
+        l.t("Кіно", "Cinema"),
+        l.t("Лежачи", "Lying down"),
+    ];
+    for (i, p) in s.profiles.iter().enumerate() {
+        items.push(Item::Box(rect(x, y, w, 104.0), [255, 255, 255, 12]));
+        items.push(text(
+            x + 24.0,
+            y + 42.0,
+            26.0,
+            true,
+            TEXT,
+            names.get(i).copied().unwrap_or("—"),
+        ));
+        let mut sizes: Vec<String> = Vec::new();
+        for (w, h) in &p.sizes {
+            sizes.push(format!("{w}×{h}"));
+        }
+        let layout = if p.settings.cinema {
+            l.t("кінотеатр", "cinema")
+        } else {
+            match p.settings.preset {
+                Preset::Arc => l.t("дуга", "arc"),
+                Preset::Grid => l.t("сітка", "grid"),
+                Preset::Column => l.t("стовпчик", "column"),
+                Preset::Overhead => l.t("над головою", "overhead"),
+            }
+        };
+        let mut summary = format!(
+            "{}: {} · {layout}",
+            monitors_count(l, p.sizes.len()),
+            sizes.join(", ")
+        );
+        if p.mirror {
+            summary.push_str(l.t(" · екран ноутбука", " · laptop screen"));
+        }
+        items.push(text(x + 24.0, y + 78.0, 19.0, false, MUTED, &summary));
+        let save = rect(x + w - 16.0 - 230.0, y + 28.0, 230.0, 48.0);
+        let apply = rect(save.left() - 10.0 - 200.0, y + 28.0, 200.0, 48.0);
+        if s.active_profile == Some(i) {
+            items.push(button(
+                apply,
+                l.t("Увімкнено", "Active"),
+                Style::Selected,
+                None,
+            ));
+        } else {
+            let (style, action) = if s.host.is_some() {
+                (Style::Normal, Some(Action::ApplyProfile(i)))
+            } else {
+                (Style::Disabled, None)
+            };
+            items.push(button(apply, l.t("Увімкнути", "Switch to"), style, action));
+        }
+        let (style, action) = if s.host.is_some() {
+            (Style::Normal, Some(Action::SaveProfile(i)))
+        } else {
+            (Style::Disabled, None)
+        };
+        items.push(button(
+            save,
+            l.t("Зберегти поточне", "Save current"),
+            style,
+            action,
+        ));
+        y += 116.0;
+    }
+    y += 24.0;
+    for line in [
+        l.t(
+            "«Зберегти поточне» записує в профіль теперішні монітори, екран ноутбука,",
+            "“Save current” stores the current monitors, laptop screen,",
+        ),
+        l.t(
+            "розкладку, вигин, фон і режим. Монітори того самого розміру",
+            "layout, curve, background and mode. Monitors of the same size",
+        ),
+        l.t(
+            "при перемиканні лишаються, тож вікна на них не зникають.",
+            "are kept when switching, so their windows stay.",
+        ),
+    ] {
+        items.push(text(x, y, 19.0, false, MUTED, line));
+        y += 30.0;
+    }
+}
+
 /// PC sound and headset microphone.
 fn build_sound(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32) {
     let l = s.lang;
@@ -1302,6 +1416,10 @@ mod tests {
             confirm_remove: None,
             tab: Tab::Monitors,
             lang: Lang::Uk,
+            profiles: (0..crate::profiles::SLOTS)
+                .map(Profile::default_for)
+                .collect(),
+            active_profile: None,
         }
     }
 

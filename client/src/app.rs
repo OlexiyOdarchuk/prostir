@@ -27,6 +27,7 @@ use crate::input::Controls;
 use crate::layout::{self, Cylinder, Grab, Hit, Placement, Ray};
 use crate::net::{Feedback, NetEvent};
 use crate::overlay::{self, Overlay, Sphere};
+use crate::profiles::{self, Profile};
 use crate::settings::{Background, HandMode, Settings};
 use crate::ui::{self, Action, MonitorEntry, Panel, Tab, UiState};
 use crate::xrutil::{self, Gfx, ImageLayer, as_layer, pose, posef, vec3};
@@ -133,6 +134,13 @@ struct Scene {
     confirm_remove: Option<(u8, Instant)>,
     /// Menu page shown.
     tab: Tab,
+    profiles: [Profile; profiles::SLOTS],
+    profiles_path: PathBuf,
+    /// The profile last switched to, until something is changed by hand.
+    active_profile: Option<usize>,
+    /// After switching profiles, monitors come and go for a few seconds: lay them
+    /// out again on each change until then.
+    relayout_until: Option<Instant>,
     layout_path: PathBuf,
     settings_path: PathBuf,
 }
@@ -175,6 +183,10 @@ impl Scene {
         self.monitors
             .get(&MIRROR_ID)
             .map(|m| (MIRROR_ID, m.width_px, m.height_px))
+    }
+
+    fn relayout_pending(&self) -> bool {
+        self.relayout_until.is_some_and(|t| Instant::now() < t)
     }
 
     /// Lays everything out by the chosen preset.
@@ -340,6 +352,8 @@ impl Scene {
                 .map(|(id, _)| id),
             tab: self.tab,
             lang: Lang::Uk,
+            profiles: self.profiles.to_vec(),
+            active_profile: self.active_profile,
         }
     }
 }
@@ -449,6 +463,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         .internal_data_path()
         .unwrap_or_else(|| PathBuf::from("/data/local/tmp"));
     let settings_path = data_dir.join("settings.txt");
+    let profiles_path = data_dir.join("profiles.txt");
     let settings = Settings::load(&settings_path);
 
     // Passthrough keeps the cameras busy and costs battery: only when "Room" is chosen.
@@ -546,6 +561,10 @@ fn run(app: &AndroidApp) -> Result<()> {
         error: None,
         confirm_remove: None,
         tab: Tab::Monitors,
+        profiles: profiles::load(&profiles_path),
+        profiles_path,
+        active_profile: None,
+        relayout_until: None,
         layout_path,
         settings_path,
     };
@@ -1142,12 +1161,23 @@ fn handle_net_event(
             scene.host = None;
             scene.feedback = None;
         }
-        NetEvent::PrimaryChanged(id) => scene.primary = Some(id),
+        NetEvent::PrimaryChanged(id) => {
+            scene.primary = Some(id);
+            // Cinema shows the primary monitor.
+            if scene.relayout_pending() || scene.settings.cinema {
+                scene.arrange_all();
+            }
+        }
         NetEvent::MirrorWanted(enabled) => scene.mirror_wanted = enabled,
         NetEvent::AudioWanted(enabled) => scene.audio_wanted = enabled,
         NetEvent::MicWanted(enabled) => scene.mic_wanted = enabled,
         NetEvent::Focus(id) => scene.focus = id,
-        NetEvent::Order(ids) => scene.order = ids,
+        NetEvent::Order(ids) => {
+            scene.order = ids;
+            if scene.relayout_pending() {
+                scene.arrange_all();
+            }
+        }
         NetEvent::HostError(text) => scene.show_error(text),
         NetEvent::StreamStart {
             id,
@@ -1181,7 +1211,9 @@ fn handle_net_event(
                             swapchain,
                         },
                     );
-                    if !scene.placements.contains_key(&id) && !scene.settings.cinema {
+                    if scene.relayout_pending() {
+                        scene.arrange_all();
+                    } else if !scene.placements.contains_key(&id) && !scene.settings.cinema {
                         if id == MIRROR_ID {
                             // Only the mirror is new: put it under the primary monitor.
                             let all = layout::arrange(
@@ -1217,6 +1249,15 @@ fn handle_net_event(
     }
 }
 
+/// Passthrough cameras on only for the "room" background.
+fn set_passthrough(scene: &mut Scene, passthrough: &mut Option<passthrough::Passthrough>) {
+    if let Some(pt) = passthrough
+        && let Err(e) = pt.set_running(scene.settings.background == Background::Room)
+    {
+        scene.show_error(format!("Камери недоступні: {e:#}"));
+    }
+}
+
 fn handle_action(
     scene: &mut Scene,
     action: Action,
@@ -1224,6 +1265,21 @@ fn handle_action(
     controls: &mut Controls,
 ) {
     let settings_path: &Path = &scene.settings_path.clone();
+    // Changing the setup by hand leaves the profile it came from.
+    if matches!(
+        action,
+        Action::Add { .. }
+            | Action::Remove(_)
+            | Action::MakePrimary(_)
+            | Action::Move { .. }
+            | Action::SetMirror(_)
+            | Action::Preset(_)
+            | Action::Curve(_)
+            | Action::Background(_)
+            | Action::Cinema(_)
+    ) {
+        scene.active_profile = None;
+    }
     match action {
         Action::Add { width, height } => scene.send(ClientMsg::AddMonitor { width, height }),
         Action::Remove(id) => {
@@ -1298,11 +1354,42 @@ fn handle_action(
         Action::Background(background) => {
             scene.settings.background = background;
             scene.settings.save(settings_path);
-            if let Some(pt) = passthrough
-                && let Err(e) = pt.set_running(background == Background::Room)
-            {
-                scene.show_error(format!("Камери недоступні: {e:#}"));
+            set_passthrough(scene, passthrough);
+        }
+        Action::ApplyProfile(i) => {
+            let p = scene.profiles[i].clone();
+            scene.send(ClientMsg::SetMonitors {
+                sizes: p.sizes.clone(),
+                primary: p.primary,
+            });
+            if p.mirror != scene.mirror_wanted {
+                scene.mirror_wanted = p.mirror;
+                scene.send(ClientMsg::SetMirror { enabled: p.mirror });
             }
+            let s = &mut scene.settings;
+            s.preset = p.settings.preset;
+            s.curve = p.settings.curve;
+            s.background = p.settings.background;
+            s.cinema = p.settings.cinema;
+            scene.settings.save(settings_path);
+            set_passthrough(scene, passthrough);
+            scene.active_profile = Some(i);
+            scene.relayout_until = Some(Instant::now() + Duration::from_secs(8));
+            scene.arrange_all();
+        }
+        Action::SaveProfile(i) => {
+            let sizes = scene.quest_sizes();
+            scene.profiles[i] = Profile {
+                primary: sizes
+                    .iter()
+                    .position(|m| Some(m.0) == scene.primary)
+                    .unwrap_or(0) as u8,
+                sizes: sizes.iter().map(|m| (m.1, m.2)).collect(),
+                mirror: scene.mirror_wanted,
+                settings: scene.settings,
+            };
+            profiles::save(&scene.profiles_path, &scene.profiles);
+            scene.active_profile = Some(i);
         }
         Action::ConnectTo(i) => {
             if let Some(h) = scene.found.get(i) {

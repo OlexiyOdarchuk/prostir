@@ -8,6 +8,7 @@
 pub mod background;
 pub mod i18n;
 pub mod layout;
+pub mod profiles;
 pub mod settings;
 pub mod ui;
 

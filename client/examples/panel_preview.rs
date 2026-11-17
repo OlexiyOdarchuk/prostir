@@ -69,9 +69,14 @@ fn main() {
         confirm_remove: Some(2),
         tab: match std::env::var("TAB").as_deref() {
             Ok("look") => Tab::Look,
+            Ok("profiles") => Tab::Profiles,
             Ok("sound") => Tab::Sound,
             _ => Tab::Monitors,
         },
+        profiles: (0..prostir::profiles::SLOTS)
+            .map(prostir::profiles::Profile::default_for)
+            .collect(),
+        active_profile: Some(0),
         lang: if std::env::var("LANG_UI").as_deref() == Ok("en") {
             Lang::En
         } else {

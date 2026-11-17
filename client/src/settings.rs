@@ -84,10 +84,14 @@ impl Default for Settings {
 
 impl Settings {
     pub fn load(path: &Path) -> Self {
+        std::fs::read_to_string(path)
+            .map(|text| Self::parse(&text))
+            .unwrap_or_default()
+    }
+
+    /// Reads `key value` lines; unknown keys are ignored and missing ones default.
+    pub fn parse(text: &str) -> Self {
         let mut s = Self::default();
-        let Ok(text) = std::fs::read_to_string(path) else {
-            return s;
-        };
         for line in text.lines() {
             match line.split_once(' ') {
                 Some(("preset", v)) => {
@@ -132,6 +136,12 @@ impl Settings {
     }
 
     pub fn save(&self, path: &Path) {
+        if let Err(e) = std::fs::write(path, self.to_text()) {
+            log::warn!("cannot save settings to {}: {e}", path.display());
+        }
+    }
+
+    pub fn to_text(&self) -> String {
         let preset = match self.preset {
             Preset::Arc => "arc",
             Preset::Grid => "grid",
@@ -158,15 +168,12 @@ impl Settings {
             HandMode::Control => "control",
         };
         let on = |b: bool| if b { "on" } else { "off" };
-        let text = format!(
+        format!(
             "preset {preset}\ncurve {curve}\nbackground {background}\nhands {hands}\n\
              focus {}\ncinema {}\n",
             on(self.focus),
             on(self.cinema)
-        );
-        if let Err(e) = std::fs::write(path, text) {
-            log::warn!("cannot save settings to {}: {e}", path.display());
-        }
+        )
     }
 }
 
