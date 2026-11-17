@@ -102,6 +102,8 @@ pub enum Action {
     Hands(HandMode),
     Focus(bool),
     Cinema(bool),
+    /// Which monitor (position in the row) cinema mode shows.
+    CinemaScreen(u8),
     ApplyProfile(usize),
     SaveProfile(usize),
     Tab(Tab),
@@ -1091,18 +1093,46 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
             ),
         ],
     );
-    if st.cinema {
-        items.push(text(
+    // The cinema screen can be picked before switching to cinema.
+    if s.monitors.len() > 1 {
+        let sizes: Vec<(u8, u32, u32)> = s
+            .monitors
+            .iter()
+            .map(|m| (m.id, m.width, m.height))
+            .collect();
+        let shown = crate::layout::cinema_choice(&sizes, st.cinema_screen);
+        let short = s.monitors.len() > 3;
+        let labels: Vec<String> = s
+            .monitors
+            .iter()
+            .map(|m| {
+                if short {
+                    format!("{}", m.id + 1)
+                } else {
+                    format!("{} {}", l.t("Монітор", "Monitor"), m.id + 1)
+                }
+            })
+            .collect();
+        segmented(
+            items,
             rx,
-            y - 12.0,
-            19.0,
-            false,
-            MUTED,
-            l.t(
-                "Видно лише головний монітор, великий і далі.",
-                "Only the primary monitor, big and further away.",
-            ),
-        ));
+            rw,
+            &mut y,
+            l.t("Екран для кінотеатру", "Cinema screen"),
+            s.monitors
+                .iter()
+                .zip(&labels)
+                .enumerate()
+                .map(|(i, (m, label))| {
+                    (
+                        label.as_str(),
+                        Action::CinemaScreen(i as u8),
+                        shown == Some(m.id),
+                        true,
+                    )
+                })
+                .collect(),
+        );
     }
 }
 

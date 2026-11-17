@@ -68,6 +68,9 @@ pub struct Settings {
     pub focus: bool,
     /// One big screen further away; the other monitors are hidden.
     pub cinema: bool,
+    /// Position in the row of the monitor shown in cinema mode; `None`: the largest
+    /// landscape one.
+    pub cinema_screen: Option<u8>,
     pub language: Language,
     /// The language of the PC last connected to (for "like the PC" before connecting).
     pub pc_language: Option<Lang>,
@@ -82,6 +85,7 @@ impl Default for Settings {
             hands: HandMode::Visible,
             focus: false,
             cinema: false,
+            cinema_screen: None,
             language: Language::LikePc,
             pc_language: None,
         }
@@ -117,6 +121,7 @@ impl Settings {
                 }
                 Some(("focus", v)) => s.focus = v == "on",
                 Some(("cinema", v)) => s.cinema = v == "on",
+                Some(("cinema-screen", v)) => s.cinema_screen = v.parse().ok(),
                 Some(("language", v)) => {
                     s.language = match v {
                         "uk" => Language::Fixed(Lang::Uk),
@@ -184,9 +189,11 @@ impl Settings {
         let on = |b: bool| if b { "on" } else { "off" };
         format!(
             "preset {preset}\ncurve {curve}\nbackground {background}\nhands {hands}\n\
-             focus {}\ncinema {}\nlanguage {}\npc-language {}\n",
+             focus {}\ncinema {}\ncinema-screen {}\nlanguage {}\npc-language {}\n",
             on(self.focus),
             on(self.cinema),
+            self.cinema_screen
+                .map_or_else(|| "auto".to_owned(), |i| i.to_string()),
             match self.language {
                 Language::LikePc => "like-pc",
                 Language::Fixed(l) => l.code(),
@@ -212,6 +219,7 @@ mod tests {
             hands: HandMode::Control,
             focus: true,
             cinema: true,
+            cinema_screen: Some(2),
             language: Language::Fixed(Lang::En),
             pc_language: Some(Lang::Uk),
         };

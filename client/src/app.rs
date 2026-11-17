@@ -194,7 +194,7 @@ impl Scene {
     /// Lays everything out by the chosen preset.
     fn arrange_all(&mut self) {
         if self.settings.cinema {
-            self.placements = layout::cinema(&self.quest_sizes(), self.primary);
+            self.placements = layout::cinema(&self.quest_sizes(), self.settings.cinema_screen);
             self.grabs = [None, None];
             return;
         }
@@ -1195,8 +1195,7 @@ fn handle_net_event(
         }
         NetEvent::PrimaryChanged(id) => {
             scene.primary = Some(id);
-            // Cinema shows the primary monitor.
-            if scene.relayout_pending() || scene.settings.cinema {
+            if scene.relayout_pending() {
                 scene.arrange_all();
             }
         }
@@ -1310,6 +1309,7 @@ fn handle_action(
             | Action::Curve(_)
             | Action::Background(_)
             | Action::Cinema(_)
+            | Action::CinemaScreen(_)
     ) {
         scene.active_profile = None;
     }
@@ -1330,6 +1330,13 @@ fn handle_action(
         Action::Language(language) => {
             scene.settings.language = language;
             scene.settings.save(settings_path);
+        }
+        Action::CinemaScreen(i) => {
+            scene.settings.cinema_screen = Some(i);
+            scene.settings.save(settings_path);
+            if scene.settings.cinema {
+                scene.arrange_all();
+            }
         }
         Action::Cinema(on) => {
             scene.settings.cinema = on;
@@ -1408,6 +1415,7 @@ fn handle_action(
             s.curve = p.settings.curve;
             s.background = p.settings.background;
             s.cinema = p.settings.cinema;
+            s.cinema_screen = p.settings.cinema_screen;
             scene.settings.save(settings_path);
             set_passthrough(scene, passthrough);
             scene.active_profile = Some(i);

@@ -80,15 +80,27 @@ pub fn order_by_direction(placements: &HashMap<u8, Placement>, ids: &[u8]) -> Ve
     v.into_iter().map(|(_, id)| id).collect()
 }
 
-/// Cinema: only the primary monitor (else the first), big and further away,
-/// straight ahead at eye level; the others are not shown.
-pub fn cinema(monitors: &[(u8, u32, u32)], primary: Option<u8>) -> HashMap<u8, Placement> {
+/// The monitor shown in cinema mode: the one at position `pick` in the row, else the
+/// largest landscape one (films are wide), else the first.
+pub fn cinema_choice(monitors: &[(u8, u32, u32)], pick: Option<u8>) -> Option<u8> {
+    pick.and_then(|i| monitors.get(i as usize))
+        .or_else(|| {
+            monitors
+                .iter()
+                .filter(|m| m.1 > m.2)
+                .max_by_key(|m| u64::from(m.1) * u64::from(m.2))
+        })
+        .or_else(|| monitors.first())
+        .map(|m| m.0)
+}
+
+/// Cinema: one monitor big and further away, straight ahead at eye level; the others
+/// are not shown.
+pub fn cinema(monitors: &[(u8, u32, u32)], pick: Option<u8>) -> HashMap<u8, Placement> {
     const DISTANCE: f32 = 3.0;
     /// About 56° wide, like a good seat in a cinema.
     const WIDTH: f32 = 3.2;
-    let id = primary
-        .filter(|p| monitors.iter().any(|m| m.0 == *p))
-        .or_else(|| monitors.first().map(|m| m.0));
+    let id = cinema_choice(monitors, pick);
     let mut out = HashMap::new();
     if let Some(id) = id {
         let position = Vec3::new(0.0, -0.05, -DISTANCE);
@@ -556,13 +568,20 @@ mod tests {
     }
 
     #[test]
-    fn cinema_shows_only_the_primary() {
-        let monitors = [(0, 2560, 1440), (1, 2560, 1440), (2, 1440, 2560)];
+    fn cinema_shows_one_monitor() {
+        // Row order: portrait in the middle.
+        let monitors = [(0, 2560, 1440), (2, 1440, 2560), (1, 3840, 2160)];
         let out = cinema(&monitors, Some(1));
-        assert_eq!(out.keys().copied().collect::<Vec<_>>(), vec![1]);
-        assert!(out[&1].position.z < -2.0, "further away than the desk");
-        // Unknown primary: the first monitor.
-        assert!(cinema(&monitors, Some(9)).contains_key(&0));
+        assert_eq!(
+            out.keys().copied().collect::<Vec<_>>(),
+            vec![2],
+            "picked by position"
+        );
+        assert!(out[&2].position.z < -2.0, "further away than the desk");
+        // Nothing picked (or a stale pick): the largest landscape monitor, not a portrait one.
+        assert_eq!(cinema_choice(&monitors, None), Some(1));
+        assert_eq!(cinema_choice(&monitors, Some(9)), Some(1));
+        assert_eq!(cinema_choice(&[(4, 1440, 2560)], None), Some(4));
         assert!(cinema(&[], None).is_empty());
     }
 }
