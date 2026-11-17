@@ -47,6 +47,8 @@ pub struct UiState {
     pub monitors: Vec<MonitorEntry>,
     pub primary: Option<u8>,
     pub mirror_wanted: bool,
+    /// PC sound goes to the headset.
+    pub audio_wanted: bool,
     /// The physical display is being shown (its lid is open).
     pub mirror_active: bool,
     pub settings: Settings,
@@ -74,6 +76,7 @@ pub enum Action {
         delta: i32,
     },
     SetMirror(bool),
+    SetAudio(bool),
     Preset(Preset),
     Curve(Curve),
     Background(Background),
@@ -362,6 +365,27 @@ impl Panel {
                 label,
                 style,
                 Some(Action::SetMirror(!s.mirror_wanted)),
+            ));
+            y += 70.0;
+            // Sound.
+            items.push(Item::Box(rect(lx, y, lw, 62.0), [255, 255, 255, 12]));
+            items.push(text(lx + 20.0, y + 40.0, 24.0, true, TEXT, "Звук"));
+            let where_ = if s.audio_wanted {
+                "у шоломі"
+            } else {
+                "на ноутбуці"
+            };
+            items.push(text(lx + 100.0, y + 40.0, 20.0, false, MUTED, where_));
+            let (label, enable) = if s.audio_wanted {
+                ("На ноутбук", false)
+            } else {
+                ("У шолом", true)
+            };
+            items.push(button(
+                rect(lx + lw - 10.0 - 160.0, y + 7.0, 160.0, 48.0),
+                label,
+                Style::Normal,
+                Some(Action::SetAudio(enable)),
             ));
             y += 70.0;
         }
@@ -1006,6 +1030,7 @@ mod tests {
             ],
             primary: Some(1),
             mirror_wanted: true,
+            audio_wanted: true,
             mirror_active: true,
             settings: Settings::default(),
             room_available: true,

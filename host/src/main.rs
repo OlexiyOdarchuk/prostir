@@ -1,3 +1,4 @@
+mod audio;
 mod displays;
 mod encoder;
 mod pairing;
@@ -138,7 +139,8 @@ fn serve_client(
 ) -> Result<()> {
     let mut writer = BufWriter::with_capacity(1 << 20, writer);
 
-    let (tx, rx) = mpsc::sync_channel::<HostMsg>(16);
+    // Room for ~0.3 s of 10 ms sound slices next to video frames.
+    let (tx, rx) = mpsc::sync_channel::<HostMsg>(64);
     let writer_thread = {
         let stream = stream.try_clone()?;
         std::thread::Builder::new()
@@ -184,6 +186,10 @@ fn serve_client(
     displays.router.send(HostMsg::MirrorWanted {
         enabled: displays.mirror_wanted(),
     });
+    displays.router.send(HostMsg::AudioWanted {
+        enabled: displays.audio_wanted(),
+    });
+    displays.set_audio_active(true);
     displays.force_keyframes();
 
     // Housekeeping runs on a clock: the headset acknowledges every frame, so the
@@ -232,6 +238,10 @@ fn serve_client(
                 Ok(()) => displays.save(),
                 Err(e) => report(displays, format!("{e:#}")),
             },
+            Ok(Ok(ClientMsg::SetAudio { enabled })) => {
+                displays.set_audio_wanted(enabled);
+                displays.save();
+            }
             Ok(Ok(ClientMsg::SetMirror { enabled })) => {
                 displays.set_mirror(enabled);
                 displays.save();
@@ -248,6 +258,7 @@ fn serve_client(
             Err(RecvTimeoutError::Disconnected) => break Ok(()),
         }
     };
+    displays.set_audio_active(false);
     displays.router.detach();
     let _ = stream.shutdown(Shutdown::Both);
     let _ = writer_thread.join();
@@ -374,12 +385,14 @@ fn create_displays(args: &Args, bitrate: u32) -> Result<Displays> {
             specs: args.monitors.clone(),
             primary: None,
             mirror,
+            audio: true,
             bitrate: None,
         },
         _ => SavedMonitors {
             specs: vec![parse_monitor("2560x1440").expect("valid default")],
             primary: None,
             mirror,
+            audio: true,
             bitrate: None,
         },
     };

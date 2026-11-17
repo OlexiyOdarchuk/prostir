@@ -54,6 +54,8 @@ pub enum NetEvent {
     Hosts(Vec<FoundHost>),
     PrimaryChanged(u8),
     MirrorWanted(bool),
+    /// Whether PC sound comes to the headset.
+    AudioWanted(bool),
     /// Left-to-right order of the Quest monitors.
     Order(Vec<u8>),
     /// A request failed on the host; shown in the menu.
@@ -543,6 +545,8 @@ fn run_session(
     }
 
     let mut streams: HashMap<u8, StreamSlot> = HashMap::new();
+    // Started on the first sound slice, stopped with the session.
+    let mut player: Option<crate::audio::Player> = None;
     let result = loop {
         let msg = match HostMsg::read(&mut reader) {
             Ok(m) => m,
@@ -620,6 +624,17 @@ fn run_session(
             }
             HostMsg::Error { text } => {
                 let _ = events.send(NetEvent::HostError(text));
+            }
+            HostMsg::Audio { pcm } => {
+                player
+                    .get_or_insert_with(crate::audio::Player::spawn)
+                    .push(pcm);
+            }
+            HostMsg::AudioWanted { enabled } => {
+                if !enabled {
+                    player = None;
+                }
+                let _ = events.send(NetEvent::AudioWanted(enabled));
             }
             HostMsg::Welcome { .. }
             | HostMsg::PairingRequired

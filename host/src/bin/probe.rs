@@ -109,6 +109,9 @@ fn main() -> Result<()> {
         first_is_key: Option<bool>,
     }
     let mut streams: HashMap<u8, Stats> = HashMap::new();
+    // Raw PCM: play with `pw-play --format s16 --rate 48000 --channels 2 audio.raw`.
+    let mut audio = BufWriter::new(std::fs::File::create(dir.join("audio.raw"))?);
+    let mut audio_bytes = 0u64;
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(seconds) {
         match HostMsg::read(&mut r)? {
@@ -152,11 +155,21 @@ fn main() -> Result<()> {
             HostMsg::Error { text } => println!("host error: {text}"),
             HostMsg::MirrorWanted { enabled } => println!("mirror wanted: {enabled}"),
             HostMsg::Order { ids } => println!("order: {ids:?}"),
+            HostMsg::Audio { pcm } => {
+                audio_bytes += pcm.len() as u64;
+                audio.write_all(&pcm)?;
+            }
+            HostMsg::AudioWanted { enabled } => println!("sound to headset: {enabled}"),
             HostMsg::PairingRequired | HostMsg::PairMsg { .. } | HostMsg::PairResult { .. } => {}
             HostMsg::Welcome { .. } => {}
         }
     }
     let secs = start.elapsed().as_secs_f64();
+    audio.flush()?;
+    println!(
+        "sound: {:.1} s of audio in {secs:.1} s",
+        audio_bytes as f64 / (prostir_proto::AUDIO_RATE * prostir_proto::AUDIO_CHANNELS * 2) as f64
+    );
     for (id, s) in &mut streams {
         s.file.flush()?;
         println!(

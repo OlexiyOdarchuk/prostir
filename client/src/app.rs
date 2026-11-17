@@ -102,6 +102,7 @@ struct Scene {
     placements: HashMap<u8, Placement>,
     primary: Option<u8>,
     mirror_wanted: bool,
+    audio_wanted: bool,
     settings: Settings,
     curve_supported: bool,
     panel_open: bool,
@@ -298,6 +299,7 @@ impl Scene {
                 .collect(),
             primary: self.primary,
             mirror_wanted: self.mirror_wanted,
+            audio_wanted: self.audio_wanted,
             mirror_active: self.monitors.contains_key(&MIRROR_ID),
             settings: self.settings,
             room_available: room,
@@ -493,6 +495,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         placements: layout::load(&layout_path),
         primary: None,
         mirror_wanted: true,
+        audio_wanted: true,
         settings,
         curve_supported: exts.khr_composition_layer_cylinder,
         panel_open: false,
@@ -1031,6 +1034,7 @@ fn handle_net_event(
         }
         NetEvent::PrimaryChanged(id) => scene.primary = Some(id),
         NetEvent::MirrorWanted(enabled) => scene.mirror_wanted = enabled,
+        NetEvent::AudioWanted(enabled) => scene.audio_wanted = enabled,
         NetEvent::Order(ids) => scene.order = ids,
         NetEvent::HostError(text) => scene.show_error(text),
         NetEvent::StreamStart {
@@ -1135,6 +1139,10 @@ fn handle_action(
                 scene.reorder(ids);
                 scene.arrange_all();
             }
+        }
+        Action::SetAudio(enabled) => {
+            scene.audio_wanted = enabled;
+            scene.send(ClientMsg::SetAudio { enabled });
         }
         Action::SetMirror(enabled) => {
             scene.mirror_wanted = enabled;

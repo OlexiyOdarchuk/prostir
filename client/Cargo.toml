@@ -22,7 +22,7 @@ fontdue = "0.9"
 prostir-proto = { path = "../proto" }
 openxr = { version = "0.22", features = ["loaded"] }
 android-activity = { version = "0.6", features = ["native-activity"] }
-ndk = { version = "0.9", features = ["media", "api-level-29"] }
+ndk = { version = "0.9", features = ["media", "audio", "api-level-29"] }
 ndk-context = "0.1"
 jni = "0.21"
 khronos-egl = { version = "6", features = ["static", "no-pkg-config"] }

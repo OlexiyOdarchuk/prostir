@@ -11,6 +11,7 @@ use anyhow::{Result, bail};
 use log::{debug, error, info, warn};
 use prostir_proto::{Codec, HostMsg, MIRROR_ID};
 
+use crate::audio::AudioOut;
 use crate::encoder::{Encoder, EncoderConfig, EncoderEvent};
 use crate::virtual_output::{self, MonitorSpec, Screencast, VirtualOutput};
 
@@ -143,6 +144,14 @@ impl Router {
         }
     }
 
+    /// Forwards a slice of PC sound; dropped if the network is backed up (a tiny gap
+    /// in sound beats growing latency).
+    pub fn send_audio(&self, pcm: Vec<u8>) {
+        if let Some(tx) = &self.inner.lock().unwrap().tx {
+            let _ = tx.try_send(HostMsg::Audio { pcm });
+        }
+    }
+
     pub fn frame_shown(&self, id: u8, pts_us: u64) {
         let mut inner = self.inner.lock().unwrap();
         let Some(slot) = inner.streams.get_mut(&id) else {
@@ -256,6 +265,8 @@ pub struct SavedMonitors {
     pub specs: Vec<MonitorSpec>,
     pub primary: Option<usize>,
     pub mirror: bool,
+    /// PC sound goes to the headset while it is connected.
+    pub audio: bool,
     /// Mbit/s per monitor, if chosen in the tray.
     pub bitrate: Option<u32>,
 }
@@ -278,10 +289,15 @@ pub fn load_saved(parse: impl Fn(&str) -> Result<MonitorSpec, String>) -> Option
     let mut specs = Vec::new();
     let mut primary = None;
     let mut mirror = true;
+    let mut audio = true;
     let mut bitrate = None;
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
         if let Some(v) = line.strip_prefix("bitrate ") {
             bitrate = v.trim().parse().ok();
+            continue;
+        }
+        if let Some(v) = line.strip_prefix("audio ") {
+            audio = v.trim() != "off";
             continue;
         }
         if let Some(v) = line.strip_prefix("mirror ") {
@@ -303,6 +319,7 @@ pub fn load_saved(parse: impl Fn(&str) -> Result<MonitorSpec, String>) -> Option
         specs,
         primary,
         mirror,
+        audio,
         bitrate,
     })
 }
@@ -315,6 +332,9 @@ pub struct Displays {
     mirror: Option<Mirror>,
     mirror_wanted: bool,
     mirror_retry: Instant,
+    /// PC sound to the headset, while one is connected.
+    audio: Option<AudioOut>,
+    audio_wanted: bool,
     /// Last time the laptop panel was switched back on (to avoid fighting the user).
     woke_display_at: Option<Instant>,
     screencast: Screencast,
@@ -332,6 +352,8 @@ impl Displays {
             order: Vec::new(),
             mirror: None,
             mirror_wanted: saved.mirror,
+            audio: None,
+            audio_wanted: saved.audio,
             mirror_retry: Instant::now(),
             woke_display_at: None,
             screencast: Screencast::connect()?,
@@ -478,6 +500,29 @@ impl Displays {
 
     pub fn mirror_active(&self) -> bool {
         self.mirror.is_some()
+    }
+
+    /// Starts or stops sending PC sound (only while a headset is connected).
+    pub fn set_audio_active(&mut self, active: bool) {
+        let active = active && self.audio_wanted;
+        if active && self.audio.is_none() {
+            match AudioOut::start(self.router.clone()) {
+                Ok(a) => self.audio = Some(a),
+                Err(e) => warn!("no sound in the headset: {e:#}"),
+            }
+        } else if !active {
+            self.audio = None;
+        }
+    }
+
+    pub fn set_audio_wanted(&mut self, enabled: bool) {
+        self.audio_wanted = enabled;
+        self.set_audio_active(enabled);
+        self.router.send(HostMsg::AudioWanted { enabled });
+    }
+
+    pub fn audio_wanted(&self) -> bool {
+        self.audio_wanted
     }
 
     pub fn mirror_wanted(&self) -> bool {
@@ -652,8 +697,9 @@ impl Displays {
                 format!("{}{star}\n", m.spec)
             })
             .chain(std::iter::once(format!(
-                "mirror {}\nbitrate {}\n",
+                "mirror {}\naudio {}\nbitrate {}\n",
                 if self.mirror_wanted { "on" } else { "off" },
+                if self.audio_wanted { "on" } else { "off" },
                 self.cfg.bitrate_kbps / 1000
             )))
             .collect();
