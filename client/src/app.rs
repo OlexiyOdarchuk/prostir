@@ -14,7 +14,7 @@ use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use android_activity::{AndroidApp, MainEvent, PollEvent};
+use android_activity::{AndroidApp, InputStatus, MainEvent, PollEvent};
 use anyhow::{Result, anyhow, bail};
 use glam::Vec3;
 use log::{error, info, warn};
@@ -531,13 +531,22 @@ fn run(app: &AndroidApp) -> Result<()> {
         } else {
             Duration::from_millis(100)
         };
-        app.poll_events(Some(timeout), |event| {
-            if let PollEvent::Main(MainEvent::Destroy) = event {
-                destroy = true;
-            }
+        let mut input_waiting = false;
+        app.poll_events(Some(timeout), |event| match event {
+            PollEvent::Main(MainEvent::Destroy) => destroy = true,
+            PollEvent::Main(MainEvent::InputAvailable) => input_waiting = true,
+            _ => {}
         });
         if destroy {
             break;
+        }
+        if input_waiting {
+            // Android waits for every key event (e.g. the volume buttons) to be taken
+            // and answers "not responding" after 5 s otherwise. Hand them all back to
+            // the system so the volume buttons keep working.
+            if let Ok(mut events) = app.input_events_iter() {
+                while events.next(|_| InputStatus::Unhandled) {}
+            }
         }
 
         while let Some(event) = instance.poll_event(&mut event_storage)? {

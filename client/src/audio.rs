@@ -5,10 +5,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::time::Duration;
 
 use log::{info, warn};
-use ndk::audio::{
-    AudioDirection, AudioFormat, AudioPerformanceMode, AudioSharingMode, AudioStream,
-    AudioStreamBuilder,
-};
+use ndk_sys as ffi;
 use prostir_proto::{AUDIO_CHANNELS, AUDIO_RATE};
 
 /// Most audio kept waiting before older slices are dropped (10 ms each), so sound
@@ -26,9 +23,9 @@ impl Player {
         let (tx, rx) = mpsc::sync_channel(32);
         std::thread::Builder::new()
             .name("audio".into())
-            .spawn(move || match open() {
+            .spawn(move || match Stream::open() {
                 Ok(stream) => play(&stream, &rx),
-                Err(e) => warn!("no sound: {e}"),
+                Err(e) => warn!("no sound: AAudio error {e}"),
             })
             .expect("spawn audio thread");
         Self { tx }
@@ -40,28 +37,74 @@ impl Player {
     }
 }
 
-fn open() -> ndk::audio::Result<AudioStream> {
-    let stream = AudioStreamBuilder::new()?
-        .direction(AudioDirection::Output)
-        .format(AudioFormat::PCM_I16)
-        .channel_count(AUDIO_CHANNELS as i32)
-        .sample_rate(AUDIO_RATE as i32)
-        .performance_mode(AudioPerformanceMode::LowLatency)
-        .sharing_mode(AudioSharingMode::Shared)
-        .open_stream()?;
-    // A few bursts of headroom absorb network jitter without much delay.
-    let burst = stream.frames_per_burst().max(96);
-    let _ = stream.set_buffer_size_in_frames(burst * 4);
-    stream.request_start()?;
-    info!(
-        "sound: {} Hz, buffer {} frames",
-        stream.sample_rate(),
-        burst * 4
-    );
-    Ok(stream)
+/// An AAudio output stream. Called through `ndk-sys` directly: `ndk` 0.9 reports a
+/// successful write (the frame count) as an error.
+struct Stream(*mut ffi::AAudioStream);
+
+// SAFETY: AAudio streams may be used from any one thread at a time; this one is
+// owned by the audio thread.
+unsafe impl Send for Stream {}
+
+impl Stream {
+    fn open() -> Result<Self, i32> {
+        // SAFETY: plain AAudio calls; the builder is deleted on every path.
+        unsafe {
+            let mut builder = std::ptr::null_mut();
+            check(ffi::AAudio_createStreamBuilder(&mut builder))?;
+            ffi::AAudioStreamBuilder_setDirection(builder, ffi::AAUDIO_DIRECTION_OUTPUT as i32);
+            ffi::AAudioStreamBuilder_setFormat(builder, ffi::AAUDIO_FORMAT_PCM_I16);
+            ffi::AAudioStreamBuilder_setChannelCount(builder, AUDIO_CHANNELS as i32);
+            ffi::AAudioStreamBuilder_setSampleRate(builder, AUDIO_RATE as i32);
+            ffi::AAudioStreamBuilder_setPerformanceMode(
+                builder,
+                ffi::AAUDIO_PERFORMANCE_MODE_LOW_LATENCY as i32,
+            );
+            ffi::AAudioStreamBuilder_setSharingMode(
+                builder,
+                ffi::AAUDIO_SHARING_MODE_SHARED as i32,
+            );
+            let mut stream = std::ptr::null_mut();
+            let opened = ffi::AAudioStreamBuilder_openStream(builder, &mut stream);
+            ffi::AAudioStreamBuilder_delete(builder);
+            check(opened)?;
+            // A few bursts of headroom absorb network jitter without much delay.
+            let burst = ffi::AAudioStream_getFramesPerBurst(stream).max(96);
+            ffi::AAudioStream_setBufferSizeInFrames(stream, burst * 4);
+            let s = Self(stream);
+            check(ffi::AAudioStream_requestStart(stream))?;
+            info!(
+                "sound: {} Hz, buffer {} frames",
+                ffi::AAudioStream_getSampleRate(stream),
+                burst * 4
+            );
+            Ok(s)
+        }
+    }
+
+    /// Writes interleaved i16 frames, waiting up to 50 ms for room.
+    fn write(&self, pcm: &[u8]) -> Result<(), i32> {
+        let frames = (pcm.len() / FRAME_BYTES) as i32;
+        // SAFETY: `pcm` holds `frames` whole frames; the stream is open.
+        let n = unsafe { ffi::AAudioStream_write(self.0, pcm.as_ptr().cast(), frames, 50_000_000) };
+        check(n)
+    }
 }
 
-fn play(stream: &AudioStream, rx: &Receiver<Vec<u8>>) {
+impl Drop for Stream {
+    fn drop(&mut self) {
+        // SAFETY: the stream was opened by `Stream::open` and is closed once.
+        unsafe {
+            ffi::AAudioStream_requestStop(self.0);
+            ffi::AAudioStream_close(self.0);
+        }
+    }
+}
+
+fn check(result: i32) -> Result<(), i32> {
+    if result < 0 { Err(result) } else { Ok(()) }
+}
+
+fn play(stream: &Stream, rx: &Receiver<Vec<u8>>) {
     let mut queue: VecDeque<Vec<u8>> = VecDeque::new();
     loop {
         match rx.recv_timeout(Duration::from_millis(200)) {
@@ -76,14 +119,10 @@ fn play(stream: &AudioStream, rx: &Receiver<Vec<u8>>) {
             queue.pop_front();
         }
         while let Some(pcm) = queue.pop_front() {
-            let frames = (pcm.len() / FRAME_BYTES) as i32;
-            // SAFETY: `pcm` holds `frames` interleaved i16 stereo frames.
-            let written = unsafe { stream.write(pcm.as_ptr().cast(), frames, 50_000_000) };
-            if let Err(e) = written {
-                warn!("sound output: {e}");
+            if let Err(e) = stream.write(&pcm) {
+                warn!("sound output: AAudio error {e}");
                 return;
             }
         }
     }
-    let _ = stream.request_stop();
 }

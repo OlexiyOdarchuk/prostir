@@ -1751,6 +1751,7 @@ dependencies = [
  "log",
  "ndk",
  "ndk-context",
+ "ndk-sys",
  "openxr",
  "prostir-proto",
  "tiny-skia",
