@@ -171,7 +171,7 @@ impl Dispatch<ZkdeScreencastStreamUnstableV1, u32> for State {
             zkde_screencast_stream_unstable_v1::Event::Created { node } => s.node = Some(node),
             zkde_screencast_stream_unstable_v1::Event::Failed { error } => s.failed = Some(error),
             zkde_screencast_stream_unstable_v1::Event::Closed => {
-                warn!("KWin closed virtual output Quest-{number}");
+                warn!("KWin closed virtual output Prostir-{number}");
                 s.closed = true;
             }
             _ => {}
@@ -336,7 +336,7 @@ impl Screencast {
         })
     }
 
-    /// Creates output `Virtual-Quest-<number>` and waits for its PipeWire node.
+    /// Creates output `Virtual-Prostir-<number>` and waits for its PipeWire node.
     pub fn create(&self, number: u32, spec: &MonitorSpec) -> Result<VirtualOutput> {
         spec.validate()?;
         self.shared
@@ -344,12 +344,12 @@ impl Screencast {
             .lock()
             .unwrap()
             .insert(number, StreamState::default());
-        let name = format!("Quest-{number}");
+        let name = format!("Prostir-{number}");
         // The protocol calls these "logical", but KWin uses them as the output's mode
         // (pixel size); scale is applied separately through KScreen.
         let (w, h) = (spec.width as i32, spec.height as i32);
         let stream = if self.screencast.version() >= 4 {
-            let description = format!("Quest 3 — монітор {number}");
+            let description = format!("Prostir — монітор {number}");
             self.screencast.stream_virtual_output_with_description(
                 name,
                 description,
@@ -374,10 +374,10 @@ impl Screencast {
         let output = self.wait_for_node(
             number,
             stream,
-            format!("Virtual-Quest-{number}"),
+            format!("Virtual-Prostir-{number}"),
             Duration::from_secs(10),
         )?;
-        info!("Quest-{number}: {spec}, PipeWire node {}", output.node);
+        info!("Prostir-{number}: {spec}, PipeWire node {}", output.node);
         if (spec.scale - 1.0).abs() > f64::EPSILON {
             kscreen(output.output_name(), &format!("scale.{}", spec.scale));
         }
@@ -400,7 +400,7 @@ impl Drop for Screencast {
 pub struct VirtualOutput {
     pub number: u32,
     pub node: u32,
-    /// KScreen/connector name: `Virtual-Quest-N`, or e.g. `eDP-1` for a mirror.
+    /// KScreen/connector name: `Virtual-Prostir-N`, or e.g. `eDP-1` for a mirror.
     name: String,
     stream: ZkdeScreencastStreamUnstableV1,
     conn: Connection,

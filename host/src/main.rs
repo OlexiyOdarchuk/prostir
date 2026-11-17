@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use log::{error, info, warn};
-use qmon_proto::{ClientMsg, Codec, HostMsg, PROTOCOL_VERSION};
+use prostir_proto::{ClientMsg, Codec, HostMsg, PROTOCOL_VERSION};
 
 use displays::{Displays, SavedMonitors};
 use encoder::EncoderConfig;
@@ -36,7 +36,7 @@ struct Args {
     /// Software x264 encoder instead of VA-API (implies --codec h264).
     #[arg(long)]
     software: bool,
-    #[arg(long, default_value_t = qmon_proto::TCP_PORT)]
+    #[arg(long, default_value_t = prostir_proto::TCP_PORT)]
     port: u16,
     /// Keep the virtual monitors this many seconds after the headset disconnects.
     #[arg(long, default_value_t = 30)]
@@ -163,7 +163,7 @@ fn serve_client(
                 };
                 match displays.add(spec) {
                     Ok(id) => {
-                        info!("headset added Quest-{}", id + 1);
+                        info!("headset added Prostir-{}", id + 1);
                         displays.force_keyframe(id);
                         displays.save();
                         displays::sync_wallpapers();
@@ -173,7 +173,7 @@ fn serve_client(
             }
             Ok(Ok(ClientMsg::RemoveMonitor { id })) => match displays.remove(id) {
                 Ok(()) => {
-                    info!("headset removed Quest-{}", id + 1);
+                    info!("headset removed Prostir-{}", id + 1);
                     displays.save();
                 }
                 Err(e) => report(displays, format!("{e:#}")),
@@ -224,7 +224,7 @@ fn hostname() -> String {
 fn spawn_discovery(port: u16) -> Result<()> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
     socket.set_broadcast(true)?;
-    let beacon = qmon_proto::encode_beacon(port, &hostname());
+    let beacon = prostir_proto::encode_beacon(port, &hostname());
     std::thread::Builder::new()
         .name("discovery".into())
         .spawn(move || {
@@ -234,7 +234,7 @@ fn spawn_discovery(port: u16) -> Result<()> {
                 let mut targets = broadcast_addresses();
                 targets.push(Ipv4Addr::BROADCAST);
                 for ip in targets {
-                    let _ = socket.send_to(&beacon, (ip, qmon_proto::DISCOVERY_PORT));
+                    let _ = socket.send_to(&beacon, (ip, prostir_proto::DISCOVERY_PORT));
                 }
                 std::thread::sleep(Duration::from_secs(1));
             }

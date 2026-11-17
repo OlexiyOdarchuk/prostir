@@ -1,18 +1,23 @@
 [package]
-name = "qmon-host"
+name = "prostir-host"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Prostir host: virtual KDE Plasma monitors streamed to a Meta Quest headset"
 
 [[bin]]
-name = "questmon-host"
+name = "prostir"
 path = "src/main.rs"
 
 [[bin]]
-name = "questmon-probe"
+name = "prostir-probe"
 path = "src/bin/probe.rs"
 
 [dependencies]
-qmon-proto = { path = "../proto" }
+prostir-proto = { path = "../proto" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 log = "0.4"
@@ -25,5 +30,5 @@ wayland-client = "0.31"
 wayland-protocols-plasma = { version = "0.3", features = ["client"] }
 
 [[bin]]
-name = "questmon-mirrortest"
+name = "prostir-mirrortest"
 path = "src/bin/mirrortest.rs"

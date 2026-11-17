@@ -1,6 +1,11 @@
 [package]
-name = "qmon-proto"
+name = "prostir-proto"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Wire protocol between the Prostir host (KDE Plasma) and the Meta Quest client"
 
 [dependencies]

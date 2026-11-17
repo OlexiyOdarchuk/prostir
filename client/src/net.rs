@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use log::{info, warn};
-use qmon_proto::{ClientMsg, Codec, HostMsg, PROTOCOL_VERSION};
+use prostir_proto::{ClientMsg, Codec, HostMsg, PROTOCOL_VERSION};
 
 pub struct Frame {
     /// When the frame arrived from the network.
@@ -70,7 +70,7 @@ pub fn spawn(events: Sender<NetEvent>, discovery: Discovery) {
     std::thread::Builder::new()
         .name("net".into())
         .spawn(move || {
-            let beacon = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, qmon_proto::DISCOVERY_PORT))
+            let beacon = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, prostir_proto::DISCOVERY_PORT))
                 .inspect_err(|e| warn!("discovery socket: {e}"))
                 .ok();
             loop {
@@ -103,7 +103,7 @@ fn read_addr(path: &PathBuf) -> Option<SocketAddr> {
     text.parse::<SocketAddr>().ok().or_else(|| {
         text.parse::<IpAddr>()
             .ok()
-            .map(|ip| SocketAddr::new(ip, qmon_proto::TCP_PORT))
+            .map(|ip| SocketAddr::new(ip, prostir_proto::TCP_PORT))
     })
 }
 
@@ -119,7 +119,7 @@ fn connect(beacon: Option<&UdpSocket>, discovery: &Discovery) -> Option<TcpStrea
     // USB: the host keeps `adb reverse` active, so localhost reaches the PC.
     if let Some(stream) = try_connect(SocketAddr::new(
         Ipv4Addr::LOCALHOST.into(),
-        qmon_proto::TCP_PORT,
+        prostir_proto::TCP_PORT,
     )) {
         return Some(stream);
     }
@@ -131,7 +131,7 @@ fn connect(beacon: Option<&UdpSocket>, discovery: &Discovery) -> Option<TcpStrea
         let _ = beacon.set_read_timeout(Some(Duration::from_millis(1500)));
         let mut buf = [0u8; 512];
         if let Ok((n, from)) = beacon.recv_from(&mut buf)
-            && let Some((port, name)) = qmon_proto::decode_beacon(&buf[..n])
+            && let Some((port, name)) = prostir_proto::decode_beacon(&buf[..n])
         {
             info!("found host '{name}' at {}", from.ip());
             if let Some(stream) = try_connect(SocketAddr::new(from.ip(), port)) {
@@ -165,7 +165,8 @@ fn scan_subnet() -> Option<TcpStream> {
         for d in (1..=254u8).filter(|&d| d != own) {
             let found = &found;
             scope.spawn(move || {
-                let addr = SocketAddr::new(Ipv4Addr::new(a, b, c, d).into(), qmon_proto::TCP_PORT);
+                let addr =
+                    SocketAddr::new(Ipv4Addr::new(a, b, c, d).into(), prostir_proto::TCP_PORT);
                 if let Ok(stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(400)) {
                     found.lock().unwrap().get_or_insert(stream);
                 }

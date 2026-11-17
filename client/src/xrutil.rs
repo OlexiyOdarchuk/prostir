@@ -129,7 +129,7 @@ pub fn acquire_low_latency_wifi(
                 &[JValue::Object(&service)],
             )?
             .l()?;
-        let tag = env.new_string("questmon")?;
+        let tag = env.new_string("prostir")?;
         let lock = env
             .call_method(
                 &wifi,

@@ -1,10 +1,15 @@
 [package]
-name = "qmon-client"
+name = "prostir-client"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Prostir client for Meta Quest: virtual monitors as OpenXR compositor layers"
 
 [lib]
-name = "questmon"
+name = "prostir"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
@@ -14,7 +19,7 @@ tiny-skia = { version = "0.12", default-features = false, features = ["std", "si
 fontdue = "0.9"
 
 [target.'cfg(target_os = "android")'.dependencies]
-qmon-proto = { path = "../proto" }
+prostir-proto = { path = "../proto" }
 openxr = { version = "0.22", features = ["loaded"] }
 android-activity = { version = "0.6", features = ["native-activity"] }
 ndk = { version = "0.9", features = ["media", "api-level-29"] }

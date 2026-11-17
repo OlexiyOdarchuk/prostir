@@ -1,8 +1,8 @@
 //! Renders the headset menu to a PNG for checking the design on the desktop.
-//! cargo run -p qmon-client --example panel_preview -- panel.png [hover_x hover_y]
+//! cargo run -p prostir-client --example panel_preview -- panel.png [hover_x hover_y]
 
-use questmon::settings::Settings;
-use questmon::ui::{MonitorEntry, Panel, UiState};
+use prostir::settings::Settings;
+use prostir::ui::{MonitorEntry, Panel, UiState};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -47,11 +47,11 @@ fn main() {
     let rgba = panel.render_if_dirty().unwrap().to_vec();
     let pixmap = tiny_skia::Pixmap::from_vec(
         rgba,
-        tiny_skia::IntSize::from_wh(questmon::ui::WIDTH, questmon::ui::HEIGHT).unwrap(),
+        tiny_skia::IntSize::from_wh(prostir::ui::WIDTH, prostir::ui::HEIGHT).unwrap(),
     )
     .unwrap();
     // Composite over a dark grey so translucent parts are visible in the preview.
-    let mut bg = tiny_skia::Pixmap::new(questmon::ui::WIDTH, questmon::ui::HEIGHT).unwrap();
+    let mut bg = tiny_skia::Pixmap::new(prostir::ui::WIDTH, prostir::ui::HEIGHT).unwrap();
     bg.fill(tiny_skia::Color::from_rgba8(40, 44, 52, 255));
     bg.draw_pixmap(
         0,

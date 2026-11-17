@@ -8,11 +8,11 @@ use std::io::{self, Read, Write};
 
 pub const TCP_PORT: u16 = 47830;
 pub const DISCOVERY_PORT: u16 = 47831;
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 /// Stream id of the mirrored physical display (laptop panel); Quest monitors use 0..
 pub const MIRROR_ID: u8 = 100;
 /// Prefix of the UDP discovery beacon: `MAGIC ++ tcp_port (u16 LE) ++ hostname (utf-8)`.
-pub const BEACON_MAGIC: &[u8; 8] = b"QMONHOST";
+pub const BEACON_MAGIC: &[u8; 8] = b"PROSTIR1";
 
 const MAX_PAYLOAD: u32 = 64 * 1024 * 1024;
 
@@ -352,7 +352,7 @@ mod tests {
                 width: 2560,
                 height: 1440,
                 codec: Codec::H265,
-                name: "Quest-1".into(),
+                name: "Prostir-1".into(),
             },
             HostMsg::Frame {
                 id: 2,

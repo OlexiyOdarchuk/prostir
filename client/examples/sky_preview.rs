@@ -1,6 +1,6 @@
 //! Renders the built-in panoramas to PNGs:
-//! cargo run --release -p qmon-client --example sky_preview -- DIR
-use questmon::background::{self, Sky};
+//! cargo run --release -p prostir-client --example sky_preview -- DIR
+use prostir::background::{self, Sky};
 
 fn main() {
     let dir = std::path::PathBuf::from(std::env::args().nth(1).unwrap_or_else(|| ".".into()));

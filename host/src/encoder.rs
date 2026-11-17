@@ -12,7 +12,7 @@ use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use gstreamer_video as gst_video;
 use log::{debug, error, warn};
-use qmon_proto::Codec;
+use prostir_proto::Codec;
 
 #[derive(Debug, Clone)]
 pub struct EncoderConfig {

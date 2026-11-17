@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="dev.questmon.client"
+    package="dev.prostir.client"
     android:versionCode="1"
     android:versionName="0.1.0"
     android:installLocation="auto">
@@ -31,7 +31,7 @@
     </queries>
 
     <application
-        android:label="Quest Monitors"
+        android:label="Prostir"
         android:hasCode="false"
         android:debuggable="true"
         android:extractNativeLibs="true"
@@ -51,7 +51,7 @@
             android:resizeableActivity="false"
             android:excludeFromRecents="false"
             android:exported="true">
-            <meta-data android:name="android.app.lib_name" android:value="questmon" />
+            <meta-data android:name="android.app.lib_name" android:value="prostir" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

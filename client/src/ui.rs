@@ -235,7 +235,7 @@ impl Panel {
                 22.0,
                 true,
                 TEXT,
-                &format!("Quest-{}", m.id + 1),
+                &format!("Монітор {}", m.id + 1),
             ));
             items.push(text(
                 lx + 116.0,

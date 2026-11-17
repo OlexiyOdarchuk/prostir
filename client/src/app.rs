@@ -20,7 +20,7 @@ use glam::Vec3;
 use log::{error, info, warn};
 use openxr as xr;
 use openxr::sys::Handle as _;
-use qmon_proto::{ClientMsg, MIRROR_ID};
+use prostir_proto::{ClientMsg, MIRROR_ID};
 
 use crate::input::Controls;
 use crate::layout::{self, Cylinder, Grab, Hit, Placement, Ray};
@@ -51,7 +51,7 @@ pub fn android_main(app: AndroidApp) {
             } else {
                 log::LevelFilter::Info
             })
-            .with_tag("questmon"),
+            .with_tag("prostir"),
     );
     if let Err(e) = run(&app) {
         error!("{e:#}");
@@ -368,9 +368,9 @@ fn run(app: &AndroidApp) -> Result<()> {
     exts.ext_hand_tracking = available.ext_hand_tracking;
     let instance = entry.create_instance(
         &xr::ApplicationInfo {
-            application_name: "Quest Monitors",
+            application_name: "Prostir",
             application_version: 1,
-            engine_name: "questmon",
+            engine_name: "prostir",
             engine_version: 1,
             api_version: xr::Version::new(1, 0, 0),
         },

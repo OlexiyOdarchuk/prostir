@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds build/questmon.apk for Meta Quest (arm64). Needs the Android SDK with NDK
+# Builds build/prostir.apk for Meta Quest (arm64). Needs the Android SDK with NDK
 # and build-tools, plus `rustup target add aarch64-linux-android`.
 set -euo pipefail
 
@@ -22,11 +22,11 @@ echo ">> cargo build ($PROFILE) with NDK $(basename "$NDK")"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TC/aarch64-linux-android$API-clang"
 export CC_aarch64_linux_android="$TC/aarch64-linux-android$API-clang"
 export AR_aarch64_linux_android="$TC/llvm-ar"
-cargo_flags=(-p qmon-client --target aarch64-linux-android)
+cargo_flags=(-p prostir-client --target aarch64-linux-android)
 [[ "$PROFILE" == release ]] && cargo_flags+=(--release)
 (cd "$ROOT" && cargo build "${cargo_flags[@]}")
-cp "$ROOT/target/aarch64-linux-android/$PROFILE/libquestmon.so" "$STAGE/lib/arm64-v8a/"
-"$TC/llvm-strip" --strip-debug "$STAGE/lib/arm64-v8a/libquestmon.so"
+cp "$ROOT/target/aarch64-linux-android/$PROFILE/libprostir.so" "$STAGE/lib/arm64-v8a/"
+"$TC/llvm-strip" --strip-debug "$STAGE/lib/arm64-v8a/libprostir.so"
 
 AAR="$OUT/openxr_loader_for_android-$LOADER_VERSION.aar"
 if [[ ! -f "$AAR" ]]; then
@@ -46,11 +46,11 @@ if [[ ! -f "$KEYSTORE" ]]; then
         -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
 fi
 "$BUILD_TOOLS/apksigner" sign --ks "$KEYSTORE" --ks-pass pass:android --key-pass pass:android \
-    --out "$OUT/questmon.apk" "$OUT/aligned.apk"
-rm -f "$OUT/unaligned.apk" "$OUT/aligned.apk" "$OUT/questmon.apk.idsig"
-echo ">> $OUT/questmon.apk"
+    --out "$OUT/prostir.apk" "$OUT/aligned.apk"
+rm -f "$OUT/unaligned.apk" "$OUT/aligned.apk" "$OUT/prostir.apk.idsig"
+echo ">> $OUT/prostir.apk"
 
 if [[ "${1:-}" == "--install" ]]; then
-    adb install -r "$OUT/questmon.apk"
-    adb shell am start -n dev.questmon.client/android.app.NativeActivity
+    adb install -r "$OUT/prostir.apk"
+    adb shell am start -n dev.prostir.client/android.app.NativeActivity
 fi

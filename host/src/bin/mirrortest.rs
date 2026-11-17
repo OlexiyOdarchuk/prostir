@@ -1,5 +1,5 @@
 //! Checks that the physical display can be mirrored, stopped and mirrored again
-//! (KWin needs a fresh connection each time): questmon-mirrortest [OUTPUT]
+//! (KWin needs a fresh connection each time): prostir-mirrortest [OUTPUT]
 #[path = "../virtual_output.rs"]
 #[allow(dead_code)]
 mod virtual_output;

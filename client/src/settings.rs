@@ -163,7 +163,7 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        let dir = std::env::temp_dir().join(format!("qmon-settings-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("prostir-settings-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("settings.txt");
         let s = Settings {

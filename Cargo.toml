@@ -6,6 +6,10 @@ default-members = ["proto", "host", "client"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+license = "GPL-3.0-or-later"
+authors = ["Prostir contributors"]
+repository = "https://github.com/OlexiyOdarchuk/prostir"
+rust-version = "1.90"
 
 [profile.release]
 lto = "thin"

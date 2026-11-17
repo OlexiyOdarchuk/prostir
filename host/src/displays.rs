@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use log::{debug, error, info, warn};
-use qmon_proto::{Codec, HostMsg, MIRROR_ID};
+use prostir_proto::{Codec, HostMsg, MIRROR_ID};
 
 use crate::encoder::{Encoder, EncoderConfig, EncoderEvent};
 use crate::virtual_output::{self, MonitorSpec, Screencast, VirtualOutput};
@@ -71,7 +71,7 @@ fn stream_name(id: u8) -> String {
     if id == MIRROR_ID {
         "mirror".into()
     } else {
-        format!("Quest-{}", id + 1)
+        format!("Prostir-{}", id + 1)
     }
 }
 
@@ -148,7 +148,7 @@ impl Router {
         };
         match slot.sent.remove(&pts_us) {
             Some(sent) => slot.latency.add(id, sent.elapsed().as_secs_f64() * 1e3),
-            None => debug!("shown frame {pts_us} of Quest-{} is unknown", id + 1),
+            None => debug!("shown frame {pts_us} of Prostir-{} is unknown", id + 1),
         }
     }
 
@@ -255,7 +255,13 @@ fn config_path() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-    Some(base.join("questmon").join("monitors.txt"))
+    let dir = base.join("prostir");
+    // Settings from before the rename.
+    let old = base.join("questmon");
+    if !dir.exists() && old.exists() {
+        let _ = std::fs::rename(&old, &dir);
+    }
+    Some(dir.join("monitors.txt"))
 }
 
 pub fn load_saved(parse: impl Fn(&str) -> Result<MonitorSpec, String>) -> Option<SavedMonitors> {
@@ -330,7 +336,7 @@ impl Displays {
         Ok(displays)
     }
 
-    /// Adds a monitor and returns its id; ids are reused so `Quest-N` keeps the
+    /// Adds a monitor and returns its id; ids are reused so `Prostir-N` keeps the
     /// position and scale KScreen remembers for that name.
     pub fn add(&mut self, spec: MonitorSpec) -> Result<u8> {
         if self.monitors.len() >= MAX_MONITORS {
@@ -419,7 +425,7 @@ impl Displays {
 
     pub fn remove(&mut self, id: u8) -> Result<()> {
         if !self.monitors.contains_key(&id) {
-            bail!("Монітора Quest-{} немає", id + 1);
+            bail!("Монітора {} немає", id + 1);
         }
         if self.monitors.len() == 1 {
             bail!("Останній монітор прибрати не можна");

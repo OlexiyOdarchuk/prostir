@@ -1,7 +1,7 @@
 //! Desktop test client: connects like the headset would, prints stream stats
 //! and dumps each monitor's elementary stream into `<dir>/monitor-N.{h264,h265}`.
 //!
-//! Usage: questmon-probe [HOST:PORT] [SECONDS] [DIR]
+//! Usage: prostir-probe [HOST:PORT] [SECONDS] [DIR]
 
 use std::collections::HashMap;
 use std::io::{BufReader, BufWriter, Write};
@@ -9,13 +9,13 @@ use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
-use qmon_proto::{ClientMsg, Codec, HostMsg, PROTOCOL_VERSION};
+use prostir_proto::{ClientMsg, Codec, HostMsg, PROTOCOL_VERSION};
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let addr = args
         .next()
-        .unwrap_or_else(|| format!("127.0.0.1:{}", qmon_proto::TCP_PORT));
+        .unwrap_or_else(|| format!("127.0.0.1:{}", prostir_proto::TCP_PORT));
     let seconds: u64 = args.next().map(|s| s.parse()).transpose()?.unwrap_or(10);
     let dir = std::path::PathBuf::from(args.next().unwrap_or_else(|| ".".into()));
 

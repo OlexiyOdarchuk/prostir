@@ -1135,13 +1135,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pxfm"
-version = "0.1.30"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
-
-[[package]]
-name = "qmon-client"
+name = "prostir-client"
 version = "0.1.0"
 dependencies = [
  "android-activity",
@@ -1157,12 +1151,12 @@ dependencies = [
  "ndk",
  "ndk-context",
  "openxr",
- "qmon-proto",
+ "prostir-proto",
  "tiny-skia",
 ]
 
 [[package]]
-name = "qmon-host"
+name = "prostir-host"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -1173,14 +1167,20 @@ dependencies = [
  "gstreamer-video",
  "libc",
  "log",
- "qmon-proto",
+ "prostir-proto",
  "wayland-client",
  "wayland-protocols-plasma",
 ]
 
 [[package]]
-name = "qmon-proto"
+name = "prostir-proto"
 version = "0.1.0"
+
+[[package]]
+name = "pxfm"
+version = "0.1.30"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 
 [[package]]
 name = "quick-xml"

@@ -15,7 +15,7 @@ use ndk::media::media_codec::{
 };
 use ndk::media::media_format::MediaFormat;
 use ndk::native_window::NativeWindow;
-use qmon_proto::{ClientMsg, Codec};
+use prostir_proto::{ClientMsg, Codec};
 
 use crate::net::{Feedback, Frame};
 
