@@ -200,6 +200,8 @@ impl Timing {
             self.in_flight.len()
         );
         *self = Timing {
+            id: self.id,
+            feedback: self.feedback.take(),
             in_flight: std::mem::take(&mut self.in_flight),
             ..Default::default()
         };

@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use qmon_proto::{ClientMsg, Codec, HostMsg, PROTOCOL_VERSION};
 
 use encoder::{Encoder, EncoderConfig, EncoderEvent};
@@ -150,11 +150,18 @@ impl Router {
 
     fn frame_shown(&self, id: u8, pts_us: u64) {
         let mut inner = self.inner.lock().unwrap();
-        if let Some(slot) = inner.streams.get_mut(id as usize)
-            && let Some(sent) = slot.sent.remove(&pts_us)
-        {
-            slot.latency
-                .add(id as usize + 1, sent.elapsed().as_secs_f64() * 1e3);
+        let Some(slot) = inner.streams.get_mut(id as usize) else {
+            return;
+        };
+        match slot.sent.remove(&pts_us) {
+            Some(sent) => slot
+                .latency
+                .add(id as usize + 1, sent.elapsed().as_secs_f64() * 1e3),
+            None => debug!(
+                "shown frame {pts_us} of monitor {} is unknown (sent: {:?})",
+                id + 1,
+                slot.sent.keys().take(3).collect::<Vec<_>>()
+            ),
         }
     }
 
@@ -443,24 +450,31 @@ fn spawn_adb_reverse(port: u16) {
     let _ = std::thread::Builder::new()
         .name("adb-reverse".into())
         .spawn(move || {
-            let mut connected = false;
+            let spec = format!("tcp:{port}");
+            let mut active: Vec<String> = Vec::new();
             loop {
-                let spec = format!("tcp:{port}");
-                let ok = std::process::Command::new("adb")
-                    .args(["reverse", &spec, &spec])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status()
-                    .map(|s| s.success());
-                match ok {
-                    Err(_) => return, // no adb installed
-                    Ok(true) if !connected => {
-                        info!("USB headset detected, adb reverse {spec} active");
-                        connected = true;
+                let Ok(out) = std::process::Command::new("adb").arg("devices").output() else {
+                    return; // no adb installed
+                };
+                // Only USB devices: "serial\tdevice"; adb-over-Wi-Fi serials are "ip:port".
+                let usb: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .filter_map(|l| l.strip_suffix("\tdevice"))
+                    .filter(|serial| !serial.contains(':'))
+                    .map(str::to_owned)
+                    .collect();
+                for serial in &usb {
+                    let ok = std::process::Command::new("adb")
+                        .args(["-s", serial, "reverse", &spec, &spec])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status()
+                        .is_ok_and(|s| s.success());
+                    if ok && !active.contains(serial) {
+                        info!("USB headset {serial}: adb reverse {spec} active");
                     }
-                    Ok(false) => connected = false,
-                    _ => {}
                 }
+                active = usb;
                 std::thread::sleep(Duration::from_secs(3));
             }
         });
