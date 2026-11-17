@@ -25,6 +25,7 @@ use qmon_proto::{ClientMsg, MIRROR_ID};
 use crate::input::Controls;
 use crate::layout::{self, Cylinder, Grab, Hit, Placement, Ray};
 use crate::net::{Feedback, NetEvent};
+use crate::overlay::{self, Overlay, Sphere};
 use crate::settings::{Background, Settings};
 use crate::ui::{self, Action, MonitorEntry, Panel, UiState};
 use crate::xrutil::{self, Gfx, ImageLayer, as_layer, pose, posef, vec3};
@@ -38,6 +39,8 @@ const CURSOR_PX: u32 = 64;
 const BUTTON_PX: u32 = 128;
 const ERROR_SHOWN_FOR: Duration = Duration::from_secs(8);
 const CONFIRM_FOR: Duration = Duration::from_secs(4);
+/// How long a pinch must be held on a monitor before it starts dragging it.
+const HOLD_TO_DRAG: Duration = Duration::from_millis(300);
 
 #[unsafe(no_mangle)]
 pub fn android_main(app: AndroidApp) {
@@ -362,6 +365,7 @@ fn run(app: &AndroidApp) -> Result<()> {
     exts.khr_composition_layer_cylinder = available.khr_composition_layer_cylinder;
     exts.khr_composition_layer_equirect2 = available.khr_composition_layer_equirect2;
     exts.ext_hand_interaction = available.ext_hand_interaction;
+    exts.ext_hand_tracking = available.ext_hand_tracking;
     let instance = entry.create_instance(
         &xr::ApplicationInfo {
             application_name: "Quest Monitors",
@@ -426,6 +430,19 @@ fn run(app: &AndroidApp) -> Result<()> {
     let mut button_hovered = false;
     button_layer.upload(&gl, &ui::menu_button_image(BUTTON_PX, false))?;
     let mut panel = Panel::new();
+    // Tracked hands and pointer rays, drawn on top of everything.
+    let hand_trackers = if exts.ext_hand_tracking {
+        let make = |h| session.create_hand_tracker(h);
+        make(xr::Hand::LEFT)
+            .and_then(|l| Ok([l, make(xr::Hand::RIGHT)?]))
+            .inspect_err(|e| warn!("hand tracking unavailable: {e}"))
+            .ok()
+    } else {
+        None
+    };
+    let mut overlay = Overlay::new(&gl, &instance, system, &session, format)
+        .inspect_err(|e| warn!("hand/ray overlay unavailable: {e:#}"))
+        .ok();
     // The panorama shown and the background it was made for.
     let mut pano_layer: Option<(Background, ImageLayer)> = None;
     let mut pano_job: Option<(Background, JoinHandle<Panorama>)> = None;
@@ -474,6 +491,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         settings_path,
     };
 
+    let mut hold_since: [Option<Instant>; 2] = [None, None];
     let mut session_running = false;
     let mut last_time: Option<xr::Time> = None;
     let mut event_storage = xr::EventDataBuffer::new();
@@ -621,15 +639,18 @@ fn run(app: &AndroidApp) -> Result<()> {
         for hand in 0..2 {
             let input = controls.state[hand];
             if input.select.pressed {
+                let mut clicked = false;
                 match picks[hand] {
                     Some((Target::Panel, hit)) => {
                         panel.hover(Some(panel_point(&hit)));
                         if let Some(action) = panel.hovered_action() {
+                            clicked = true;
                             controls.pulse(&session, hand);
                             handle_action(&mut scene, action, &mut passthrough, &mut controls);
                         }
                     }
                     Some((Target::MenuButton, _)) => {
+                        clicked = true;
                         controls.pulse(&session, hand);
                         if scene.panel_open {
                             scene.panel_open = false;
@@ -639,11 +660,23 @@ fn run(app: &AndroidApp) -> Result<()> {
                     }
                     _ => {}
                 }
+                // Hands drag with pinch-and-hold, like the Quest's own windows.
+                if input.is_hand && !clicked && picks[hand].is_some() {
+                    hold_since[hand] = Some(Instant::now());
+                }
             }
+            if input.select.released {
+                hold_since[hand] = None;
+            }
+            let (start_grab, end_grab) = if input.is_hand {
+                let held = input.select.down
+                    && hold_since[hand].is_some_and(|t| t.elapsed() >= HOLD_TO_DRAG);
+                (held && scene.grabs[hand].is_none(), input.select.released)
+            } else {
+                (input.grab.pressed, input.grab.released)
+            };
 
-            if input.grab.released
-                && let Some(released) = scene.grabs[hand].take()
-            {
+            if end_grab && let Some(released) = scene.grabs[hand].take() {
                 layout::save(&scene.layout_path, &scene.placements);
                 // Dropped somewhere else in the row: KDE's order follows what the eyes see.
                 if released.id != PANEL_ID && released.id != MIRROR_ID {
@@ -663,7 +696,8 @@ fn run(app: &AndroidApp) -> Result<()> {
                     grab.update(p, ray, head, input.stick, dt);
                     scene.grabs[hand] = Some(grab);
                 }
-            } else if input.grab.pressed {
+            } else if start_grab {
+                hold_since[hand] = None;
                 let other = scene.grabs[1 - hand].map(|g| g.id);
                 let grabbed = match picks[hand] {
                     Some((Target::Panel, hit)) if other != Some(PANEL_ID) => {
@@ -673,7 +707,14 @@ fn run(app: &AndroidApp) -> Result<()> {
                         Some(Grab::start(id, hit.t, hit.local, &scene.placements[&id]))
                     }
                     _ => None,
-                };
+                }
+                .map(|g| {
+                    if input.is_hand {
+                        g.with_reach(ray.origin, head)
+                    } else {
+                        g
+                    }
+                });
                 if grabbed.is_some() {
                     controls.pulse(&session, hand);
                     scene.grabs[hand] = grabbed;
@@ -698,6 +739,48 @@ fn run(app: &AndroidApp) -> Result<()> {
                 panel_layer.upload(&gl, pixels)?;
             }
         }
+
+        // Hands and rays: only rendered when there is something to show.
+        let mut spheres: Vec<Sphere> = Vec::new();
+        for tracker in hand_trackers.iter().flatten() {
+            if let Ok(Some(locations)) = local.locate_hand_joints(tracker, time)
+                && let Some(joints) = overlay::joints(&locations)
+            {
+                overlay::hand_spheres(&joints, &mut spheres);
+            }
+        }
+        for (input, pick) in controls.state.iter().zip(&picks) {
+            if let Some(ray) = input.ray {
+                let length = pick.map_or(1.2, |(_, h)| h.t).min(4.0);
+                overlay::ray_spheres(ray.origin, ray.dir, length, &mut spheres);
+                if !input.is_hand {
+                    // Where the controller is, since it is not visible otherwise.
+                    spheres.push(Sphere {
+                        center: ray.origin,
+                        radius: 0.012,
+                        color: [0.30, 0.32, 0.38, 1.0],
+                    });
+                }
+            }
+        }
+        let views = if spheres.is_empty() {
+            None
+        } else {
+            session
+                .locate_views(xr::ViewConfigurationType::PRIMARY_STEREO, time, &local)
+                .ok()
+                .map(|(_, v)| v)
+        };
+        if let Some(ov) = &mut overlay {
+            ov.render(&gl, views.as_deref().unwrap_or(&[]), &mut spheres)?;
+        }
+        let projection_views = overlay
+            .as_ref()
+            .zip(views.as_ref())
+            .and_then(|(o, v)| o.layer_views(v));
+        let hands_layer = projection_views
+            .as_ref()
+            .map(|v| overlay::projection_layer(&local, v));
 
         // ---- Layers, back to front ----
         // Desktop text is denser than the display, so ask the compositor to supersample
@@ -848,6 +931,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         layers.extend(quads.iter().map(as_layer));
         layers.extend(button.iter().map(as_layer));
         layers.extend(panel_quad.iter().map(as_layer));
+        layers.extend(hands_layer.iter().map(as_layer));
         layers.extend(cursors.iter().map(as_layer));
         // The compositor supports 16 layers at most.
         layers.truncate(16);

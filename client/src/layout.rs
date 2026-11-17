@@ -279,6 +279,9 @@ pub struct Grab {
     /// Grabbed point relative to the monitor centre, in the monitor's plane, as a
     /// fraction of its width so resizing keeps the point under the controller.
     pub anchor: Vec2,
+    /// For hands: distance at the start and how far the hand was from the head, so
+    /// reaching out pushes the monitor away and pulling in brings it closer.
+    reach: Option<(f32, f32)>,
 }
 
 impl Grab {
@@ -287,7 +290,14 @@ impl Grab {
             id,
             distance,
             anchor: local_hit / placement.width,
+            reach: None,
         }
+    }
+
+    /// Distance follows how far the hand reaches from the head (no thumbstick on hands).
+    pub fn with_reach(mut self, hand: Vec3, head: Vec3) -> Self {
+        self.reach = Some((self.distance, hand.distance(head).max(0.05)));
+        self
     }
 
     /// Moves the monitor so the grabbed point follows the ray, facing the head.
@@ -301,7 +311,11 @@ impl Grab {
         dt: f32,
     ) {
         let dead = |v: f32| if v.abs() < 0.15 { 0.0 } else { v };
-        self.distance = (self.distance * (1.0 + dead(stick.y) * 1.5 * dt)).clamp(0.3, 6.0);
+        self.distance = match self.reach {
+            Some((d0, r0)) => d0 * (ray.origin.distance(head) / r0).powi(3),
+            None => self.distance * (1.0 + dead(stick.y) * 1.5 * dt),
+        }
+        .clamp(0.3, 6.0);
         placement.width = (placement.width * (1.0 + dead(stick.x) * 1.0 * dt)).clamp(0.2, 8.0);
         let point = ray.origin + ray.dir * self.distance;
         let offset = (self.anchor * placement.width).extend(0.0);

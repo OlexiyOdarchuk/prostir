@@ -21,6 +21,8 @@ mod input;
 #[cfg(target_os = "android")]
 mod net;
 #[cfg(target_os = "android")]
+mod overlay;
+#[cfg(target_os = "android")]
 mod passthrough;
 #[cfg(target_os = "android")]
 mod xrutil;

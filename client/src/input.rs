@@ -33,6 +33,8 @@ pub struct HandState {
     pub select: Button,
     pub grab: Button,
     pub stick: Vec2,
+    /// Driven by a tracked hand (pinch to click, pinch and hold to drag).
+    pub is_hand: bool,
 }
 
 pub struct Controls {
@@ -45,6 +47,7 @@ pub struct Controls {
     haptic: xr::Action<xr::Haptic>,
     menu: xr::Action<bool>,
     align: xr::Action<bool>,
+    pinch_ready: xr::Action<bool>,
     /// `/interaction_profiles/ext/hand_interaction_ext`, when hands are bound.
     hand_profile: Option<xr::Path>,
     /// Which sides are currently driven by tracked hands rather than controllers.
@@ -72,6 +75,8 @@ impl Controls {
             set.create_action::<xr::Vector2f>("adjust", "Distance and size", &hands)?;
         let haptic = set.create_action::<xr::Haptic>("haptic", "Haptic", &hands)?;
         let menu = set.create_action::<bool>("menu", "Menu", &[])?;
+        let pinch_ready =
+            set.create_action::<bool>("pinch_ready", "Hand ready to pinch", &hands)?;
         let align = set.create_action::<bool>("align", "Align monitors", &[])?;
         let p = |s: &str| instance.string_to_path(s);
 
@@ -109,7 +114,9 @@ impl Controls {
                 let path = |input: &str| p(&format!("/user/hand/{side}/input/{input}"));
                 hand.push(xr::Binding::new(&aim, path("aim/pose")?));
                 hand.push(xr::Binding::new(&select, path("pinch_ext/value")?));
-                hand.push(xr::Binding::new(&grab, path("grasp_ext/value")?));
+                // Pointing only while the hand is raised in a pinch-ready pose, so
+                // hands resting on the keyboard never aim or click.
+                hand.push(xr::Binding::new(&pinch_ready, path("pinch_ext/ready_ext")?));
             }
             instance.suggest_interaction_profile_bindings(profile, &hand)?;
         }
@@ -129,6 +136,7 @@ impl Controls {
             haptic,
             menu,
             align,
+            pinch_ready,
             hand_profile,
             tracked_hands: [false; 2],
             hands_enabled: false,
@@ -161,9 +169,28 @@ impl Controls {
             let tracked = location.location_flags.contains(
                 xr::SpaceLocationFlags::POSITION_VALID | xr::SpaceLocationFlags::ORIENTATION_VALID,
             );
+            let is_hand = self.tracked_hands[hand];
+            let ready = !is_hand
+                || self
+                    .pinch_ready
+                    .state(session, path)
+                    .is_ok_and(|s| s.current_state);
             let s = &mut self.state[hand];
-            if self.tracked_hands[hand] && !self.hands_enabled {
-                *s = HandState::default();
+            s.is_hand = is_hand;
+            if is_hand && (!self.hands_enabled || !ready) {
+                s.ray = None;
+                s.grab = Button::default();
+                s.stick = Vec2::ZERO;
+                if self.hands_enabled {
+                    // Still notice the pinch opening, so a drag always ends.
+                    let pinch = self
+                        .select
+                        .state(session, path)
+                        .map_or(0.0, |v| v.current_state);
+                    s.select.update(pinch);
+                } else {
+                    s.select = Button::default();
+                }
                 continue;
             }
             s.ray = tracked.then(|| Ray {
@@ -173,7 +200,8 @@ impl Controls {
             let value =
                 |a: &xr::Action<f32>| a.state(session, path).map_or(0.0, |s| s.current_state);
             s.select.update(value(&self.select));
-            s.grab.update(value(&self.grab));
+            // Hands have no grip: the main loop turns pinch-and-hold into a drag.
+            s.grab.update(if is_hand { 0.0 } else { value(&self.grab) });
             s.stick = self
                 .thumbstick
                 .state(session, path)
