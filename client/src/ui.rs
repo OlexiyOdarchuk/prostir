@@ -23,8 +23,20 @@ pub struct MonitorEntry {
     pub height: u32,
 }
 
+/// Pairing with a new PC: either show `code` (the PC asks for it) or let the user
+/// type the PC's code into `typed`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PairingView {
+    pub host: String,
+    pub code: Option<String>,
+    pub typed: String,
+    /// The last attempt's codes did not match.
+    pub failed: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct UiState {
+    pub pairing: Option<PairingView>,
     /// Name of the connected PC, `None` while searching.
     pub host: Option<String>,
     /// PCs seen on the network while not connected: (name, address).
@@ -75,6 +87,8 @@ pub enum Action {
     CancelKeypad,
     /// Disconnect and pick another PC.
     ChangeHost,
+    /// Pair the other way round (swap which side shows the code).
+    PairOtherWay,
     Close,
 }
 
@@ -203,6 +217,7 @@ impl Panel {
         // Header.
         items.push(text(44.0, 70.0, 34.0, true, TEXT, "Монітори в шоломі"));
         let status = match &s.host {
+            _ if s.pairing.is_some() => "Сполучення…".to_owned(),
             Some(h) => format!("Підключено до {h}"),
             None => "Шукаю ПК…".to_owned(),
         };
@@ -238,7 +253,9 @@ impl Panel {
         // Left column: the connection screen, or the monitor list.
         let (lx, lw) = (44.0, 580.0);
         let mut y = 150.0;
-        if s.host.is_none() {
+        if let Some(p) = &s.pairing {
+            y = self.build_pairing(p, &mut items, lx, lw, y);
+        } else if s.host.is_none() {
             y = self.build_connection(s, &mut items, lx, lw, y);
         } else {
             items.push(text(lx, y, 21.0, false, MUTED, "Монітори"));
@@ -529,6 +546,129 @@ impl Panel {
             ],
         );
         items
+    }
+
+    /// The code to type on the PC, or a keypad for the PC's code.
+    fn build_pairing(
+        &mut self,
+        p: &PairingView,
+        items: &mut Vec<Item>,
+        lx: f32,
+        lw: f32,
+        mut y: f32,
+    ) -> f32 {
+        items.push(text(
+            lx,
+            y,
+            21.0,
+            false,
+            MUTED,
+            &format!("Сполучення з {}", p.host),
+        ));
+        y += 40.0;
+        if p.failed {
+            items.push(text(
+                lx,
+                y,
+                20.0,
+                true,
+                DANGER,
+                "Код не підійшов — спробуйте ще раз",
+            ));
+            y += 34.0;
+        }
+        if let Some(code) = &p.code {
+            items.push(text(
+                lx,
+                y,
+                20.0,
+                false,
+                TEXT,
+                "Введіть цей код у віконці Prostir на ноутбуці:",
+            ));
+            y += 30.0;
+            items.push(Item::Box(rect(lx, y, lw, 130.0), [255, 255, 255, 16]));
+            let cw = self.text_width(code, 84.0, true);
+            items.push(text(lx + (lw - cw) / 2.0, y + 98.0, 84.0, true, TEXT, code));
+            y += 150.0;
+            items.push(text(
+                lx,
+                y,
+                18.0,
+                false,
+                MUTED,
+                "Це потрібно лише один раз для кожного ПК.",
+            ));
+            y += 30.0;
+            items.push(button(
+                rect(lx, y, lw, 50.0),
+                "Навпаки: код на ноутбуці, ввести тут",
+                Style::Normal,
+                Some(Action::PairOtherWay),
+            ));
+            return y + 62.0;
+        }
+        for line in [
+            "Введіть код, який показує ноутбук",
+            "(сповіщення або іконка Prostir у треї):",
+        ] {
+            items.push(text(lx, y, 20.0, false, TEXT, line));
+            y += 30.0;
+        }
+        items.push(Item::Box(rect(lx, y, lw, 64.0), [255, 255, 255, 16]));
+        let shown: String = (0..6)
+            .map(|i| p.typed.chars().nth(i).unwrap_or('·'))
+            .flat_map(|c| [c, ' '])
+            .collect();
+        let sw = self.text_width(shown.trim_end(), 40.0, true);
+        items.push(text(
+            lx + (lw - sw) / 2.0,
+            y + 47.0,
+            40.0,
+            true,
+            TEXT,
+            shown.trim_end(),
+        ));
+        y += 76.0;
+        let ready = p.typed.len() == 6;
+        let keys = [
+            "1",
+            "2",
+            "3",
+            "4",
+            "5",
+            "6",
+            "7",
+            "8",
+            "9",
+            "Стерти",
+            "0",
+            "Готово",
+        ];
+        let (kw, kh) = ((lw - 20.0) / 3.0, 50.0);
+        for (i, k) in keys.iter().enumerate() {
+            let r = rect(
+                lx + (i % 3) as f32 * (kw + 10.0),
+                y + (i / 3) as f32 * (kh + 8.0),
+                kw,
+                kh,
+            );
+            let (style, action) = match *k {
+                "Стерти" => (Style::Normal, Some(Action::Backspace)),
+                "Готово" if ready => (Style::Selected, Some(Action::ConnectTyped)),
+                "Готово" => (Style::Disabled, None),
+                d => (Style::Normal, d.chars().next().map(Action::Key)),
+            };
+            items.push(button(r, k, style, action));
+        }
+        y += 4.0 * (kh + 8.0) + 4.0;
+        items.push(button(
+            rect(lx, y, lw, 50.0),
+            "Навпаки: код у шоломі, ввести на ноутбуці",
+            Style::Normal,
+            Some(Action::PairOtherWay),
+        ));
+        y + 62.0
     }
 
     /// PCs found on the network and a keypad for typing an address.
@@ -843,6 +983,7 @@ mod tests {
 
     pub fn sample_state() -> UiState {
         UiState {
+            pairing: None,
             host: Some("iShawyha-Laptop".into()),
             found: Vec::new(),
             ip_input: None,

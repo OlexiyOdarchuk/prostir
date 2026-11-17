@@ -113,6 +113,8 @@ struct Scene {
     found: Vec<net::FoundHost>,
     /// IP typed on the menu keypad.
     ip_input: Option<String>,
+    /// Pairing with a new PC in progress.
+    pairing: Option<ui::PairingView>,
     steering: net::Steering,
     /// When the connection was lost (or the app started without one).
     offline_since: Option<Instant>,
@@ -288,6 +290,7 @@ impl Scene {
                 .map(|h| (h.name.clone(), h.addr.ip().to_string()))
                 .collect(),
             ip_input: self.ip_input.clone(),
+            pairing: self.pairing.clone(),
             monitors: self
                 .quest_sizes()
                 .into_iter()
@@ -468,6 +471,8 @@ fn run(app: &AndroidApp) -> Result<()> {
     net::spawn(
         net_tx,
         net::Discovery {
+            identity_file: data_dir.join("identity"),
+            trust_file: data_dir.join("paired_hosts"),
             host_file: external_dir.as_ref().map(|p| p.join("host.txt")),
             last_host_file: data_dir.join("last_host"),
         },
@@ -501,6 +506,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         host: None,
         found: Vec::new(),
         ip_input: None,
+        pairing: None,
         steering,
         offline_since: Some(Instant::now()),
         feedback: None,
@@ -621,6 +627,10 @@ fn run(app: &AndroidApp) -> Result<()> {
                 )
             });
 
+        // Pairing needs the menu: open it where the user is looking.
+        if scene.pairing.is_some() && !scene.panel_open {
+            scene.open_panel(head, forward);
+        }
         // Without a PC there is nothing to see: show the connection screen.
         if !scene.panel_open
             && scene
@@ -997,8 +1007,25 @@ fn handle_net_event(
             scene.ip_input = None;
         }
         NetEvent::Hosts(hosts) => scene.found = hosts,
+        NetEvent::Pairing { host, code } => {
+            let failed = scene.pairing.as_ref().is_some_and(|p| p.failed);
+            scene.pairing = Some(ui::PairingView {
+                host,
+                code,
+                typed: String::new(),
+                failed,
+            });
+        }
+        NetEvent::PairingFailed => {
+            if let Some(p) = &mut scene.pairing {
+                p.failed = true;
+                p.typed.clear();
+            }
+        }
+        NetEvent::Paired => scene.pairing = None,
         NetEvent::Disconnected => {
             scene.offline_since = Some(Instant::now());
+            scene.pairing = None;
             scene.host = None;
             scene.feedback = None;
         }
@@ -1137,6 +1164,29 @@ fn handle_action(
             }
         }
         Action::ShowKeypad => scene.ip_input = Some(String::new()),
+        Action::Key(c) if scene.pairing.is_some() => {
+            if let Some(p) = &mut scene.pairing
+                && p.typed.len() < 6
+                && c.is_ascii_digit()
+            {
+                p.typed.push(c);
+            }
+        }
+        Action::Backspace if scene.pairing.is_some() => {
+            if let Some(p) = &mut scene.pairing {
+                p.typed.pop();
+            }
+        }
+        Action::ConnectTyped if scene.pairing.is_some() => {
+            if let Some(p) = &mut scene.pairing {
+                scene.steering.submit_code(std::mem::take(&mut p.typed));
+                p.failed = false;
+            }
+        }
+        Action::PairOtherWay => {
+            scene.steering.switch_pairing_side();
+            scene.pairing = None;
+        }
         Action::Key(c) => {
             if let Some(t) = &mut scene.ip_input
                 && t.len() < 21

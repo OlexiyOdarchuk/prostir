@@ -5,10 +5,13 @@ use std::io::{BufReader, Write};
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpStream, UdpSocket};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use log::{info, warn};
+use prostir_proto::secure::{
+    self, Identity, Pairing, SecureReader, SecureWriter, TrustStore, confirmation, tags_match,
+};
 use prostir_proto::{ClientMsg, Codec, HostMsg, PROTOCOL_VERSION};
 
 pub struct Frame {
@@ -21,12 +24,12 @@ pub struct Frame {
 
 /// Sends small messages back to the host from any thread (net, decoders).
 #[derive(Clone)]
-pub struct Feedback(Arc<Mutex<TcpStream>>);
+pub struct Feedback(Arc<Mutex<SecureWriter>>);
 
 impl Feedback {
     pub fn send(&self, msg: &ClientMsg) -> std::io::Result<()> {
         let mut stream = self.0.lock().unwrap();
-        // One write per message: TCP_NODELAY sends it right away.
+        // One write per message: one encrypted chunk, sent right away (TCP_NODELAY).
         let mut buf = Vec::with_capacity(16);
         msg.write(&mut buf)?;
         stream.write_all(&buf)
@@ -68,20 +71,33 @@ pub enum NetEvent {
         id: u8,
         removed: bool,
     },
+    /// Pairing with a new PC: show `code` (the PC asks for it), or, with `None`,
+    /// ask for the code the PC shows.
+    Pairing {
+        host: String,
+        code: Option<String>,
+    },
+    /// The codes did not match; a new attempt follows.
+    PairingFailed,
+    Paired,
     Disconnected,
 }
 
-/// Where to look for the PC.
+/// Where to look for the PC, and this headset's keys.
 pub struct Discovery {
+    /// This headset's long-term key.
+    pub identity_file: PathBuf,
+    /// PCs paired with.
+    pub trust_file: PathBuf,
     /// User-provided `IP` or `IP:PORT`, tried first.
     pub host_file: Option<PathBuf>,
     /// Address of the last host that worked over the network, tried before discovery.
     pub last_host_file: PathBuf,
 }
 
-/// Lets the menu choose which PC to use.
+/// Lets the menu choose which PC to use and take part in pairing.
 #[derive(Clone, Default)]
-pub struct Steering(Arc<Mutex<Steer>>);
+pub struct Steering(Arc<(Mutex<Steer>, Condvar)>);
 
 #[derive(Default)]
 struct Steer {
@@ -90,12 +106,20 @@ struct Steer {
     /// "Change PC": do not reconnect on our own until the user picks one.
     picking: bool,
     current: Option<TcpStream>,
+    /// Pairing the other way round: the PC shows the code, the headset asks for it.
+    pc_shows_code: bool,
+    /// Code typed in the menu while pairing.
+    typed_code: Option<String>,
 }
 
 impl Steering {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Steer> {
+        self.0.0.lock().unwrap()
+    }
+
     /// Connects to `addr`, dropping the current connection if it is another PC.
     pub fn connect_to(&self, addr: SocketAddr) {
-        let mut s = self.0.lock().unwrap();
+        let mut s = self.lock();
         s.choice = Some(addr);
         s.picking = false;
         if let Some(cur) = &s.current
@@ -107,11 +131,62 @@ impl Steering {
 
     /// Disconnects and waits for the user to pick a PC in the menu.
     pub fn change_host(&self) {
-        let mut s = self.0.lock().unwrap();
+        let mut s = self.lock();
         s.choice = None;
         s.picking = true;
         if let Some(cur) = s.current.take() {
             let _ = cur.shutdown(Shutdown::Both);
+        }
+        self.0.1.notify_all();
+    }
+
+    /// Swaps which side shows the pairing code and restarts pairing.
+    pub fn switch_pairing_side(&self) {
+        let mut s = self.lock();
+        s.pc_shows_code = !s.pc_shows_code;
+        s.typed_code = None;
+        if let Some(cur) = &s.current {
+            let _ = cur.shutdown(Shutdown::Both);
+        }
+        self.0.1.notify_all();
+    }
+
+    /// The code the user typed for the PC's code.
+    pub fn submit_code(&self, code: String) {
+        self.lock().typed_code = Some(code);
+        self.0.1.notify_all();
+    }
+
+    fn pc_shows_code(&self) -> bool {
+        self.lock().pc_shows_code
+    }
+
+    /// Waits for a typed code; `None` if the connection was dropped meanwhile.
+    fn wait_code(&self, stream: &TcpStream) -> Option<String> {
+        let mut s = self.lock();
+        s.typed_code = None;
+        let deadline = Instant::now() + Duration::from_secs(300);
+        loop {
+            if let Some(code) = s.typed_code.take() {
+                return Some(code);
+            }
+            // Dropped by "change PC" or "the other way round".
+            let gone = s
+                .current
+                .as_ref()
+                .is_none_or(|c| c.peer_addr().ok() != stream.peer_addr().ok())
+                || stream.take_error().ok().flatten().is_some()
+                || matches!(stream.peek(&mut [0u8; 1]), Ok(0));
+            let left = deadline.saturating_duration_since(Instant::now());
+            if gone || left.is_zero() {
+                return None;
+            }
+            s = self
+                .0
+                .1
+                .wait_timeout(s, left.min(Duration::from_millis(500)))
+                .unwrap()
+                .0;
         }
     }
 }
@@ -123,6 +198,15 @@ pub fn spawn(events: Sender<NetEvent>, discovery: Discovery, steering: Steering)
             let beacon = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, prostir_proto::DISCOVERY_PORT))
                 .inspect_err(|e| warn!("discovery socket: {e}"))
                 .ok();
+            let identity = match Identity::load_or_create(&discovery.identity_file) {
+                Ok(id) => id,
+                Err(e) => {
+                    warn!("cannot create the headset key: {e}");
+                    return;
+                }
+            };
+            info!("headset key {}", secure::fingerprint(&identity.public));
+            let mut trusted = TrustStore::load(&discovery.trust_file);
             let mut finder = Finder::default();
             let mut round = 0u32;
             loop {
@@ -140,12 +224,12 @@ pub fn spawn(events: Sender<NetEvent>, discovery: Discovery, steering: Steering)
                         let _ = std::fs::write(&discovery.last_host_file, p.to_string());
                     }
                     let name = peer.and_then(|p| finder.name_of(p));
-                    steering.0.lock().unwrap().current = stream.try_clone().ok();
-                    match run_session(stream, &events, name) {
+                    steering.lock().current = stream.try_clone().ok();
+                    match run_session(stream, &events, name, &steering, &identity, &mut trusted) {
                         Ok(()) => info!("host {peer:?} closed the connection"),
                         Err(e) => warn!("connection to {peer:?} lost: {e}"),
                     }
-                    steering.0.lock().unwrap().current = None;
+                    steering.lock().current = None;
                     if events.send(NetEvent::Disconnected).is_err() {
                         return;
                     }
@@ -234,7 +318,7 @@ fn connect(
         return Some(stream);
     }
     let (choice, picking) = {
-        let s = steering.0.lock().unwrap();
+        let s = steering.lock();
         (s.choice, s.picking)
     };
     if let Some(stream) = choice.and_then(try_connect) {
@@ -306,6 +390,93 @@ fn scan_subnet() -> Option<TcpStream> {
     Some(stream)
 }
 
+/// What pairing needs from the current connection.
+struct Session<'a> {
+    stream: &'a TcpStream,
+    reader: &'a mut BufReader<SecureReader>,
+    feedback: &'a Feedback,
+    events: &'a Sender<NetEvent>,
+    steering: &'a Steering,
+    identity: &'a Identity,
+    peer: &'a secure::Peer,
+    host: &'a str,
+}
+
+impl Session<'_> {
+    /// Pairs with the PC, retrying with a fresh code until the codes match.
+    fn pair(&mut self, trusted: &mut TrustStore) -> std::io::Result<()> {
+        // The user needs time to read and type the code.
+        self.stream
+            .set_read_timeout(Some(Duration::from_secs(300)))?;
+        loop {
+            let pc_shows = self.steering.pc_shows_code();
+            let code = if pc_shows {
+                let _ = self.events.send(NetEvent::Pairing {
+                    host: self.host.to_owned(),
+                    code: None,
+                });
+                self.steering
+                    .wait_code(self.stream)
+                    .ok_or_else(|| std::io::Error::other("pairing interrupted"))?
+            } else {
+                let code = secure::pairing_code();
+                let _ = self.events.send(NetEvent::Pairing {
+                    host: self.host.to_owned(),
+                    code: Some(format!("{} {}", &code[..3], &code[3..])),
+                });
+                code
+            };
+            self.feedback.send(&ClientMsg::PairBegin {
+                headset_shows: !pc_shows,
+                name: "Meta Quest".into(),
+            })?;
+            let (pairing, msg) = Pairing::start(&code);
+            self.feedback.send(&ClientMsg::PairMsg { msg })?;
+            let theirs = loop {
+                match HostMsg::read(self.reader)? {
+                    HostMsg::PairMsg { msg } => break Some(msg),
+                    // The PC gave up this attempt (e.g. its dialog was cancelled).
+                    HostMsg::PairResult { .. } => break None,
+                    HostMsg::Error { text } => {
+                        let _ = self.events.send(NetEvent::HostError(text));
+                    }
+                    other => return Err(std::io::Error::other(format!("unexpected {other:?}"))),
+                }
+            };
+            let Some(theirs) = theirs else {
+                let _ = self.events.send(NetEvent::PairingFailed);
+                continue;
+            };
+            let key = pairing.finish(&theirs)?;
+            let own = &self.identity.public;
+            self.feedback.send(&ClientMsg::PairConfirm {
+                tag: confirmation(&key, "headset", self.peer, own),
+            })?;
+            match HostMsg::read(self.reader)? {
+                HostMsg::PairResult { ok: true, tag }
+                    if tags_match(&tag, &confirmation(&key, "pc", self.peer, own)) =>
+                {
+                    trusted.add(self.peer.key, self.host)?;
+                    info!(
+                        "paired with {} ({})",
+                        self.host,
+                        secure::fingerprint(&self.peer.key)
+                    );
+                    let _ = self.events.send(NetEvent::Paired);
+                    self.stream
+                        .set_read_timeout(Some(Duration::from_secs(10)))?;
+                    return Ok(());
+                }
+                HostMsg::PairResult { .. } => {
+                    warn!("pairing with {}: the codes did not match", self.host);
+                    let _ = self.events.send(NetEvent::PairingFailed);
+                }
+                other => return Err(std::io::Error::other(format!("unexpected {other:?}"))),
+            }
+        }
+    }
+}
+
 struct StreamSlot {
     tx: SyncSender<Frame>,
     waiting_for_keyframe: bool,
@@ -315,17 +486,51 @@ fn run_session(
     stream: TcpStream,
     events: &Sender<NetEvent>,
     name: Option<String>,
+    steering: &Steering,
+    identity: &Identity,
+    trusted: &mut TrustStore,
 ) -> std::io::Result<()> {
     stream.set_nodelay(true)?;
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-    let feedback = Feedback(Arc::new(Mutex::new(stream.try_clone()?)));
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    let (reader, writer, peer) = secure::handshake(&stream, identity, true)?;
+    let mut reader = BufReader::with_capacity(1 << 20, reader);
+    let feedback = Feedback(Arc::new(Mutex::new(writer)));
+    let host = name.clone().unwrap_or_else(|| match stream.peer_addr() {
+        Ok(a) if a.ip().is_loopback() => "ПК (USB)".into(),
+        Ok(a) => a.ip().to_string(),
+        Err(_) => "ПК".into(),
+    });
+    let mut session = Session {
+        stream: &stream,
+        reader: &mut reader,
+        feedback: &feedback,
+        events,
+        steering,
+        identity,
+        peer: &peer,
+        host: &host,
+    };
+    // A PC we have never paired with must prove it knows the code too.
+    if !trusted.contains(&peer.key) {
+        session.pair(trusted)?;
+    }
     feedback.send(&ClientMsg::Hello {
         version: PROTOCOL_VERSION,
     })?;
-    let mut reader = BufReader::with_capacity(1 << 20, stream.try_clone()?);
-    match HostMsg::read(&mut reader)? {
-        HostMsg::Welcome { .. } => {}
-        other => return Err(std::io::Error::other(format!("unexpected {other:?}"))),
+    loop {
+        match HostMsg::read(session.reader)? {
+            HostMsg::Welcome { .. } => break,
+            HostMsg::PairingRequired => {
+                session.pair(trusted)?;
+                feedback.send(&ClientMsg::Hello {
+                    version: PROTOCOL_VERSION,
+                })?;
+            }
+            HostMsg::Error { text } => {
+                let _ = events.send(NetEvent::HostError(text));
+            }
+            other => return Err(std::io::Error::other(format!("unexpected {other:?}"))),
+        }
     }
     // The host re-sends the last frame every 500 ms, so 10 s of silence means a dead link.
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
@@ -416,7 +621,10 @@ fn run_session(
             HostMsg::Error { text } => {
                 let _ = events.send(NetEvent::HostError(text));
             }
-            HostMsg::Welcome { .. } => {}
+            HostMsg::Welcome { .. }
+            | HostMsg::PairingRequired
+            | HostMsg::PairMsg { .. }
+            | HostMsg::PairResult { .. } => {}
         }
     };
     for id in streams.into_keys() {

@@ -2,7 +2,20 @@
 //! cargo run -p prostir-client --example panel_preview -- panel.png [hover_x hover_y]
 
 use prostir::settings::Settings;
-use prostir::ui::{MonitorEntry, Panel, UiState};
+use prostir::ui::{MonitorEntry, PairingView, Panel, UiState};
+
+fn questmon_pairing(mode: &str) -> PairingView {
+    PairingView {
+        host: "iShawyha-Laptop".into(),
+        code: (mode == "show").then(|| "482 913".into()),
+        typed: if mode == "show" {
+            String::new()
+        } else {
+            "4829".into()
+        },
+        failed: mode == "failed",
+    }
+}
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -12,6 +25,9 @@ fn main() {
         _ => None,
     };
     let state = UiState {
+        pairing: std::env::var("PAIR")
+            .ok()
+            .map(|mode| questmon_pairing(&mode)),
         host: std::env::var("OFFLINE")
             .is_err()
             .then(|| "iShawyha-Laptop".into()),
