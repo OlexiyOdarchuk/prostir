@@ -1529,12 +1529,12 @@ fn build_profiles(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32
     y += 24.0;
     for line in [
         l.t(
-            "«Зберегти поточне» записує в профіль теперішні монітори, екран ноутбука,",
-            "“Save current” stores the current monitors, laptop screen,",
+            "«Зберегти поточне» записує в профіль теперішні монітори, головний,",
+            "“Save current” stores the current monitors, the primary one,",
         ),
         l.t(
-            "розкладку, вигин, фон і режим. Монітори того самого розміру",
-            "layout, curve, background and mode. Monitors of the same size",
+            "екран ноутбука, розкладку, вигин, фон і режим. Монітори того самого розміру",
+            "laptop screen, layout, curve, background and mode. Monitors of the same size",
         ),
         l.t(
             "при перемиканні лишаються, тож вікна на них не зникають.",

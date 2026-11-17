@@ -291,6 +291,21 @@ impl Scene {
         self.appear.retain(|id, _| monitors.contains_key(id));
     }
 
+    /// The setup as it is now: monitors left to right, the primary, the laptop screen,
+    /// layout and look.
+    fn current_profile(&self) -> Profile {
+        let sizes = self.quest_sizes();
+        Profile {
+            primary: sizes
+                .iter()
+                .position(|m| Some(m.0) == self.primary)
+                .unwrap_or(0) as u8,
+            sizes: sizes.iter().map(|m| (m.1, m.2)).collect(),
+            mirror: self.mirror_wanted,
+            settings: self.settings,
+        }
+    }
+
     fn relayout_pending(&self) -> bool {
         self.relayout_until.is_some_and(|t| Instant::now() < t)
     }
@@ -1747,6 +1762,12 @@ fn handle_action(
             set_passthrough(scene, passthrough);
         }
         Action::ApplyProfile(i) => {
+            // Never saved yet: the setup the user built by hand becomes "Work", so
+            // switching away and back returns to it instead of the starting template.
+            if !scene.profiles_path.exists() && !scene.quest_sizes().is_empty() {
+                scene.profiles[0] = scene.current_profile();
+                profiles::save(&scene.profiles_path, &scene.profiles);
+            }
             let p = scene.profiles[i].clone();
             scene.send(ClientMsg::SetMonitors {
                 sizes: p.sizes.clone(),
@@ -1769,16 +1790,7 @@ fn handle_action(
             scene.arrange_all();
         }
         Action::SaveProfile(i) => {
-            let sizes = scene.quest_sizes();
-            scene.profiles[i] = Profile {
-                primary: sizes
-                    .iter()
-                    .position(|m| Some(m.0) == scene.primary)
-                    .unwrap_or(0) as u8,
-                sizes: sizes.iter().map(|m| (m.1, m.2)).collect(),
-                mirror: scene.mirror_wanted,
-                settings: scene.settings,
-            };
+            scene.profiles[i] = scene.current_profile();
             profiles::save(&scene.profiles_path, &scene.profiles);
             scene.active_profile = Some(i);
         }
