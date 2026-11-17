@@ -197,8 +197,23 @@ fn serve_client(
     });
     displays.force_keyframes();
 
+    // Housekeeping runs on a clock: the headset acknowledges every frame, so the
+    // channel is rarely quiet long enough for a receive timeout.
+    let mut next_tick = Instant::now();
     let result = loop {
-        match msg_rx.recv_timeout(Duration::from_millis(500)) {
+        if Instant::now() >= next_tick {
+            next_tick = Instant::now() + Duration::from_millis(500);
+            if control.poll(Some(displays)) {
+                break Ok(());
+            }
+            control.show(Some(via), Some(displays));
+            displays.tick();
+            if !displays.healthy() {
+                break Err(anyhow::anyhow!("virtual monitor or encoder stopped"));
+            }
+        }
+        let wait = next_tick.saturating_duration_since(Instant::now());
+        match msg_rx.recv_timeout(wait) {
             Ok(Ok(ClientMsg::RequestKeyframe { id })) => displays.force_keyframe(id),
             Ok(Ok(ClientMsg::FrameShown { id, pts_us })) => displays.router.frame_shown(id, pts_us),
             Ok(Ok(ClientMsg::AddMonitor { width, height })) => {
@@ -240,16 +255,7 @@ fn serve_client(
             Ok(Ok(other)) => warn!("ignoring {other:?}"),
             Ok(Err(e)) if e.kind() == ErrorKind::UnexpectedEof => break Ok(()),
             Ok(Err(e)) => break Err(e.into()),
-            Err(RecvTimeoutError::Timeout) => {
-                if control.poll(Some(displays)) {
-                    break Ok(());
-                }
-                control.show(Some(via), Some(displays));
-                displays.tick();
-                if !displays.healthy() {
-                    break Err(anyhow::anyhow!("virtual monitor or encoder stopped"));
-                }
-            }
+            Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break Ok(()),
         }
     };

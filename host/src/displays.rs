@@ -315,6 +315,8 @@ pub struct Displays {
     mirror: Option<Mirror>,
     mirror_wanted: bool,
     mirror_retry: Instant,
+    /// Last time the laptop panel was switched back on (to avoid fighting the user).
+    woke_display_at: Option<Instant>,
     screencast: Screencast,
     pub router: Arc<Router>,
     cfg: EncoderConfig,
@@ -331,6 +333,7 @@ impl Displays {
             mirror: None,
             mirror_wanted: saved.mirror,
             mirror_retry: Instant::now(),
+            woke_display_at: None,
             screencast: Screencast::connect()?,
             router: Arc::new(Router::new(cfg.codec)),
             cfg,
@@ -403,6 +406,7 @@ impl Displays {
         }
         self.mirror_retry = Instant::now() + Duration::from_secs(2);
         let Some(name) = self.screencast.physical_output() else {
+            self.wake_physical_display();
             return;
         };
         let started = Screencast::connect().and_then(|connection| {
@@ -422,6 +426,26 @@ impl Displays {
             }
             Err(e) => warn!("cannot mirror {name}: {e:#}"),
         }
+    }
+
+    /// KDE sometimes leaves the laptop panel off after the lid is opened again while
+    /// virtual monitors exist. With the mirror wanted and the lid open, switch it on.
+    fn wake_physical_display(&mut self) {
+        if self
+            .woke_display_at
+            .is_some_and(|t| t.elapsed() < Duration::from_secs(30))
+            || !virtual_output::lid_open()
+        {
+            return;
+        }
+        let off = virtual_output::disabled_physical_outputs();
+        if off.is_empty() {
+            return;
+        }
+        self.woke_display_at = Some(Instant::now());
+        info!("lid is open but {off:?} is off: switching it on for the mirror");
+        let settings: Vec<String> = off.iter().map(|n| format!("output.{n}.enable")).collect();
+        virtual_output::kscreen_apply(&settings);
     }
 
     fn stop_mirror(&mut self) {

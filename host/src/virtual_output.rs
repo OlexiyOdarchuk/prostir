@@ -461,17 +461,7 @@ pub fn output_geometries() -> HashMap<String, Geometry> {
     // kscreen-doctor prints "priority N" before "Geometry:".
     let mut priorities: HashMap<String, Option<u32>> = HashMap::new();
     for raw in text.lines() {
-        // Strip ANSI colour codes.
-        let mut line = String::new();
-        let mut esc = false;
-        for c in raw.chars() {
-            match (esc, c) {
-                (false, '\x1b') => esc = true,
-                (true, 'm') => esc = false,
-                (false, c) => line.push(c),
-                _ => {}
-            }
-        }
+        let line = strip_ansi(raw);
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("Output:") {
             name = rest.split_whitespace().nth(1).map(str::to_owned);
@@ -502,6 +492,58 @@ pub fn output_geometries() -> HashMap<String, Geometry> {
         }
     }
     map
+}
+
+/// Connected real displays that KDE has switched off (e.g. the laptop panel after
+/// the lid was closed and opened again while other monitors were on).
+pub fn disabled_physical_outputs() -> Vec<String> {
+    let Ok(out) = std::process::Command::new("kscreen-doctor")
+        .arg("-o")
+        .output()
+    else {
+        return Vec::new();
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut name: Option<String> = None;
+    let mut found = Vec::new();
+    for raw in text.lines() {
+        let line: String = strip_ansi(raw);
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("Output:") {
+            name = rest.split_whitespace().nth(1).map(str::to_owned);
+        } else if line == "disabled"
+            && let Some(n) = &name
+            && !n.starts_with("Virtual-")
+        {
+            found.push(n.clone());
+        }
+    }
+    found
+}
+
+/// Whether the laptop lid is open (true on machines without a lid).
+pub fn lid_open() -> bool {
+    let Ok(entries) = std::fs::read_dir("/proc/acpi/button/lid") else {
+        return true;
+    };
+    entries
+        .flatten()
+        .filter_map(|e| std::fs::read_to_string(e.path().join("state")).ok())
+        .all(|state| !state.contains("closed"))
+}
+
+fn strip_ansi(raw: &str) -> String {
+    let mut line = String::new();
+    let mut esc = false;
+    for c in raw.chars() {
+        match (esc, c) {
+            (false, '\x1b') => esc = true,
+            (true, 'm') => esc = false,
+            (false, c) => line.push(c),
+            _ => {}
+        }
+    }
+    line
 }
 
 /// Applies several `output.<name>.<setting>` changes in one kscreen-doctor call, so
