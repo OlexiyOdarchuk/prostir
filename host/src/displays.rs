@@ -17,6 +17,29 @@ use crate::desktop::{Desktop, Output};
 use crate::encoder::{Encoder, EncoderConfig, EncoderEvent, Input};
 use crate::virtual_output::{self, MonitorSpec, Screencast};
 
+/// Retry timing after failures: 2 s, then doubling up to 2 min.
+#[derive(Default)]
+struct Backoff {
+    failures: u32,
+    next: Option<Instant>,
+}
+
+impl Backoff {
+    fn due(&self) -> bool {
+        self.next.is_none_or(|t| Instant::now() >= t)
+    }
+
+    fn failed(&mut self) {
+        self.failures += 1;
+        let secs = (2u64 << self.failures.min(6)).min(120);
+        self.next = Some(Instant::now() + Duration::from_secs(secs));
+    }
+
+    fn succeeded(&mut self) {
+        *self = Self::default();
+    }
+}
+
 /// More streams than this overwhelm the headset's hardware decoders.
 pub const MAX_MONITORS: usize = 6;
 
@@ -369,6 +392,10 @@ pub struct Displays {
     audio_wanted: bool,
     mic: Option<MicIn>,
     mic_wanted: bool,
+    /// After a failed start, sound and microphone wait longer and longer before the
+    /// next attempt (starting them blocks the session for up to 2 s).
+    audio_retry: Backoff,
+    mic_retry: Backoff,
     /// Last state told to the headset: a PC app is recording.
     mic_recording: bool,
     /// Connected and worn (encoders running).
@@ -404,6 +431,8 @@ impl Displays {
             audio_wanted: saved.audio,
             mic: None,
             mic_wanted: saved.mic,
+            audio_retry: Backoff::default(),
+            mic_retry: Backoff::default(),
             mic_recording: false,
             streaming: true,
             taken_off_at: None,
@@ -681,19 +710,31 @@ impl Displays {
     /// Starts or stops PC sound and microphone to match the wishes and the state.
     fn sync_audio(&mut self) {
         let audio = self.streaming && self.audio_wanted;
-        if audio && self.audio.is_none() {
+        if audio && self.audio.is_none() && self.audio_retry.due() {
             match AudioOut::start(self.router.clone()) {
-                Ok(a) => self.audio = Some(a),
-                Err(e) => warn!("no sound in the headset: {e:#}"),
+                Ok(a) => {
+                    self.audio = Some(a);
+                    self.audio_retry.succeeded();
+                }
+                Err(e) => {
+                    warn!("no sound in the headset: {e:#}");
+                    self.audio_retry.failed();
+                }
             }
         } else if !audio {
             self.audio = None;
         }
         let mic = self.streaming && self.mic_wanted;
-        if mic && self.mic.is_none() {
+        if mic && self.mic.is_none() && self.mic_retry.due() {
             match MicIn::start() {
-                Ok(m) => self.mic = Some(m),
-                Err(e) => warn!("no headset microphone: {e:#}"),
+                Ok(m) => {
+                    self.mic = Some(m);
+                    self.mic_retry.succeeded();
+                }
+                Err(e) => {
+                    warn!("no headset microphone: {e:#}");
+                    self.mic_retry.failed();
+                }
             }
         } else if !mic {
             self.mic = None;
@@ -714,12 +755,15 @@ impl Displays {
 
     pub fn set_audio_wanted(&mut self, enabled: bool) {
         self.audio_wanted = enabled;
+        // Switched on by hand: try right away.
+        self.audio_retry.succeeded();
         self.sync_audio();
         self.router.send(HostMsg::AudioWanted { enabled });
     }
 
     pub fn set_mic_wanted(&mut self, enabled: bool) {
         self.mic_wanted = enabled;
+        self.mic_retry.succeeded();
         self.sync_audio();
         self.router.send(HostMsg::MicWanted { enabled });
     }

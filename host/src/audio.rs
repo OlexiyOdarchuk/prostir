@@ -69,6 +69,14 @@ fn destroy_node(name: &str) {
     }
 }
 
+/// Removes the sound devices a previous run (killed, crashed) left behind. The sink
+/// lingers by design, and while it is gone PipeWire falls back to a real output.
+pub fn restore_after_crash() {
+    for name in [SINK, MIC, MIC_FEED] {
+        destroy_node(name);
+    }
+}
+
 fn pactl(args: &[&str]) -> Option<String> {
     let out = Command::new("pactl").args(args).output().ok()?;
     out.status
@@ -196,6 +204,7 @@ impl MicIn {
         });
         if !ready {
             let _ = loopback.kill();
+            let _ = loopback.wait();
             bail!("the virtual microphone did not appear");
         }
         let desc = format!(

@@ -99,6 +99,9 @@ struct Control {
 impl Control {
     /// Applies tray commands; returns `true` when asked to quit.
     fn poll(&mut self, displays: Option<&mut Displays>) -> bool {
+        if QUIT.load(Ordering::Relaxed) {
+            self.quit = true;
+        }
         let mut displays = displays;
         while let Ok(cmd) = self.commands.try_recv() {
             match cmd {
@@ -503,16 +506,14 @@ fn create_displays(args: &Args, bitrate: u32, sharp: bool) -> Result<Displays> {
     Ok(displays)
 }
 
-/// On Hyprland, removes Prostir's monitors left from an earlier run and when asked to quit (SIGTERM, Ctrl+C,
-/// SIGHUP). KWin drops them by itself when the program ends; Hyprland keeps headless
-/// outputs, and the windows on them would stay out of sight.
-fn clean_up_on_signals() {
-    if !hyprland::running() {
-        return;
-    }
-    // Monitors from a run that crashed: without the headset nobody sees their windows.
-    hyprland::remove_leftovers();
-    static QUIT: AtomicBool = AtomicBool::new(false);
+/// Set by SIGTERM, SIGINT and SIGHUP; the main loop then quits normally, so monitors,
+/// the sound output and the microphone are put back by the usual clean-up.
+static QUIT: AtomicBool = AtomicBool::new(false);
+
+/// Lets signals end the program cleanly on every desktop. If the normal path does not
+/// finish within a few seconds (stuck in a dialog, say), removes Hyprland's monitors
+/// directly: KWin drops its outputs when the program ends, Hyprland keeps them.
+fn quit_on_signals() {
     extern "C" fn on_signal(_: libc::c_int) {
         // Only an atomic store: safe inside a signal handler.
         QUIT.store(true, Ordering::Relaxed);
@@ -528,19 +529,52 @@ fn clean_up_on_signals() {
             while !QUIT.load(Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(100));
             }
-            info!("asked to quit: removing Prostir's monitors");
-            hyprland::remove_leftovers();
-            std::process::exit(0);
+            std::thread::sleep(Duration::from_secs(5));
+            warn!("did not quit within 5 s: removing monitors and leaving");
+            if hyprland::running() {
+                hyprland::remove_leftovers();
+            }
+            audio::restore_after_crash();
+            std::process::exit(1);
         });
     if let Err(e) = spawned {
         warn!("cannot watch for signals: {e}");
     }
 }
 
+/// One Prostir per desktop session: a second one would fight over the monitors (and
+/// on Hyprland, its start-up clean-up would remove the first one's). The lock file is
+/// held for the life of the process.
+fn single_instance() -> Result<std::fs::File> {
+    let dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let display = std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-0".into());
+    let path = dir.join(format!("prostir-{display}.lock"));
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("cannot open {}", path.display()))?;
+    use std::os::fd::AsRawFd;
+    // SAFETY: flock on a file descriptor this function owns.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        anyhow::bail!("Prostir is already running on this desktop");
+    }
+    Ok(file)
+}
+
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    clean_up_on_signals();
     let args = Args::parse();
+    let _instance = single_instance()?;
+    quit_on_signals();
+    // Monitors from a run that crashed: without the headset nobody sees their windows.
+    if hyprland::running() {
+        hyprland::remove_leftovers();
+    }
+    audio::restore_after_crash();
     gstreamer::init().context("GStreamer init")?;
 
     let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, args.port))
