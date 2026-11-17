@@ -14,6 +14,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600&family=Noto+Sans+Mono&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="site.css">
+  <script>document.documentElement.classList.add("js")</script>
 </head>
 <body>
 <header class="top">
@@ -23,8 +24,11 @@
       <a href="#install">Install</a>
       <a href="#requirements">Requirements</a>
       <a href="https://github.com/OlexiyOdarchuk/prostir">GitHub</a>
-      <a href="uk/" hreflang="uk" lang="uk">Українською</a>
     </nav>
+    <div class="lang" aria-label="Language">
+      <a href="./" aria-current="true" lang="en">EN</a>
+      <a href="uk/" hreflang="uk" lang="uk">UK</a>
+    </div>
   </div>
 </header>
 
@@ -33,7 +37,7 @@
     <div class="hero">
       <div>
         <h1>Extra monitors for KDE Plasma, inside a Quest 3</h1>
-        <p class="lead">Prostir turns the headset into a multi-monitor desk for your laptop or desktop. The monitors are real KWin outputs: windows move onto them, the Plasma panel can live there, and the mouse crosses from one to the next where they meet in front of you.</p>
+        <p class="lead">Real KWin outputs around you. Windows, the panel and the mouse move across them as if the monitors stood on your desk.</p>
         <div class="actions">
           <a class="button primary" href="https://github.com/OlexiyOdarchuk/prostir/releases">Download for KDE Plasma</a>
           <a class="button" href="https://github.com/OlexiyOdarchuk/prostir">Source code</a>
@@ -49,33 +53,46 @@
 
   <section>
     <div class="wrap">
-      <figure>
+      <div class="band reveal">
+        <div class="copy">
+          <h3>Real monitors, not pictures of windows</h3>
+          <p>Each one is an output in System Settings → Display. Drag windows onto it, maximize them, put the Plasma panel there.</p>
+          <p>Lift a monitor above another in the headset and KDE puts it above too, so the mouse goes up where you look.</p>
+        </div>
         <img src="headset.jpg" width="1920" height="1080" loading="lazy" alt="A capture from the headset: three virtual monitors around the user, KDE's display settings on the right listing them as Prostir outputs, and the laptop screen below the main monitor">
-        <figcaption>A capture from the headset. The monitor on the right shows KDE's display settings: the three monitors are ordinary outputs there.</figcaption>
-      </figure>
-    </div>
-  </section>
+      </div>
 
-  <section>
-    <div class="wrap">
-      <h2>What it does</h2>
-      <div class="split">
-        <div>
-          <p>You add, remove and reorder monitors from inside the headset: 1080p, 1440p, 4K, ultrawide or portrait, up to six. KDE arranges its displays the way you see them, side by side and above or below each other, so the mouse always leaves one monitor where the next one begins.</p>
-          <p>Text stays sharp because the video goes straight into the Quest compositor's own layers instead of a flat window inside an app. The PC encodes on the GPU (VA-API on Intel or AMD) and the Quest decodes in hardware; over Wi-Fi a frame takes about 14 ms from encoder to display.</p>
-          <p>With your hands in view, the menu opens within reach and works like a touchscreen.</p>
+      <div class="band flip reveal">
+        <div class="copy">
+          <h3>Touch the menu</h3>
+          <p>With your hands in view, the menu opens within reach and works like a touchscreen. Add a 1080p, 1440p, 4K, ultrawide or portrait monitor; move it, make it primary, curve the row.</p>
         </div>
         <img src="menu-monitors.png" width="1280" height="960" loading="lazy" alt="The headset menu, Monitors tab: the monitor list, sizes to add, layout, curve and mode">
       </div>
-      <ul class="points">
+
+      <div class="band reveal">
+        <div class="copy">
+          <div class="figure-number">14<small>ms</small></div>
+          <p>From the encoder to the headset display over Wi-Fi on the author's laptop. The PC encodes on the GPU and the Quest decodes in hardware, straight into its compositor, so text stays sharp.</p>
+        </div>
+        <img src="menu-profiles.png" width="1280" height="960" loading="lazy" alt="The headset menu, Profiles tab: Work, Cinema and Lying down">
+      </div>
+
+      <div class="band flip reveal">
+        <div class="copy">
+          <h3>Work, cinema, lying down</h3>
+          <p>Profiles switch the monitors, the laptop screen, the layout and the background in one press. Monitors of the same size stay, so their windows do not move.</p>
+        </div>
+        <img src="backgrounds.jpg" width="1932" height="972" loading="lazy" alt="The four built-in panoramas: night, sunset, space and aurora">
+      </div>
+
+      <ul class="points reveal">
         <li><h3>The laptop screen too</h3><p>It hangs under the main monitor without a seam and disappears when you close the lid.</p></li>
-        <li><h3>Profiles</h3><p>Work, Cinema and Lying down switch the whole setup in one press; save your own into any of them.</p></li>
         <li><h3>Focus mode</h3><p>Every monitor except the one with the mouse gets darker.</p></li>
         <li><h3>Sound and microphone</h3><p>PC sound plays in the headset, and PC apps hear the headset microphone while they record.</p></li>
-        <li><h3>Headset off, desk back</h3><p>Take it off and after 10 seconds windows, panel and sound return to the laptop. Put it on and they come back.</p></li>
-        <li><h3>Keyboard window</h3><p>A rectangle you place over the real keyboard shows the desk through the cameras, on any background.</p></li>
-        <li><h3>Paired and encrypted</h3><p>Noise and SPAKE2: a PC streams nothing to a headset it has not been paired with.</p></li>
-        <li><h3>Ukrainian and English</h3><p>The headset follows the PC's language unless you pick one.</p></li>
+        <li><h3>Headset off, desk back</h3><p>After 10 seconds off your head, windows, panel and sound return to the laptop.</p></li>
+        <li><h3>Keyboard window</h3><p>A rectangle over the real keyboard shows the desk through the cameras.</p></li>
+        <li><h3>Paired and encrypted</h3><p>A PC streams nothing to a headset it has not been paired with.</p></li>
       </ul>
     </div>
   </section>

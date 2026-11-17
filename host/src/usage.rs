@@ -22,7 +22,7 @@ use crate::pairing::config_dir;
 const TOKEN: Option<&str> = option_env!("PROSTIR_COUNT_TOKEN");
 const SITE: &str = match option_env!("PROSTIR_COUNT_SITE") {
     Some(s) => s,
-    None => "prostir",
+    None => "ishawyha",
 };
 
 fn switch_file() -> Option<PathBuf> {

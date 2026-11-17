@@ -1,3 +1,25 @@
+// Marks the page as scripted, then reveals each band once as it scrolls into view.
+document.documentElement.classList.add("js");
+(function () {
+  const items = document.querySelectorAll(".reveal");
+  if (!("IntersectionObserver" in window)) {
+    items.forEach((el) => el.classList.add("seen"));
+    return;
+  }
+  const io = new IntersectionObserver(
+    (entries) => {
+      entries.forEach((e) => {
+        if (e.isIntersecting) {
+          e.target.classList.add("seen");
+          io.unobserve(e.target);
+        }
+      });
+    },
+    { rootMargin: "0px 0px -10% 0px" }
+  );
+  items.forEach((el) => io.observe(el));
+})();
+
 // How many PCs use Prostir, from GoatCounter's public counter. Prostir counts each PC
 // once a day (no id, nothing about the user); this page only reads the totals.
 // Hidden when there is nothing to show or the counter cannot be reached.
@@ -5,7 +27,7 @@
   const out = document.getElementById("downloads");
   if (!out) return;
   const uk = document.documentElement.lang === "uk";
-  const site = "https://prostir.goatcounter.com/counter/";
+  const site = "https://ishawyha.goatcounter.com/counter/";
   const count = (path) =>
     fetch(site + encodeURIComponent(path) + ".json")
       .then((r) => (r.ok ? r.json() : null))
