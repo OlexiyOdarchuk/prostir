@@ -52,6 +52,8 @@ pub struct Controls {
     hand_profile: Option<xr::Path>,
     /// Which sides are currently driven by tracked hands rather than controllers.
     tracked_hands: [bool; 2],
+    /// Last reported profile per side, to log changes.
+    last_profile: [Option<xr::Path>; 2],
     /// Whether tracked hands may point and click; otherwise their input is ignored.
     pub hands_enabled: bool,
     pub state: [HandState; 2],
@@ -139,6 +141,7 @@ impl Controls {
             pinch_ready,
             hand_profile,
             tracked_hands: [false; 2],
+            last_profile: [None; 2],
             hands_enabled: false,
             state: [HandState::default(); 2],
         })
@@ -149,7 +152,16 @@ impl Controls {
     pub fn refresh_profiles(&mut self, session: &xr::Session<Gfx>) {
         for hand in 0..2 {
             let profile = session.current_interaction_profile(self.hands[hand]).ok();
-            self.tracked_hands[hand] = profile.is_some() && profile == self.hand_profile;
+            let is_hand = profile.is_some() && profile == self.hand_profile;
+            if is_hand != self.tracked_hands[hand] || profile != self.last_profile[hand] {
+                let name = profile
+                    .filter(|p| *p != xr::Path::NULL)
+                    .and_then(|p| session.instance().path_to_string(p).ok())
+                    .unwrap_or_else(|| "none".into());
+                log::info!("{} hand: {name}", if hand == 0 { "left" } else { "right" });
+                self.last_profile[hand] = profile;
+            }
+            self.tracked_hands[hand] = is_hand;
         }
     }
 

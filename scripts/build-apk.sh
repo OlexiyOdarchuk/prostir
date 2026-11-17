@@ -36,7 +36,16 @@ fi
 unzip -p "$AAR" jni/arm64-v8a/libopenxr_loader.so > "$STAGE/lib/arm64-v8a/libopenxr_loader.so"
 
 echo ">> packaging with $(basename "$BUILD_TOOLS") / $(basename "$PLATFORM")"
-"$BUILD_TOOLS/aapt2" link -o "$OUT/unaligned.apk" --manifest "$ROOT/client/AndroidManifest.xml" -I "$PLATFORM/android.jar"
+rm -rf "$OUT/res" && mkdir -p "$OUT/res"
+"$BUILD_TOOLS/aapt2" compile --dir "$ROOT/client/res" -o "$OUT/res"
+link_flags=()
+# PROSTIR_DEBUG=1: debuggable build (adb run-as can read the app's files). Never for releases.
+if [[ "${PROSTIR_DEBUG:-}" == 1 ]]; then
+    link_flags+=(--debug-mode)
+    echo ">> debuggable build"
+fi
+"$BUILD_TOOLS/aapt2" link -o "$OUT/unaligned.apk" --manifest "$ROOT/client/AndroidManifest.xml" \
+    -I "$PLATFORM/android.jar" "$OUT"/res/*.flat "${link_flags[@]}"
 (cd "$STAGE" && zip -q -r "$OUT/unaligned.apk" lib)
 "$BUILD_TOOLS/zipalign" -f -p 4 "$OUT/unaligned.apk" "$OUT/aligned.apk"
 

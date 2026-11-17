@@ -171,20 +171,41 @@ pub fn arrange(
                 Some((*out.get(&mid.0)?, mid.2))
             });
         let yaw = anchor.map_or(0.0, |(p, _)| yaw_of(&p));
-        // Below the lowest monitor, so it never covers another one.
-        let lowest = sorted
+        // Below every monitor it could cover: those whose arc overlaps its own.
+        let reach = angular_width(w) / 2.0;
+        let bottom = sorted
             .iter()
-            .filter_map(|m| out.get(&m.0).map(|p| p.position.y - m.2 / 2.0))
+            .filter_map(|m| {
+                let p = out.get(&m.0)?;
+                let overlaps = (yaw_of(p) - yaw).abs() < reach + angular_width(m.1) / 2.0;
+                overlaps.then_some(p.position.y - m.2 / 2.0)
+            })
             .fold(f32::INFINITY, f32::min);
-        let bottom = if lowest.is_finite() {
-            lowest
+        let bottom = if bottom.is_finite() {
+            bottom
         } else {
             -EYE_DROP
         };
-        // Tilted back towards the eyes like a laptop lid, since it sits below them.
-        let mut p = on_cylinder(yaw, bottom - h / 2.0, w);
-        p.rotation = facing(p.position, Vec3::ZERO);
-        out.insert(id, p);
+        // Hinged at its top edge to the bottom edge of the monitor above (no seam) and
+        // tilted back towards the eyes like a laptop lid, since it sits below them.
+        let top = match anchor {
+            Some((p, _)) => Vec3::new(p.position.x, bottom, p.position.z),
+            None => on_cylinder(yaw, bottom, w).position,
+        };
+        let mut position = top - Vec3::Y * h / 2.0;
+        let mut rotation = facing(position, Vec3::ZERO);
+        for _ in 0..4 {
+            position = top + rotation * Vec3::new(0.0, -h / 2.0, 0.0);
+            rotation = facing(position, Vec3::ZERO);
+        }
+        out.insert(
+            id,
+            Placement {
+                position,
+                rotation,
+                width: w,
+            },
+        );
     }
 
     if preset == Preset::Overhead {
@@ -583,5 +604,38 @@ mod tests {
         assert_eq!(cinema_choice(&monitors, Some(9)), Some(1));
         assert_eq!(cinema_choice(&[(4, 1440, 2560)], None), Some(4));
         assert!(cinema(&[], None).is_empty());
+    }
+
+    #[test]
+    fn mirror_hangs_from_the_monitor_above() {
+        let monitors = [(0, 2560, 1440), (1, 1440, 2560), (2, 2560, 1440)];
+        for primary in [0, 1] {
+            let out = arrange(
+                Preset::Arc,
+                &monitors,
+                Some(primary),
+                Some((100, 2880, 1800)),
+            );
+            let above = out[&primary];
+            let h_above =
+                monitors.iter().find(|m| m.0 == primary).unwrap().2 as f32 * METRES_PER_PIXEL;
+            let mirror = out[&100];
+            let h = 1800.0 * METRES_PER_PIXEL * (MIRROR_MAX_WIDTH / (2880.0 * METRES_PER_PIXEL));
+            let top_edge = mirror.position + mirror.rotation * Vec3::new(0.0, h / 2.0, 0.0);
+            let bottom_edge = above.position - Vec3::Y * h_above / 2.0;
+            // The portrait one in the middle hangs lowest; under it there is no gap.
+            if primary == 1 {
+                assert!(
+                    top_edge.distance(bottom_edge) < 1e-3,
+                    "{top_edge} vs {bottom_edge}"
+                );
+            }
+            assert!(
+                top_edge.y <= bottom_edge.y + 1e-3,
+                "never above the monitor's bottom"
+            );
+            // Tilted back: its normal points up towards the eyes.
+            assert!((mirror.rotation * Vec3::Z).y > 0.05);
+        }
     }
 }
