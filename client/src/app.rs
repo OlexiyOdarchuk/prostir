@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use android_activity::{AndroidApp, InputStatus, MainEvent, PollEvent};
 use anyhow::{Result, anyhow, bail};
-use glam::Vec3;
+use glam::{Vec2, Vec3};
 use log::{error, info, warn};
 use openxr as xr;
 use openxr::sys::Handle as _;
@@ -43,6 +43,27 @@ const ERROR_SHOWN_FOR: Duration = Duration::from_secs(8);
 const CONFIRM_FOR: Duration = Duration::from_secs(4);
 /// How long a pinch must be held on a monitor before it starts dragging it.
 const HOLD_TO_DRAG: Duration = Duration::from_millis(300);
+
+/// `XR_HAND_JOINT_INDEX_TIP_EXT`.
+const INDEX_TIP: usize = 10;
+/// Touching the menu with a fingertip, like a touchscreen. Distances from the menu's
+/// surface, positive in front of it.
+const POKE_HOVER: f32 = 0.06;
+const POKE_PRESS: f32 = 0.008;
+const POKE_RELEASE: f32 = 0.025;
+/// A finger further behind the menu than this is not touching it (reaching past).
+const POKE_BEHIND: f32 = -0.06;
+
+/// One fingertip against the menu.
+#[derive(Default, Clone, Copy)]
+struct Poke {
+    /// Distance to the menu in the previous frame, while in front of it.
+    last_z: Option<f32>,
+    /// Touched and not yet pulled back.
+    pressed: bool,
+    /// Dragging the menu: the touched point in the menu's own plane.
+    drag: Option<Vec2>,
+}
 
 #[unsafe(no_mangle)]
 pub fn android_main(app: AndroidApp) {
@@ -286,9 +307,15 @@ impl Scene {
         });
     }
 
-    fn open_panel(&mut self, head: Vec3, forward: Vec3) {
+    /// Opens the menu in front of the user: within arm's reach, a little lower, when
+    /// hands are in view (to touch it), further away for controllers.
+    fn open_panel(&mut self, head: Vec3, forward: Vec3, touch: bool) {
         let flat = Vec3::new(forward.x, 0.0, forward.z).normalize_or(-Vec3::Z);
-        let position = head + flat * 0.7 - Vec3::Y * 0.12;
+        let position = if touch {
+            head + flat * 0.5 - Vec3::Y * 0.22
+        } else {
+            head + flat * 0.7 - Vec3::Y * 0.12
+        };
         self.panel_place = Placement {
             position,
             rotation: layout::facing(position, head),
@@ -595,6 +622,7 @@ fn run(app: &AndroidApp) -> Result<()> {
     };
 
     let mut hold_since: [Option<Instant>; 2] = [None, None];
+    let mut pokes = [Poke::default(); 2];
     let mut session_running = false;
     let mut last_time: Option<xr::Time> = None;
     let mut event_storage = xr::EventDataBuffer::new();
@@ -734,9 +762,25 @@ fn run(app: &AndroidApp) -> Result<()> {
                 )
             });
 
+        // Tracked hands: joints for drawing, fingertips for touching the menu.
+        let joints: [Option<[(Vec3, f32); 26]>; 2] = match &hand_trackers {
+            Some(trackers) if scene.settings.hands != HandMode::Hidden => {
+                std::array::from_fn(|h| {
+                    local
+                        .locate_hand_joints(&trackers[h], time)
+                        .ok()
+                        .flatten()
+                        .and_then(|l| overlay::joints(&l))
+                })
+            }
+            _ => [None, None],
+        };
+        let tips: [Option<Vec3>; 2] = std::array::from_fn(|h| joints[h].map(|j| j[INDEX_TIP].0));
+        let hands_in_view = tips.iter().any(Option::is_some);
+
         // Pairing needs the menu: open it where the user is looking.
         if scene.pairing.is_some() && !scene.panel_open {
-            scene.open_panel(head, forward);
+            scene.open_panel(head, forward, hands_in_view);
         }
         // Without a PC there is nothing to see: show the connection screen.
         if !scene.panel_open
@@ -744,14 +788,14 @@ fn run(app: &AndroidApp) -> Result<()> {
                 .offline_since
                 .is_some_and(|t| t.elapsed() > Duration::from_secs(4))
         {
-            scene.open_panel(head, forward);
+            scene.open_panel(head, forward, hands_in_view);
             scene.offline_since = None;
         }
         if controls.menu_pressed(&session) {
             if scene.panel_open {
                 scene.panel_open = false;
             } else {
-                scene.open_panel(head, forward);
+                scene.open_panel(head, forward, hands_in_view);
             }
         }
         if controls.align_pressed(&session) {
@@ -760,16 +804,81 @@ fn run(app: &AndroidApp) -> Result<()> {
         scene.place_button();
 
         // Pointing, clicking and dragging.
-        let picks: [Option<(Target, Hit)>; 2] =
+        let mut picks: [Option<(Target, Hit)>; 2] =
             std::array::from_fn(|h| controls.state[h].ray.and_then(|r| scene.pick(r)));
         let panel_point = |hit: &Hit| {
             let x = (hit.local.x / PANEL_WIDTH + 0.5) * ui::WIDTH as f32;
             let y = (0.5 - hit.local.y / panel_height()) * ui::HEIGHT as f32;
             (x, y)
         };
-        let hover = [1, 0].into_iter().find_map(|h| match picks[h] {
-            Some((Target::Panel, hit)) => Some(panel_point(&hit)),
-            _ => None,
+
+        // Touching the menu with a fingertip: hover when close, press on contact,
+        // drag the menu by touching an empty spot.
+        let mut poke_hover: [Option<(Vec2, f32)>; 2] = [None, None];
+        for h in 0..2 {
+            let poke = &mut pokes[h];
+            let Some(tip) = tips[h].filter(|_| scene.panel_open) else {
+                *poke = Poke::default();
+                continue;
+            };
+            let place = scene.panel_place;
+            let l = place.rotation.inverse() * (tip - place.position);
+            let (half_w, half_h) = (PANEL_WIDTH / 2.0, panel_height() / 2.0);
+            if let Some(anchor) = poke.drag {
+                if l.z > POKE_RELEASE {
+                    *poke = Poke::default();
+                    continue;
+                }
+                // The touched point follows the finger; pushing deeper moves it away.
+                let shift = Vec3::new(l.x - anchor.x, l.y - anchor.y, (l.z + 0.03).min(0.0));
+                let position = place.position + place.rotation * shift;
+                scene.panel_place.position = position;
+                scene.panel_place.rotation = layout::facing(position, head);
+                picks[h] = None;
+                continue;
+            }
+            let inside = l.x.abs() <= half_w && l.y.abs() <= half_h;
+            if !inside || l.z > POKE_HOVER || l.z < POKE_BEHIND {
+                poke.last_z = None;
+                poke.pressed = false;
+                continue;
+            }
+            // Near the menu, the finger is the pointer, not this hand's ray.
+            picks[h] = None;
+            let at = Vec2::new(l.x, l.y);
+            poke_hover[h] = Some((at, l.z));
+            let px = (
+                (l.x / PANEL_WIDTH + 0.5) * ui::WIDTH as f32,
+                (0.5 - l.y / panel_height()) * ui::HEIGHT as f32,
+            );
+            if poke.pressed && l.z > POKE_RELEASE {
+                poke.pressed = false;
+            }
+            let arrived = poke.last_z.is_some_and(|z| z >= POKE_PRESS);
+            if !poke.pressed && arrived && l.z < POKE_PRESS {
+                poke.pressed = true;
+                panel.hover(Some(px));
+                match panel.hovered_action() {
+                    Some(action) => {
+                        handle_action(&mut scene, action, &mut passthrough, &mut controls)
+                    }
+                    None => poke.drag = Some(at),
+                }
+            }
+            poke.last_z = Some(l.z);
+        }
+
+        let poke_px = poke_hover.iter().flatten().next().map(|(at, _)| {
+            (
+                (at.x / PANEL_WIDTH + 0.5) * ui::WIDTH as f32,
+                (0.5 - at.y / panel_height()) * ui::HEIGHT as f32,
+            )
+        });
+        let hover = poke_px.or_else(|| {
+            [1, 0].into_iter().find_map(|h| match picks[h] {
+                Some((Target::Panel, hit)) => Some(panel_point(&hit)),
+                _ => None,
+            })
         });
         panel.hover(hover);
         let over_button = picks
@@ -800,7 +909,7 @@ fn run(app: &AndroidApp) -> Result<()> {
                         if scene.panel_open {
                             scene.panel_open = false;
                         } else {
-                            scene.open_panel(head, forward);
+                            scene.open_panel(head, forward, hands_in_view);
                         }
                     }
                     _ => {}
@@ -891,13 +1000,8 @@ fn run(app: &AndroidApp) -> Result<()> {
 
         // Hands and rays: only rendered when there is something to show.
         let mut spheres: Vec<Sphere> = Vec::new();
-        let show_hands = scene.settings.hands != HandMode::Hidden;
-        for tracker in hand_trackers.iter().flatten().filter(|_| show_hands) {
-            if let Ok(Some(locations)) = local.locate_hand_joints(tracker, time)
-                && let Some(joints) = overlay::joints(&locations)
-            {
-                overlay::hand_spheres(&joints, &mut spheres);
-            }
+        for j in joints.iter().flatten() {
+            overlay::hand_spheres(j, &mut spheres);
         }
         for (input, pick) in controls.state.iter().zip(&picks) {
             if let Some(ray) = input.ray {
@@ -1100,7 +1204,7 @@ fn run(app: &AndroidApp) -> Result<()> {
                 panel_height(),
             )
         });
-        let cursors: Vec<xr::sys::CompositionLayerQuad> = picks
+        let mut cursors: Vec<xr::sys::CompositionLayerQuad> = picks
             .iter()
             .flatten()
             .map(|(_, hit)| {
@@ -1114,6 +1218,20 @@ fn run(app: &AndroidApp) -> Result<()> {
                 )
             })
             .collect();
+        // Under a fingertip near the menu: a dot that shrinks as the finger gets closer.
+        for (at, z) in poke_hover.iter().flatten() {
+            let place = &scene.panel_place;
+            let normal = place.rotation * Vec3::Z;
+            let point =
+                place.position + place.rotation * Vec3::new(at.x, at.y, 0.0) + normal * 0.002;
+            let size = 0.006 + z.max(0.0) * 0.15;
+            cursors.push(cursor_layer.quad(
+                &local,
+                pose(point, layout::facing(point, point + normal)),
+                size,
+                size,
+            ));
+        }
 
         let mut layers: Vec<&xr::CompositionLayerBase<Gfx>> = Vec::with_capacity(16);
         if let Some(l) = &passthrough_layer {

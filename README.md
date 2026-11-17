@@ -66,7 +66,7 @@ The PC encodes with the GPU's video engine (VA-API HEVC on Intel or AMD) and the
 decodes in hardware. Over Wi-Fi a frame takes about 14 ms from the encoder to the
 display on my setup.
 
-Monitors can sit on an arc, in a grid, in a column, or above your head for lying down.
+Monitors can sit on an arc, in a grid, in a column, or above your head for lying down (the "Lying down" layout).
 They can be flat or curved, and on an arc they touch edge to edge, so three of them
 read as one wide screen. The laptop's own screen can float below the main monitor,
 tilted towards you, so you can see it without taking the headset off. It disappears
@@ -173,12 +173,17 @@ headset to come back before the windows move back to the laptop.
 | | Controller | Hands (menu → Look → Hands → Show and use) |
 |---|---|---|
 | Open the menu | ☰ or X on the left controller, or the round ☰ button under the main monitor | pinch the ☰ button |
-| Click | trigger | pinch |
+| Press a button in the menu | trigger | touch it with a finger, or pinch from afar |
+| Move the menu | hold grip and point | touch an empty spot with a finger and drag |
+| Click on a monitor | trigger | pinch |
 | Move a monitor or the menu | hold grip and point | pinch and hold for about 0.3 s |
 | Nearer or farther | thumbstick up or down while holding | move your hand away or closer |
 | Bigger or smaller | thumbstick left or right while holding | |
 | Line the monitors up | A | menu → Monitors → Layout |
 | Recenter | hold the Meta button | system gesture |
+
+With hands in view, the menu opens within arm's reach so you can touch it. A dot shows
+where your finger is; pull the finger back to press the next button.
 
 ### Menu
 

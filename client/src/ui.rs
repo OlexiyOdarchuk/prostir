@@ -230,6 +230,56 @@ impl Panel {
         }
     }
 
+    /// Labels and texts that do not fit: a button label wider than its button, text
+    /// running off the panel or into another text or button. Empty when the layout is
+    /// clean; checked by the tests for every page in both languages.
+    pub fn overflows(&mut self) -> Vec<String> {
+        let items = std::mem::take(&mut self.items);
+        let mut boxes: Vec<(Rect, String, bool)> = Vec::new(); // (bounds, text, is_button)
+        let mut found = Vec::new();
+        for item in &items {
+            match item {
+                Item::Button { rect: r, label, .. } => {
+                    let size = button_font_size(label);
+                    let tw = self.text_width(label, size, true);
+                    if tw > r.width() - 16.0 {
+                        found.push(format!(
+                            "button too narrow: {label:?} ({tw:.0} > {:.0})",
+                            r.width() - 16.0
+                        ));
+                    }
+                    boxes.push((*r, label.clone(), true));
+                }
+                Item::Text {
+                    x,
+                    baseline,
+                    size,
+                    medium,
+                    text,
+                    ..
+                } => {
+                    let tw = self.text_width(text, *size, *medium);
+                    if x + tw > WIDTH as f32 - 32.0 {
+                        found.push(format!("off the panel: {text:?}"));
+                    }
+                    let r = rect(*x, baseline - size * 0.75, tw, size * 0.95);
+                    boxes.push((r, text.clone(), false));
+                }
+                _ => {}
+            }
+        }
+        for (i, (a, ta, a_button)) in boxes.iter().enumerate() {
+            for (b, tb, b_button) in &boxes[i + 1..] {
+                if (*a_button && *b_button) || !overlap(a, b) {
+                    continue;
+                }
+                found.push(format!("{ta:?} overlaps {tb:?}"));
+            }
+        }
+        self.items = items;
+        found
+    }
+
     /// Premultiplied RGBA, top row first, when it changed since the last call.
     pub fn render_if_dirty(&mut self) -> Option<&[u8]> {
         if !self.dirty {
@@ -673,12 +723,7 @@ impl Panel {
                         _ => ([255, 255, 255, 20], TEXT),
                     };
                     fill(&mut pixmap, rounded(*r, 12.0), bg);
-                    let size = match label.as_str() {
-                        "×" => 32.0,
-                        "‹" | "›" => 34.0,
-                        l if l.len() == 1 => 26.0,
-                        _ => 19.0,
-                    };
+                    let size = button_font_size(label);
                     let tw = self.text_width(label, size, true);
                     let baseline = r.top() + r.height() / 2.0 + size * 0.36;
                     self.draw_text(
@@ -900,20 +945,20 @@ fn toggle_row(
 fn hints(l: Lang, items: &mut Vec<Item>, lx: f32, mut y: f32) {
     for line in [
         l.t(
-            "Контролер: курок — натиснути, grip — перенести",
-            "Controller: trigger to press, grip to move",
+            "Пальцем: торкніться кнопки або тягніть меню за порожнє місце",
+            "Finger: touch a button, or drag the menu by an empty spot",
         ),
         l.t(
-            "Стік, поки тримаєте, — відстань і розмір · A — вирівняти",
-            "Stick while holding: distance and size · A: line up",
+            "Здалеку рукою: щипок натискає, щипок з утриманням переносить",
+            "Hand from afar: pinch to press, pinch and hold to move",
         ),
         l.t(
-            "Руки: щипок — натиснути, щипок і тримати — перенести",
-            "Hands: pinch to press, pinch and hold to move",
+            "Контролер: курок натискає, grip переносить",
+            "Controller: trigger presses, grip moves",
         ),
         l.t(
-            "Відсуньте або наблизьте руку — монітор далі чи ближче",
-            "Move the hand away or closer to push or pull",
+            "Стік, поки тримаєте: відстань і розмір. A: вирівняти",
+            "Stick while holding: distance and size. A: line up",
         ),
     ] {
         items.push(text(lx, y, 19.0, false, MUTED, line));
@@ -1038,7 +1083,7 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
                 true,
             ),
             (
-                l.t("Над головою", "Overhead"),
+                l.t("Лежачи", "Lying down"),
                 Action::Preset(Preset::Overhead),
                 false,
                 true,
@@ -1286,7 +1331,7 @@ fn build_profiles(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32
                 Preset::Arc => l.t("дуга", "arc"),
                 Preset::Grid => l.t("сітка", "grid"),
                 Preset::Column => l.t("стовпчик", "column"),
-                Preset::Overhead => l.t("над головою", "overhead"),
+                Preset::Overhead => l.t("лежачи", "lying down"),
             }
         };
         let mut summary = format!(
@@ -1373,15 +1418,9 @@ fn build_sound(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32)
     );
     y += 70.0;
     let (note, label) = if s.mic_wanted {
-        (
-            l.t("шолома", "from the headset"),
-            l.t("З ноутбука", "Use the PC's"),
-        )
+        (l.t("шолома", "headset"), l.t("З ноутбука", "Use the PC's"))
     } else {
-        (
-            l.t("ноутбука", "from the PC"),
-            l.t("Зі шолома", "Use the headset's"),
-        )
+        (l.t("ноутбука", "PC"), l.t("Зі шолома", "Use the headset's"))
     };
     toggle_row(
         items,
@@ -1414,6 +1453,19 @@ fn build_sound(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32)
         items.push(text(lx, y, 19.0, false, MUTED, line));
         y += 30.0;
     }
+}
+
+fn button_font_size(label: &str) -> f32 {
+    match label {
+        "×" => 32.0,
+        "‹" | "›" => 34.0,
+        l if l.len() == 1 => 26.0,
+        _ => 19.0,
+    }
+}
+
+fn overlap(a: &Rect, b: &Rect) -> bool {
+    a.left() < b.right() && b.left() < a.right() && a.top() < b.bottom() && b.top() < a.bottom()
 }
 
 fn circle(cx: f32, cy: f32, r: f32) -> Path {
@@ -1535,5 +1587,71 @@ mod tests {
         assert!(p.render_if_dirty().is_some());
         p.hover(None);
         assert_eq!(p.hovered_action(), None);
+    }
+
+    /// Every page and state, in both languages, without text that does not fit.
+    #[test]
+    fn nothing_overflows() {
+        let mut states = Vec::new();
+        for lang in [Lang::Uk, Lang::En] {
+            for tab in [Tab::Monitors, Tab::Profiles, Tab::Look, Tab::Sound] {
+                let mut st = sample_state();
+                st.lang = lang;
+                st.tab = tab;
+                states.push(st.clone());
+                st.confirm_remove = Some(2);
+                st.settings.cinema = true;
+                st.settings.focus = true;
+                st.mic_wanted = false;
+                st.audio_wanted = false;
+                st.mirror_wanted = false;
+                st.active_profile = Some(1);
+                st.error = Some(format!(
+                    "{} 6",
+                    lang.t("Максимум моніторів:", "At most monitors:")
+                ));
+                states.push(st.clone());
+                // Six monitors.
+                st.monitors = (0..6)
+                    .map(|id| MonitorEntry {
+                        id,
+                        width: 3440,
+                        height: 1440,
+                    })
+                    .collect();
+                states.push(st);
+            }
+            let mut offline = sample_state();
+            offline.lang = lang;
+            offline.host = None;
+            offline.found = vec![("workstation".into(), "192.168.1.10".into())];
+            states.push(offline.clone());
+            offline.ip_input = Some("192.168.100.200".into());
+            states.push(offline);
+            for (code, typed, failed) in [
+                (Some("482 913".to_owned()), String::new(), false),
+                (None, "4829".to_owned(), true),
+            ] {
+                let mut pairing = sample_state();
+                pairing.lang = lang;
+                pairing.pairing = Some(PairingView {
+                    host: "workstation".into(),
+                    code,
+                    typed,
+                    failed,
+                });
+                states.push(pairing);
+            }
+        }
+        let mut problems = Vec::new();
+        for st in &states {
+            let mut p = Panel::new();
+            p.set_state(st);
+            for o in p.overflows() {
+                problems.push(format!("{:?}/{:?}: {o}", st.lang, st.tab));
+            }
+        }
+        problems.dedup();
+        assert!(problems.is_empty(), "{}", problems.join("\n"));
     }
 }
