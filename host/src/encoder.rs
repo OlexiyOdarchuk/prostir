@@ -1,8 +1,10 @@
 //! PipeWire → VA-API hardware encoder → encoded access units, via GStreamer.
 
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow};
 use gstreamer as gst;
@@ -47,7 +49,7 @@ fn pipeline_description(node: u32, cfg: &EncoderConfig) -> String {
     let (encoder, parser, caps) = match (cfg.codec, cfg.software) {
         (Codec::H264, true) => (
             format!(
-                "videoconvert ! video/x-raw,format=I420 ! x264enc tune=zerolatency speed-preset=superfast \
+                "videoconvert name=enc_in ! video/x-raw,format=I420 ! x264enc tune=zerolatency speed-preset=superfast \
                  bitrate={} key-int-max=600 bframes=0",
                 cfg.bitrate_kbps
             ),
@@ -98,6 +100,19 @@ impl Encoder {
 
         let on_event = Arc::new(on_event);
         let last_size = std::sync::Mutex::new((0u32, 0u32));
+        let probe = Arc::new(Mutex::new(Probe::default()));
+        // Frames enter the encoder in order and (no B-frames) leave in order, so a FIFO
+        // of arrival times pairs them up despite the encoder rewriting timestamps.
+        if let Some(pad) = pipeline
+            .by_name("enc_in")
+            .and_then(|e| e.static_pad("sink"))
+        {
+            let probe = probe.clone();
+            pad.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+                probe.lock().unwrap().entered();
+                gst::PadProbeReturn::Ok
+            });
+        }
         {
             let on_event = on_event.clone();
             sink.set_callbacks(
@@ -127,6 +142,7 @@ impl Encoder {
                         let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
                         let keyframe = !buffer.flags().contains(gst::BufferFlags::DELTA_UNIT);
                         let pts_us = buffer.pts().map(|t| t.useconds()).unwrap_or(0);
+                        probe.lock().unwrap().left(node);
                         if on_event(EncoderEvent::Frame {
                             pts_us,
                             keyframe,
@@ -206,6 +222,64 @@ impl Drop for Encoder {
         let _ = self.pipeline.set_state(gst::State::Null);
         if let Some(t) = self.bus_thread.take() {
             let _ = t.join();
+        }
+    }
+}
+
+/// Time each frame spends in conversion + encoding, and gaps between captured frames.
+#[derive(Default)]
+struct Probe {
+    inside: std::collections::VecDeque<Instant>,
+    last_entered: Option<Instant>,
+    max_gap_ms: f64,
+    frames: u32,
+    sum_ms: f64,
+    max_ms: f64,
+    since: Option<Instant>,
+}
+
+impl Probe {
+    fn entered(&mut self) {
+        let now = Instant::now();
+        if let Some(prev) = self.last_entered.replace(now) {
+            self.max_gap_ms = self.max_gap_ms.max((now - prev).as_secs_f64() * 1e3);
+        }
+        if self.inside.len() > 64 {
+            self.inside.clear();
+        }
+        self.inside.push_back(now);
+    }
+
+    fn left(&mut self, node: u32) {
+        let Some(t0) = self.inside.pop_front() else {
+            return;
+        };
+        let ms = t0.elapsed().as_secs_f64() * 1e3;
+        self.frames += 1;
+        self.sum_ms += ms;
+        self.max_ms = self.max_ms.max(ms);
+        if ms > 30.0 {
+            debug!(
+                "node {node}: frame spent {ms:.0} ms in the encoder, {} still inside",
+                self.inside.len()
+            );
+        }
+        let since = *self.since.get_or_insert_with(Instant::now);
+        if since.elapsed().as_secs() >= 5 {
+            debug!(
+                "node {node}: {} frames, encoder avg {:.1} max {:.1} ms, longest gap between captured frames {:.0} ms",
+                self.frames,
+                self.sum_ms / f64::from(self.frames),
+                self.max_ms,
+                self.max_gap_ms
+            );
+            let inside = std::mem::take(&mut self.inside);
+            let last_entered = self.last_entered;
+            *self = Self {
+                inside,
+                last_entered,
+                ..Self::default()
+            };
         }
     }
 }
