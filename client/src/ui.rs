@@ -1344,12 +1344,12 @@ fn build_sound(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32)
     y += 70.0;
     let (note, label) = if s.mic_wanted {
         (
-            l.t("шолома", "headset's"),
+            l.t("шолома", "from the headset"),
             l.t("З ноутбука", "Use the PC's"),
         )
     } else {
         (
-            l.t("ноутбука", "PC's"),
+            l.t("ноутбука", "from the PC"),
             l.t("Зі шолома", "Use the headset's"),
         )
     };
