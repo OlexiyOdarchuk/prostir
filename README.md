@@ -32,6 +32,7 @@ from one screen to the next exactly where the screens meet in front of you.
 - **Hands**: see your tracked hands (e.g. over the keyboard), optionally point,
   pinch to click and pinch-and-hold to drag.
 - **Tray icon** on the PC: connection status, video quality, start with the session.
+- **Encrypted and paired**: nothing is streamed to a device you have not paired.
 - Works over **Wi-Fi** (automatic discovery) or **USB**.
 
 ## Status
@@ -99,7 +100,9 @@ rustup target add aarch64-linux-android
 3. The headset finds the PC by itself: over USB if the cable is plugged in,
    otherwise over Wi-Fi. With several PCs around, pick one in the menu — or type
    the IP on the keypad.
-4. The monitors appear in front of you. Press **A** to line them up.
+4. The first time, pair them: the headset shows a code, type it into the dialog that
+   pops up on the PC (or swap sides with the button under the code).
+5. The monitors appear in front of you. Press **A** to line them up.
 
 The monitors stay in KDE for 30 s after the headset disconnects (`--linger`), then
 windows move back to the laptop screen.
@@ -157,9 +160,19 @@ Measured with three 2560×1440 monitors and the laptop mirror:
 
 ## Security
 
-The connection is **neither authenticated nor encrypted**: anyone on the same network
-can connect and see the virtual monitors. Use Prostir on a trusted network (or USB).
-Ports: TCP 47830 (stream), UDP 47831 (discovery broadcast).
+- **Encrypted**: every connection starts with a Noise `XX` handshake (Curve25519,
+  ChaCha20-Poly1305, BLAKE2s) and everything after it is encrypted and authenticated.
+- **Paired**: a headset and a PC must be paired once before the PC creates any monitors
+  or streams anything. The headset shows a 6-digit code and the PC asks for it in a small
+  dialog — or the other way round (the PC shows it in the tray and a notification, you
+  type it in the headset). The code goes through SPAKE2, so it cannot be guessed offline
+  from captured traffic, and the confirmation is bound to that connection's handshake,
+  which stops a man in the middle.
+- Paired keys are kept in `~/.config/prostir/paired_headsets` on the PC (tray → "Forget
+  paired headsets" clears it) and inside the app on the headset.
+
+Ports: TCP 47830 (stream), UDP 47831 (discovery broadcast). The broadcast contains the
+PC's host name only.
 
 ## Troubleshooting
 

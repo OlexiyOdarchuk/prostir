@@ -14,4 +14,6 @@ First public version.
 - Backgrounds: black, room (passthrough), night, sunset, space, aurora, own picture.
 - Tracked hands shown, optional hand pointing (pinch, pinch-and-hold to drag).
 - Discovery over Wi-Fi, USB via `adb reverse`, PC list and IP keypad in the headset.
-- Tray icon on the PC: status, video quality, autostart, quit.
+- Tray icon on the PC: status, video quality, autostart, forget paired headsets, quit.
+- Encrypted connections (Noise XX) and one-time pairing with a 6-digit code (SPAKE2),
+  shown on either side.
