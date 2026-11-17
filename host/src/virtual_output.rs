@@ -423,6 +423,58 @@ impl Drop for VirtualOutput {
     }
 }
 
+/// Logical geometry `(x, y, width, height)` of each enabled output, from KScreen.
+fn output_geometries() -> HashMap<String, (i32, i32, i32, i32)> {
+    let Ok(out) = std::process::Command::new("kscreen-doctor")
+        .arg("-o")
+        .output()
+    else {
+        return HashMap::new();
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut name = None;
+    let mut map = HashMap::new();
+    for raw in text.lines() {
+        // Strip ANSI colour codes.
+        let mut line = String::new();
+        let mut esc = false;
+        for c in raw.chars() {
+            match (esc, c) {
+                (false, '\x1b') => esc = true,
+                (true, 'm') => esc = false,
+                (false, c) => line.push(c),
+                _ => {}
+            }
+        }
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("Output:") {
+            name = rest.split_whitespace().nth(1).map(str::to_owned);
+        } else if let (Some(n), Some(rest)) = (&name, line.strip_prefix("Geometry:")) {
+            let nums: Vec<i32> = rest
+                .split(|c: char| !c.is_ascii_digit() && c != '-')
+                .filter_map(|t| t.parse().ok())
+                .collect();
+            if let [x, y, w, h] = nums[..] {
+                map.insert(n.clone(), (x, y, w, h));
+            }
+        }
+    }
+    map
+}
+
+/// Moves `output` (e.g. the laptop panel) right under `anchor` in KDE's layout, so the
+/// mouse goes down into it just like the mirror sits under the monitor in the headset.
+pub fn place_below(output: &str, anchor: &str) {
+    let geometries = output_geometries();
+    let (Some(&(ax, ay, aw, ah)), Some(&(_, _, w, _))) =
+        (geometries.get(anchor), geometries.get(output))
+    else {
+        return;
+    };
+    let (x, y) = (ax + (aw - w) / 2, ay + ah);
+    kscreen(output, &format!("position.{x},{y}"));
+}
+
 /// Applies `output.<name>.<setting>` through kscreen-doctor, retrying while KScreen
 /// has not caught up with a just-created output.
 fn kscreen(output: &str, setting: &str) {

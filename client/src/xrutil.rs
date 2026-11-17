@@ -1,0 +1,301 @@
+//! OpenXR/Android plumbing shared by the main loop.
+
+use std::num::NonZeroU32;
+use std::ptr;
+
+use android_activity::AndroidApp;
+use anyhow::{Context, Result, bail};
+use glam::{Quat, Vec3};
+use glow::HasContext;
+use ndk::native_window::NativeWindow;
+use openxr as xr;
+use openxr::sys::Handle as _;
+
+use crate::layout::Placement;
+
+pub type Gfx = xr::OpenGlEs;
+
+const GL_RGBA8: u32 = 0x8058;
+const GL_SRGB8_ALPHA8: u32 = 0x8C43;
+
+/// Views a raw `XrCompositionLayer*` struct as the base type `FrameStream::end` takes.
+pub fn as_layer<'a, T>(layer: &'a T) -> &'a xr::CompositionLayerBase<'a, Gfx> {
+    // SAFETY: only called with XrCompositionLayer* structs, which all begin with the
+    // common layer header; CompositionLayerBase is a transparent wrapper over it.
+    unsafe { &*(layer as *const T).cast() }
+}
+
+pub fn vec3(v: xr::Vector3f) -> Vec3 {
+    Vec3::new(v.x, v.y, v.z)
+}
+
+pub fn quat(q: xr::Quaternionf) -> Quat {
+    Quat::from_xyzw(q.x, q.y, q.z, q.w)
+}
+
+pub fn pose(position: Vec3, rotation: Quat) -> xr::Posef {
+    xr::Posef {
+        orientation: xr::Quaternionf {
+            x: rotation.x,
+            y: rotation.y,
+            z: rotation.z,
+            w: rotation.w,
+        },
+        position: xr::Vector3f {
+            x: position.x,
+            y: position.y,
+            z: position.z,
+        },
+    }
+}
+
+pub fn posef(p: &Placement) -> xr::Posef {
+    pose(p.position, p.rotation)
+}
+
+/// A swapchain whose Android Surface MediaCodec decodes into.
+pub fn create_surface_swapchain(
+    session: &xr::Session<Gfx>,
+    vm: &jni::JavaVM,
+    width: u32,
+    height: u32,
+) -> Result<(xr::Swapchain<Gfx>, NativeWindow)> {
+    let ext = session
+        .instance()
+        .exts()
+        .khr_android_surface_swapchain
+        .as_ref()
+        .context("XR_KHR_android_surface_swapchain is not enabled")?;
+    // Meta's runtime rejects surface swapchains with a format or non-zero counts
+    // ("info format validation failure"): MediaCodec decides those.
+    let info = xr::sys::SwapchainCreateInfo {
+        ty: xr::sys::SwapchainCreateInfo::TYPE,
+        next: ptr::null(),
+        create_flags: xr::SwapchainCreateFlags::EMPTY,
+        usage_flags: xr::SwapchainUsageFlags::SAMPLED | xr::SwapchainUsageFlags::COLOR_ATTACHMENT,
+        format: 0,
+        sample_count: 0,
+        width,
+        height,
+        face_count: 0,
+        array_size: 0,
+        mip_count: 0,
+    };
+    let mut handle = xr::sys::Swapchain::NULL;
+    let mut surface = ptr::null_mut();
+    // SAFETY: valid session and create info; out-pointers live on the stack.
+    let result = unsafe {
+        (ext.create_swapchain_android_surface)(session.as_raw(), &info, &mut handle, &mut surface)
+    };
+    if result != xr::sys::Result::SUCCESS {
+        bail!("xrCreateSwapchainAndroidSurfaceKHR failed: {result:?}");
+    }
+    // SAFETY: the handle was just created for this session and is owned by the wrapper.
+    let swapchain = unsafe { xr::Swapchain::from_raw(session.clone(), handle) };
+    let env = vm.attach_current_thread_permanently()?;
+    // SAFETY: `surface` is a valid android.view.Surface reference returned by the runtime.
+    let window = unsafe { NativeWindow::from_surface(env.get_raw().cast(), surface.cast()) }
+        .context("ANativeWindow_fromSurface failed")?;
+    Ok((swapchain, window))
+}
+
+/// Keeps Wi-Fi out of power save while the app runs. Without it the headset's
+/// radio naps between beacons and downlink frames wait at the router.
+pub fn acquire_low_latency_wifi(
+    app: &AndroidApp,
+    vm: &jni::JavaVM,
+) -> Result<jni::objects::GlobalRef> {
+    use jni::objects::{JObject, JValue};
+    /// WifiManager.WIFI_MODE_FULL_LOW_LATENCY (API 29).
+    const WIFI_MODE_FULL_LOW_LATENCY: i32 = 4;
+    let mut env = vm.attach_current_thread_permanently()?;
+    let result = (|| -> jni::errors::Result<jni::objects::GlobalRef> {
+        // SAFETY: the activity reference stays valid while the app runs.
+        let activity = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
+        let context = env
+            .call_method(
+                &activity,
+                "getApplicationContext",
+                "()Landroid/content/Context;",
+                &[],
+            )?
+            .l()?;
+        let service = env.new_string("wifi")?;
+        let wifi = env
+            .call_method(
+                &context,
+                "getSystemService",
+                "(Ljava/lang/String;)Ljava/lang/Object;",
+                &[JValue::Object(&service)],
+            )?
+            .l()?;
+        let tag = env.new_string("questmon")?;
+        let lock = env
+            .call_method(
+                &wifi,
+                "createWifiLock",
+                "(ILjava/lang/String;)Landroid/net/wifi/WifiManager$WifiLock;",
+                &[
+                    JValue::Int(WIFI_MODE_FULL_LOW_LATENCY),
+                    JValue::Object(&tag),
+                ],
+            )?
+            .l()?;
+        env.call_method(&lock, "setReferenceCounted", "(Z)V", &[JValue::Bool(0)])?;
+        env.call_method(&lock, "acquire", "()V", &[])?;
+        env.new_global_ref(lock)
+    })();
+    if result.is_err() {
+        let _ = env.exception_describe();
+        let _ = env.exception_clear();
+    }
+    Ok(result?)
+}
+
+/// GL function loader for the EGL context the session was created with.
+pub fn load_gl(egl: &khronos_egl::Instance<khronos_egl::Static>) -> glow::Context {
+    // SAFETY: the EGL context is current on this thread for the app's lifetime.
+    unsafe {
+        glow::Context::from_loader_function(|name| {
+            egl.get_proc_address(name)
+                .map_or(ptr::null(), |f| f as *const std::ffi::c_void)
+        })
+    }
+}
+
+/// Picks sRGB storage when the runtime offers it, so CPU-drawn sRGB pixels show right.
+pub fn color_format(session: &xr::Session<Gfx>) -> u32 {
+    let formats = session.enumerate_swapchain_formats().unwrap_or_default();
+    if formats.contains(&GL_SRGB8_ALPHA8) {
+        GL_SRGB8_ALPHA8
+    } else {
+        GL_RGBA8
+    }
+}
+
+/// A CPU-drawn image (menu, cursor, panorama) in a GL swapchain.
+pub struct ImageLayer {
+    swapchain: xr::Swapchain<Gfx>,
+    images: Vec<u32>,
+    pub width: u32,
+    pub height: u32,
+    is_static: bool,
+    uploaded: bool,
+}
+
+impl ImageLayer {
+    /// `is_static` images are uploaded once and never change.
+    pub fn new(
+        session: &xr::Session<Gfx>,
+        format: u32,
+        width: u32,
+        height: u32,
+        is_static: bool,
+    ) -> Result<Self> {
+        let swapchain = session.create_swapchain(&xr::SwapchainCreateInfo {
+            create_flags: if is_static {
+                xr::SwapchainCreateFlags::STATIC_IMAGE
+            } else {
+                xr::SwapchainCreateFlags::EMPTY
+            },
+            usage_flags: xr::SwapchainUsageFlags::SAMPLED
+                | xr::SwapchainUsageFlags::COLOR_ATTACHMENT
+                | xr::SwapchainUsageFlags::TRANSFER_DST,
+            format,
+            sample_count: 1,
+            width,
+            height,
+            face_count: 1,
+            array_size: 1,
+            mip_count: 1,
+        })?;
+        let images = swapchain.enumerate_images()?;
+        Ok(Self {
+            swapchain,
+            images,
+            width,
+            height,
+            is_static,
+            uploaded: false,
+        })
+    }
+
+    /// Whether the compositor has something to show.
+    pub fn ready(&self) -> bool {
+        self.uploaded
+    }
+
+    /// Uploads RGBA8 pixels given top row first (GL images are stored bottom row first).
+    pub fn upload(&mut self, gl: &glow::Context, rgba: &[u8]) -> Result<()> {
+        if self.is_static && self.uploaded {
+            return Ok(());
+        }
+        let row = self.width as usize * 4;
+        if rgba.len() != row * self.height as usize {
+            bail!(
+                "image is {} bytes, expected {}",
+                rgba.len(),
+                row * self.height as usize
+            );
+        }
+        let flipped: Vec<u8> = rgba.chunks_exact(row).rev().flatten().copied().collect();
+        let index = self.swapchain.acquire_image()? as usize;
+        self.swapchain.wait_image(xr::Duration::INFINITE)?;
+        let texture = NonZeroU32::new(self.images[index]).context("null GL texture")?;
+        // SAFETY: the texture belongs to the acquired swapchain image; the context is current.
+        unsafe {
+            gl.bind_texture(glow::TEXTURE_2D, Some(glow::NativeTexture(texture)));
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
+            gl.tex_sub_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                0,
+                0,
+                self.width as i32,
+                self.height as i32,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(Some(&flipped)),
+            );
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            gl.flush();
+        }
+        self.swapchain.release_image()?;
+        self.uploaded = true;
+        Ok(())
+    }
+
+    pub fn sub_image(&self) -> xr::sys::SwapchainSubImage {
+        xr::sys::SwapchainSubImage {
+            swapchain: self.swapchain.as_raw(),
+            image_rect: xr::Rect2Di {
+                offset: xr::Offset2Di { x: 0, y: 0 },
+                extent: xr::Extent2Di {
+                    width: self.width as i32,
+                    height: self.height as i32,
+                },
+            },
+            image_array_index: 0,
+        }
+    }
+
+    /// A camera-facing quad of this image, alpha-blended over what is behind it.
+    pub fn quad(
+        &self,
+        space: &xr::Space,
+        pose: xr::Posef,
+        width: f32,
+        height: f32,
+    ) -> xr::sys::CompositionLayerQuad {
+        xr::sys::CompositionLayerQuad {
+            ty: xr::sys::CompositionLayerQuad::TYPE,
+            next: ptr::null(),
+            layer_flags: xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA,
+            space: space.as_raw(),
+            eye_visibility: xr::EyeVisibility::BOTH,
+            sub_image: self.sub_image(),
+            pose,
+            size: xr::Extent2Df { width, height },
+        }
+    }
+}

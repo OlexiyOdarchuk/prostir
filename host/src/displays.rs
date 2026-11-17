@@ -12,7 +12,7 @@ use log::{debug, error, info, warn};
 use qmon_proto::{Codec, HostMsg, MIRROR_ID};
 
 use crate::encoder::{Encoder, EncoderConfig, EncoderEvent};
-use crate::virtual_output::{MonitorSpec, Screencast, VirtualOutput};
+use crate::virtual_output::{self, MonitorSpec, Screencast, VirtualOutput};
 
 /// More streams than this overwhelm the headset's hardware decoders.
 pub const MAX_MONITORS: usize = 6;
@@ -372,6 +372,7 @@ impl Displays {
             Ok(m) => {
                 m.encoder.force_keyframe();
                 self.mirror = Some(m);
+                self.place_mirrored_display();
             }
             Err(e) => warn!("cannot mirror {name}: {e:#}"),
         }
@@ -422,6 +423,19 @@ impl Displays {
         }
         self.primary = Some(id);
         self.router.send(HostMsg::PrimaryChanged { id });
+        self.place_mirrored_display();
+    }
+
+    /// Keeps KDE's layout in step with the headset: the mirrored display sits under
+    /// the primary monitor.
+    fn place_mirrored_display(&self) {
+        let (Some(mirror), Some(primary)) = (
+            &self.mirror,
+            self.primary.and_then(|id| self.monitors.get(&id)),
+        ) else {
+            return;
+        };
+        virtual_output::place_below(mirror.output.output_name(), primary.output.output_name());
     }
 
     /// Without a chosen primary, the middle monitor gets the Plasma panel.

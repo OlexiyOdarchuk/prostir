@@ -17,6 +17,10 @@ mod decoder;
 #[cfg(target_os = "android")]
 mod egl;
 #[cfg(target_os = "android")]
+mod input;
+#[cfg(target_os = "android")]
 mod net;
 #[cfg(target_os = "android")]
 mod passthrough;
+#[cfg(target_os = "android")]
+mod xrutil;

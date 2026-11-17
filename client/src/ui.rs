@@ -519,6 +519,37 @@ impl Panel {
     }
 }
 
+/// Pointer dot: white with a dark rim so it shows on light and dark content.
+/// Premultiplied RGBA, `size`×`size`.
+pub fn cursor_image(size: u32) -> Vec<u8> {
+    let mut p = Pixmap::new(size, size).expect("cursor size");
+    let c = size as f32 / 2.0;
+    fill(&mut p, circle(c, c, c - 1.0), [20, 22, 28, 200]);
+    fill(&mut p, circle(c, c, c * 0.62), [255, 255, 255, 255]);
+    p.take()
+}
+
+/// Round "☰" button that opens the menu. Premultiplied RGBA, `size`×`size`.
+pub fn menu_button_image(size: u32, hovered: bool) -> Vec<u8> {
+    let mut p = Pixmap::new(size, size).expect("button size");
+    let s = size as f32;
+    let bg = if hovered { ACCENT } else { [16, 18, 24, 225] };
+    fill(&mut p, circle(s / 2.0, s / 2.0, s / 2.0 - 1.0), bg);
+    for i in -1..=1 {
+        let y = s / 2.0 + i as f32 * s * 0.15;
+        fill(
+            &mut p,
+            rounded(rect(s * 0.3, y - s * 0.035, s * 0.4, s * 0.07), s * 0.035),
+            [255, 255, 255, 255],
+        );
+    }
+    p.take()
+}
+
+fn circle(cx: f32, cy: f32, r: f32) -> Path {
+    PathBuilder::from_circle(cx, cy, r).expect("valid circle")
+}
+
 fn rect(x: f32, y: f32, w: f32, h: f32) -> Rect {
     Rect::from_xywh(x, y, w, h).expect("valid rect")
 }

@@ -1,32 +1,42 @@
-//! OpenXR main loop: shows each virtual KDE monitor as an OpenXR quad layer.
+//! OpenXR main loop.
 //!
-//! Video frames are decoded by MediaCodec directly into Android surfaces owned
-//! by the Quest compositor (XR_KHR_android_surface_swapchain), so pixels never
-//! pass through this app's GPU code and text stays as sharp as the compositor
-//! can make it.
+//! Each KDE monitor is decoded by MediaCodec straight into an Android surface
+//! owned by the Quest compositor (XR_KHR_android_surface_swapchain) and shown as
+//! a quad or cylinder layer. The menu, its button, pointer dots and the
+//! panorama are small CPU-drawn images; nothing is rendered per frame.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use android_activity::{AndroidApp, MainEvent, PollEvent};
-use anyhow::{Context, Result, anyhow, bail};
-use glam::{Quat, Vec2, Vec3};
+use anyhow::{Result, anyhow, bail};
+use glam::Vec3;
 use log::{error, info, warn};
-use ndk::native_window::NativeWindow;
 use openxr as xr;
 use openxr::sys::Handle as _;
+use qmon_proto::{ClientMsg, MIRROR_ID};
 
-use crate::layout::{self, Grab, Placement, Ray};
-use crate::net::NetEvent;
-use crate::{decoder, egl, net, passthrough};
+use crate::input::Controls;
+use crate::layout::{self, Cylinder, Grab, Hit, Placement, Ray};
+use crate::net::{Feedback, NetEvent};
+use crate::settings::{Background, Settings};
+use crate::ui::{self, Action, MonitorEntry, Panel, UiState};
+use crate::xrutil::{self, Gfx, ImageLayer, as_layer, pose, posef, vec3};
+use crate::{background, decoder, egl, net, passthrough};
 
-type Gfx = xr::OpenGlEs;
+/// Grab id for the menu panel (monitor ids are 0..=MIRROR_ID).
+const PANEL_ID: u8 = 250;
+const PANEL_WIDTH: f32 = 0.62;
+const BUTTON_SIZE: f32 = 0.075;
+const CURSOR_PX: u32 = 64;
+const BUTTON_PX: u32 = 128;
+const ERROR_SHOWN_FOR: Duration = Duration::from_secs(8);
 
 #[unsafe(no_mangle)]
 pub fn android_main(app: AndroidApp) {
@@ -44,7 +54,11 @@ pub fn android_main(app: AndroidApp) {
     }
 }
 
-/// One virtual monitor: the compositor surface it is decoded into and its decoder thread.
+fn panel_height() -> f32 {
+    PANEL_WIDTH * ui::HEIGHT as f32 / ui::WIDTH as f32
+}
+
+/// One stream: the compositor surface it is decoded into and its decoder thread.
 struct Monitor {
     width_px: u32,
     height_px: u32,
@@ -69,214 +83,217 @@ impl Drop for Monitor {
     }
 }
 
-fn create_surface_swapchain(
-    session: &xr::Session<Gfx>,
-    vm: &jni::JavaVM,
-    width: u32,
-    height: u32,
-) -> Result<(xr::Swapchain<Gfx>, NativeWindow)> {
-    let ext = session
-        .instance()
-        .exts()
-        .khr_android_surface_swapchain
-        .as_ref()
-        .context("XR_KHR_android_surface_swapchain is not enabled")?;
-    // Meta's runtime rejects surface swapchains with a format or non-zero counts
-    // ("info format validation failure"): MediaCodec decides those.
-    let info = xr::sys::SwapchainCreateInfo {
-        ty: xr::sys::SwapchainCreateInfo::TYPE,
-        next: ptr::null(),
-        create_flags: xr::SwapchainCreateFlags::EMPTY,
-        usage_flags: xr::SwapchainUsageFlags::SAMPLED | xr::SwapchainUsageFlags::COLOR_ATTACHMENT,
-        format: 0,
-        sample_count: 0,
-        width,
-        height,
-        face_count: 0,
-        array_size: 0,
-        mip_count: 0,
-    };
-    let mut handle = xr::sys::Swapchain::NULL;
-    let mut surface = ptr::null_mut();
-    // SAFETY: valid session and create info; out-pointers live on the stack.
-    let result = unsafe {
-        (ext.create_swapchain_android_surface)(session.as_raw(), &info, &mut handle, &mut surface)
-    };
-    if result != xr::sys::Result::SUCCESS {
-        bail!("xrCreateSwapchainAndroidSurfaceKHR failed: {result:?}");
-    }
-    // SAFETY: the handle was just created for this session and is owned by the wrapper.
-    let swapchain = unsafe { xr::Swapchain::from_raw(session.clone(), handle) };
-    let env = vm.attach_current_thread_permanently()?;
-    // SAFETY: `surface` is a valid android.view.Surface reference returned by the runtime.
-    let window = unsafe { NativeWindow::from_surface(env.get_raw().cast(), surface.cast()) }
-        .context("ANativeWindow_fromSurface failed")?;
-    Ok((swapchain, window))
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Target {
+    Panel,
+    MenuButton,
+    Monitor(u8),
 }
 
-/// Keeps Wi-Fi out of power save while the app runs. Without it the headset's
-/// radio naps between beacons and downlink frames wait at the router.
-fn acquire_low_latency_wifi(app: &AndroidApp, vm: &jni::JavaVM) -> Result<jni::objects::GlobalRef> {
-    use jni::objects::{JObject, JValue};
-    /// WifiManager.WIFI_MODE_FULL_LOW_LATENCY (API 29).
-    const WIFI_MODE_FULL_LOW_LATENCY: i32 = 4;
-    let mut env = vm.attach_current_thread_permanently()?;
-    let result = (|| -> jni::errors::Result<jni::objects::GlobalRef> {
-        // SAFETY: the activity reference stays valid while the app runs.
-        let activity = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
-        let context = env
-            .call_method(
-                &activity,
-                "getApplicationContext",
-                "()Landroid/content/Context;",
-                &[],
-            )?
-            .l()?;
-        let service = env.new_string("wifi")?;
-        let wifi = env
-            .call_method(
-                &context,
-                "getSystemService",
-                "(Ljava/lang/String;)Ljava/lang/Object;",
-                &[JValue::Object(&service)],
-            )?
-            .l()?;
-        let tag = env.new_string("questmon")?;
-        let lock = env
-            .call_method(
-                &wifi,
-                "createWifiLock",
-                "(ILjava/lang/String;)Landroid/net/wifi/WifiManager$WifiLock;",
-                &[
-                    JValue::Int(WIFI_MODE_FULL_LOW_LATENCY),
-                    JValue::Object(&tag),
-                ],
-            )?
-            .l()?;
-        env.call_method(&lock, "setReferenceCounted", "(Z)V", &[JValue::Bool(0)])?;
-        env.call_method(&lock, "acquire", "()V", &[])?;
-        env.new_global_ref(lock)
-    })();
-    if result.is_err() {
-        let _ = env.exception_describe();
-        let _ = env.exception_clear();
-    }
-    Ok(result?)
+/// Everything shown in the headset and how it is arranged.
+struct Scene {
+    monitors: HashMap<u8, Monitor>,
+    placements: HashMap<u8, Placement>,
+    primary: Option<u8>,
+    mirror_wanted: bool,
+    settings: Settings,
+    curve_supported: bool,
+    panel_open: bool,
+    panel_place: Placement,
+    button_place: Option<Placement>,
+    grabs: [Option<Grab>; 2],
+    host: Option<String>,
+    feedback: Option<Feedback>,
+    error: Option<(String, Instant)>,
+    layout_path: PathBuf,
+    settings_path: PathBuf,
 }
 
-/// Views a raw `XrCompositionLayer*` struct as the base type `FrameStream::end` takes.
-fn as_layer<'a, T>(layer: &'a T) -> &'a xr::CompositionLayerBase<'a, Gfx> {
-    // SAFETY: only called with XrCompositionLayer* structs, which all begin with the
-    // common layer header; CompositionLayerBase is a transparent wrapper over it.
-    unsafe { &*(layer as *const T).cast() }
-}
-
-fn vec3(v: xr::Vector3f) -> Vec3 {
-    Vec3::new(v.x, v.y, v.z)
-}
-
-fn quat(q: xr::Quaternionf) -> Quat {
-    Quat::from_xyzw(q.x, q.y, q.z, q.w)
-}
-
-fn posef(p: &Placement) -> xr::Posef {
-    let (q, v) = (p.rotation, p.position);
-    xr::Posef {
-        orientation: xr::Quaternionf {
-            x: q.x,
-            y: q.y,
-            z: q.z,
-            w: q.w,
-        },
-        position: xr::Vector3f {
-            x: v.x,
-            y: v.y,
-            z: v.z,
-        },
-    }
-}
-
-struct Controls {
-    set: xr::ActionSet,
-    hands: [xr::Path; 2],
-    aim_spaces: [xr::Space; 2],
-    squeeze: xr::Action<f32>,
-    thumbstick: xr::Action<xr::Vector2f>,
-    haptic: xr::Action<xr::Haptic>,
-    reset_layout: xr::Action<bool>,
-    toggle_passthrough: xr::Action<bool>,
-}
-
-impl Controls {
-    fn new(instance: &xr::Instance, session: &xr::Session<Gfx>) -> Result<Self> {
-        let set = instance.create_action_set("monitors", "Monitors", 0)?;
-        let hands = [
-            instance.string_to_path("/user/hand/left")?,
-            instance.string_to_path("/user/hand/right")?,
-        ];
-        let aim = set.create_action::<xr::Posef>("aim", "Aim", &hands)?;
-        let squeeze = set.create_action::<f32>("grab", "Grab monitor", &hands)?;
-        let thumbstick =
-            set.create_action::<xr::Vector2f>("adjust", "Distance and size", &hands)?;
-        let haptic = set.create_action::<xr::Haptic>("haptic", "Haptic", &hands)?;
-        let reset_layout = set.create_action::<bool>("reset_layout", "Reset layout", &[])?;
-        let toggle_passthrough =
-            set.create_action::<bool>("toggle_passthrough", "Toggle passthrough", &[])?;
-        let p = |s: &str| instance.string_to_path(s);
-        instance.suggest_interaction_profile_bindings(
-            p("/interaction_profiles/oculus/touch_controller")?,
-            &[
-                xr::Binding::new(&aim, p("/user/hand/left/input/aim/pose")?),
-                xr::Binding::new(&aim, p("/user/hand/right/input/aim/pose")?),
-                xr::Binding::new(&squeeze, p("/user/hand/left/input/squeeze/value")?),
-                xr::Binding::new(&squeeze, p("/user/hand/right/input/squeeze/value")?),
-                xr::Binding::new(&thumbstick, p("/user/hand/left/input/thumbstick")?),
-                xr::Binding::new(&thumbstick, p("/user/hand/right/input/thumbstick")?),
-                xr::Binding::new(&haptic, p("/user/hand/left/output/haptic")?),
-                xr::Binding::new(&haptic, p("/user/hand/right/output/haptic")?),
-                xr::Binding::new(&reset_layout, p("/user/hand/right/input/a/click")?),
-                xr::Binding::new(&toggle_passthrough, p("/user/hand/left/input/x/click")?),
-            ],
-        )?;
-        session.attach_action_sets(&[&set])?;
-        let aim_spaces = [
-            aim.create_space(session, hands[0], xr::Posef::IDENTITY)?,
-            aim.create_space(session, hands[1], xr::Posef::IDENTITY)?,
-        ];
-        Ok(Self {
-            set,
-            hands,
-            aim_spaces,
-            squeeze,
-            thumbstick,
-            haptic,
-            reset_layout,
-            toggle_passthrough,
-        })
+impl Scene {
+    fn quest_sizes(&self) -> Vec<(u8, u32, u32)> {
+        let mut v: Vec<_> = self
+            .monitors
+            .iter()
+            .filter(|(id, _)| **id != MIRROR_ID)
+            .map(|(id, m)| (*id, m.width_px, m.height_px))
+            .collect();
+        v.sort_by_key(|m| m.0);
+        v
     }
 
-    fn pulse(&self, session: &xr::Session<Gfx>, hand: usize) {
-        let vibration = xr::HapticVibration::new()
-            .amplitude(0.4)
-            .duration(xr::Duration::from_nanos(25_000_000))
-            .frequency(xr::FREQUENCY_UNSPECIFIED);
-        let _ = self
-            .haptic
-            .apply_feedback(session, self.hands[hand], &vibration);
+    fn mirror_size(&self) -> Option<(u8, u32, u32)> {
+        self.monitors
+            .get(&MIRROR_ID)
+            .map(|m| (MIRROR_ID, m.width_px, m.height_px))
+    }
+
+    /// Lays everything out by the chosen preset.
+    fn arrange_all(&mut self) {
+        let mirror_place = self.placements.get(&MIRROR_ID).copied();
+        self.placements = layout::arrange(
+            self.settings.preset,
+            &self.quest_sizes(),
+            self.primary,
+            self.mirror_size(),
+        );
+        // Keep the mirror's spot while the laptop lid is closed.
+        if let (Some(p), false) = (mirror_place, self.placements.contains_key(&MIRROR_ID)) {
+            self.placements.insert(MIRROR_ID, p);
+        }
+        self.grabs = [None, None];
+        layout::save(&self.layout_path, &self.placements);
+    }
+
+    fn curve_radius(&self) -> Option<f32> {
+        if !self.curve_supported {
+            return None;
+        }
+        self.settings
+            .curve
+            .radius_factor()
+            .map(|f| f * layout::RADIUS)
+    }
+
+    fn height_of(&self, id: u8) -> f32 {
+        match (self.placements.get(&id), self.monitors.get(&id)) {
+            (Some(p), Some(m)) => p.width * m.aspect(),
+            _ => 0.0,
+        }
+    }
+
+    /// Nearest thing the ray points at.
+    fn pick(&self, ray: Ray) -> Option<(Target, Hit)> {
+        let mut best: Option<(Target, Hit)> = None;
+        let mut consider = |target: Target, hit: Option<Hit>| {
+            if let Some(h) = hit
+                && best.is_none_or(|(_, b)| h.t < b.t)
+            {
+                best = Some((target, h));
+            }
+        };
+        if self.panel_open {
+            consider(
+                Target::Panel,
+                layout::hit_surface(ray, &self.panel_place, panel_height(), None),
+            );
+        }
+        if let Some(b) = &self.button_place {
+            consider(
+                Target::MenuButton,
+                layout::hit_surface(ray, b, BUTTON_SIZE, None),
+            );
+        }
+        let curve = self.curve_radius();
+        for id in self.monitors.keys() {
+            if let Some(p) = self.placements.get(id) {
+                consider(
+                    Target::Monitor(*id),
+                    layout::hit_surface(ray, p, self.height_of(*id), curve),
+                );
+            }
+        }
+        best
+    }
+
+    /// Puts the menu button just under the primary monitor's bottom-left corner.
+    fn place_button(&mut self) {
+        let anchor = self
+            .primary
+            .filter(|id| self.monitors.contains_key(id))
+            .or_else(|| self.quest_sizes().first().map(|m| m.0));
+        self.button_place = anchor.and_then(|id| {
+            let p = self.placements.get(&id)?;
+            let h = self.height_of(id);
+            let offset = Vec3::new(
+                -p.width / 2.0 + BUTTON_SIZE,
+                -h / 2.0 - BUTTON_SIZE * 0.9,
+                0.02,
+            );
+            Some(Placement {
+                position: p.position + p.rotation * offset,
+                rotation: p.rotation,
+                width: BUTTON_SIZE,
+            })
+        });
+    }
+
+    fn open_panel(&mut self, head: Vec3, forward: Vec3) {
+        let flat = Vec3::new(forward.x, 0.0, forward.z).normalize_or(-Vec3::Z);
+        let position = head + flat * 0.7 - Vec3::Y * 0.12;
+        self.panel_place = Placement {
+            position,
+            rotation: layout::facing(position, head),
+            width: PANEL_WIDTH,
+        };
+        self.panel_open = true;
+    }
+
+    fn send(&mut self, msg: ClientMsg) {
+        let sent = self.feedback.as_ref().map(|f| f.send(&msg));
+        match sent {
+            Some(Ok(())) => {}
+            Some(Err(e)) => self.show_error(format!("Не вдалося надіслати на ПК: {e}")),
+            None => self.show_error("Немає з'єднання з ПК".into()),
+        }
+    }
+
+    fn show_error(&mut self, text: String) {
+        warn!("{text}");
+        self.error = Some((text, Instant::now()));
+    }
+
+    fn ui_state(&self, room: bool, panorama: bool) -> UiState {
+        UiState {
+            host: self.host.clone(),
+            monitors: self
+                .quest_sizes()
+                .into_iter()
+                .map(|(id, width, height)| MonitorEntry { id, width, height })
+                .collect(),
+            primary: self.primary,
+            mirror_wanted: self.mirror_wanted,
+            mirror_active: self.monitors.contains_key(&MIRROR_ID),
+            settings: self.settings,
+            room_available: room,
+            panorama_available: panorama,
+            curve_available: self.curve_supported,
+            error: self
+                .error
+                .as_ref()
+                .filter(|(_, at)| at.elapsed() < ERROR_SHOWN_FOR)
+                .map(|(t, _)| t.clone()),
+        }
     }
 }
 
-fn pressed_now(action: &xr::Action<bool>, session: &xr::Session<Gfx>) -> bool {
-    action
-        .state(session, xr::Path::NULL)
-        .is_ok_and(|s| s.is_active && s.changed_since_last_sync && s.current_state)
-}
-
-fn monitor_sizes(monitors: &HashMap<u8, Monitor>) -> Vec<(u8, u32, u32)> {
-    monitors
-        .iter()
-        .map(|(id, m)| (*id, m.width_px, m.height_px))
-        .collect()
+/// The user's own panorama (`background.jpg`/`.png` next to `host.txt`), else the night sky.
+fn load_panorama(dir: Option<PathBuf>) -> (u32, u32, Vec<u8>) {
+    let custom = dir.and_then(|d| {
+        ["background.jpg", "background.jpeg", "background.png"]
+            .iter()
+            .map(|n| d.join(n))
+            .find(|p| p.exists())
+    });
+    if let Some(path) = custom {
+        match image::open(&path) {
+            Ok(img) => {
+                let img = if img.width() > 4096 {
+                    img.resize(4096, 2048, image::imageops::FilterType::Triangle)
+                } else {
+                    img
+                };
+                let rgba = img.to_rgba8();
+                info!("panorama from {}", path.display());
+                return (rgba.width(), rgba.height(), rgba.into_raw());
+            }
+            Err(e) => warn!("cannot read {}: {e}", path.display()),
+        }
+    }
+    (
+        background::WIDTH,
+        background::HEIGHT,
+        background::night_sky(),
+    )
 }
 
 fn run(app: &AndroidApp) -> Result<()> {
@@ -297,6 +314,9 @@ fn run(app: &AndroidApp) -> Result<()> {
     exts.fb_display_refresh_rate = available.fb_display_refresh_rate;
     exts.fb_composition_layer_settings = available.fb_composition_layer_settings;
     exts.fb_composition_layer_image_layout = available.fb_composition_layer_image_layout;
+    exts.khr_composition_layer_cylinder = available.khr_composition_layer_cylinder;
+    exts.khr_composition_layer_equirect2 = available.khr_composition_layer_equirect2;
+    exts.ext_hand_interaction = available.ext_hand_interaction;
     let instance = entry.create_instance(
         &xr::ApplicationInfo {
             application_name: "Quest Monitors",
@@ -309,6 +329,12 @@ fn run(app: &AndroidApp) -> Result<()> {
         &[],
         &platform,
     )?;
+    info!(
+        "cylinder layers: {}, equirect: {}, hand interaction: {}",
+        exts.khr_composition_layer_cylinder,
+        exts.khr_composition_layer_equirect2,
+        exts.ext_hand_interaction
+    );
     let system = instance.system(xr::FormFactor::HEAD_MOUNTED_DISPLAY)?;
     let _ = instance.graphics_requirements::<Gfx>(system)?;
 
@@ -324,17 +350,17 @@ fn run(app: &AndroidApp) -> Result<()> {
             },
         )
     }?;
+    let gl = xrutil::load_gl(&egl.egl);
 
     let data_dir: PathBuf = app
         .internal_data_path()
         .unwrap_or_else(|| PathBuf::from("/data/local/tmp"));
-    // Passthrough keeps the cameras busy and costs battery, so it starts off unless
-    // it was left on last time.
-    let passthrough_path = data_dir.join("passthrough");
-    let passthrough_wanted =
-        std::fs::read_to_string(&passthrough_path).is_ok_and(|s| s.trim() == "1");
+    let settings_path = data_dir.join("settings.txt");
+    let settings = Settings::load(&settings_path);
+
+    // Passthrough keeps the cameras busy and costs battery: only when "Room" is chosen.
     let mut passthrough = if exts.fb_passthrough {
-        passthrough::Passthrough::new(&session, passthrough_wanted)
+        passthrough::Passthrough::new(&session, settings.background == Background::Room)
             .inspect_err(|e| warn!("passthrough unavailable: {e:#}"))
             .ok()
     } else {
@@ -344,28 +370,59 @@ fn run(app: &AndroidApp) -> Result<()> {
     let local =
         session.create_reference_space(xr::ReferenceSpaceType::LOCAL, xr::Posef::IDENTITY)?;
     let view = session.create_reference_space(xr::ReferenceSpaceType::VIEW, xr::Posef::IDENTITY)?;
-    let controls = Controls::new(&instance, &session)?;
+    let mut controls = Controls::new(&instance, &session, exts.ext_hand_interaction)?;
+
+    let format = xrutil::color_format(&session);
+    let mut panel_layer = ImageLayer::new(&session, format, ui::WIDTH, ui::HEIGHT, false)?;
+    let mut button_layer = ImageLayer::new(&session, format, BUTTON_PX, BUTTON_PX, false)?;
+    let mut cursor_layer = ImageLayer::new(&session, format, CURSOR_PX, CURSOR_PX, true)?;
+    cursor_layer.upload(&gl, &ui::cursor_image(CURSOR_PX))?;
+    let mut button_hovered = false;
+    button_layer.upload(&gl, &ui::menu_button_image(BUTTON_PX, false))?;
+    let mut panel = Panel::new();
+    let mut pano_layer: Option<ImageLayer> = None;
+    let mut pano_job: Option<JoinHandle<(u32, u32, Vec<u8>)>> = None;
+    let external_dir = app.external_data_path();
 
     let (net_tx, net_rx) = mpsc::channel();
     net::spawn(
         net_tx,
         net::Discovery {
-            host_file: app.external_data_path().map(|p| p.join("host.txt")),
+            host_file: external_dir.as_ref().map(|p| p.join("host.txt")),
             last_host_file: data_dir.join("last_host"),
         },
     );
 
     // SAFETY: the VM pointer is valid for the life of the process.
     let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) }?;
-    let _wifi_lock = acquire_low_latency_wifi(app, &vm)
+    let _wifi_lock = xrutil::acquire_low_latency_wifi(app, &vm)
         .inspect(|_| info!("Wi-Fi low-latency mode on"))
         .inspect_err(|e| warn!("Wi-Fi low-latency lock unavailable: {e:#}"))
         .ok();
+
     let layout_path = data_dir.join("layout.txt");
-    let mut placements = layout::load(&layout_path);
-    let mut monitors: HashMap<u8, Monitor> = HashMap::new();
-    let mut grabs: [Option<Grab>; 2] = [None, None];
-    let mut squeeze_down = [false; 2];
+    let mut scene = Scene {
+        monitors: HashMap::new(),
+        placements: layout::load(&layout_path),
+        primary: None,
+        mirror_wanted: true,
+        settings,
+        curve_supported: exts.khr_composition_layer_cylinder,
+        panel_open: false,
+        panel_place: Placement {
+            position: Vec3::new(0.0, -0.12, -0.7),
+            rotation: glam::Quat::IDENTITY,
+            width: PANEL_WIDTH,
+        },
+        button_place: None,
+        grabs: [None, None],
+        host: None,
+        feedback: None,
+        error: None,
+        layout_path,
+        settings_path,
+    };
+
     let mut session_running = false;
     let mut last_time: Option<xr::Time> = None;
     let mut event_storage = xr::EventDataBuffer::new();
@@ -421,62 +478,26 @@ fn run(app: &AndroidApp) -> Result<()> {
         }
 
         while let Ok(event) = net_rx.try_recv() {
-            match event {
-                NetEvent::Connected(addr, _) => info!("connected to {addr}"),
-                NetEvent::PrimaryChanged(_) | NetEvent::MirrorWanted(_) => {}
-                NetEvent::HostError(text) => warn!("host: {text}"),
-                NetEvent::Disconnected => info!("disconnected"),
-                NetEvent::StreamStart {
-                    id,
-                    width,
-                    height,
-                    codec,
-                    frames,
-                    feedback,
-                } => {
-                    monitors.remove(&id);
-                    match create_surface_swapchain(&session, &vm, width, height) {
-                        Ok((swapchain, window)) => {
-                            let stop = Arc::new(AtomicBool::new(false));
-                            let decoder = decoder::spawn(
-                                id,
-                                codec,
-                                width,
-                                height,
-                                window,
-                                frames,
-                                feedback,
-                                stop.clone(),
-                            );
-                            monitors.insert(
-                                id,
-                                Monitor {
-                                    width_px: width,
-                                    height_px: height,
-                                    decoder: Some(decoder),
-                                    stop,
-                                    swapchain,
-                                },
-                            );
-                            if let std::collections::hash_map::Entry::Vacant(slot) =
-                                placements.entry(id)
-                                && let Some(p) =
-                                    layout::default_layout(&monitor_sizes(&monitors)).remove(&id)
-                            {
-                                slot.insert(p);
-                            }
-                        }
-                        Err(e) => error!("monitor {id}: {e:#}"),
-                    }
+            handle_net_event(&mut scene, &session, &vm, event);
+        }
+
+        // Panorama: generated or decoded off the main thread, uploaded once.
+        if scene.settings.background == Background::Panorama
+            && exts.khr_composition_layer_equirect2
+            && pano_layer.is_none()
+            && pano_job.is_none()
+        {
+            let dir = external_dir.clone();
+            pano_job = Some(std::thread::spawn(move || load_panorama(dir)));
+        }
+        if pano_job.as_ref().is_some_and(|j| j.is_finished()) {
+            match pano_job.take().unwrap().join() {
+                Ok((w, h, pixels)) => {
+                    let mut layer = ImageLayer::new(&session, format, w, h, true)?;
+                    layer.upload(&gl, &pixels)?;
+                    pano_layer = Some(layer);
                 }
-                NetEvent::StreamEnd { id } => {
-                    monitors.remove(&id);
-                    for g in &mut grabs {
-                        if g.is_some_and(|g| g.id == id) {
-                            *g = None;
-                        }
-                    }
-                }
+                Err(_) => warn!("panorama generation panicked"),
             }
         }
 
@@ -496,100 +517,118 @@ fn run(app: &AndroidApp) -> Result<()> {
             .clamp(0.0, 0.1);
         last_time = Some(time);
 
-        session.sync_actions(&[(&controls.set).into()])?;
-        let head = view
+        controls.sync(&session, &local, time)?;
+        let (head, forward) = view
             .locate(&local, time)
-            .map(|l| vec3(l.pose.position))
-            .unwrap_or(Vec3::ZERO);
+            .map_or((Vec3::ZERO, -Vec3::Z), |l| {
+                (
+                    vec3(l.pose.position),
+                    xrutil::quat(l.pose.orientation) * -Vec3::Z,
+                )
+            });
 
-        if pressed_now(&controls.reset_layout, &session) {
-            placements = layout::default_layout(&monitor_sizes(&monitors));
-            grabs = [None, None];
-            layout::save(&layout_path, &placements);
-        }
-        if let Some(pt) = &mut passthrough
-            && pressed_now(&controls.toggle_passthrough, &session)
-        {
-            let on = !pt.running();
-            match pt.set_running(on) {
-                Ok(()) => {
-                    let _ = std::fs::write(&passthrough_path, if on { "1" } else { "0" });
-                }
-                Err(e) => warn!("{e:#}"),
-            }
-        }
-
-        for hand in 0..2 {
-            let path = controls.hands[hand];
-            let location = controls.aim_spaces[hand].locate(&local, time)?;
-            let tracked = location.location_flags.contains(
-                xr::SpaceLocationFlags::POSITION_VALID | xr::SpaceLocationFlags::ORIENTATION_VALID,
-            );
-            let squeeze = controls
-                .squeeze
-                .state(&session, path)
-                .map(|s| s.current_state)
-                .unwrap_or(0.0);
-            let stick = controls
-                .thumbstick
-                .state(&session, path)
-                .map(|s| Vec2::new(s.current_state.x, s.current_state.y))
-                .unwrap_or(Vec2::ZERO);
-            let was_down = squeeze_down[hand];
-            squeeze_down[hand] = if was_down {
-                squeeze > 0.4
+        if controls.menu_pressed(&session) {
+            if scene.panel_open {
+                scene.panel_open = false;
             } else {
-                squeeze > 0.7
-            };
-            if !tracked {
-                continue;
+                scene.open_panel(head, forward);
             }
-            let ray = Ray {
-                origin: vec3(location.pose.position),
-                dir: quat(location.pose.orientation) * -Vec3::Z,
-            };
+        }
+        if controls.align_pressed(&session) {
+            scene.arrange_all();
+        }
+        scene.place_button();
 
-            if !squeeze_down[hand] {
-                if grabs[hand].take().is_some() {
-                    layout::save(&layout_path, &placements);
+        // Pointing, clicking and dragging.
+        let picks: [Option<(Target, Hit)>; 2] =
+            std::array::from_fn(|h| controls.state[h].ray.and_then(|r| scene.pick(r)));
+        let panel_point = |hit: &Hit| {
+            let x = (hit.local.x / PANEL_WIDTH + 0.5) * ui::WIDTH as f32;
+            let y = (0.5 - hit.local.y / panel_height()) * ui::HEIGHT as f32;
+            (x, y)
+        };
+        let hover = [1, 0].into_iter().find_map(|h| match picks[h] {
+            Some((Target::Panel, hit)) => Some(panel_point(&hit)),
+            _ => None,
+        });
+        panel.hover(hover);
+        let over_button = picks
+            .iter()
+            .any(|p| matches!(p, Some((Target::MenuButton, _))));
+        if over_button != button_hovered {
+            button_hovered = over_button;
+            button_layer.upload(&gl, &ui::menu_button_image(BUTTON_PX, over_button))?;
+        }
+
+        #[allow(clippy::needless_range_loop)] // `hand` indexes several per-hand arrays
+        for hand in 0..2 {
+            let input = controls.state[hand];
+            if input.select.pressed {
+                match picks[hand] {
+                    Some((Target::Panel, hit)) => {
+                        panel.hover(Some(panel_point(&hit)));
+                        if let Some(action) = panel.hovered_action() {
+                            controls.pulse(&session, hand);
+                            handle_action(&mut scene, action, &mut passthrough);
+                        }
+                    }
+                    Some((Target::MenuButton, _)) => {
+                        controls.pulse(&session, hand);
+                        if scene.panel_open {
+                            scene.panel_open = false;
+                        } else {
+                            scene.open_panel(head, forward);
+                        }
+                    }
+                    _ => {}
                 }
-                continue;
             }
-            if let Some(grab) = &mut grabs[hand] {
-                if let Some(p) = placements.get_mut(&grab.id) {
-                    grab.update(p, ray, head, stick, dt);
+
+            if input.grab.released && scene.grabs[hand].take().is_some() {
+                layout::save(&scene.layout_path, &scene.placements);
+            }
+            let Some(ray) = input.ray else { continue };
+            if let Some(mut grab) = scene.grabs[hand] {
+                let target = if grab.id == PANEL_ID {
+                    Some(&mut scene.panel_place)
+                } else {
+                    scene.placements.get_mut(&grab.id)
+                };
+                if let Some(p) = target {
+                    grab.update(p, ray, head, input.stick, dt);
+                    scene.grabs[hand] = Some(grab);
                 }
-            } else if !was_down {
-                let other = grabs[1 - hand].map(|g| g.id);
-                let target = monitors
-                    .iter()
-                    .filter(|(id, _)| Some(**id) != other)
-                    .filter_map(|(id, m)| {
-                        let p = placements.get(id)?;
-                        let (t, local_hit) = layout::hit(ray, p, p.width * m.aspect())?;
-                        Some((t, *id, local_hit))
-                    })
-                    .min_by(|a, b| a.0.total_cmp(&b.0));
-                if let Some((t, id, local_hit)) = target {
-                    grabs[hand] = Some(Grab::start(id, t, local_hit, &placements[&id]));
+            } else if input.grab.pressed {
+                let other = scene.grabs[1 - hand].map(|g| g.id);
+                let grabbed = match picks[hand] {
+                    Some((Target::Panel, hit)) if other != Some(PANEL_ID) => {
+                        Some(Grab::start(PANEL_ID, hit.t, hit.local, &scene.panel_place))
+                    }
+                    Some((Target::Monitor(id), hit)) if other != Some(id) => {
+                        Some(Grab::start(id, hit.t, hit.local, &scene.placements[&id]))
+                    }
+                    _ => None,
+                };
+                if grabbed.is_some() {
                     controls.pulse(&session, hand);
+                    scene.grabs[hand] = grabbed;
                 }
             }
         }
 
-        // Far monitors first so nearer (and grabbed) ones draw on top.
-        let grabbed: Vec<u8> = grabs.iter().flatten().map(|g| g.id).collect();
-        let mut order: Vec<(f32, u8)> = monitors
-            .keys()
-            .filter_map(|id| {
-                let d = placements.get(id)?.position.distance(head);
-                Some((if grabbed.contains(id) { -1.0 } else { d }, *id))
-            })
-            .collect();
-        order.sort_by(|a, b| b.0.total_cmp(&a.0));
+        // Menu contents.
+        if scene.panel_open {
+            let ui_state =
+                scene.ui_state(passthrough.is_some(), exts.khr_composition_layer_equirect2);
+            panel.set_state(&ui_state);
+            if let Some(pixels) = panel.render_if_dirty() {
+                panel_layer.upload(&gl, pixels)?;
+            }
+        }
 
+        // ---- Layers, back to front ----
         // Desktop text is denser than the display, so ask the compositor to supersample
-        // and sharpen the quads instead of shimmering through plain bilinear sampling.
+        // and sharpen instead of shimmering through plain bilinear sampling.
         let quality = xr::sys::CompositionLayerSettingsFB {
             ty: xr::sys::CompositionLayerSettingsFB::TYPE,
             next: ptr::null(),
@@ -608,41 +647,12 @@ fn run(app: &AndroidApp) -> Result<()> {
             next: quality_next.cast_mut(),
             flags: xr::sys::CompositionLayerImageLayoutFlagsFB::VERTICAL_FLIP,
         };
-        let quad_next = if exts.fb_composition_layer_image_layout {
+        let video_next = if exts.fb_composition_layer_image_layout {
             (&flip as *const xr::sys::CompositionLayerImageLayoutFB).cast()
         } else {
             quality_next
         };
-        let quads: Vec<xr::sys::CompositionLayerQuad> = order
-            .iter()
-            .map(|(_, id)| {
-                let m = &monitors[id];
-                let p = &placements[id];
-                xr::sys::CompositionLayerQuad {
-                    ty: xr::sys::CompositionLayerQuad::TYPE,
-                    next: quad_next,
-                    layer_flags: xr::CompositionLayerFlags::EMPTY,
-                    space: local.as_raw(),
-                    eye_visibility: xr::EyeVisibility::BOTH,
-                    sub_image: xr::sys::SwapchainSubImage {
-                        swapchain: m.swapchain.as_raw(),
-                        image_rect: xr::Rect2Di {
-                            offset: xr::Offset2Di { x: 0, y: 0 },
-                            extent: xr::Extent2Di {
-                                width: m.width_px as i32,
-                                height: m.height_px as i32,
-                            },
-                        },
-                        image_array_index: 0,
-                    },
-                    pose: posef(p),
-                    size: xr::Extent2Df {
-                        width: p.width,
-                        height: p.width * m.aspect(),
-                    },
-                }
-            })
-            .collect();
+
         let passthrough_layer = passthrough.as_ref().filter(|pt| pt.running()).map(|pt| {
             xr::sys::CompositionLayerPassthroughFB {
                 ty: xr::sys::CompositionLayerPassthroughFB::TYPE,
@@ -652,15 +662,249 @@ fn run(app: &AndroidApp) -> Result<()> {
                 layer_handle: pt.layer(),
             }
         });
-        let mut layers: Vec<&xr::CompositionLayerBase<Gfx>> = Vec::with_capacity(quads.len() + 1);
+        let pano = pano_layer
+            .as_ref()
+            .filter(|_| scene.settings.background == Background::Panorama)
+            .map(|l| xr::sys::CompositionLayerEquirect2KHR {
+                ty: xr::sys::CompositionLayerEquirect2KHR::TYPE,
+                next: ptr::null(),
+                layer_flags: xr::CompositionLayerFlags::EMPTY,
+                space: local.as_raw(),
+                eye_visibility: xr::EyeVisibility::BOTH,
+                sub_image: l.sub_image(),
+                pose: xr::Posef::IDENTITY,
+                radius: 0.0,
+                central_horizontal_angle: std::f32::consts::TAU,
+                upper_vertical_angle: std::f32::consts::FRAC_PI_2,
+                lower_vertical_angle: -std::f32::consts::FRAC_PI_2,
+            });
+
+        // Far monitors first so nearer (and grabbed) ones draw on top.
+        let grabbed: Vec<u8> = scene.grabs.iter().flatten().map(|g| g.id).collect();
+        let mut order: Vec<(f32, u8)> = scene
+            .monitors
+            .keys()
+            .filter_map(|id| {
+                let d = scene.placements.get(id)?.position.distance(head);
+                Some((if grabbed.contains(id) { -1.0 } else { d }, *id))
+            })
+            .collect();
+        order.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let curve = scene.curve_radius();
+        let mut quads = Vec::new();
+        let mut cylinders = Vec::new();
+        for (_, id) in &order {
+            let m = &scene.monitors[id];
+            let p = &scene.placements[id];
+            let height = p.width * m.aspect();
+            let sub_image = xr::sys::SwapchainSubImage {
+                swapchain: m.swapchain.as_raw(),
+                image_rect: xr::Rect2Di {
+                    offset: xr::Offset2Di { x: 0, y: 0 },
+                    extent: xr::Extent2Di {
+                        width: m.width_px as i32,
+                        height: m.height_px as i32,
+                    },
+                },
+                image_array_index: 0,
+            };
+            if let Some(radius) = curve {
+                let c = Cylinder::new(p, radius);
+                cylinders.push(xr::sys::CompositionLayerCylinderKHR {
+                    ty: xr::sys::CompositionLayerCylinderKHR::TYPE,
+                    next: video_next,
+                    layer_flags: xr::CompositionLayerFlags::EMPTY,
+                    space: local.as_raw(),
+                    eye_visibility: xr::EyeVisibility::BOTH,
+                    sub_image,
+                    pose: pose(c.center, p.rotation),
+                    radius: c.radius,
+                    central_angle: c.central_angle,
+                    aspect_ratio: c.arc_length() / height,
+                });
+            } else {
+                quads.push(xr::sys::CompositionLayerQuad {
+                    ty: xr::sys::CompositionLayerQuad::TYPE,
+                    next: video_next,
+                    layer_flags: xr::CompositionLayerFlags::EMPTY,
+                    space: local.as_raw(),
+                    eye_visibility: xr::EyeVisibility::BOTH,
+                    sub_image,
+                    pose: posef(p),
+                    size: xr::Extent2Df {
+                        width: p.width,
+                        height,
+                    },
+                });
+            }
+        }
+
+        let button = scene
+            .button_place
+            .map(|b| button_layer.quad(&local, posef(&b), BUTTON_SIZE, BUTTON_SIZE));
+        let panel_quad = (scene.panel_open && panel_layer.ready()).then(|| {
+            panel_layer.quad(
+                &local,
+                posef(&scene.panel_place),
+                PANEL_WIDTH,
+                panel_height(),
+            )
+        });
+        let cursors: Vec<xr::sys::CompositionLayerQuad> = picks
+            .iter()
+            .flatten()
+            .map(|(_, hit)| {
+                let size = 0.011 * hit.t.clamp(0.3, 4.0);
+                let at = hit.point + hit.normal * 0.004;
+                cursor_layer.quad(
+                    &local,
+                    pose(at, layout::facing(at, at + hit.normal)),
+                    size,
+                    size,
+                )
+            })
+            .collect();
+
+        let mut layers: Vec<&xr::CompositionLayerBase<Gfx>> = Vec::with_capacity(16);
         if let Some(l) = &passthrough_layer {
             layers.push(as_layer(l));
+        } else if let Some(l) = &pano {
+            layers.push(as_layer(l));
         }
+        layers.extend(cylinders.iter().map(as_layer));
         layers.extend(quads.iter().map(as_layer));
+        layers.extend(button.iter().map(as_layer));
+        layers.extend(panel_quad.iter().map(as_layer));
+        layers.extend(cursors.iter().map(as_layer));
+        // The compositor supports 16 layers at most.
+        layers.truncate(16);
         frame_stream.end(time, xr::EnvironmentBlendMode::OPAQUE, &layers)?;
     }
 
     info!("exiting");
-    drop(monitors);
+    drop(scene);
     Ok(())
+}
+
+fn handle_net_event(
+    scene: &mut Scene,
+    session: &xr::Session<Gfx>,
+    vm: &jni::JavaVM,
+    event: NetEvent,
+) {
+    match event {
+        NetEvent::Connected(addr, feedback) => {
+            info!("connected to {addr}");
+            scene.host = Some(addr.ip().to_string());
+            scene.feedback = Some(feedback);
+        }
+        NetEvent::Disconnected => {
+            scene.host = None;
+            scene.feedback = None;
+        }
+        NetEvent::PrimaryChanged(id) => scene.primary = Some(id),
+        NetEvent::MirrorWanted(enabled) => scene.mirror_wanted = enabled,
+        NetEvent::HostError(text) => scene.show_error(text),
+        NetEvent::StreamStart {
+            id,
+            width,
+            height,
+            codec,
+            frames,
+            feedback,
+        } => {
+            scene.monitors.remove(&id);
+            match xrutil::create_surface_swapchain(session, vm, width, height) {
+                Ok((swapchain, window)) => {
+                    let stop = Arc::new(AtomicBool::new(false));
+                    let decoder = decoder::spawn(
+                        id,
+                        codec,
+                        width,
+                        height,
+                        window,
+                        frames,
+                        feedback,
+                        stop.clone(),
+                    );
+                    scene.monitors.insert(
+                        id,
+                        Monitor {
+                            width_px: width,
+                            height_px: height,
+                            decoder: Some(decoder),
+                            stop,
+                            swapchain,
+                        },
+                    );
+                    if !scene.placements.contains_key(&id) {
+                        if id == MIRROR_ID {
+                            // Only the mirror is new: put it under the primary monitor.
+                            let all = layout::arrange(
+                                scene.settings.preset,
+                                &scene.quest_sizes(),
+                                scene.primary,
+                                scene.mirror_size(),
+                            );
+                            if let Some(p) = all.get(&MIRROR_ID) {
+                                scene.placements.insert(MIRROR_ID, *p);
+                            }
+                        } else {
+                            // A new monitor: re-arrange so it joins the row seamlessly.
+                            scene.arrange_all();
+                        }
+                    }
+                }
+                Err(e) => error!("monitor {id}: {e:#}"),
+            }
+        }
+        NetEvent::StreamEnd { id, removed } => {
+            scene.monitors.remove(&id);
+            for g in &mut scene.grabs {
+                if g.is_some_and(|g| g.id == id) {
+                    *g = None;
+                }
+            }
+            if removed && id != MIRROR_ID {
+                scene.placements.remove(&id);
+                scene.arrange_all();
+            }
+        }
+    }
+}
+
+fn handle_action(
+    scene: &mut Scene,
+    action: Action,
+    passthrough: &mut Option<passthrough::Passthrough>,
+) {
+    let settings_path: &Path = &scene.settings_path.clone();
+    match action {
+        Action::Add { width, height } => scene.send(ClientMsg::AddMonitor { width, height }),
+        Action::Remove(id) => scene.send(ClientMsg::RemoveMonitor { id }),
+        Action::MakePrimary(id) => scene.send(ClientMsg::SetPrimary { id }),
+        Action::SetMirror(enabled) => {
+            scene.mirror_wanted = enabled;
+            scene.send(ClientMsg::SetMirror { enabled });
+        }
+        Action::Preset(preset) => {
+            scene.settings.preset = preset;
+            scene.settings.save(settings_path);
+            scene.arrange_all();
+        }
+        Action::Curve(curve) => {
+            scene.settings.curve = curve;
+            scene.settings.save(settings_path);
+        }
+        Action::Background(background) => {
+            scene.settings.background = background;
+            scene.settings.save(settings_path);
+            if let Some(pt) = passthrough
+                && let Err(e) = pt.set_running(background == Background::Room)
+            {
+                scene.show_error(format!("Камери недоступні: {e:#}"));
+            }
+        }
+        Action::Close => scene.panel_open = false,
+    }
 }

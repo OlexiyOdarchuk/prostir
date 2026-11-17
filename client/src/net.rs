@@ -48,8 +48,10 @@ pub enum NetEvent {
         frames: Receiver<Frame>,
         feedback: Feedback,
     },
+    /// `removed`: the host took the monitor away (not just a lost connection).
     StreamEnd {
         id: u8,
+        removed: bool,
     },
     Disconnected,
 }
@@ -215,7 +217,7 @@ fn run_session(stream: TcpStream, events: &Sender<NetEvent>) -> std::io::Result<
             } => {
                 info!("monitor {name}: {width}x{height} {codec:?}");
                 if streams.remove(&id).is_some() {
-                    let _ = events.send(NetEvent::StreamEnd { id });
+                    let _ = events.send(NetEvent::StreamEnd { id, removed: false });
                 }
                 let (tx, rx) = mpsc::sync_channel(32);
                 streams.insert(
@@ -263,7 +265,7 @@ fn run_session(stream: TcpStream, events: &Sender<NetEvent>) -> std::io::Result<
             }
             HostMsg::StreamEnd { id } => {
                 if streams.remove(&id).is_some() {
-                    let _ = events.send(NetEvent::StreamEnd { id });
+                    let _ = events.send(NetEvent::StreamEnd { id, removed: true });
                 }
             }
             HostMsg::PrimaryChanged { id } => {
@@ -279,7 +281,7 @@ fn run_session(stream: TcpStream, events: &Sender<NetEvent>) -> std::io::Result<
         }
     };
     for id in streams.into_keys() {
-        let _ = events.send(NetEvent::StreamEnd { id });
+        let _ = events.send(NetEvent::StreamEnd { id, removed: false });
     }
     result
 }
