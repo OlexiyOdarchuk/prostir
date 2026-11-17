@@ -602,6 +602,7 @@ fn run(app: &AndroidApp) -> Result<()> {
                     {
                         scene.worn = worn;
                         scene.tell_presence();
+                        scene.steering.set_worn(worn);
                     }
                     match e.state() {
                         xr::SessionState::READY => {

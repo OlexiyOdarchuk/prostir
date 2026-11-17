@@ -165,6 +165,13 @@ pub enum ClientMsg {
     Mic {
         pcm: Vec<u8>,
     },
+    /// Switch to this set of monitors, left to right (a profile). Monitors whose size
+    /// already matches are kept, so their windows stay where they are.
+    SetMonitors {
+        sizes: Vec<(u32, u32)>,
+        /// Index into `sizes`.
+        primary: u8,
+    },
     /// Whether the headset is being worn; streaming pauses while it is not.
     Presence {
         worn: bool,
@@ -217,6 +224,7 @@ mod tag {
     pub const SET_MIC: u8 = 113;
     pub const MIC: u8 = 114;
     pub const PRESENCE: u8 = 115;
+    pub const SET_MONITORS: u8 = 116;
 }
 
 fn invalid(msg: &str) -> io::Error {
@@ -409,6 +417,14 @@ impl ClientMsg {
             ClientMsg::RemoveMonitor { id } => write_frame(w, tag::REMOVE_MONITOR, &[&[*id]]),
             ClientMsg::SetPrimary { id } => write_frame(w, tag::SET_PRIMARY, &[&[*id]]),
             ClientMsg::SetOrder { ids } => write_frame(w, tag::SET_ORDER, &[ids]),
+            ClientMsg::SetMonitors { sizes, primary } => {
+                let mut body = vec![*primary];
+                for (width, height) in sizes {
+                    body.extend_from_slice(&width.to_le_bytes());
+                    body.extend_from_slice(&height.to_le_bytes());
+                }
+                write_frame(w, tag::SET_MONITORS, &[&body])
+            }
             ClientMsg::PairBegin {
                 headset_shows,
                 name,
@@ -465,6 +481,14 @@ impl ClientMsg {
             tag::PAIR_CONFIRM => ClientMsg::PairConfirm {
                 tag: c.rest().to_vec(),
             },
+            tag::SET_MONITORS => {
+                let primary = c.u8()?;
+                let mut sizes = Vec::new();
+                while let (Ok(width), Ok(height)) = (c.u32(), c.u32()) {
+                    sizes.push((width, height));
+                }
+                ClientMsg::SetMonitors { sizes, primary }
+            }
             tag::SET_ORDER => ClientMsg::SetOrder {
                 ids: c.rest().to_vec(),
             },
@@ -568,6 +592,10 @@ mod tests {
             ClientMsg::SetPrimary { id: 1 },
             ClientMsg::SetMirror { enabled: true },
             ClientMsg::SetOrder { ids: vec![2, 0, 1] },
+            ClientMsg::SetMonitors {
+                sizes: vec![(2560, 1440), (1440, 2560)],
+                primary: 1,
+            },
             ClientMsg::PairBegin {
                 headset_shows: true,
                 name: "Meta Quest 3".into(),

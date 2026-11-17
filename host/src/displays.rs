@@ -349,6 +349,8 @@ pub struct Displays {
     mic_recording: bool,
     /// Connected and worn (encoders running).
     streaming: bool,
+    /// When the headset was taken off (as last reported by it).
+    taken_off_at: Option<Instant>,
     /// Last time the laptop panel was switched back on (to avoid fighting the user).
     woke_display_at: Option<Instant>,
     screencast: Screencast,
@@ -372,6 +374,7 @@ impl Displays {
             mic_wanted: saved.mic,
             mic_recording: false,
             streaming: true,
+            taken_off_at: None,
             mirror_retry: Instant::now(),
             woke_display_at: None,
             screencast: Screencast::connect()?,
@@ -539,6 +542,21 @@ impl Displays {
             }
         }
         self.sync_audio();
+    }
+
+    /// The headset reports being put on or taken off.
+    pub fn set_worn(&mut self, worn: bool) {
+        self.taken_off_at = match (worn, self.taken_off_at) {
+            (true, _) => None,
+            (false, Some(t)) => Some(t),
+            (false, None) => Some(Instant::now()),
+        };
+        self.set_streaming(worn);
+    }
+
+    /// How long the headset has been off the head, if it is.
+    pub fn taken_off_for(&self) -> Option<Duration> {
+        self.taken_off_at.map(|t| t.elapsed())
     }
 
     pub fn streaming(&self) -> bool {
@@ -712,6 +730,59 @@ impl Displays {
     }
 
     /// Changes the left-to-right order (ids of all current monitors).
+    /// Makes the monitors match `sizes` left to right (a headset profile). Monitors of a
+    /// matching size are kept, so their windows stay where they are.
+    pub fn set_monitors(&mut self, sizes: &[(u32, u32)], primary: usize) -> Result<()> {
+        if sizes.is_empty() || sizes.len() > MAX_MONITORS {
+            bail!("1–{MAX_MONITORS} monitors");
+        }
+        let specs: Vec<MonitorSpec> = sizes
+            .iter()
+            .map(|&(width, height)| MonitorSpec {
+                width,
+                height,
+                scale: 1.0,
+            })
+            .collect();
+        for s in &specs {
+            s.validate()?;
+        }
+        let mut unused: Vec<u8> = self.order.clone();
+        let mut plan: Vec<Option<u8>> = specs
+            .iter()
+            .map(|s| {
+                let i = unused.iter().position(|id| {
+                    let have = &self.monitors[id].spec;
+                    have.width == s.width && have.height == s.height
+                })?;
+                Some(unused.remove(i))
+            })
+            .collect();
+        // Remove before adding (to stay under the limit), but never the last one.
+        let mut last = None;
+        for id in unused {
+            if self.monitors.len() > 1 {
+                self.remove(id)?;
+            } else {
+                last = Some(id);
+            }
+        }
+        for (slot, spec) in plan.iter_mut().zip(&specs) {
+            if slot.is_none() {
+                *slot = Some(self.add(spec.clone())?);
+            }
+        }
+        if let Some(id) = last {
+            self.remove(id)?;
+        }
+        let ids: Vec<u8> = plan.into_iter().flatten().collect();
+        self.set_order(&ids)?;
+        if let Some(&p) = ids.get(primary) {
+            self.set_primary(p);
+        }
+        Ok(())
+    }
+
     pub fn set_order(&mut self, ids: &[u8]) -> Result<()> {
         let mut sorted = ids.to_vec();
         sorted.sort_unstable();

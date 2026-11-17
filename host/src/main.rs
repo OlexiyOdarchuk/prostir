@@ -131,6 +131,34 @@ impl Control {
     }
 }
 
+/// Taken off for this long, the headset counts as gone.
+const TAKEN_OFF_GRACE: Duration = Duration::from_secs(10);
+
+/// Notices a headset that vanished without closing the connection (switched off,
+/// out of Wi-Fi) within about 10 s, instead of waiting forever.
+fn set_keepalive(stream: &TcpStream) {
+    use std::os::fd::AsRawFd;
+    let fd = stream.as_raw_fd();
+    let set = |level, name, value: libc::c_int| {
+        // SAFETY: a valid socket and a c_int option value.
+        unsafe {
+            libc::setsockopt(
+                fd,
+                level,
+                name,
+                (&value as *const libc::c_int).cast(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        }
+    };
+    set(libc::SOL_SOCKET, libc::SO_KEEPALIVE, 1);
+    set(libc::IPPROTO_TCP, libc::TCP_KEEPIDLE, 4);
+    set(libc::IPPROTO_TCP, libc::TCP_KEEPINTVL, 2);
+    set(libc::IPPROTO_TCP, libc::TCP_KEEPCNT, 3);
+    // Unacknowledged data (frames) also gives up after 10 s.
+    set(libc::IPPROTO_TCP, libc::TCP_USER_TIMEOUT, 10_000);
+}
+
 fn serve_client(
     stream: TcpStream,
     mut reader: BufReader<SecureReader>,
@@ -223,6 +251,10 @@ fn serve_client(
             }
             control.show(Some(via), Some(displays));
             displays.tick();
+            if displays.taken_off_for() >= Some(TAKEN_OFF_GRACE) {
+                info!("headset taken off");
+                break Ok(());
+            }
             if !displays.healthy() {
                 break Err(anyhow::anyhow!("virtual monitor or encoder stopped"));
             }
@@ -260,8 +292,19 @@ fn serve_client(
                 Ok(()) => displays.save(),
                 Err(e) => report(displays, format!("{e:#}")),
             },
+            Ok(Ok(ClientMsg::SetMonitors { sizes, primary })) => {
+                match displays.set_monitors(&sizes, primary as usize) {
+                    Ok(()) => info!("headset switched to {} monitor(s)", sizes.len()),
+                    Err(e) => report(displays, format!("{e:#}")),
+                }
+                for id in displays.order().to_vec() {
+                    displays.force_keyframe(id);
+                }
+                displays.save();
+                displays::sync_wallpapers();
+            }
             Ok(Ok(ClientMsg::Mic { pcm })) => displays.push_mic(pcm),
-            Ok(Ok(ClientMsg::Presence { worn })) => displays.set_streaming(worn),
+            Ok(Ok(ClientMsg::Presence { worn })) => displays.set_worn(worn),
             Ok(Ok(ClientMsg::SetMic { enabled })) => {
                 displays.set_mic_wanted(enabled);
                 displays.save();
@@ -499,6 +542,10 @@ fn main() -> Result<()> {
                         }
                     }
                 }
+                set_keepalive(&stream);
+                if let Some(d) = displays.as_mut() {
+                    d.set_worn(true);
+                }
                 control.show(Some(via), displays.as_ref());
                 if let Err(e) = serve_client(
                     stream,
@@ -513,6 +560,15 @@ fn main() -> Result<()> {
                     info!("headset disconnected");
                 }
                 idle_since = Instant::now();
+                // Taken off: give the desktop back to the laptop right away (the
+                // headset reconnects by itself once it is worn again).
+                if displays
+                    .as_ref()
+                    .is_some_and(|d| d.taken_off_for().is_some())
+                {
+                    info!("removing virtual monitors until the headset is worn again");
+                    displays = None;
+                }
                 control.show(None, displays.as_ref());
                 if args.linger > 0 && displays.as_ref().is_some_and(|d| d.healthy()) {
                     info!("keeping virtual monitors for {} s", args.linger);

@@ -115,6 +115,9 @@ struct Steer {
     pc_shows_code: bool,
     /// Code typed in the menu while pairing.
     typed_code: Option<String>,
+    /// The headset is off the head: stay away from the PC, so it can give its
+    /// desktop back to the laptop.
+    taken_off: bool,
 }
 
 impl Steering {
@@ -143,6 +146,22 @@ impl Steering {
             let _ = cur.shutdown(Shutdown::Both);
         }
         self.0.1.notify_all();
+    }
+
+    /// Put on or taken off; connecting waits until the headset is worn.
+    pub fn set_worn(&self, worn: bool) {
+        self.lock().taken_off = !worn;
+        self.0.1.notify_all();
+    }
+
+    fn wait_until_worn(&self) {
+        let mut s = self.lock();
+        if s.taken_off {
+            info!("headset not worn: not connecting");
+        }
+        while s.taken_off {
+            s = self.0.1.wait(s).unwrap();
+        }
     }
 
     /// Swaps which side shows the pairing code and restarts pairing.
@@ -215,6 +234,7 @@ pub fn spawn(events: Sender<NetEvent>, discovery: Discovery, steering: Steering)
             let mut finder = Finder::default();
             let mut round = 0u32;
             loop {
+                steering.wait_until_worn();
                 round += 1;
                 if let Some(stream) = connect(
                     beacon.as_ref(),
