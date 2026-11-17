@@ -184,9 +184,9 @@ headset to come back before the windows move back to the laptop.
 | Click on a monitor | trigger | pinch |
 | Move a monitor or the menu | hold grip and point | pinch and hold for about 0.3 s |
 | Nearer or farther | thumbstick up or down while holding | move your hand away or closer |
-| Bigger or smaller | thumbstick left or right while holding | |
+| Bigger or smaller | thumbstick left or right while holding, or hold it with both controllers and move them apart or together | hold it with both hands and move them apart or together |
 | Line the monitors up | A | menu → Monitors → Layout |
-| Recenter | hold the Meta button | system gesture |
+| Bring everything in front of you | menu → Monitors → Bring everything in front of me | same |
 
 With hands in view, the menu opens within arm's reach so you can touch it. A dot shows
 where your finger is; pull the finger back to press the next button.

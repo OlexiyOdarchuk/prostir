@@ -35,3 +35,9 @@ First public version.
 - Cinema mode lets you pick the monitor; by default the largest landscape one.
 - The laptop screen meets the monitor above it without a seam, flat or curved.
 - Hand input works even when the Quest is slow to switch from controllers to hands.
+- Monitors fade in when they appear and glide to their new places instead of jumping.
+- Resize a monitor with both hands (or both controllers): hold it with two and move them
+  apart or together.
+- Menu → Monitors → "Bring everything in front of me" lays everything out where you look.
+- The version is shown in the tray, in the headset menu and in the logs; the APK takes
+  it from Cargo.toml.

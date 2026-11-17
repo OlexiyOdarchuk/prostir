@@ -58,6 +58,16 @@ const POKE_RELEASE: f32 = 0.025;
 /// A finger further behind the menu than this is not touching it (reaching past).
 const POKE_BEHIND: f32 = -0.06;
 
+/// A monitor held with both hands: the distance between them sets its width.
+#[derive(Clone, Copy)]
+struct Scaling {
+    id: u8,
+    /// The hand that took hold second (the first one keeps its ordinary grab).
+    hand: usize,
+    start_distance: f32,
+    start_width: f32,
+}
+
 /// One fingertip against the menu.
 #[derive(Default, Clone, Copy)]
 struct Poke {
@@ -144,6 +154,8 @@ struct Scene {
     focus: Option<u8>,
     /// Current brightness of each monitor, easing towards 1 or the dimmed level.
     brightness: HashMap<u8, f32>,
+    /// Resizing a monitor with both hands.
+    scaling: Option<Scaling>,
     /// Where each monitor is drawn: follows `placements`, easing into new spots.
     shown: HashMap<u8, Placement>,
     /// How far each monitor has faded in (0 to 1) since it appeared.
@@ -702,6 +714,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         mic_wanted: true,
         focus: None,
         brightness: HashMap::new(),
+        scaling: None,
         shown: HashMap::new(),
         appear: HashMap::new(),
         worn: true,
@@ -1013,6 +1026,15 @@ fn run(app: &AndroidApp) -> Result<()> {
             button_layer.upload(&gl, &ui::menu_button_image(BUTTON_PX, over_button))?;
         }
 
+        // Both hands on one monitor: the distance between them sets its width.
+        if let Some(s) = scene.scaling
+            && let (Some(a), Some(b)) = (controls.state[0].ray, controls.state[1].ray)
+            && let Some(p) = scene.placements.get_mut(&s.id)
+        {
+            let d = a.origin.distance(b.origin);
+            p.width = (s.start_width * d / s.start_distance.max(0.05)).clamp(0.2, 8.0);
+        }
+
         #[allow(clippy::needless_range_loop)] // `hand` indexes several per-hand arrays
         for hand in 0..2 {
             let input = controls.state[hand];
@@ -1054,7 +1076,13 @@ fn run(app: &AndroidApp) -> Result<()> {
                 (input.grab.pressed, input.grab.released)
             };
 
+            if end_grab && scene.scaling.is_some_and(|s| s.hand == hand) {
+                scene.scaling = None;
+                layout::save(&scene.layout_path, &scene.placements);
+            }
             if end_grab && let Some(released) = scene.grabs[hand].take() {
+                // Letting go with the first hand ends resizing too.
+                scene.scaling = None;
                 if released.id == KEYBOARD_ID {
                     if let Some(k) = scene.keyboard_place {
                         layout::save(&scene.keyboard_path, &HashMap::from([(0, k)]));
@@ -1094,6 +1122,23 @@ fn run(app: &AndroidApp) -> Result<()> {
                     Some((Target::Keyboard, hit)) if other != Some(KEYBOARD_ID) => scene
                         .keyboard_place
                         .map(|k| Grab::start(KEYBOARD_ID, hit.t, hit.local, &k)),
+                    // The other hand already holds it: resize with both.
+                    Some((Target::Monitor(id), _)) if other == Some(id) => {
+                        if let (Some(a), Some(b), Some(p)) = (
+                            controls.state[0].ray,
+                            controls.state[1].ray,
+                            scene.placements.get(&id),
+                        ) {
+                            scene.scaling = Some(Scaling {
+                                id,
+                                hand,
+                                start_distance: a.origin.distance(b.origin),
+                                start_width: p.width,
+                            });
+                            controls.pulse(&session, hand);
+                        }
+                        None
+                    }
                     Some((Target::Monitor(id), hit)) if other != Some(id) => {
                         Some(Grab::start(id, hit.t, hit.local, &scene.placements[&id]))
                     }
