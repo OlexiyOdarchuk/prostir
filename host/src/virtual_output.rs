@@ -438,7 +438,7 @@ impl Drop for VirtualOutput {
 }
 
 /// Logical geometry `(x, y, width, height)` of each enabled output, from KScreen.
-fn output_geometries() -> HashMap<String, (i32, i32, i32, i32)> {
+pub fn output_geometries() -> HashMap<String, (i32, i32, i32, i32)> {
     let Ok(out) = std::process::Command::new("kscreen-doctor")
         .arg("-o")
         .output()
@@ -476,17 +476,30 @@ fn output_geometries() -> HashMap<String, (i32, i32, i32, i32)> {
     map
 }
 
-/// Moves `output` (e.g. the laptop panel) right under `anchor` in KDE's layout, so the
-/// mouse goes down into it just like the mirror sits under the monitor in the headset.
-pub fn place_below(output: &str, anchor: &str) {
-    let geometries = output_geometries();
-    let (Some(&(ax, ay, aw, ah)), Some(&(_, _, w, _))) =
-        (geometries.get(anchor), geometries.get(output))
-    else {
+/// Applies several `output.<name>.<setting>` changes in one kscreen-doctor call, so
+/// KDE never sees an in-between (overlapping) layout. Retries while KScreen has not
+/// caught up with just-created outputs.
+pub fn kscreen_apply(settings: &[String]) {
+    if settings.is_empty() {
         return;
-    };
-    let (x, y) = (ax + (aw - w) / 2, ay + ah);
-    kscreen(output, &format!("position.{x},{y}"));
+    }
+    for _ in 0..10 {
+        match std::process::Command::new("kscreen-doctor")
+            .args(settings)
+            .output()
+        {
+            Ok(out) if out.status.success() => {
+                info!("KDE layout: {}", settings.join(" "));
+                return;
+            }
+            Ok(_) => std::thread::sleep(Duration::from_millis(300)),
+            Err(e) => {
+                warn!("cannot run kscreen-doctor: {e}");
+                return;
+            }
+        }
+    }
+    warn!("kscreen-doctor did not apply {}", settings.join(" "));
 }
 
 /// Applies `output.<name>.<setting>` through kscreen-doctor, retrying while KScreen

@@ -50,6 +50,11 @@ pub enum Action {
     },
     Remove(u8),
     MakePrimary(u8),
+    /// Move a monitor left (-1) or right (+1) in the row.
+    Move {
+        id: u8,
+        delta: i32,
+    },
     SetMirror(bool),
     Preset(Preset),
     Curve(Curve),
@@ -206,26 +211,41 @@ impl Panel {
         items.push(text(lx, y, 21.0, false, MUTED, "Монітори"));
         y += 18.0;
         let removable = s.monitors.len() > 1;
-        for m in &s.monitors {
+        let count = s.monitors.len();
+        for (i, m) in s.monitors.iter().enumerate() {
             items.push(Item::Box(rect(lx, y, lw, 62.0), [255, 255, 255, 12]));
+            // Move left / right in the row (also reorders KDE's layout).
+            for (k, (label, delta)) in [("‹", -1), ("›", 1)].into_iter().enumerate() {
+                let enabled = if delta < 0 { i > 0 } else { i + 1 < count };
+                items.push(button(
+                    rect(lx + 8.0 + k as f32 * 48.0, y + 7.0, 44.0, 48.0),
+                    label,
+                    if enabled {
+                        Style::Normal
+                    } else {
+                        Style::Disabled
+                    },
+                    enabled.then_some(Action::Move { id: m.id, delta }),
+                ));
+            }
             items.push(text(
-                lx + 20.0,
-                y + 40.0,
-                24.0,
+                lx + 116.0,
+                y + 29.0,
+                22.0,
                 true,
                 TEXT,
                 &format!("Quest-{}", m.id + 1),
             ));
             items.push(text(
-                lx + 140.0,
-                y + 40.0,
-                20.0,
+                lx + 116.0,
+                y + 52.0,
+                16.0,
                 false,
                 MUTED,
                 &format!("{} × {}", m.width, m.height),
             ));
             let remove = rect(lx + lw - 58.0, y + 7.0, 48.0, 48.0);
-            let primary = rect(lx + lw - 58.0 - 10.0 - 236.0, y + 7.0, 236.0, 48.0);
+            let primary = rect(lx + lw - 58.0 - 10.0 - 210.0, y + 7.0, 210.0, 48.0);
             if s.confirm_remove == Some(m.id) {
                 let both = rect(
                     primary.left(),
@@ -489,7 +509,11 @@ impl Panel {
                         _ => ([255, 255, 255, 20], TEXT),
                     };
                     fill(&mut pixmap, rounded(*r, 12.0), bg);
-                    let size = if label == "×" { 32.0 } else { 19.0 };
+                    let size = match label.as_str() {
+                        "×" => 32.0,
+                        "‹" | "›" => 34.0,
+                        _ => 19.0,
+                    };
                     let tw = self.text_width(label, size, true);
                     let baseline = r.top() + r.height() / 2.0 + size * 0.36;
                     self.draw_text(

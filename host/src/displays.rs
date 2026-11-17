@@ -289,6 +289,8 @@ pub fn load_saved(parse: impl Fn(&str) -> Result<MonitorSpec, String>) -> Option
 pub struct Displays {
     // Field order matters: streams close before the KWin connection.
     monitors: BTreeMap<u8, Monitor>,
+    /// Left-to-right order of the monitors, in the headset and in KDE.
+    order: Vec<u8>,
     mirror: Option<Mirror>,
     mirror_wanted: bool,
     mirror_retry: Instant,
@@ -304,6 +306,7 @@ impl Displays {
     pub fn create(saved: &SavedMonitors, cfg: EncoderConfig, manage_primary: bool) -> Result<Self> {
         let mut displays = Self {
             monitors: BTreeMap::new(),
+            order: Vec::new(),
             mirror: None,
             mirror_wanted: saved.mirror,
             mirror_retry: Instant::now(),
@@ -316,7 +319,7 @@ impl Displays {
         for spec in saved.specs.iter().take(MAX_MONITORS) {
             displays.add(spec.clone())?;
         }
-        let ids: Vec<u8> = displays.monitors.keys().copied().collect();
+        let ids = displays.order.clone();
         if let Some(&id) = saved.primary.and_then(|i| ids.get(i)) {
             displays.set_primary(id);
         } else {
@@ -346,6 +349,11 @@ impl Displays {
                 spec,
             },
         );
+        self.order.push(id);
+        self.apply_kde_layout();
+        self.router.send(HostMsg::Order {
+            ids: self.order.clone(),
+        });
         Ok(id)
     }
 
@@ -383,7 +391,7 @@ impl Displays {
             Ok(m) => {
                 m.encoder.force_keyframe();
                 self.mirror = Some(m);
-                self.place_mirrored_display();
+                self.apply_kde_layout();
             }
             Err(e) => warn!("cannot mirror {name}: {e:#}"),
         }
@@ -418,6 +426,10 @@ impl Displays {
         }
         self.router.remove_stream(id);
         self.monitors.remove(&id);
+        self.order.retain(|o| *o != id);
+        self.router.send(HostMsg::Order {
+            ids: self.order.clone(),
+        });
         if self.primary == Some(id) {
             self.primary = None;
         }
@@ -434,19 +446,83 @@ impl Displays {
         }
         self.primary = Some(id);
         self.router.send(HostMsg::PrimaryChanged { id });
-        self.place_mirrored_display();
+        self.apply_kde_layout();
     }
 
-    /// Keeps KDE's layout in step with the headset: the mirrored display sits under
-    /// the primary monitor.
-    fn place_mirrored_display(&self) {
-        let (Some(mirror), Some(primary)) = (
-            &self.mirror,
-            self.primary.and_then(|id| self.monitors.get(&id)),
-        ) else {
-            return;
+    /// Lays the outputs out in KDE like they stand in the headset: Quest monitors side
+    /// by side in `order`, vertically centred, and the mirrored display under the
+    /// primary monitor. The mouse then crosses screens where the eyes expect it to.
+    fn apply_kde_layout(&self) {
+        let geometries = virtual_output::output_geometries();
+        let size = |name: &str, spec: Option<&MonitorSpec>| {
+            geometries.get(name).map(|g| (g.2, g.3)).or_else(|| {
+                spec.map(|s| {
+                    (
+                        (s.width as f64 / s.scale).round() as i32,
+                        (s.height as f64 / s.scale).round() as i32,
+                    )
+                })
+            })
         };
-        virtual_output::place_below(mirror.output.output_name(), primary.output.output_name());
+        let row: Vec<(u8, String, (i32, i32))> = self
+            .order
+            .iter()
+            .filter_map(|id| {
+                let m = self.monitors.get(id)?;
+                let name = m.output.output_name().to_owned();
+                let wh = size(&name, Some(&m.spec))?;
+                Some((*id, name, wh))
+            })
+            .collect();
+        let tallest = row.iter().map(|r| r.2.1).max().unwrap_or(0);
+        let mut settings = Vec::new();
+        let mut placed = HashMap::new();
+        let mut x = 0;
+        for (id, name, (w, h)) in &row {
+            let y = (tallest - h) / 2;
+            settings.push(format!("output.{name}.position.{x},{y}"));
+            placed.insert(*id, (x, y, *w, *h));
+            x += w;
+        }
+        if let (Some(mirror), Some(&(px, py, pw, ph))) =
+            (&self.mirror, self.primary.and_then(|p| placed.get(&p)))
+        {
+            let name = mirror.output.output_name();
+            if let Some((w, _)) = size(name, None) {
+                settings.push(format!(
+                    "output.{name}.position.{},{}",
+                    px + (pw - w) / 2,
+                    py + ph
+                ));
+            }
+        }
+        if self.manage_primary
+            && let Some(m) = self.primary.and_then(|p| self.monitors.get(&p))
+        {
+            settings.push(format!("output.{}.priority.1", m.output.output_name()));
+        }
+        virtual_output::kscreen_apply(&settings);
+    }
+
+    /// Changes the left-to-right order (ids of all current monitors).
+    pub fn set_order(&mut self, ids: &[u8]) -> Result<()> {
+        let mut sorted = ids.to_vec();
+        sorted.sort_unstable();
+        let mut current: Vec<u8> = self.monitors.keys().copied().collect();
+        current.sort_unstable();
+        if sorted != current {
+            bail!("Порядок не збігається з моніторами");
+        }
+        self.order = ids.to_vec();
+        self.apply_kde_layout();
+        self.router.send(HostMsg::Order {
+            ids: self.order.clone(),
+        });
+        Ok(())
+    }
+
+    pub fn order(&self) -> &[u8] {
+        &self.order
     }
 
     /// Without a chosen primary, the middle monitor gets the Plasma panel.
@@ -454,9 +530,11 @@ impl Displays {
         if self.primary.is_some_and(|p| self.monitors.contains_key(&p)) {
             return;
         }
-        let ids: Vec<u8> = self.monitors.keys().copied().collect();
+        let ids = self.order.clone();
         if let Some(&id) = ids.get(ids.len().saturating_sub(1) / 2) {
             self.set_primary(id);
+        } else {
+            self.apply_kde_layout();
         }
     }
 
@@ -493,8 +571,9 @@ impl Displays {
     pub fn save(&self) {
         let Some(path) = config_path() else { return };
         let text: String = self
-            .monitors
+            .order
             .iter()
+            .filter_map(|id| Some((id, self.monitors.get(id)?)))
             .map(|(id, m)| {
                 let star = if self.primary == Some(*id) { " *" } else { "" };
                 format!("{}{star}\n", m.spec)

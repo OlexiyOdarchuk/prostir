@@ -83,6 +83,7 @@ fn main() -> Result<()> {
             HostMsg::PrimaryChanged { id } => println!("primary monitor: {id}"),
             HostMsg::Error { text } => println!("host error: {text}"),
             HostMsg::MirrorWanted { enabled } => println!("mirror wanted: {enabled}"),
+            HostMsg::Order { ids } => println!("order: {ids:?}"),
             HostMsg::Welcome { .. } => {}
         }
     }

@@ -8,7 +8,7 @@ use std::io::{self, Read, Write};
 
 pub const TCP_PORT: u16 = 47830;
 pub const DISCOVERY_PORT: u16 = 47831;
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 /// Stream id of the mirrored physical display (laptop panel); Quest monitors use 0..
 pub const MIRROR_ID: u8 = 100;
 /// Prefix of the UDP discovery beacon: `MAGIC ++ tcp_port (u16 LE) ++ hostname (utf-8)`.
@@ -67,6 +67,10 @@ pub enum HostMsg {
         id: u8,
     },
     /// Something the user asked for failed; shown in the headset menu.
+    /// Left-to-right order of the Quest monitors (as in KDE's layout).
+    Order {
+        ids: Vec<u8>,
+    },
     /// Whether the physical display should be mirrored into the headset.
     MirrorWanted {
         enabled: bool,
@@ -98,6 +102,10 @@ pub enum ClientMsg {
         id: u8,
     },
     /// Make this monitor KDE's primary one.
+    /// New left-to-right order of the Quest monitors.
+    SetOrder {
+        ids: Vec<u8>,
+    },
     /// Show or hide the mirror of the physical display.
     SetMirror {
         enabled: bool,
@@ -115,6 +123,7 @@ mod tag {
     pub const PRIMARY_CHANGED: u8 = 5;
     pub const ERROR: u8 = 6;
     pub const MIRROR_WANTED: u8 = 7;
+    pub const ORDER: u8 = 8;
     pub const HELLO: u8 = 101;
     pub const REQUEST_KEYFRAME: u8 = 102;
     pub const FRAME_SHOWN: u8 = 103;
@@ -122,6 +131,7 @@ mod tag {
     pub const REMOVE_MONITOR: u8 = 105;
     pub const SET_PRIMARY: u8 = 106;
     pub const SET_MIRROR: u8 = 107;
+    pub const SET_ORDER: u8 = 108;
 }
 
 fn invalid(msg: &str) -> io::Error {
@@ -211,6 +221,7 @@ impl HostMsg {
             HostMsg::StreamEnd { id } => write_frame(w, tag::STREAM_END, &[&[*id]]),
             HostMsg::PrimaryChanged { id } => write_frame(w, tag::PRIMARY_CHANGED, &[&[*id]]),
             HostMsg::Error { text } => write_frame(w, tag::ERROR, &[text.as_bytes()]),
+            HostMsg::Order { ids } => write_frame(w, tag::ORDER, &[ids]),
             HostMsg::MirrorWanted { enabled } => {
                 write_frame(w, tag::MIRROR_WANTED, &[&[*enabled as u8]])
             }
@@ -250,6 +261,9 @@ impl HostMsg {
             }
             tag::STREAM_END => HostMsg::StreamEnd { id: c.u8()? },
             tag::PRIMARY_CHANGED => HostMsg::PrimaryChanged { id: c.u8()? },
+            tag::ORDER => HostMsg::Order {
+                ids: c.rest().to_vec(),
+            },
             tag::MIRROR_WANTED => HostMsg::MirrorWanted {
                 enabled: c.u8()? != 0,
             },
@@ -276,6 +290,7 @@ impl ClientMsg {
             ),
             ClientMsg::RemoveMonitor { id } => write_frame(w, tag::REMOVE_MONITOR, &[&[*id]]),
             ClientMsg::SetPrimary { id } => write_frame(w, tag::SET_PRIMARY, &[&[*id]]),
+            ClientMsg::SetOrder { ids } => write_frame(w, tag::SET_ORDER, &[ids]),
             ClientMsg::SetMirror { enabled } => {
                 write_frame(w, tag::SET_MIRROR, &[&[*enabled as u8]])
             }
@@ -298,6 +313,9 @@ impl ClientMsg {
             },
             tag::REMOVE_MONITOR => ClientMsg::RemoveMonitor { id: c.u8()? },
             tag::SET_PRIMARY => ClientMsg::SetPrimary { id: c.u8()? },
+            tag::SET_ORDER => ClientMsg::SetOrder {
+                ids: c.rest().to_vec(),
+            },
             tag::SET_MIRROR => ClientMsg::SetMirror {
                 enabled: c.u8()? != 0,
             },
@@ -345,6 +363,7 @@ mod tests {
             HostMsg::StreamEnd { id: 2 },
             HostMsg::PrimaryChanged { id: 1 },
             HostMsg::MirrorWanted { enabled: true },
+            HostMsg::Order { ids: vec![0, 3, 1] },
             HostMsg::Error {
                 text: "Не вдалося".into(),
             },
@@ -383,6 +402,7 @@ mod tests {
             ClientMsg::RemoveMonitor { id: 2 },
             ClientMsg::SetPrimary { id: 1 },
             ClientMsg::SetMirror { enabled: true },
+            ClientMsg::SetOrder { ids: vec![2, 0, 1] },
         ] {
             let mut buf = Vec::new();
             m.write(&mut buf).unwrap();

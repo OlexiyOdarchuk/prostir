@@ -68,19 +68,28 @@ fn yaw_of(p: &Placement) -> f32 {
 }
 
 /// Places every monitor for a preset. `monitors` and `mirror` hold
-/// `(id, width_px, height_px)`; Quest monitors go left to right by id, like in KDE,
+/// `(id, width_px, height_px)`; Quest monitors go left to right in the given order (as in KDE),
 /// and the laptop mirror goes under the primary monitor.
+/// Left-to-right order of monitors as they stand around the user (by direction).
+pub fn order_by_direction(placements: &HashMap<u8, Placement>, ids: &[u8]) -> Vec<u8> {
+    let mut v: Vec<(f32, u8)> = ids
+        .iter()
+        .filter_map(|id| placements.get(id).map(|p| (yaw_of(p), *id)))
+        .collect();
+    v.sort_by(|a, b| a.0.total_cmp(&b.0));
+    v.into_iter().map(|(_, id)| id).collect()
+}
+
 pub fn arrange(
     preset: Preset,
     monitors: &[(u8, u32, u32)],
     primary: Option<u8>,
     mirror: Option<(u8, u32, u32)>,
 ) -> HashMap<u8, Placement> {
-    let mut sorted: Vec<(u8, f32, f32)> = monitors
+    let sorted: Vec<(u8, f32, f32)> = monitors
         .iter()
         .map(|&(id, w, h)| (id, w as f32 * METRES_PER_PIXEL, h as f32 * METRES_PER_PIXEL))
         .collect();
-    sorted.sort_by_key(|m| m.0);
     let height_of = |id: u8| sorted.iter().find(|m| m.0 == id).map_or(0.0, |m| m.2);
 
     let mut out = HashMap::new();
@@ -462,6 +471,20 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn order_follows_given_sequence_and_directions() {
+        // Portrait in the middle: order [0, 2, 1].
+        let l = arrange(
+            Preset::Arc,
+            &[(0, 2560, 1440), (2, 1440, 2560), (1, 2560, 1440)],
+            Some(2),
+            None,
+        );
+        assert!(l[&0].position.x < l[&2].position.x && l[&2].position.x < l[&1].position.x);
+        assert!(l[&2].position.x.abs() < 1e-3, "portrait is straight ahead");
+        assert_eq!(order_by_direction(&l, &[1, 0, 2]), vec![0, 2, 1]);
     }
 
     #[test]

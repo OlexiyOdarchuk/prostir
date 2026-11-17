@@ -94,6 +94,8 @@ enum Target {
 /// Everything shown in the headset and how it is arranged.
 struct Scene {
     monitors: HashMap<u8, Monitor>,
+    /// Left-to-right order of the Quest monitors, shared with the host and KDE.
+    order: Vec<u8>,
     placements: HashMap<u8, Placement>,
     primary: Option<u8>,
     mirror_wanted: bool,
@@ -113,15 +115,37 @@ struct Scene {
 }
 
 impl Scene {
+    /// Quest monitors left to right: in the host's order, unknown ones at the end.
     fn quest_sizes(&self) -> Vec<(u8, u32, u32)> {
-        let mut v: Vec<_> = self
-            .monitors
+        let mut ids: Vec<u8> = self
+            .order
             .iter()
-            .filter(|(id, _)| **id != MIRROR_ID)
-            .map(|(id, m)| (*id, m.width_px, m.height_px))
+            .copied()
+            .filter(|id| self.monitors.contains_key(id))
             .collect();
-        v.sort_by_key(|m| m.0);
-        v
+        let mut rest: Vec<u8> = self
+            .monitors
+            .keys()
+            .copied()
+            .filter(|id| *id != MIRROR_ID && !ids.contains(id))
+            .collect();
+        rest.sort_unstable();
+        ids.extend(rest);
+        ids.into_iter()
+            .map(|id| {
+                let m = &self.monitors[&id];
+                (id, m.width_px, m.height_px)
+            })
+            .collect()
+    }
+
+    /// Sends a new left-to-right order to the host (which re-arranges KDE to match).
+    fn reorder(&mut self, ids: Vec<u8>) {
+        if ids == self.quest_sizes().iter().map(|m| m.0).collect::<Vec<_>>() {
+            return;
+        }
+        self.order = ids.clone();
+        self.send(ClientMsg::SetOrder { ids });
     }
 
     fn mirror_size(&self) -> Option<(u8, u32, u32)> {
@@ -411,6 +435,7 @@ fn run(app: &AndroidApp) -> Result<()> {
     let layout_path = data_dir.join("layout.txt");
     let mut scene = Scene {
         monitors: HashMap::new(),
+        order: Vec::new(),
         placements: layout::load(&layout_path),
         primary: None,
         mirror_wanted: true,
@@ -593,8 +618,16 @@ fn run(app: &AndroidApp) -> Result<()> {
                 }
             }
 
-            if input.grab.released && scene.grabs[hand].take().is_some() {
+            if input.grab.released
+                && let Some(released) = scene.grabs[hand].take()
+            {
                 layout::save(&scene.layout_path, &scene.placements);
+                // Dropped somewhere else in the row: KDE's order follows what the eyes see.
+                if released.id != PANEL_ID && released.id != MIRROR_ID {
+                    let ids: Vec<u8> = scene.quest_sizes().iter().map(|m| m.0).collect();
+                    let by_direction = layout::order_by_direction(&scene.placements, &ids);
+                    scene.reorder(by_direction);
+                }
             }
             let Some(ray) = input.ray else { continue };
             if let Some(mut grab) = scene.grabs[hand] {
@@ -813,6 +846,7 @@ fn handle_net_event(
         }
         NetEvent::PrimaryChanged(id) => scene.primary = Some(id),
         NetEvent::MirrorWanted(enabled) => scene.mirror_wanted = enabled,
+        NetEvent::Order(ids) => scene.order = ids,
         NetEvent::HostError(text) => scene.show_error(text),
         NetEvent::StreamStart {
             id,
@@ -908,6 +942,15 @@ fn handle_action(
             controls.hands_enabled = enabled;
         }
         Action::MakePrimary(id) => scene.send(ClientMsg::SetPrimary { id }),
+        Action::Move { id, delta } => {
+            let mut ids: Vec<u8> = scene.quest_sizes().iter().map(|m| m.0).collect();
+            if let Some(i) = ids.iter().position(|x| *x == id) {
+                let j = (i as i32 + delta).clamp(0, ids.len() as i32 - 1) as usize;
+                ids.swap(i, j);
+                scene.reorder(ids);
+                scene.arrange_all();
+            }
+        }
         Action::SetMirror(enabled) => {
             scene.mirror_wanted = enabled;
             scene.send(ClientMsg::SetMirror { enabled });

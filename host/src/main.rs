@@ -143,6 +143,9 @@ fn serve_client(
     if let Some(id) = displays.primary() {
         displays.router.send(HostMsg::PrimaryChanged { id });
     }
+    displays.router.send(HostMsg::Order {
+        ids: displays.order().to_vec(),
+    });
     displays.router.send(HostMsg::MirrorWanted {
         enabled: displays.mirror_wanted(),
     });
@@ -173,6 +176,10 @@ fn serve_client(
                     info!("headset removed Quest-{}", id + 1);
                     displays.save();
                 }
+                Err(e) => report(displays, format!("{e:#}")),
+            },
+            Ok(Ok(ClientMsg::SetOrder { ids })) => match displays.set_order(&ids) {
+                Ok(()) => displays.save(),
                 Err(e) => report(displays, format!("{e:#}")),
             },
             Ok(Ok(ClientMsg::SetMirror { enabled })) => {

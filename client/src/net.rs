@@ -38,6 +38,8 @@ pub enum NetEvent {
     Connected(SocketAddr, Feedback),
     PrimaryChanged(u8),
     MirrorWanted(bool),
+    /// Left-to-right order of the Quest monitors.
+    Order(Vec<u8>),
     /// A request failed on the host; shown in the menu.
     HostError(String),
     StreamStart {
@@ -273,6 +275,9 @@ fn run_session(stream: TcpStream, events: &Sender<NetEvent>) -> std::io::Result<
             }
             HostMsg::MirrorWanted { enabled } => {
                 let _ = events.send(NetEvent::MirrorWanted(enabled));
+            }
+            HostMsg::Order { ids } => {
+                let _ = events.send(NetEvent::Order(ids));
             }
             HostMsg::Error { text } => {
                 let _ = events.send(NetEvent::HostError(text));
