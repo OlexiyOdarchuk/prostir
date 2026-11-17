@@ -122,6 +122,18 @@ pub fn arrange(
     primary: Option<u8>,
     mirror: Option<(u8, u32, u32)>,
 ) -> HashMap<u8, Placement> {
+    arrange_curved(preset, monitors, primary, mirror, None)
+}
+
+/// [`arrange`] for monitors drawn curved with cylinder radius `curve` (metres): the
+/// laptop mirror then continues the cylinder of the monitor above it.
+pub fn arrange_curved(
+    preset: Preset,
+    monitors: &[(u8, u32, u32)],
+    primary: Option<u8>,
+    mirror: Option<(u8, u32, u32)>,
+    curve: Option<f32>,
+) -> HashMap<u8, Placement> {
     let sorted: Vec<(u8, f32, f32)> = monitors
         .iter()
         .map(|&(id, w, h)| (id, w as f32 * METRES_PER_PIXEL, h as f32 * METRES_PER_PIXEL))
@@ -186,8 +198,28 @@ pub fn arrange(
         } else {
             -EYE_DROP
         };
-        // Hinged at its top edge to the bottom edge of the monitor above (no seam) and
-        // tilted back towards the eyes like a laptop lid, since it sits below them.
+        // Curved: a tilted cylinder cannot meet the curved edge above along its whole
+        // width, so the mirror continues the same cylinder downwards, like the lower
+        // part of one tall curved screen.
+        if let (Some(radius), Some((above, _))) = (curve, anchor) {
+            let normal = above.rotation * Vec3::Z;
+            let half_above = (above.width / 2.0).min(radius * 0.999);
+            let axis = above.position + normal * (radius * radius - half_above * half_above).sqrt();
+            let half = (w / 2.0).min(radius * 0.999);
+            let mut position = axis - normal * (radius * radius - half * half).sqrt();
+            position.y = bottom - h / 2.0;
+            out.insert(
+                id,
+                Placement {
+                    position,
+                    rotation: above.rotation,
+                    width: w,
+                },
+            );
+            return finish(preset, out);
+        }
+        // Flat: hinged at its top edge to the bottom edge of the monitor above (no seam)
+        // and tilted back towards the eyes like a laptop lid, since it sits below them.
         let top = match anchor {
             Some((p, _)) => Vec3::new(p.position.x, bottom, p.position.z),
             None => on_cylinder(yaw, bottom, w).position,
@@ -208,6 +240,11 @@ pub fn arrange(
         );
     }
 
+    finish(preset, out)
+}
+
+/// Tilts everything up for the overhead preset.
+fn finish(preset: Preset, mut out: HashMap<u8, Placement>) -> HashMap<u8, Placement> {
     if preset == Preset::Overhead {
         let tilt = Quat::from_rotation_x(OVERHEAD_PITCH);
         for p in out.values_mut() {
@@ -637,5 +674,26 @@ mod tests {
             // Tilted back: its normal points up towards the eyes.
             assert!((mirror.rotation * Vec3::Z).y > 0.05);
         }
+    }
+
+    #[test]
+    fn curved_mirror_continues_the_cylinder() {
+        let monitors = [(0, 2560, 1440), (1, 2560, 1440), (2, 2560, 1440)];
+        let radius = RADIUS;
+        let out = arrange_curved(
+            Preset::Arc,
+            &monitors,
+            Some(1),
+            Some((100, 2880, 1800)),
+            Some(radius),
+        );
+        let (above, mirror) = (out[&1], out[&100]);
+        let a = Cylinder::new(&above, radius);
+        let m = Cylinder::new(&mirror, radius);
+        // Same axis (horizontally) and same radius: the edges meet along the whole width.
+        assert!(Vec2::new(a.center.x - m.center.x, a.center.z - m.center.z).length() < 1e-3);
+        let h_above = 1440.0 * METRES_PER_PIXEL;
+        let h = 1800.0 * METRES_PER_PIXEL * (MIRROR_MAX_WIDTH / (2880.0 * METRES_PER_PIXEL));
+        assert!(((above.position.y - h_above / 2.0) - (mirror.position.y + h / 2.0)).abs() < 1e-3);
     }
 }

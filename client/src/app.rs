@@ -208,6 +208,20 @@ impl Scene {
             .map(|m| (MIRROR_ID, m.width_px, m.height_px))
     }
 
+    /// Puts the laptop mirror back under the primary monitor, leaving the rest alone.
+    fn place_mirror(&mut self) {
+        let all = layout::arrange_curved(
+            self.settings.preset,
+            &self.quest_sizes(),
+            self.primary,
+            self.mirror_size(),
+            self.curve_radius(),
+        );
+        if let Some(p) = all.get(&MIRROR_ID) {
+            self.placements.insert(MIRROR_ID, *p);
+        }
+    }
+
     fn relayout_pending(&self) -> bool {
         self.relayout_until.is_some_and(|t| Instant::now() < t)
     }
@@ -220,11 +234,12 @@ impl Scene {
             return;
         }
         let mirror_place = self.placements.get(&MIRROR_ID).copied();
-        self.placements = layout::arrange(
+        self.placements = layout::arrange_curved(
             self.settings.preset,
             &self.quest_sizes(),
             self.primary,
             self.mirror_size(),
+            self.curve_radius(),
         );
         // Keep the mirror's spot while the laptop lid is closed.
         if let (Some(p), false) = (mirror_place, self.placements.contains_key(&MIRROR_ID)) {
@@ -285,20 +300,32 @@ impl Scene {
         best
     }
 
-    /// Puts the menu button just under the primary monitor's bottom-left corner.
+    /// Puts the menu button just under the primary monitor's bottom-left corner, and
+    /// left of the laptop mirror hanging there so it never covers it.
     fn place_button(&mut self) {
         let anchor = self
             .primary
             .filter(|id| self.monitors.contains_key(id))
             .or_else(|| self.quest_sizes().first().map(|m| m.0));
+        let mirror = self
+            .monitors
+            .contains_key(&MIRROR_ID)
+            .then(|| self.placements.get(&MIRROR_ID).copied())
+            .flatten()
+            .map(|m| (m, self.height_of(MIRROR_ID)));
         self.button_place = anchor.and_then(|id| {
             let p = self.placements.get(&id)?;
             let h = self.height_of(id);
-            let offset = Vec3::new(
-                -p.width / 2.0 + BUTTON_SIZE,
-                -h / 2.0 - BUTTON_SIZE * 0.9,
-                0.02,
-            );
+            let mut x = -p.width / 2.0 + BUTTON_SIZE;
+            if let Some((m, mh)) = mirror {
+                let corner = m.position + m.rotation * Vec3::new(-m.width / 2.0, mh / 2.0, 0.0);
+                let local = p.rotation.inverse() * (corner - p.position);
+                // Only when the mirror actually hangs under this monitor.
+                if local.y < -h / 2.0 + 0.05 && local.y > -h / 2.0 - 0.3 {
+                    x = x.min(local.x - BUTTON_SIZE * 0.8);
+                }
+            }
+            let offset = Vec3::new(x, -h / 2.0 - BUTTON_SIZE * 0.9, 0.02);
             Some(Placement {
                 position: p.position + p.rotation * offset,
                 rotation: p.rotation,
@@ -777,6 +804,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         };
         let tips: [Option<Vec3>; 2] = std::array::from_fn(|h| joints[h].map(|j| j[INDEX_TIP].0));
         let hands_in_view = tips.iter().any(Option::is_some);
+        controls.hands_from_joints(&joints, head, forward);
 
         // Pairing needs the menu: open it where the user is looking.
         if scene.pairing.is_some() && !scene.panel_open {
@@ -1365,15 +1393,7 @@ fn handle_net_event(
                     } else if !scene.placements.contains_key(&id) && !scene.settings.cinema {
                         if id == MIRROR_ID {
                             // Only the mirror is new: put it under the primary monitor.
-                            let all = layout::arrange(
-                                scene.settings.preset,
-                                &scene.quest_sizes(),
-                                scene.primary,
-                                scene.mirror_size(),
-                            );
-                            if let Some(p) = all.get(&MIRROR_ID) {
-                                scene.placements.insert(MIRROR_ID, *p);
-                            }
+                            scene.place_mirror();
                         } else {
                             // A new monitor: re-arrange so it joins the row seamlessly.
                             scene.arrange_all();
@@ -1512,6 +1532,10 @@ fn handle_action(
         Action::Curve(curve) => {
             scene.settings.curve = curve;
             scene.settings.save(settings_path);
+            // Flat it hangs tilted, curved it continues the cylinder.
+            if !scene.settings.cinema {
+                scene.place_mirror();
+            }
         }
         Action::Background(background) => {
             scene.settings.background = background;
