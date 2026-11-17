@@ -438,7 +438,17 @@ impl Drop for VirtualOutput {
 }
 
 /// Logical geometry `(x, y, width, height)` of each enabled output, from KScreen.
-pub fn output_geometries() -> HashMap<String, (i32, i32, i32, i32)> {
+/// Where KScreen has an output: logical position and size, and its priority (1 = primary).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Geometry {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+    pub priority: Option<u32>,
+}
+
+pub fn output_geometries() -> HashMap<String, Geometry> {
     let Ok(out) = std::process::Command::new("kscreen-doctor")
         .arg("-o")
         .output()
@@ -447,7 +457,9 @@ pub fn output_geometries() -> HashMap<String, (i32, i32, i32, i32)> {
     };
     let text = String::from_utf8_lossy(&out.stdout);
     let mut name = None;
-    let mut map = HashMap::new();
+    let mut map: HashMap<String, Geometry> = HashMap::new();
+    // kscreen-doctor prints "priority N" before "Geometry:".
+    let mut priorities: HashMap<String, Option<u32>> = HashMap::new();
     for raw in text.lines() {
         // Strip ANSI colour codes.
         let mut line = String::new();
@@ -463,13 +475,29 @@ pub fn output_geometries() -> HashMap<String, (i32, i32, i32, i32)> {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("Output:") {
             name = rest.split_whitespace().nth(1).map(str::to_owned);
+        } else if let (Some(n), Some(rest)) = (&name, line.strip_prefix("priority ")) {
+            if let Some(g) = map.get_mut(n) {
+                g.priority = rest.trim().parse().ok();
+            } else {
+                priorities.insert(n.clone(), rest.trim().parse().ok());
+            }
         } else if let (Some(n), Some(rest)) = (&name, line.strip_prefix("Geometry:")) {
             let nums: Vec<i32> = rest
                 .split(|c: char| !c.is_ascii_digit() && c != '-')
                 .filter_map(|t| t.parse().ok())
                 .collect();
             if let [x, y, w, h] = nums[..] {
-                map.insert(n.clone(), (x, y, w, h));
+                let priority = priorities.get(n).copied().flatten();
+                map.insert(
+                    n.clone(),
+                    Geometry {
+                        x,
+                        y,
+                        w,
+                        h,
+                        priority,
+                    },
+                );
             }
         }
     }

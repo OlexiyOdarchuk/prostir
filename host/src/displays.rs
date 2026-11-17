@@ -80,6 +80,7 @@ pub struct Router {
     codec: Codec,
     inner: Mutex<RouterInner>,
     failed: AtomicBool,
+    mirror_failed: AtomicBool,
 }
 
 struct RouterInner {
@@ -96,6 +97,7 @@ impl Router {
                 streams: BTreeMap::new(),
             }),
             failed: AtomicBool::new(false),
+            mirror_failed: AtomicBool::new(false),
         }
     }
 
@@ -169,7 +171,12 @@ impl Router {
             }
             EncoderEvent::Failed(reason) => {
                 error!("{}: {reason}", stream_name(id));
-                self.failed.store(true, Ordering::Relaxed);
+                // A broken mirror is restarted by `Displays::tick`; anything else ends the session.
+                if id == MIRROR_ID {
+                    self.mirror_failed.store(true, Ordering::Relaxed);
+                } else {
+                    self.failed.store(true, Ordering::Relaxed);
+                }
                 false
             }
             EncoderEvent::Frame {
@@ -381,9 +388,15 @@ impl Displays {
     /// Keeps the mirror in step with the physical display: it disappears when the
     /// laptop lid closes and comes back when it opens.
     pub fn tick(&mut self) {
-        if self.mirror.as_ref().is_some_and(|m| m.output.closed()) {
-            info!("physical display went away, mirror stopped");
+        let broken = self.router.mirror_failed.swap(false, Ordering::Relaxed);
+        if self
+            .mirror
+            .as_ref()
+            .is_some_and(|m| broken || m.output.closed())
+        {
+            info!("mirror stream stopped, restarting it shortly");
             self.stop_mirror();
+            self.mirror_retry = Instant::now() + Duration::from_secs(2);
         }
         if !self.mirror_wanted || self.mirror.is_some() || self.mirror_retry > Instant::now() {
             return;
@@ -485,7 +498,7 @@ impl Displays {
     fn apply_kde_layout(&self) {
         let geometries = virtual_output::output_geometries();
         let size = |name: &str, spec: Option<&MonitorSpec>| {
-            geometries.get(name).map(|g| (g.2, g.3)).or_else(|| {
+            geometries.get(name).map(|g| (g.w, g.h)).or_else(|| {
                 spec.map(|s| {
                     (
                         (s.width as f64 / s.scale).round() as i32,
@@ -506,11 +519,18 @@ impl Displays {
             .collect();
         let tallest = row.iter().map(|r| r.2.1).max().unwrap_or(0);
         let mut settings = Vec::new();
+        // Every applied change makes KWin reconfigure its outputs, which also cuts the
+        // laptop mirror's stream: only send what actually differs.
+        let mut position = |name: &str, x: i32, y: i32| {
+            if geometries.get(name).is_none_or(|g| (g.x, g.y) != (x, y)) {
+                settings.push(format!("output.{name}.position.{x},{y}"));
+            }
+        };
         let mut placed = HashMap::new();
         let mut x = 0;
         for (id, name, (w, h)) in &row {
             let y = (tallest - h) / 2;
-            settings.push(format!("output.{name}.position.{x},{y}"));
+            position(name, x, y);
             placed.insert(*id, (x, y, *w, *h));
             x += w;
         }
@@ -519,15 +539,14 @@ impl Displays {
         {
             let name = mirror.output.output_name();
             if let Some((w, _)) = size(name, None) {
-                settings.push(format!(
-                    "output.{name}.position.{},{}",
-                    px + (pw - w) / 2,
-                    py + ph
-                ));
+                position(name, px + (pw - w) / 2, py + ph);
             }
         }
         if self.manage_primary
             && let Some(m) = self.primary.and_then(|p| self.monitors.get(&p))
+            && geometries
+                .get(m.output.output_name())
+                .is_none_or(|g| g.priority != Some(1))
         {
             settings.push(format!("output.{}.priority.1", m.output.output_name()));
         }
