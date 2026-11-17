@@ -487,7 +487,7 @@ impl Displays {
             .unwrap();
         let mut output = self.desktop.create(u32::from(id) + 1, &spec)?;
         let encoder = self.start_encoder(id, &output.input())?;
-        output.attach(&encoder, self.cfg.software)?;
+        output.attach(&encoder, self.cfg.backend.takes_dmabuf())?;
         self.monitors.insert(
             id,
             Monitor {
@@ -539,7 +539,7 @@ impl Displays {
             .mirror(u32::from(MIRROR_ID) + 1, &name)
             .and_then(|(mut output, connection)| {
                 let encoder = self.start_encoder(MIRROR_ID, &output.input())?;
-                output.attach(&encoder, self.cfg.software)?;
+                output.attach(&encoder, self.cfg.backend.takes_dmabuf())?;
                 Ok(Mirror {
                     encoder,
                     output,

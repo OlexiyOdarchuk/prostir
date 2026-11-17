@@ -161,7 +161,7 @@ impl Output {
     }
 
     /// Starts feeding `encoder` (Hyprland; KWin feeds it through PipeWire by itself).
-    pub fn attach(&mut self, encoder: &Encoder, software: bool) -> Result<()> {
+    pub fn attach(&mut self, encoder: &Encoder, dmabuf: bool) -> Result<()> {
         if let Self::Hyprland(o) = self {
             let appsrc = encoder
                 .appsrc()
@@ -170,7 +170,7 @@ impl Output {
                 o.name.clone(),
                 appsrc,
                 encoder.paused(),
-                !software,
+                dmabuf,
             )?);
         }
         Ok(())

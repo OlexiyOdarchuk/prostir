@@ -252,18 +252,39 @@ pub fn spawn(events: Sender<NetEvent>, discovery: Discovery, steering: Steering)
                     round,
                 ) {
                     let peer = stream.peer_addr().ok();
-                    if let Some(p) = peer.filter(|p| !p.ip().is_loopback()) {
-                        let _ = std::fs::write(&discovery.last_host_file, p.to_string());
-                    }
                     let name = peer.and_then(|p| finder.name_of(p));
                     steering.lock().current = stream.try_clone().ok();
-                    match run_session(stream, &events, name, &steering, &identity, &mut trusted) {
+                    let mut ended = Ended::default();
+                    match run_session(
+                        stream,
+                        &events,
+                        name,
+                        &steering,
+                        &identity,
+                        &mut trusted,
+                        &mut ended,
+                    ) {
                         Ok(()) => info!("host {peer:?} closed the connection"),
                         Err(e) => warn!("connection to {peer:?} lost: {e}"),
+                    }
+                    // Remembered only once the PC proved it is a trusted one: a single
+                    // connection to anything else must not redirect the next start.
+                    if ended.welcomed
+                        && let Some(p) = peer.filter(|p| !p.ip().is_loopback())
+                    {
+                        let _ = std::fs::write(&discovery.last_host_file, p.to_string());
                     }
                     steering.lock().current = None;
                     if events.send(NetEvent::Disconnected).is_err() {
                         return;
+                    }
+                    // The PC said what is wrong (no encoder, say): the message stays
+                    // up, and retrying every 0.3 s would only rebuild its monitors.
+                    if ended
+                        .refused
+                        .is_some_and(|t| t.elapsed() < Duration::from_secs(3))
+                    {
+                        std::thread::sleep(Duration::from_secs(10));
                     }
                 }
                 std::thread::sleep(Duration::from_millis(300));
@@ -514,6 +535,16 @@ struct StreamSlot {
     waiting_for_keyframe: bool,
 }
 
+/// How a session went, for what to do next.
+#[derive(Default)]
+struct Ended {
+    /// The PC is trusted and the session started.
+    welcomed: bool,
+    /// When the PC last sent an error: right before it hung up means it cannot
+    /// serve the headset right now.
+    refused: Option<Instant>,
+}
+
 fn run_session(
     stream: TcpStream,
     events: &Sender<NetEvent>,
@@ -521,6 +552,7 @@ fn run_session(
     steering: &Steering,
     identity: &Identity,
     trusted: &mut TrustStore,
+    ended: &mut Ended,
 ) -> std::io::Result<()> {
     stream.set_nodelay(true)?;
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
@@ -574,6 +606,7 @@ fn run_session(
             other => return Err(std::io::Error::other(format!("unexpected {other:?}"))),
         }
     };
+    ended.welcomed = true;
     // The host re-sends the last frame every 500 ms, so 10 s of silence means a dead link.
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     if let Ok(peer) = stream.peer_addr() {
@@ -669,6 +702,7 @@ fn run_session(
                 let _ = events.send(NetEvent::Order(ids));
             }
             HostMsg::Error { text } => {
+                ended.refused = Some(Instant::now());
                 let _ = events.send(NetEvent::HostError(text));
             }
             HostMsg::Audio { pcm } => {

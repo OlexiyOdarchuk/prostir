@@ -14,12 +14,82 @@ use gstreamer_video as gst_video;
 use log::{debug, error, warn};
 use prostir_proto::Codec;
 
+/// Which hardware (or the CPU) encodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    /// VA-API: Intel and AMD graphics.
+    Va,
+    /// NVENC through GStreamer's nvcodec plugin: NVIDIA graphics with its own driver.
+    Nvenc,
+    /// x264 on the CPU (gst-plugins-ugly): works anywhere, costs CPU time.
+    X264,
+}
+
+impl Backend {
+    fn elements(self, codec: Codec) -> &'static [&'static str] {
+        match (self, codec) {
+            (Self::Va, Codec::H265) => &["vapostproc", "vah265enc"],
+            (Self::Va, Codec::H264) => &["vapostproc", "vah264enc"],
+            (Self::Nvenc, Codec::H265) => &["nvh265enc"],
+            (Self::Nvenc, Codec::H264) => &["nvh264enc"],
+            (Self::X264, _) => &["x264enc"],
+        }
+    }
+
+    /// Whether the encoder takes frames straight from GPU buffers (dmabuf).
+    pub fn takes_dmabuf(self) -> bool {
+        self == Self::Va
+    }
+}
+
+/// Picks the first encoder this PC has: VA-API, then NVENC, then x264 on the CPU, in
+/// the preferred codec first. `software` forces x264. The error names what to install.
+pub fn pick(prefer: Codec, software: bool) -> Result<(Backend, Codec)> {
+    let other = match prefer {
+        Codec::H265 => Codec::H264,
+        Codec::H264 => Codec::H265,
+    };
+    let mut order = Vec::new();
+    if !software {
+        for backend in [Backend::Va, Backend::Nvenc] {
+            order.push((backend, prefer));
+            order.push((backend, other));
+        }
+    }
+    order.push((Backend::X264, Codec::H264));
+    let parsers = |codec| match codec {
+        Codec::H265 => "h265parse",
+        Codec::H264 => "h264parse",
+    };
+    let found = order.into_iter().find(|(backend, codec)| {
+        backend
+            .elements(*codec)
+            .iter()
+            .chain(std::iter::once(&parsers(*codec)))
+            .all(|e| gst::ElementFactory::find(e).is_some())
+    });
+    found.ok_or_else(|| {
+        anyhow!(
+            "{}",
+            crate::i18n::t(
+                "На ПК немає відеокодувальника. Intel чи AMD: встановіть VA-плагін GStreamer \
+                 (gst-plugin-va або gst-plugins-bad) і VA-драйвер. NVIDIA: драйвер NVIDIA і \
+                 nvcodec з gst-plugins-bad. Будь-яка відеокарта: gst-plugins-ugly (x264, \
+                 кодування процесором).",
+                "No video encoder on the PC. Intel or AMD: install the GStreamer VA plugin \
+                 (gst-plugin-va or gst-plugins-bad) and a VA driver. NVIDIA: the NVIDIA driver \
+                 and nvcodec from gst-plugins-bad. Any graphics: gst-plugins-ugly (x264, \
+                 encoding on the CPU).",
+            )
+        )
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct EncoderConfig {
     pub codec: Codec,
     pub bitrate_kbps: u32,
-    /// Use the software x264 encoder instead of VA-API (H.264 only).
-    pub software: bool,
+    pub backend: Backend,
     /// Slower VA-API preset: clearer small text at the same bitrate for about 2 ms more
     /// encoding per frame.
     pub sharp: bool,
@@ -81,8 +151,8 @@ fn pipeline_description(input: &Input, cfg: &EncoderConfig) -> String {
              max-buffers=2 leaky-type=downstream"
             .to_owned(),
     };
-    let (encoder, parser, caps) = match (cfg.codec, cfg.software) {
-        (Codec::H264, true) => (
+    let (encoder, parser, caps) = match (cfg.codec, cfg.backend) {
+        (_, Backend::X264) => (
             format!(
                 "videoconvert name=enc_in ! video/x-raw,format=I420 ! x264enc name=enc tune=zerolatency speed-preset=superfast \
                  bitrate={} key-int-max=600 bframes=0",
@@ -91,7 +161,25 @@ fn pipeline_description(input: &Input, cfg: &EncoderConfig) -> String {
             "h264parse config-interval=-1",
             "video/x-h264,stream-format=byte-stream,alignment=au,profile=high",
         ),
-        (Codec::H264, false) => (
+        (Codec::H264, Backend::Nvenc) => (
+            format!(
+                "videoconvert name=enc_in ! video/x-raw,format=NV12 ! nvh264enc name=enc rc-mode=cbr \
+                 bitrate={} gop-size=600 bframes=0 zerolatency=true",
+                cfg.bitrate_kbps
+            ),
+            "h264parse config-interval=-1",
+            "video/x-h264,stream-format=byte-stream,alignment=au",
+        ),
+        (Codec::H265, Backend::Nvenc) => (
+            format!(
+                "videoconvert name=enc_in ! video/x-raw,format=NV12 ! nvh265enc name=enc rc-mode=cbr \
+                 bitrate={} gop-size=600 bframes=0 zerolatency=true",
+                cfg.bitrate_kbps
+            ),
+            "h265parse config-interval=-1",
+            "video/x-h265,stream-format=byte-stream,alignment=au",
+        ),
+        (Codec::H264, Backend::Va) => (
             format!(
                 "vapostproc name=enc_in ! video/x-raw(memory:VAMemory),format=NV12 ! vah264enc name=enc rate-control=cbr bitrate={} \
                  key-int-max=600 b-frames=0 ref-frames=1 target-usage={}",
@@ -101,7 +189,7 @@ fn pipeline_description(input: &Input, cfg: &EncoderConfig) -> String {
             "h264parse config-interval=-1",
             "video/x-h264,stream-format=byte-stream,alignment=au",
         ),
-        (Codec::H265, _) => (
+        (Codec::H265, Backend::Va) => (
             format!(
                 "vapostproc name=enc_in ! video/x-raw(memory:VAMemory),format=NV12 ! vah265enc name=enc rate-control=cbr bitrate={} \
                  key-int-max=600 b-frames=0 ref-frames=1 target-usage={}",

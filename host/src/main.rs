@@ -46,7 +46,8 @@ struct Args {
     /// Bitrate per monitor, Mbit/s (default: the quality chosen in the tray, or 30).
     #[arg(long)]
     bitrate: Option<u32>,
-    /// Software x264 encoder instead of VA-API (implies --codec h264).
+    /// Encode on the CPU with x264 even when the graphics card can (implies H.264).
+    /// Without it Prostir uses VA-API (Intel, AMD), then NVENC (NVIDIA), then x264.
     #[arg(long)]
     software: bool,
     #[arg(long, default_value_t = prostir_proto::TCP_PORT)]
@@ -462,18 +463,16 @@ fn spawn_adb_reverse(port: u16) {
 }
 
 fn create_displays(args: &Args, bitrate: u32, sharp: bool) -> Result<Displays> {
-    let codec = if args.software {
-        Codec::H264
-    } else {
-        match args.codec {
-            CodecArg::H264 => Codec::H264,
-            CodecArg::H265 => Codec::H265,
-        }
+    let prefer = match args.codec {
+        CodecArg::H264 => Codec::H264,
+        CodecArg::H265 => Codec::H265,
     };
+    let (backend, codec) = encoder::pick(prefer, args.software)?;
+    info!("encoding with {backend:?} {codec:?}");
     let cfg = EncoderConfig {
         codec,
         bitrate_kbps: bitrate * 1000,
-        software: args.software,
+        backend,
         sharp,
     };
     let stored = displays::load_saved(parse_monitor);
@@ -642,6 +641,13 @@ fn main() -> Result<()> {
                         Ok(d) => displays = Some(d),
                         Err(e) => {
                             error!("{e:#}");
+                            // Tell the headset why, instead of just hanging up.
+                            let mut writer = writer;
+                            let _ = HostMsg::Error {
+                                text: format!("{e:#}"),
+                            }
+                            .write(&mut writer);
+                            let _ = writer.flush();
                             continue;
                         }
                     }
