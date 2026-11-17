@@ -81,6 +81,7 @@ fn main() -> Result<()> {
     }
     ClientMsg::Hello {
         version: PROTOCOL_VERSION,
+        min: prostir_proto::MIN_PROTOCOL,
         app: env!("CARGO_PKG_VERSION").into(),
     }
     .write(&mut w)?;
@@ -94,6 +95,7 @@ fn main() -> Result<()> {
                 pair(&mut r, &mut w, &identity, &peer)?;
                 ClientMsg::Hello {
                     version: PROTOCOL_VERSION,
+                    min: prostir_proto::MIN_PROTOCOL,
                     app: env!("CARGO_PKG_VERSION").into(),
                 }
                 .write(&mut w)?;
@@ -165,6 +167,7 @@ fn main() -> Result<()> {
             HostMsg::MicWanted { enabled } => println!("headset microphone wanted: {enabled}"),
             HostMsg::MicActive { active } => println!("PC is recording: {active}"),
             HostMsg::Focus { id } => println!("mouse on: {id}"),
+            HostMsg::Unknown { tag } => println!("skipped message {tag} from a newer PC"),
             HostMsg::Incompatible { protocol, app } => {
                 println!("PC speaks protocol v{protocol} (app {app}): update one side");
                 break;

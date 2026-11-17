@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use prostir_proto::secure::{SecureReader, SecureWriter};
 use prostir_proto::{ClientMsg, Codec, HostMsg, NO_FOCUS};
 
@@ -349,6 +349,9 @@ fn serve_client(
                 displays.set_primary(id);
                 displays.save();
                 displays::sync_wallpapers();
+            }
+            Ok(Ok(ClientMsg::Unknown { tag })) => {
+                debug!("skipping message {tag} from a newer headset")
             }
             Ok(Ok(other)) => warn!("ignoring {other:?}"),
             Ok(Err(e)) if e.kind() == ErrorKind::UnexpectedEof => break Ok(()),

@@ -1397,13 +1397,18 @@ fn build_update(l: Lang, items: &mut Vec<Item>, x: f32, w: f32, pc_newer: bool, 
     ));
     y += 50.0;
     items.push(Item::Box(rect(x, y, w, 130.0), [255, 255, 255, 12]));
-    let (how, where_) = if pc_newer {
+    let (how, where_) = if pc_newer && cfg!(feature = "store") {
         (
             l.t(
-                "Оновіть Prostir у Meta Horizon Store або встановіть новий APK з",
-                "Update Prostir in the Meta Horizon Store, or install the new APK from",
+                "Оновіть Prostir у бібліотеці шолома:",
+                "Update Prostir in the headset's library:",
             ),
-            "prostir.ishawyha.dev",
+            "Meta Horizon Store",
+        )
+    } else if pc_newer {
+        (
+            l.t("Встановіть новий APK з", "Install the new APK from"),
+            "github.com/OlexiyOdarchuk/prostir/releases",
         )
     } else {
         (

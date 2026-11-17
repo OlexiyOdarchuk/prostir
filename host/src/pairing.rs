@@ -62,8 +62,8 @@ pub fn accept(
     let mut attempts = 0;
     loop {
         match ClientMsg::read(&mut reader)? {
-            ClientMsg::Hello { version, app } if version != PROTOCOL_VERSION => {
-                incompatible(&mut writer, version, &app)?;
+            ClientMsg::Hello { version, min, app } if !prostir_proto::compatible(version, min) => {
+                incompatible(&mut writer, min > PROTOCOL_VERSION, &app)?;
                 bail!("headset speaks protocol v{version} (app {app}), PC v{PROTOCOL_VERSION}")
             }
             ClientMsg::Hello { .. } if security.trusted.contains(&peer.key) => {
@@ -123,6 +123,8 @@ pub fn accept(
                     false => warn!("pairing failed: the codes did not match"),
                 }
             }
+            // Something a newer headset sends that this PC does not know yet.
+            ClientMsg::Unknown { .. } => {}
             other => bail!("unexpected message before pairing: {other:?}"),
         }
     }
@@ -150,14 +152,21 @@ fn obtain_code(headset_shows: bool, tray: Option<&tray::Handle>) -> Option<Strin
 
 /// The headset speaks another protocol: tell both the headset and the person at the PC
 /// which side needs the update.
-fn incompatible(writer: &mut SecureWriter, headset: u32, headset_app: &str) -> Result<()> {
+fn incompatible(writer: &mut SecureWriter, pc_too_old: bool, headset_app: &str) -> Result<()> {
     let ours = env!("CARGO_PKG_VERSION");
+    // Comes from a peer that has not proved anything yet: only a version-like string
+    // goes into the notification.
+    let headset_app: String = headset_app
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || ".+-".contains(*c))
+        .take(24)
+        .collect();
     let headset_app = if headset_app.is_empty() {
         t("старіша", "older")
     } else {
-        headset_app
+        headset_app.as_str()
     };
-    let (title, body) = if headset > PROTOCOL_VERSION {
+    let (title, body) = if pc_too_old {
         (
             t("Оновіть Prostir на ПК", "Update Prostir on the PC"),
             format!(
@@ -189,10 +198,10 @@ fn incompatible(writer: &mut SecureWriter, headset: u32, headset_app: &str) -> R
     .write(writer)?;
     writer.flush()?;
     // Once per headset version, not on every reconnection attempt.
-    static TOLD: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+    static TOLD: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
     let mut told = TOLD.lock().unwrap();
-    if !told.contains(&headset) {
-        told.push(headset);
+    if !told.iter().any(|t| t == headset_app) {
+        told.push(headset_app.to_owned());
         notify(title, &body);
     }
     Ok(())
@@ -363,6 +372,7 @@ mod tests {
             let mut r = BufReader::new(r);
             ClientMsg::Hello {
                 version: PROTOCOL_VERSION + 1,
+                min: PROTOCOL_VERSION + 1,
                 app: "9.9.9".into(),
             }
             .write(&mut w)

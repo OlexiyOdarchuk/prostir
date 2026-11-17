@@ -493,6 +493,7 @@ impl Session<'_> {
                     HostMsg::Error { text } => {
                         let _ = self.events.send(NetEvent::HostError(text));
                     }
+                    HostMsg::Unknown { .. } => {}
                     other => return Err(std::io::Error::other(format!("unexpected {other:?}"))),
                 }
             };
@@ -524,6 +525,7 @@ impl Session<'_> {
                     warn!("pairing with {}: the codes did not match", self.host);
                     let _ = self.events.send(NetEvent::PairingFailed);
                 }
+                HostMsg::Unknown { .. } => {}
                 other => return Err(std::io::Error::other(format!("unexpected {other:?}"))),
             }
         }
@@ -580,6 +582,7 @@ fn run_session(
     }
     feedback.send(&ClientMsg::Hello {
         version: PROTOCOL_VERSION,
+        min: prostir_proto::MIN_PROTOCOL,
         app: env!("CARGO_PKG_VERSION").into(),
     })?;
     let language = loop {
@@ -589,6 +592,7 @@ fn run_session(
                 session.pair(trusted)?;
                 feedback.send(&ClientMsg::Hello {
                     version: PROTOCOL_VERSION,
+                    min: prostir_proto::MIN_PROTOCOL,
                     app: env!("CARGO_PKG_VERSION").into(),
                 })?;
             }
@@ -603,6 +607,7 @@ fn run_session(
                 std::thread::sleep(Duration::from_secs(10));
                 return Ok(());
             }
+            HostMsg::Unknown { .. } => {}
             other => return Err(std::io::Error::other(format!("unexpected {other:?}"))),
         }
     };
@@ -722,7 +727,9 @@ fn run_session(
             HostMsg::MicActive { active } => {
                 _recorder = active.then(|| crate::mic::Recorder::start(feedback.clone()));
             }
-            HostMsg::Welcome { .. }
+            // From a newer PC: skipped, the session goes on.
+            HostMsg::Unknown { .. }
+            | HostMsg::Welcome { .. }
             | HostMsg::Incompatible { .. }
             | HostMsg::PairingRequired
             | HostMsg::PairMsg { .. }

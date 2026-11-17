@@ -13,7 +13,18 @@ use std::io::{self, Read, Write};
 
 pub const TCP_PORT: u16 = 47830;
 pub const DISCOVERY_PORT: u16 = 47831;
-pub const PROTOCOL_VERSION: u32 = 9;
+/// Newest protocol this build speaks. Messages added later are skipped by older peers
+/// (see [`HostMsg::Unknown`]), so a new optional message does not need a new version.
+pub const PROTOCOL_VERSION: u32 = 1;
+/// Oldest peer protocol this build can still talk to. Raise it only for a change an
+/// older peer cannot just skip.
+pub const MIN_PROTOCOL: u32 = 1;
+
+/// Whether a peer that speaks `version` and still understands down to `min` can talk
+/// to this build.
+pub fn compatible(version: u32, min: u32) -> bool {
+    version >= MIN_PROTOCOL && min <= PROTOCOL_VERSION
+}
 /// PC sound sent to the headset: interleaved signed 16-bit little-endian stereo.
 pub const AUDIO_RATE: u32 = 48_000;
 pub const AUDIO_CHANNELS: u32 = 2;
@@ -50,11 +61,11 @@ impl Codec {
             Codec::H265 => "video/hevc",
         }
     }
-    fn from_u8(v: u8) -> io::Result<Self> {
+    fn from_u8(v: u8) -> Option<Self> {
         match v {
-            0 => Ok(Codec::H264),
-            1 => Ok(Codec::H265),
-            _ => Err(invalid("unknown codec")),
+            0 => Some(Codec::H264),
+            1 => Some(Codec::H265),
+            _ => None,
         }
     }
 }
@@ -140,14 +151,25 @@ pub enum HostMsg {
         ok: bool,
         tag: Vec<u8>,
     },
+    /// A message from a newer PC that this build does not know; skipped.
+    Unknown {
+        tag: u8,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClientMsg {
     Hello {
+        /// Newest protocol the headset speaks ([`PROTOCOL_VERSION`]).
         version: u32,
+        /// Oldest protocol it still understands ([`MIN_PROTOCOL`]).
+        min: u32,
         /// The headset app's version (e.g. `0.2.0`), to say what to update.
         app: String,
+    },
+    /// A message from a newer headset that this build does not know; skipped.
+    Unknown {
+        tag: u8,
     },
     RequestKeyframe {
         id: u8,
@@ -316,6 +338,8 @@ impl<'a> Cursor<'a> {
 impl HostMsg {
     pub fn write(&self, w: &mut impl Write) -> io::Result<()> {
         match self {
+            // Never sent: only stands for what a newer peer sent.
+            HostMsg::Unknown { .. } => Ok(()),
             HostMsg::Welcome { version, language } => write_frame(
                 w,
                 tag::WELCOME,
@@ -384,7 +408,10 @@ impl HostMsg {
             },
             tag::STREAM_START => {
                 let id = c.u8()?;
-                let codec = Codec::from_u8(c.u8()?)?;
+                // A codec from a newer PC: skip the stream, keep the connection.
+                let Some(codec) = Codec::from_u8(c.u8()?) else {
+                    return Ok(HostMsg::Unknown { tag: t });
+                };
                 let width = c.u32()?;
                 let height = c.u32()?;
                 let name = String::from_utf8_lossy(c.rest()).into_owned();
@@ -444,7 +471,8 @@ impl HostMsg {
             tag::ERROR => HostMsg::Error {
                 text: String::from_utf8_lossy(c.rest()).into_owned(),
             },
-            _ => return Err(invalid("unknown host message")),
+            // Newer PCs may send messages this build does not know.
+            _ => HostMsg::Unknown { tag: t },
         })
     }
 }
@@ -452,9 +480,13 @@ impl HostMsg {
 impl ClientMsg {
     pub fn write(&self, w: &mut impl Write) -> io::Result<()> {
         match self {
-            ClientMsg::Hello { version, app } => {
-                write_frame(w, tag::HELLO, &[&version.to_le_bytes(), app.as_bytes()])
-            }
+            ClientMsg::Hello { version, min, app } => write_frame(
+                w,
+                tag::HELLO,
+                &[&version.to_le_bytes(), &min.to_le_bytes(), app.as_bytes()],
+            ),
+            // Never sent: only stands for what a newer peer sent.
+            ClientMsg::Unknown { .. } => Ok(()),
             ClientMsg::RequestKeyframe { id } => write_frame(w, tag::REQUEST_KEYFRAME, &[&[*id]]),
             ClientMsg::FrameShown { id, pts_us } => {
                 write_frame(w, tag::FRAME_SHOWN, &[&[*id], &pts_us.to_le_bytes()])
@@ -508,9 +540,9 @@ impl ClientMsg {
         let (t, payload) = read_frame(r)?;
         let mut c = Cursor(&payload);
         Ok(match t {
-            // Older headsets send only the protocol version.
             tag::HELLO => ClientMsg::Hello {
                 version: c.u32()?,
+                min: c.u32()?,
                 app: String::from_utf8_lossy(c.rest()).into_owned(),
             },
             tag::REQUEST_KEYFRAME => ClientMsg::RequestKeyframe { id: c.u8()? },
@@ -570,7 +602,7 @@ impl ClientMsg {
             tag::SET_MIRROR => ClientMsg::SetMirror {
                 enabled: c.u8()? != 0,
             },
-            _ => return Err(invalid("unknown client message")),
+            _ => ClientMsg::Unknown { tag: t },
         })
     }
 }
@@ -593,6 +625,50 @@ pub fn decode_beacon(buf: &[u8]) -> Option<(u16, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A message from a newer peer is skipped and the next one still reads.
+    #[test]
+    fn skips_unknown_messages() {
+        let mut buf = Vec::new();
+        write_frame(&mut buf, 250, &[&[1, 2, 3]]).unwrap();
+        HostMsg::Focus { id: 1 }.write(&mut buf).unwrap();
+        // A stream in a codec this build does not know.
+        write_frame(&mut buf, tag::STREAM_START, &[&[0, 9], &[0; 8], b"x"]).unwrap();
+        let mut r = buf.as_slice();
+        assert_eq!(
+            HostMsg::read(&mut r).unwrap(),
+            HostMsg::Unknown { tag: 250 }
+        );
+        assert_eq!(HostMsg::read(&mut r).unwrap(), HostMsg::Focus { id: 1 });
+        assert!(matches!(
+            HostMsg::read(&mut r).unwrap(),
+            HostMsg::Unknown { .. }
+        ));
+
+        let mut buf = Vec::new();
+        write_frame(&mut buf, 251, &[&[7; 10]]).unwrap();
+        ClientMsg::SetMic { enabled: true }.write(&mut buf).unwrap();
+        let mut r = buf.as_slice();
+        assert_eq!(
+            ClientMsg::read(&mut r).unwrap(),
+            ClientMsg::Unknown { tag: 251 }
+        );
+        assert_eq!(
+            ClientMsg::read(&mut r).unwrap(),
+            ClientMsg::SetMic { enabled: true }
+        );
+    }
+
+    #[test]
+    fn version_ranges() {
+        assert!(compatible(PROTOCOL_VERSION, MIN_PROTOCOL));
+        // A newer peer that still understands us.
+        assert!(compatible(PROTOCOL_VERSION + 3, PROTOCOL_VERSION));
+        // A newer peer that dropped what we speak.
+        assert!(!compatible(PROTOCOL_VERSION + 3, PROTOCOL_VERSION + 1));
+        // An older peer than we still support.
+        assert!(!compatible(MIN_PROTOCOL - 1, 0));
+    }
 
     #[test]
     fn roundtrip() {
