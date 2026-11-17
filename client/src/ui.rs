@@ -1452,7 +1452,7 @@ mod tests {
     pub fn sample_state() -> UiState {
         UiState {
             pairing: None,
-            host: Some("iShawyha-Laptop".into()),
+            host: Some("workstation".into()),
             found: Vec::new(),
             ip_input: None,
             monitors: vec![

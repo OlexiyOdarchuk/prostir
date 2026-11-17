@@ -12,9 +12,9 @@ DIST="$ROOT/dist"
 NAME="prostir-$VERSION-x86_64-linux"
 rm -rf "$DIST/$NAME" && mkdir -p "$DIST/$NAME"
 
-cargo build --release -p prostir-host --bin prostir --bin prostir-probe
-cp target/release/prostir target/release/prostir-probe "$DIST/$NAME/"
-strip --strip-debug "$DIST/$NAME/prostir" "$DIST/$NAME/prostir-probe"
+cargo build --release -p prostir-host --bin prostir
+cp target/release/prostir "$DIST/$NAME/"
+strip --strip-debug "$DIST/$NAME/prostir"
 mkdir -p "$DIST/$NAME/packaging"
 cp packaging/prostir.svg packaging/prostir.desktop "$DIST/$NAME/packaging/"
 cp scripts/install.sh LICENSE README.md README.uk.md CHANGELOG.md "$DIST/$NAME/"

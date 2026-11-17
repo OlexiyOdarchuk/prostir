@@ -8,7 +8,7 @@ use prostir::ui::{MonitorEntry, PairingView, Panel, Tab, UiState};
 
 fn questmon_pairing(mode: &str) -> PairingView {
     PairingView {
-        host: "iShawyha-Laptop".into(),
+        host: "workstation".into(),
         code: (mode == "show").then(|| "482 913".into()),
         typed: if mode == "show" {
             String::new()
@@ -32,10 +32,10 @@ fn main() {
             .map(|mode| questmon_pairing(&mode)),
         host: std::env::var("OFFLINE")
             .is_err()
-            .then(|| "iShawyha-Laptop".into()),
+            .then(|| "workstation".into()),
         found: vec![
-            ("iShawyha-Laptop".into(), "192.168.1.167".into()),
-            ("desktop".into(), "192.168.1.20".into()),
+            ("workstation".into(), "192.168.1.10".into()),
+            ("media-pc".into(), "192.168.1.20".into()),
         ],
         ip_input: std::env::var("KEYPAD").ok(),
         monitors: vec![
@@ -66,7 +66,7 @@ fn main() {
         custom_available: false,
         curve_available: true,
         error: None,
-        confirm_remove: Some(2),
+        confirm_remove: std::env::var("CONFIRM").is_ok().then_some(2),
         tab: match std::env::var("TAB").as_deref() {
             Ok("look") => Tab::Look,
             Ok("profiles") => Tab::Profiles,
