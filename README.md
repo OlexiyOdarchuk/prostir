@@ -43,6 +43,11 @@ hit one.
 </p>
 <p align="center"><sub>A capture from the headset: the right monitor shows KDE's display settings with the three Prostir outputs.</sub></p>
 
+<p align="center">
+  <img src="docs/hyprland.jpg" alt="In the headset on Hyprland: an arc of three monitors under an aurora sky, system monitor on the left, code on a portrait monitor in the middle, the Prostir site on the right, each with its own Waybar">
+</p>
+<p align="center"><sub>The same on Hyprland: each Prostir monitor gets its own Waybar and workspaces.</sub></p>
+
 <table>
   <tr>
     <td><img src="docs/menu-monitors.png" alt="Menu, Monitors tab: monitor list, add a monitor, layout, curve and mode"></td>
