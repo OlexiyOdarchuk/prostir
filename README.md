@@ -262,6 +262,12 @@ which stops a man in the middle.
 The PC keeps the keys of paired headsets in `~/.config/prostir/paired_headsets`; the
 tray item "Forget paired headsets" clears it. The headset keeps its keys inside the app.
 
+Official builds count how many PCs use Prostir: once a day, when a headset connects,
+the PC sends one request to GoatCounter with only the date in it (and `/install` the
+first time). No identifier, host name or settings go with it. Turn it off in the tray
+("Count this PC among users") or with `PROSTIR_NO_COUNT=1`; builds from source never
+count. See the [privacy policy](https://prostir.ishawyha.dev/privacy.html).
+
 Ports: TCP 47830 for the stream and UDP 47831 for discovery. The discovery broadcast
 contains only the PC's host name.
 

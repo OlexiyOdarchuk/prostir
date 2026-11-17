@@ -28,7 +28,11 @@
     <h1>Privacy policy</h1>
     <p class="muted">Last updated: 17 November 2026.</p>
 
-    <p>Prostir is two programs: one on your PC and one on your Meta Quest headset. They talk only to each other. Prostir has no accounts, no servers, no analytics and no telemetry, and it does not send anything about you to its author or to anyone else.</p>
+    <p>Prostir is two programs: one on your PC and one on your Meta Quest headset. They talk to each other, and the PC sends one anonymous count a day (below). Prostir has no accounts and no servers of its own, and it does not send anything about you to its author or to anyone else.</p>
+
+    <h2>Counting users</h2>
+    <p>To know how many people use Prostir, the PC program sends one request a day to <a href="https://www.goatcounter.com/">GoatCounter</a>, when a headset connects. The request contains only the path <code>/day/</code> followed by the date, and the very first time also <code>/install</code>. It carries no identifier, host name, settings or anything else about you or your PC. GoatCounter does not store IP addresses. The totals are public on this site.</p>
+    <p>It is on by default. Turn it off with the tray item "Count this PC among users", or start Prostir with the environment variable <code>PROSTIR_NO_COUNT=1</code>. Builds made from the source code never count.</p>
 
     <h2>What travels between the headset and your PC</h2>
     <p>The picture of your virtual monitors, PC sound, the headset microphone (see below), which monitor has the mouse, and the settings you change in the headset menu. All of it goes directly between your two devices, over your local network or a USB cable, encrypted with the Noise protocol. To find your PC, the PC broadcasts its host name on the local network.</p>
@@ -46,7 +50,7 @@
     <p>If you install Prostir from the Meta Horizon Store, the app asks Meta's platform whether your account owns it when it starts. That check is between the headset and Meta, under <a href="https://www.meta.com/legal/privacy-policy/">Meta's privacy policy</a>; Prostir does not see or keep its result anywhere else.</p>
 
     <h2>This website</h2>
-    <p>The site is hosted on GitHub Pages, which keeps server logs under <a href="https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement">GitHub's privacy statement</a>. The download count on the home page is read by your browser from GitHub's public API. Fonts load from Google Fonts. The site sets no cookies and runs no analytics.</p>
+    <p>The site is hosted on GitHub Pages, which keeps server logs under <a href="https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement">GitHub's privacy statement</a>. Fonts load from Google Fonts. The user numbers on the home page are read by your browser from GoatCounter's public counter. The site sets no cookies and runs no analytics.</p>
 
     <h2>Questions</h2>
     <p>Open an issue at <a href="https://github.com/OlexiyOdarchuk/prostir/issues">github.com/OlexiyOdarchuk/prostir</a>. If this policy changes, the date at the top changes with it.</p>

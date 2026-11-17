@@ -37,6 +37,9 @@ jobs:
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
           KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASS }}
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          # GoatCounter key for counting users (see host/src/usage.rs). Without it
+          # the build never counts.
+          PROSTIR_COUNT_TOKEN: ${{ secrets.GOATCOUNTER_TOKEN }}
         run: |
           [ -n "$KEYSTORE_PASS" ] || unset KEYSTORE_PASS
           [ -n "$KEY_ALIAS" ] || unset KEY_ALIAS

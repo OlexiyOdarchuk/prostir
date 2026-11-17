@@ -15,6 +15,8 @@ pub enum Command {
     SetBitrate(u32),
     /// Clearer text at about 2 ms more encoding per frame.
     SetSharp(bool),
+    /// Count this PC among users (see `usage`).
+    SetCounting(bool),
     /// Drop all paired headsets: each must pair again.
     ForgetHeadsets,
     Quit,
@@ -256,6 +258,23 @@ impl ksni::Tray for Tray {
                 activate: Box::new(|tray: &mut Self| {
                     tray.sharp = !tray.sharp;
                     let _ = tray.commands.send(Command::SetSharp(tray.sharp));
+                }),
+                ..Default::default()
+            }
+            .into(),
+            CheckmarkItem {
+                label: t(
+                    "Рахувати цей ПК серед користувачів",
+                    "Count this PC among users",
+                )
+                .into(),
+                checked: crate::usage::enabled(),
+                visible: crate::usage::available(),
+                activate: Box::new(|tray: &mut Self| {
+                    let on = !crate::usage::enabled();
+                    let _ = tray.commands.send(Command::SetCounting(on));
+                    // The tray re-reads the choice; write it now so the check mark follows.
+                    crate::usage::set_enabled(on);
                 }),
                 ..Default::default()
             }

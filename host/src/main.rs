@@ -5,6 +5,7 @@ mod focus;
 mod i18n;
 mod pairing;
 mod tray;
+mod usage;
 mod virtual_output;
 
 use std::io::{BufReader, BufWriter, ErrorKind, Write};
@@ -111,6 +112,7 @@ impl Control {
                         d.save();
                     }
                 }
+                tray::Command::SetCounting(on) => usage::set_enabled(on),
                 tray::Command::ForgetHeadsets => {
                     info!(
                         "forgetting {} paired headset(s)",
@@ -234,6 +236,7 @@ fn serve_client(
     });
     displays.set_streaming(true);
     displays.force_keyframes();
+    usage::headset_connected();
 
     // Housekeeping runs on a clock: the headset acknowledges every frame, so the
     // channel is rarely quiet long enough for a receive timeout.

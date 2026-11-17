@@ -45,3 +45,9 @@ First public version.
   monitor; Prostir now checks Plasma's screen order and corrects it.
 - Fixed: touching the menu could also trigger a pinch while pulling the hand back,
   pressing a second button.
+- Official builds count how many PCs use Prostir: one anonymous request a day with only
+  the date in it; off in the tray or with `PROSTIR_NO_COUNT=1`.
+- Website with downloads and the privacy policy: prostir.ishawyha.dev.
+- KDE arranges the monitors in rows the way they stand in the headset, so the mouse
+  crosses up and down too.
+- A start screen in the headset explains where to get the PC part.
