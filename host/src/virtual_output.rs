@@ -3,17 +3,21 @@
 //! `stream_virtual_output` makes KWin add a real output (visible in System
 //! Settings → Display, windows can be moved onto it) and stream its contents
 //! into a PipeWire node. Closing the stream removes the output again.
+//!
+//! One Wayland connection ([`Screencast`]) serves all monitors, which come and
+//! go one by one ([`VirtualOutput`]).
 
+use std::collections::HashMap;
 use std::os::fd::AsRawFd;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use log::{info, warn};
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
-use wayland_client::protocol::wl_registry;
+use wayland_client::protocol::{wl_output, wl_registry};
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle};
 use wayland_protocols_plasma::screencast::v1::client::{
     zkde_screencast_stream_unstable_v1::{self, ZkdeScreencastStreamUnstableV1},
@@ -23,35 +27,120 @@ use wayland_protocols_plasma::screencast::v1::client::{
 /// Pointer mode from the protocol: render the cursor into the stream.
 const POINTER_EMBEDDED: u32 = 2;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MonitorSpec {
     /// Size in pixels of the encoded stream.
     pub width: u32,
     pub height: u32,
-    /// KWin output scale (UI scaling on that monitor).
+    /// KWin output scale (UI scaling on that monitor); 1.0 keeps what KScreen remembers.
     pub scale: f64,
+}
+
+impl MonitorSpec {
+    pub fn validate(&self) -> Result<()> {
+        if !(320..=7680).contains(&self.width)
+            || !(240..=4320).contains(&self.height)
+            || !(0.5..=4.0).contains(&self.scale)
+        {
+            bail!(
+                "monitor {}x{}@{} is out of range",
+                self.width,
+                self.height,
+                self.scale
+            );
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Display for MonitorSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}x{}", self.width, self.height)?;
+        if (self.scale - 1.0).abs() > f64::EPSILON {
+            write!(f, "@{}", self.scale)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Default)]
 struct StreamState {
     node: Option<u32>,
     failed: Option<String>,
+    closed: bool,
+}
+
+/// Stream states keyed by monitor number, shared with the event thread.
+#[derive(Default)]
+struct Shared {
+    streams: Mutex<HashMap<u32, StreamState>>,
+    changed: Condvar,
+    /// Compositor outputs by registry name: proxy and connector name (eDP-1, HDMI-A-1…).
+    outputs: Mutex<HashMap<u32, (wl_output::WlOutput, Option<String>)>>,
+}
+
+impl Shared {
+    fn bind_output(
+        &self,
+        registry: &wl_registry::WlRegistry,
+        name: u32,
+        version: u32,
+        qh: &QueueHandle<State>,
+    ) {
+        // wl_output v4 announces the connector name.
+        if version < 4 {
+            return;
+        }
+        let output = registry.bind::<wl_output::WlOutput, _, _>(name, 4, qh, name);
+        self.outputs.lock().unwrap().insert(name, (output, None));
+    }
 }
 
 struct State {
-    streams: Vec<StreamState>,
-    closed: Arc<Vec<AtomicBool>>,
+    shared: Arc<Shared>,
 }
 
 impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
     fn event(
-        _: &mut Self,
-        _: &wl_registry::WlRegistry,
-        _: wl_registry::Event,
+        state: &mut Self,
+        registry: &wl_registry::WlRegistry,
+        event: wl_registry::Event,
         _: &GlobalListContents,
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_registry::Event::Global {
+                name,
+                interface,
+                version,
+            } if interface == "wl_output" => {
+                state.shared.bind_output(registry, name, version, qh);
+            }
+            wl_registry::Event::GlobalRemove { name } => {
+                if let Some((output, _)) = state.shared.outputs.lock().unwrap().remove(&name) {
+                    output.release();
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<wl_output::WlOutput, u32> for State {
+    fn event(
+        state: &mut Self,
+        _: &wl_output::WlOutput,
+        event: wl_output::Event,
+        global: &u32,
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        if let wl_output::Event::Name { name } = event
+            && let Some(entry) = state.shared.outputs.lock().unwrap().get_mut(global)
+        {
+            entry.1 = Some(name);
+        }
     }
 }
 
@@ -67,118 +156,63 @@ impl Dispatch<ZkdeScreencastUnstableV1, ()> for State {
     }
 }
 
-impl Dispatch<ZkdeScreencastStreamUnstableV1, usize> for State {
+impl Dispatch<ZkdeScreencastStreamUnstableV1, u32> for State {
     fn event(
         state: &mut Self,
         _: &ZkdeScreencastStreamUnstableV1,
         event: zkde_screencast_stream_unstable_v1::Event,
-        idx: &usize,
+        number: &u32,
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        let s = &mut state.streams[*idx];
+        let mut streams = state.shared.streams.lock().unwrap();
+        let s = streams.entry(*number).or_default();
         match event {
             zkde_screencast_stream_unstable_v1::Event::Created { node } => s.node = Some(node),
             zkde_screencast_stream_unstable_v1::Event::Failed { error } => s.failed = Some(error),
             zkde_screencast_stream_unstable_v1::Event::Closed => {
-                warn!("KWin closed virtual output #{}", idx + 1);
-                state.closed[*idx].store(true, Ordering::Relaxed);
+                warn!("KWin closed virtual output Quest-{number}");
+                s.closed = true;
             }
             _ => {}
         }
+        state.shared.changed.notify_all();
     }
 }
 
-pub struct VirtualOutputs {
+/// Connection to KWin's screencast interface.
+pub struct Screencast {
     conn: Connection,
     screencast: ZkdeScreencastUnstableV1,
-    streams: Vec<ZkdeScreencastStreamUnstableV1>,
-    /// PipeWire node id per output, same order as the specs.
-    pub nodes: Vec<u32>,
-    pub closed: Arc<Vec<AtomicBool>>,
+    qh: QueueHandle<State>,
+    shared: Arc<Shared>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
-impl VirtualOutputs {
-    pub fn create(specs: &[MonitorSpec]) -> Result<Self> {
+impl Screencast {
+    pub fn connect() -> Result<Self> {
         let conn = Connection::connect_to_env().context(
             "cannot connect to the Wayland compositor (is this a Plasma Wayland session?)",
         )?;
         let (globals, mut queue) = registry_queue_init::<State>(&conn)?;
         let qh = queue.handle();
-        let screencast: ZkdeScreencastUnstableV1 = globals.bind(&qh, 2..=4, ()).context(
-            "KWin does not expose zkde_screencast_unstable_v1 to this program; \
-             install the .desktop file from the README so KWin grants access",
-        )?;
-
-        let closed: Arc<Vec<AtomicBool>> =
-            Arc::new(specs.iter().map(|_| AtomicBool::new(false)).collect());
+        let screencast: ZkdeScreencastUnstableV1 = globals
+            .bind(&qh, 2..=4, ())
+            .context("KWin does not expose zkde_screencast_unstable_v1 to this program")?;
+        let shared = Arc::new(Shared::default());
+        for g in globals.contents().clone_list() {
+            if g.interface == "wl_output" {
+                shared.bind_output(globals.registry(), g.name, g.version, &qh);
+            }
+        }
         let mut state = State {
-            streams: specs.iter().map(|_| StreamState::default()).collect(),
-            closed: closed.clone(),
+            shared: shared.clone(),
         };
+        // Collect the connector names before anyone asks for them.
+        queue.roundtrip(&mut state)?;
 
-        let mut streams = Vec::new();
-        for (i, spec) in specs.iter().enumerate() {
-            let name = format!("Quest-{}", i + 1);
-            // The protocol calls these "logical", but KWin uses them as the output's mode
-            // (pixel size) and applies `scale` on top, which is what we want.
-            let (w, h) = (spec.width as i32, spec.height as i32);
-            let stream = if screencast.version() >= 4 {
-                let description = format!("Quest 3 — монітор {}", i + 1);
-                screencast.stream_virtual_output_with_description(
-                    name,
-                    description,
-                    w,
-                    h,
-                    spec.scale,
-                    POINTER_EMBEDDED,
-                    &qh,
-                    i,
-                )
-            } else {
-                screencast.stream_virtual_output(name, w, h, spec.scale, POINTER_EMBEDDED, &qh, i)
-            };
-            streams.push(stream);
-        }
-
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            queue.roundtrip(&mut state)?;
-            if let Some((i, s)) = state
-                .streams
-                .iter()
-                .enumerate()
-                .find(|(_, s)| s.failed.is_some())
-            {
-                for s in &streams {
-                    s.close();
-                }
-                let _ = conn.flush();
-                bail!(
-                    "KWin refused virtual output #{}: {}",
-                    i + 1,
-                    s.failed.as_deref().unwrap_or_default()
-                );
-            }
-            if state.streams.iter().all(|s| s.node.is_some()) {
-                break;
-            }
-            if Instant::now() > deadline {
-                bail!("timed out waiting for KWin to create the virtual outputs");
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let nodes: Vec<u32> = state.streams.iter().map(|s| s.node.unwrap()).collect();
-        info!("virtual outputs created, PipeWire nodes: {nodes:?}");
-        for (i, spec) in specs.iter().enumerate() {
-            if (spec.scale - 1.0).abs() > f64::EPSILON {
-                apply_scale(&format!("Virtual-Quest-{}", i + 1), spec.scale);
-            }
-        }
-
-        // Keep reading events so `closed` notifications arrive and the socket never fills up.
+        // Reads events in the background: replies to new monitors, `closed` notices.
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
             let stop = stop.clone();
@@ -198,60 +232,216 @@ impl VirtualOutputs {
                             revents: 0,
                         };
                         // SAFETY: a single valid pollfd.
-                        let n = unsafe { libc::poll(&mut pfd, 1, 200) };
+                        let n = unsafe { libc::poll(&mut pfd, 1, 100) };
                         if n > 0 && guard.read().is_err() {
                             break;
                         }
                     }
                 })?
         };
-
         Ok(Self {
             conn,
             screencast,
-            streams,
-            nodes,
-            closed,
+            qh,
+            shared,
             stop,
             thread: Some(thread),
         })
     }
+
+    /// Connector name of the first real (non-virtual) display, e.g. the laptop panel.
+    pub fn physical_output(&self) -> Option<String> {
+        let outputs = self.shared.outputs.lock().unwrap();
+        let mut names: Vec<&String> = outputs
+            .values()
+            .filter_map(|(_, name)| name.as_ref())
+            .filter(|n| !n.starts_with("Virtual-"))
+            .collect();
+        names.sort();
+        names.first().map(|n| (*n).clone())
+    }
+
+    /// Streams an existing display (e.g. the laptop panel) without creating anything.
+    pub fn mirror(&self, number: u32, output_name: &str) -> Result<VirtualOutput> {
+        let output = self
+            .shared
+            .outputs
+            .lock()
+            .unwrap()
+            .values()
+            .find(|(_, n)| n.as_deref() == Some(output_name))
+            .map(|(o, _)| o.clone())
+            .with_context(|| format!("display {output_name} is gone"))?;
+        self.shared
+            .streams
+            .lock()
+            .unwrap()
+            .insert(number, StreamState::default());
+        let stream = self
+            .screencast
+            .stream_output(&output, POINTER_EMBEDDED, &self.qh, number);
+        let mirror = self.wait_for_node(number, stream, output_name.to_owned())?;
+        info!("mirroring {output_name}, PipeWire node {}", mirror.node);
+        Ok(mirror)
+    }
+
+    fn wait_for_node(
+        &self,
+        number: u32,
+        stream: ZkdeScreencastStreamUnstableV1,
+        name: String,
+    ) -> Result<VirtualOutput> {
+        self.conn.flush()?;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut streams = self.shared.streams.lock().unwrap();
+        let node = loop {
+            let s = streams.get(&number).expect("stream state");
+            if let Some(error) = &s.failed {
+                let error = error.clone();
+                streams.remove(&number);
+                drop(streams);
+                stream.close();
+                let _ = self.conn.flush();
+                bail!("KWin refused {name}: {error}");
+            }
+            if let Some(node) = s.node {
+                break node;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                streams.remove(&number);
+                drop(streams);
+                stream.close();
+                let _ = self.conn.flush();
+                bail!("timed out waiting for KWin to stream {name}");
+            }
+            streams = self.shared.changed.wait_timeout(streams, left).unwrap().0;
+        };
+        Ok(VirtualOutput {
+            number,
+            node,
+            name,
+            stream,
+            conn: self.conn.clone(),
+            shared: self.shared.clone(),
+        })
+    }
+
+    /// Creates output `Virtual-Quest-<number>` and waits for its PipeWire node.
+    pub fn create(&self, number: u32, spec: &MonitorSpec) -> Result<VirtualOutput> {
+        spec.validate()?;
+        self.shared
+            .streams
+            .lock()
+            .unwrap()
+            .insert(number, StreamState::default());
+        let name = format!("Quest-{number}");
+        // The protocol calls these "logical", but KWin uses them as the output's mode
+        // (pixel size); scale is applied separately through KScreen.
+        let (w, h) = (spec.width as i32, spec.height as i32);
+        let stream = if self.screencast.version() >= 4 {
+            let description = format!("Quest 3 — монітор {number}");
+            self.screencast.stream_virtual_output_with_description(
+                name,
+                description,
+                w,
+                h,
+                1.0,
+                POINTER_EMBEDDED,
+                &self.qh,
+                number,
+            )
+        } else {
+            self.screencast.stream_virtual_output(
+                name,
+                w,
+                h,
+                1.0,
+                POINTER_EMBEDDED,
+                &self.qh,
+                number,
+            )
+        };
+        let output = self.wait_for_node(number, stream, format!("Virtual-Quest-{number}"))?;
+        info!("Quest-{number}: {spec}, PipeWire node {}", output.node);
+        if (spec.scale - 1.0).abs() > f64::EPSILON {
+            kscreen(output.output_name(), &format!("scale.{}", spec.scale));
+        }
+        Ok(output)
+    }
 }
 
-impl Drop for VirtualOutputs {
+impl Drop for Screencast {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
-        for s in &self.streams {
-            s.close();
-        }
         self.screencast.destroy();
         let _ = self.conn.flush();
-        info!("virtual outputs removed");
     }
 }
 
-/// KWin ignores the scale passed to `stream_virtual_output`, so set it through
-/// KScreen like System Settings would.
-fn apply_scale(output: &str, scale: f64) {
-    let arg = format!("output.{output}.scale.{scale}");
-    for _ in 0..5 {
+/// One KWin output; dropping it removes the output.
+pub struct VirtualOutput {
+    pub number: u32,
+    pub node: u32,
+    /// KScreen/connector name: `Virtual-Quest-N`, or e.g. `eDP-1` for a mirror.
+    name: String,
+    stream: ZkdeScreencastStreamUnstableV1,
+    conn: Connection,
+    shared: Arc<Shared>,
+}
+
+impl VirtualOutput {
+    /// Name KScreen and System Settings use for this output.
+    pub fn output_name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn closed(&self) -> bool {
+        self.shared
+            .streams
+            .lock()
+            .unwrap()
+            .get(&self.number)
+            .is_none_or(|s| s.closed)
+    }
+
+    /// Makes this the primary output, so the Plasma panel and new windows go there.
+    pub fn make_primary(&self) {
+        kscreen(self.output_name(), "priority.1");
+    }
+}
+
+impl Drop for VirtualOutput {
+    fn drop(&mut self) {
+        self.stream.close();
+        let _ = self.conn.flush();
+        self.shared.streams.lock().unwrap().remove(&self.number);
+        info!("{} stream closed", self.name);
+    }
+}
+
+/// Applies `output.<name>.<setting>` through kscreen-doctor, retrying while KScreen
+/// has not caught up with a just-created output.
+fn kscreen(output: &str, setting: &str) {
+    let arg = format!("output.{output}.{setting}");
+    for _ in 0..10 {
         match std::process::Command::new("kscreen-doctor")
             .arg(&arg)
             .output()
         {
             Ok(out) if out.status.success() => {
-                info!("{output}: scale {scale}");
+                info!("{output}: {setting}");
                 return;
             }
             Ok(_) => std::thread::sleep(Duration::from_millis(300)),
             Err(e) => {
-                warn!("cannot run kscreen-doctor to set scale {scale} on {output}: {e}");
+                warn!("cannot run kscreen-doctor for {arg}: {e}");
                 return;
             }
         }
     }
-    warn!("kscreen-doctor did not apply scale {scale} to {output}");
+    warn!("kscreen-doctor did not apply {arg}");
 }

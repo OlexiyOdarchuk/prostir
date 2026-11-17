@@ -422,7 +422,9 @@ fn run(app: &AndroidApp) -> Result<()> {
 
         while let Ok(event) = net_rx.try_recv() {
             match event {
-                NetEvent::Connected(addr) => info!("connected to {addr}"),
+                NetEvent::Connected(addr, _) => info!("connected to {addr}"),
+                NetEvent::PrimaryChanged(_) | NetEvent::MirrorWanted(_) => {}
+                NetEvent::HostError(text) => warn!("host: {text}"),
                 NetEvent::Disconnected => info!("disconnected"),
                 NetEvent::StreamStart {
                     id,

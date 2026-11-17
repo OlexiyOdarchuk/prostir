@@ -34,7 +34,12 @@ impl Feedback {
 }
 
 pub enum NetEvent {
-    Connected(SocketAddr),
+    /// Connected; the handle sends requests (add monitor…) to the host.
+    Connected(SocketAddr, Feedback),
+    PrimaryChanged(u8),
+    MirrorWanted(bool),
+    /// A request failed on the host; shown in the menu.
+    HostError(String),
     StreamStart {
         id: u8,
         width: u32,
@@ -191,7 +196,7 @@ fn run_session(stream: TcpStream, events: &Sender<NetEvent>) -> std::io::Result<
     // The host re-sends the last frame every 500 ms, so 10 s of silence means a dead link.
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     if let Ok(peer) = stream.peer_addr() {
-        let _ = events.send(NetEvent::Connected(peer));
+        let _ = events.send(NetEvent::Connected(peer, feedback.clone()));
     }
 
     let mut streams: HashMap<u8, StreamSlot> = HashMap::new();
@@ -260,6 +265,15 @@ fn run_session(stream: TcpStream, events: &Sender<NetEvent>) -> std::io::Result<
                 if streams.remove(&id).is_some() {
                     let _ = events.send(NetEvent::StreamEnd { id });
                 }
+            }
+            HostMsg::PrimaryChanged { id } => {
+                let _ = events.send(NetEvent::PrimaryChanged(id));
+            }
+            HostMsg::MirrorWanted { enabled } => {
+                let _ = events.send(NetEvent::MirrorWanted(enabled));
+            }
+            HostMsg::Error { text } => {
+                let _ = events.send(NetEvent::HostError(text));
             }
             HostMsg::Welcome { .. } => {}
         }

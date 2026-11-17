@@ -80,6 +80,9 @@ fn main() -> Result<()> {
                 s.file.write_all(&data)?;
             }
             HostMsg::StreamEnd { id } => println!("stream {id} ended"),
+            HostMsg::PrimaryChanged { id } => println!("primary monitor: {id}"),
+            HostMsg::Error { text } => println!("host error: {text}"),
+            HostMsg::MirrorWanted { enabled } => println!("mirror wanted: {enabled}"),
             HostMsg::Welcome { .. } => {}
         }
     }

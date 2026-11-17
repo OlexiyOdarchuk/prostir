@@ -8,7 +8,9 @@ use std::io::{self, Read, Write};
 
 pub const TCP_PORT: u16 = 47830;
 pub const DISCOVERY_PORT: u16 = 47831;
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
+/// Stream id of the mirrored physical display (laptop panel); Quest monitors use 0..
+pub const MIRROR_ID: u8 = 100;
 /// Prefix of the UDP discovery beacon: `MAGIC ++ tcp_port (u16 LE) ++ hostname (utf-8)`.
 pub const BEACON_MAGIC: &[u8; 8] = b"QMONHOST";
 
@@ -60,6 +62,18 @@ pub enum HostMsg {
     StreamEnd {
         id: u8,
     },
+    /// This monitor is KDE's primary one (the Plasma panel lives there).
+    PrimaryChanged {
+        id: u8,
+    },
+    /// Something the user asked for failed; shown in the headset menu.
+    /// Whether the physical display should be mirrored into the headset.
+    MirrorWanted {
+        enabled: bool,
+    },
+    Error {
+        text: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -75,6 +89,22 @@ pub enum ClientMsg {
         id: u8,
         pts_us: u64,
     },
+    /// Create another virtual monitor of this size in pixels.
+    AddMonitor {
+        width: u32,
+        height: u32,
+    },
+    RemoveMonitor {
+        id: u8,
+    },
+    /// Make this monitor KDE's primary one.
+    /// Show or hide the mirror of the physical display.
+    SetMirror {
+        enabled: bool,
+    },
+    SetPrimary {
+        id: u8,
+    },
 }
 
 mod tag {
@@ -82,9 +112,16 @@ mod tag {
     pub const STREAM_START: u8 = 2;
     pub const FRAME: u8 = 3;
     pub const STREAM_END: u8 = 4;
+    pub const PRIMARY_CHANGED: u8 = 5;
+    pub const ERROR: u8 = 6;
+    pub const MIRROR_WANTED: u8 = 7;
     pub const HELLO: u8 = 101;
     pub const REQUEST_KEYFRAME: u8 = 102;
     pub const FRAME_SHOWN: u8 = 103;
+    pub const ADD_MONITOR: u8 = 104;
+    pub const REMOVE_MONITOR: u8 = 105;
+    pub const SET_PRIMARY: u8 = 106;
+    pub const SET_MIRROR: u8 = 107;
 }
 
 fn invalid(msg: &str) -> io::Error {
@@ -172,6 +209,11 @@ impl HostMsg {
                 &[&[*id, *keyframe as u8], &pts_us.to_le_bytes(), data],
             ),
             HostMsg::StreamEnd { id } => write_frame(w, tag::STREAM_END, &[&[*id]]),
+            HostMsg::PrimaryChanged { id } => write_frame(w, tag::PRIMARY_CHANGED, &[&[*id]]),
+            HostMsg::Error { text } => write_frame(w, tag::ERROR, &[text.as_bytes()]),
+            HostMsg::MirrorWanted { enabled } => {
+                write_frame(w, tag::MIRROR_WANTED, &[&[*enabled as u8]])
+            }
         }
     }
 
@@ -207,6 +249,13 @@ impl HostMsg {
                 }
             }
             tag::STREAM_END => HostMsg::StreamEnd { id: c.u8()? },
+            tag::PRIMARY_CHANGED => HostMsg::PrimaryChanged { id: c.u8()? },
+            tag::MIRROR_WANTED => HostMsg::MirrorWanted {
+                enabled: c.u8()? != 0,
+            },
+            tag::ERROR => HostMsg::Error {
+                text: String::from_utf8_lossy(c.rest()).into_owned(),
+            },
             _ => return Err(invalid("unknown host message")),
         })
     }
@@ -220,6 +269,16 @@ impl ClientMsg {
             ClientMsg::FrameShown { id, pts_us } => {
                 write_frame(w, tag::FRAME_SHOWN, &[&[*id], &pts_us.to_le_bytes()])
             }
+            ClientMsg::AddMonitor { width, height } => write_frame(
+                w,
+                tag::ADD_MONITOR,
+                &[&width.to_le_bytes(), &height.to_le_bytes()],
+            ),
+            ClientMsg::RemoveMonitor { id } => write_frame(w, tag::REMOVE_MONITOR, &[&[*id]]),
+            ClientMsg::SetPrimary { id } => write_frame(w, tag::SET_PRIMARY, &[&[*id]]),
+            ClientMsg::SetMirror { enabled } => {
+                write_frame(w, tag::SET_MIRROR, &[&[*enabled as u8]])
+            }
         }
     }
 
@@ -232,6 +291,15 @@ impl ClientMsg {
             tag::FRAME_SHOWN => ClientMsg::FrameShown {
                 id: c.u8()?,
                 pts_us: c.u64()?,
+            },
+            tag::ADD_MONITOR => ClientMsg::AddMonitor {
+                width: c.u32()?,
+                height: c.u32()?,
+            },
+            tag::REMOVE_MONITOR => ClientMsg::RemoveMonitor { id: c.u8()? },
+            tag::SET_PRIMARY => ClientMsg::SetPrimary { id: c.u8()? },
+            tag::SET_MIRROR => ClientMsg::SetMirror {
+                enabled: c.u8()? != 0,
             },
             _ => return Err(invalid("unknown client message")),
         })
@@ -275,6 +343,11 @@ mod tests {
                 data: vec![0, 0, 0, 1, 0x40],
             },
             HostMsg::StreamEnd { id: 2 },
+            HostMsg::PrimaryChanged { id: 1 },
+            HostMsg::MirrorWanted { enabled: true },
+            HostMsg::Error {
+                text: "Не вдалося".into(),
+            },
         ];
         let mut buf = Vec::new();
         for m in &msgs {
@@ -301,6 +374,20 @@ mod tests {
         };
         shown.write(&mut buf).unwrap();
         assert_eq!(ClientMsg::read(&mut buf.as_slice()).unwrap(), shown);
+
+        for m in [
+            ClientMsg::AddMonitor {
+                width: 3440,
+                height: 1440,
+            },
+            ClientMsg::RemoveMonitor { id: 2 },
+            ClientMsg::SetPrimary { id: 1 },
+            ClientMsg::SetMirror { enabled: true },
+        ] {
+            let mut buf = Vec::new();
+            m.write(&mut buf).unwrap();
+            assert_eq!(ClientMsg::read(&mut buf.as_slice()).unwrap(), m);
+        }
 
         let b = encode_beacon(47830, "desk");
         assert_eq!(decode_beacon(&b), Some((47830, "desk".into())));
