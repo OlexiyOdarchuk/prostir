@@ -16,6 +16,15 @@ pub const AUDIO_RATE: u32 = 48_000;
 pub const AUDIO_CHANNELS: u32 = 2;
 /// Headset microphone sent to the PC: interleaved signed 16-bit little-endian mono.
 pub const MIC_CHANNELS: u32 = 1;
+/// One row of monitors in [`ClientMsg::SetLayout`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayoutRow {
+    /// Left edge of the row in desktop pixels.
+    pub offset: i32,
+    /// Monitor ids, left to right.
+    pub ids: Vec<u8>,
+}
+
 /// [`HostMsg::Focus`] when the mouse is on none of the streamed displays.
 pub const NO_FOCUS: u8 = 255;
 /// Stream id of the mirrored physical display (laptop panel); Quest monitors use 0..
@@ -174,6 +183,12 @@ pub enum ClientMsg {
         /// Index into `sizes`.
         primary: u8,
     },
+    /// How the monitors stand around the user, for KDE's arrangement: rows from top to
+    /// bottom, each left to right, with the left edge of the row in desktop pixels
+    /// (relative; only differences between rows matter).
+    SetLayout {
+        rows: Vec<LayoutRow>,
+    },
     /// Whether the headset is being worn; streaming pauses while it is not.
     Presence {
         worn: bool,
@@ -227,6 +242,7 @@ mod tag {
     pub const MIC: u8 = 114;
     pub const PRESENCE: u8 = 115;
     pub const SET_MONITORS: u8 = 116;
+    pub const SET_LAYOUT: u8 = 117;
 }
 
 fn invalid(msg: &str) -> io::Error {
@@ -426,6 +442,15 @@ impl ClientMsg {
             ClientMsg::RemoveMonitor { id } => write_frame(w, tag::REMOVE_MONITOR, &[&[*id]]),
             ClientMsg::SetPrimary { id } => write_frame(w, tag::SET_PRIMARY, &[&[*id]]),
             ClientMsg::SetOrder { ids } => write_frame(w, tag::SET_ORDER, &[ids]),
+            ClientMsg::SetLayout { rows } => {
+                let mut body = Vec::new();
+                for row in rows {
+                    body.extend_from_slice(&row.offset.to_le_bytes());
+                    body.push(row.ids.len() as u8);
+                    body.extend_from_slice(&row.ids);
+                }
+                write_frame(w, tag::SET_LAYOUT, &[&body])
+            }
             ClientMsg::SetMonitors { sizes, primary } => {
                 let mut body = vec![*primary];
                 for (width, height) in sizes {
@@ -490,6 +515,18 @@ impl ClientMsg {
             tag::PAIR_CONFIRM => ClientMsg::PairConfirm {
                 tag: c.rest().to_vec(),
             },
+            tag::SET_LAYOUT => {
+                let mut rows = Vec::new();
+                while let Ok(offset) = c.u32() {
+                    let n = c.u8()?;
+                    let ids = (0..n).map(|_| c.u8()).collect::<io::Result<Vec<u8>>>()?;
+                    rows.push(LayoutRow {
+                        offset: offset as i32,
+                        ids,
+                    });
+                }
+                ClientMsg::SetLayout { rows }
+            }
             tag::SET_MONITORS => {
                 let primary = c.u8()?;
                 let mut sizes = Vec::new();
@@ -607,6 +644,18 @@ mod tests {
             ClientMsg::SetMonitors {
                 sizes: vec![(2560, 1440), (1440, 2560)],
                 primary: 1,
+            },
+            ClientMsg::SetLayout {
+                rows: vec![
+                    LayoutRow {
+                        offset: 1280,
+                        ids: vec![3],
+                    },
+                    LayoutRow {
+                        offset: -40,
+                        ids: vec![0, 1, 2],
+                    },
+                ],
             },
             ClientMsg::PairBegin {
                 headset_shows: true,

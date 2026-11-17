@@ -302,6 +302,10 @@ fn serve_client(
                 Ok(()) => displays.save(),
                 Err(e) => report(displays, format!("{e:#}")),
             },
+            Ok(Ok(ClientMsg::SetLayout { rows })) => {
+                displays.set_layout(rows);
+                displays.save();
+            }
             Ok(Ok(ClientMsg::SetMonitors { sizes, primary })) => {
                 match displays.set_monitors(&sizes, primary as usize) {
                     Ok(()) => info!("headset switched to {} monitor(s)", sizes.len()),
@@ -472,6 +476,7 @@ fn create_displays(args: &Args, bitrate: u32, sharp: bool) -> Result<Displays> {
             mic: true,
             bitrate: None,
             sharp,
+            rows: Vec::new(),
         },
         _ => SavedMonitors {
             specs: vec![parse_monitor("2560x1440").expect("valid default")],
@@ -481,6 +486,7 @@ fn create_displays(args: &Args, bitrate: u32, sharp: bool) -> Result<Displays> {
             mic: true,
             bitrate: None,
             sharp,
+            rows: Vec::new(),
         },
     };
     let displays = Displays::create(&saved, cfg, !args.keep_primary)?;

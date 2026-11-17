@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use glam::{Quat, Vec2, Vec3};
+use prostir_proto::LayoutRow;
 
 use crate::settings::Preset;
 
@@ -78,6 +79,74 @@ pub fn order_by_direction(placements: &HashMap<u8, Placement>, ids: &[u8]) -> Ve
         .collect();
     v.sort_by(|a, b| a.0.total_cmp(&b.0));
     v.into_iter().map(|(_, id)| id).collect()
+}
+
+/// Rows of monitors as the user sees them, for KDE's arrangement: monitors whose
+/// centres are at about the same height form a row; rows go top to bottom, monitors
+/// left to right. Each row's left edge is given in desktop pixels, worked out from the
+/// angles the monitors take up, so a monitor above the left one ends up above it in
+/// KDE too. `center` is where the layout faces from (position, yaw).
+pub fn rows_by_position(
+    placements: &HashMap<u8, Placement>,
+    monitors: &[(u8, u32, u32)],
+    center: (Vec3, f32),
+) -> Vec<LayoutRow> {
+    struct Seen {
+        id: u8,
+        yaw: f32,
+        elevation: f32,
+        half_width: f32,
+        half_height: f32,
+        width_px: u32,
+    }
+    let unturn = Quat::from_rotation_y(-center.1);
+    let mut seen: Vec<Seen> = monitors
+        .iter()
+        .filter_map(|&(id, w, h)| {
+            let p = placements.get(&id)?;
+            let local = unturn * (p.position - center.0);
+            let flat = Vec2::new(local.x, local.z).length().max(0.1);
+            let height = p.width * h as f32 / w.max(1) as f32;
+            Some(Seen {
+                id,
+                yaw: local.x.atan2(-local.z),
+                elevation: local.y.atan2(flat),
+                half_width: (p.width / 2.0 / flat).atan(),
+                half_height: (height / 2.0 / flat).atan(),
+                width_px: w,
+            })
+        })
+        .collect();
+    if seen.is_empty() {
+        return Vec::new();
+    }
+    // Pixels per radian, from the monitors themselves.
+    let px_per_rad = seen
+        .iter()
+        .map(|m| m.width_px as f32 / (2.0 * m.half_width).max(1e-3))
+        .sum::<f32>()
+        / seen.len() as f32;
+    seen.sort_by(|a, b| b.elevation.total_cmp(&a.elevation));
+    let mut rows: Vec<Vec<Seen>> = Vec::new();
+    for m in seen {
+        let same_row = rows.iter_mut().find(|r| {
+            let first = &r[0];
+            (first.elevation - m.elevation).abs() < 0.75 * first.half_height.max(m.half_height)
+        });
+        match same_row {
+            Some(r) => r.push(m),
+            None => rows.push(vec![m]),
+        }
+    }
+    rows.into_iter()
+        .map(|mut r| {
+            r.sort_by(|a, b| a.yaw.total_cmp(&b.yaw));
+            LayoutRow {
+                offset: ((r[0].yaw - r[0].half_width) * px_per_rad).round() as i32,
+                ids: r.iter().map(|m| m.id).collect(),
+            }
+        })
+        .collect()
 }
 
 /// The monitor shown in cinema mode: the one at position `pick` in the row, else the
@@ -695,5 +764,47 @@ mod tests {
         let h_above = 1440.0 * METRES_PER_PIXEL;
         let h = 1800.0 * METRES_PER_PIXEL * (MIRROR_MAX_WIDTH / (2880.0 * METRES_PER_PIXEL));
         assert!(((above.position.y - h_above / 2.0) - (mirror.position.y + h / 2.0)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn rows_follow_what_the_user_sees() {
+        let center = (Vec3::ZERO, 0.0);
+        // An arc: one row, left to right.
+        let three = [(0, 2560, 1440), (1, 1440, 2560), (2, 2560, 1440)];
+        let arc = arrange(Preset::Arc, &three, Some(1), None);
+        let rows = rows_by_position(&arc, &three, center);
+        assert_eq!(
+            rows.len(),
+            1,
+            "a portrait monitor in the arc is in the same row"
+        );
+        assert_eq!(rows[0].ids, vec![0, 1, 2]);
+
+        // Lift the right monitor above the middle one: two rows, it is on top.
+        let mut lifted = arc.clone();
+        let mid = arc[&1];
+        let mut top = arc[&2];
+        top.position = Vec3::new(mid.position.x, mid.position.y + 1.0, mid.position.z);
+        top.rotation = facing(top.position, Vec3::ZERO);
+        lifted.insert(2, top);
+        let rows = rows_by_position(&lifted, &three, center);
+        assert_eq!(
+            rows.iter().map(|r| r.ids.clone()).collect::<Vec<_>>(),
+            vec![vec![2], vec![0, 1]]
+        );
+        // It sits over the middle monitor: its left edge is right of the bottom row's.
+        assert!(rows[0].offset > rows[1].offset + 1500, "{rows:?}");
+
+        // A grid of four: two rows of two.
+        let four = [
+            (0, 2560, 1440),
+            (1, 2560, 1440),
+            (2, 2560, 1440),
+            (3, 2560, 1440),
+        ];
+        let grid = arrange(Preset::Grid, &four, None, None);
+        let rows = rows_by_position(&grid, &four, center);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.ids.len() == 2));
     }
 }

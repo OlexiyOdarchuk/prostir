@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use log::{debug, error, info, warn};
-use prostir_proto::{Codec, HostMsg, MIRROR_ID};
+use prostir_proto::{Codec, HostMsg, LayoutRow, MIRROR_ID};
 
 use crate::audio::{AudioOut, MicIn};
 use crate::encoder::{Encoder, EncoderConfig, EncoderEvent};
@@ -274,6 +274,9 @@ pub struct SavedMonitors {
     pub bitrate: Option<u32>,
     /// Clearer-text encoder preset.
     pub sharp: bool,
+    /// Rows from top to bottom: (left edge in pixels, number of monitors), covering
+    /// `specs` in order. Empty: one row.
+    pub rows: Vec<(i32, usize)>,
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -298,7 +301,12 @@ pub fn load_saved(parse: impl Fn(&str) -> Result<MonitorSpec, String>) -> Option
     let mut mic = true;
     let mut bitrate = None;
     let mut sharp = false;
+    let mut rows: Vec<(i32, usize)> = Vec::new();
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if let Some(v) = line.strip_prefix("row ") {
+            rows.push((v.trim().parse().unwrap_or(0), 0));
+            continue;
+        }
         if let Some(v) = line.strip_prefix("sharp ") {
             sharp = v.trim() == "on";
             continue;
@@ -327,6 +335,9 @@ pub fn load_saved(parse: impl Fn(&str) -> Result<MonitorSpec, String>) -> Option
             if star {
                 primary = Some(specs.len());
             }
+            if let Some(r) = rows.last_mut() {
+                r.1 += 1;
+            }
             specs.push(spec);
         }
     }
@@ -338,6 +349,7 @@ pub fn load_saved(parse: impl Fn(&str) -> Result<MonitorSpec, String>) -> Option
         mic,
         bitrate,
         sharp,
+        rows,
     })
 }
 
@@ -346,6 +358,8 @@ pub struct Displays {
     monitors: BTreeMap<u8, Monitor>,
     /// Left-to-right order of the monitors, in the headset and in KDE.
     order: Vec<u8>,
+    /// How the headset arranges the monitors in rows (see `effective_rows`).
+    rows: Vec<LayoutRow>,
     mirror: Option<Mirror>,
     mirror_wanted: bool,
     mirror_retry: Instant,
@@ -379,6 +393,7 @@ impl Displays {
         let mut displays = Self {
             monitors: BTreeMap::new(),
             order: Vec::new(),
+            rows: Vec::new(),
             mirror: None,
             mirror_wanted: saved.mirror,
             audio: None,
@@ -402,6 +417,18 @@ impl Displays {
             displays.add(spec.clone())?;
         }
         let ids = displays.order.clone();
+        // Rebuild the saved rows over the new ids (same order as the saved specs).
+        let mut rest = ids.as_slice();
+        for &(offset, len) in &saved.rows {
+            let (row, tail) = rest.split_at(len.min(rest.len()));
+            rest = tail;
+            if !row.is_empty() {
+                displays.rows.push(LayoutRow {
+                    offset,
+                    ids: row.to_vec(),
+                });
+            }
+        }
         if let Some(&id) = saved.primary.and_then(|i| ids.get(i)) {
             displays.set_primary(id);
         } else {
@@ -757,6 +784,8 @@ impl Displays {
     /// by side in `order`, vertically centred, and the mirrored display under the
     /// primary monitor. The mouse then crosses screens where the eyes expect it to.
     fn apply_kde_layout(&self) {
+        /// A monitor in a row: id, KDE output name, (width, height) in pixels.
+        type Member = (u8, String, (i32, i32));
         let geometries = virtual_output::output_geometries();
         let size = |name: &str, spec: Option<&MonitorSpec>| {
             geometries.get(name).map(|g| (g.w, g.h)).or_else(|| {
@@ -768,17 +797,38 @@ impl Displays {
                 })
             })
         };
-        let row: Vec<(u8, String, (i32, i32))> = self
-            .order
-            .iter()
-            .filter_map(|id| {
-                let m = self.monitors.get(id)?;
-                let name = m.output.output_name().to_owned();
-                let wh = size(&name, Some(&m.spec))?;
-                Some((*id, name, wh))
+        // Rows stacked top to bottom with no gap, so the mouse crosses up and down where
+        // they meet; within a row monitors touch and share a vertical centre.
+        let rows: Vec<(i32, Vec<Member>)> = self
+            .effective_rows()
+            .into_iter()
+            .map(|r| {
+                let members = r
+                    .ids
+                    .iter()
+                    .filter_map(|id| {
+                        let m = self.monitors.get(id)?;
+                        let name = m.output.output_name().to_owned();
+                        let wh = size(&name, Some(&m.spec))?;
+                        Some((*id, name, wh))
+                    })
+                    .collect();
+                (r.offset, members)
             })
             .collect();
-        let tallest = row.iter().map(|r| r.2.1).max().unwrap_or(0);
+        let mut planned: Vec<(u8, String, i32, i32, i32, i32)> = Vec::new();
+        let mut top = 0;
+        for (offset, members) in &rows {
+            let tallest = members.iter().map(|m| m.2.1).max().unwrap_or(0);
+            let mut x = *offset;
+            for (id, name, (w, h)) in members {
+                planned.push((*id, name.clone(), x, top + (tallest - h) / 2, *w, *h));
+                x += w;
+            }
+            top += tallest;
+        }
+        // KDE wants the desktop to start at 0,0.
+        let left = planned.iter().map(|p| p.2).min().unwrap_or(0);
         let mut settings = Vec::new();
         // Every applied change makes KWin reconfigure its outputs, which also cuts the
         // laptop mirror's stream: only send what actually differs.
@@ -788,19 +838,17 @@ impl Displays {
             }
         };
         let mut placed = HashMap::new();
-        let mut x = 0;
-        for (id, name, (w, h)) in &row {
-            let y = (tallest - h) / 2;
-            position(name, x, y);
-            placed.insert(*id, (x, y, *w, *h));
-            x += w;
+        for (id, name, x, y, w, _) in &planned {
+            position(name, x - left, *y);
+            placed.insert(*id, (x - left, *w));
         }
-        if let (Some(mirror), Some(&(px, py, pw, ph))) =
+        // The laptop screen under the primary monitor, below every row.
+        if let (Some(mirror), Some(&(px, pw))) =
             (&self.mirror, self.primary.and_then(|p| placed.get(&p)))
         {
             let name = mirror.output.output_name();
             if let Some((w, _)) = size(name, None) {
-                position(name, px + (pw - w) / 2, py + ph);
+                position(name, (px + (pw - w) / 2).max(0), top);
             }
         }
         if self.manage_primary
@@ -868,6 +916,53 @@ impl Displays {
         Ok(())
     }
 
+    /// The headset's rows, kept in step with the monitors: gone ones dropped, new ones
+    /// (not placed by the headset yet) at the end of the bottom row.
+    fn effective_rows(&self) -> Vec<LayoutRow> {
+        let mut rows: Vec<LayoutRow> = self
+            .rows
+            .iter()
+            .map(|r| LayoutRow {
+                offset: r.offset,
+                ids: r
+                    .ids
+                    .iter()
+                    .copied()
+                    .filter(|id| self.monitors.contains_key(id))
+                    .collect(),
+            })
+            .filter(|r| !r.ids.is_empty())
+            .collect();
+        let placed: Vec<u8> = rows.iter().flat_map(|r| r.ids.clone()).collect();
+        let missing: Vec<u8> = self
+            .order
+            .iter()
+            .copied()
+            .filter(|id| !placed.contains(id) && self.monitors.contains_key(id))
+            .collect();
+        if !missing.is_empty() {
+            match rows.last_mut() {
+                Some(last) => last.ids.extend(missing),
+                None => rows.push(LayoutRow {
+                    offset: 0,
+                    ids: missing,
+                }),
+            }
+        }
+        rows
+    }
+
+    /// Arranges KDE's outputs in the rows the headset shows them in.
+    pub fn set_layout(&mut self, rows: Vec<LayoutRow>) {
+        self.rows = rows;
+        let rows = self.effective_rows();
+        self.order = rows.iter().flat_map(|r| r.ids.clone()).collect();
+        self.apply_kde_layout();
+        self.router.send(HostMsg::Order {
+            ids: self.order.clone(),
+        });
+    }
+
     pub fn set_order(&mut self, ids: &[u8]) -> Result<()> {
         let mut sorted = ids.to_vec();
         sorted.sort_unstable();
@@ -883,6 +978,11 @@ impl Displays {
             );
         }
         self.order = ids.to_vec();
+        // One row, in this order.
+        self.rows = vec![LayoutRow {
+            offset: 0,
+            ids: ids.to_vec(),
+        }];
         self.apply_kde_layout();
         self.router.send(HostMsg::Order {
             ids: self.order.clone(),
@@ -940,12 +1040,18 @@ impl Displays {
     pub fn save(&self) {
         let Some(path) = config_path() else { return };
         let text: String = self
-            .order
+            .effective_rows()
             .iter()
-            .filter_map(|id| Some((id, self.monitors.get(id)?)))
-            .map(|(id, m)| {
-                let star = if self.primary == Some(*id) { " *" } else { "" };
-                format!("{}{star}\n", m.spec)
+            .flat_map(|row| {
+                std::iter::once(format!("row {}\n", row.offset)).chain(
+                    row.ids
+                        .iter()
+                        .filter_map(|id| Some((id, self.monitors.get(id)?)))
+                        .map(|(id, m)| {
+                            let star = if self.primary == Some(*id) { " *" } else { "" };
+                            format!("{}{star}\n", m.spec)
+                        }),
+                )
             })
             .chain(std::iter::once(format!(
                 "mirror {}\naudio {}\nmic {}\nbitrate {}\nsharp {}\n",

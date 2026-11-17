@@ -192,6 +192,10 @@ struct Scene {
     tab: Tab,
     /// Where layouts are centred and which way they face (head position, yaw).
     center: (Vec3, f32),
+    /// The arrangement last sent to the PC.
+    sent_layout: Option<Vec<prostir_proto::LayoutRow>>,
+    /// A changed arrangement waiting to settle before it is sent.
+    pending_layout: Option<(Vec<prostir_proto::LayoutRow>, Instant)>,
     /// Head position and gaze this frame.
     head: (Vec3, Vec3),
     /// Tracked hands are in view this frame (the menu then opens within reach).
@@ -238,12 +242,52 @@ impl Scene {
     }
 
     /// Sends a new left-to-right order to the host (which re-arranges KDE to match).
-    fn reorder(&mut self, ids: Vec<u8>) {
-        if ids == self.quest_sizes().iter().map(|m| m.0).collect::<Vec<_>>() {
+    /// Tells the PC how the monitors stand around the user (rows, left to right), so
+    /// KDE's arrangement matches: the mouse leaves a monitor where the next one is,
+    /// sideways, up or down. Only sent when it changed.
+    fn send_layout(&mut self) {
+        if self.settings.cinema || self.feedback.is_none() {
             return;
         }
-        self.order = ids.clone();
-        self.send(ClientMsg::SetOrder { ids });
+        // Wait until every monitor the PC has is here and placed: a partial picture
+        // would make KDE rearrange (and blink) once per arriving monitor.
+        let complete = !self.order.is_empty()
+            && self
+                .order
+                .iter()
+                .all(|id| self.monitors.contains_key(id) && self.placements.contains_key(id));
+        if !complete {
+            return;
+        }
+        let rows = layout::rows_by_position(&self.placements, &self.quest_sizes(), self.center);
+        if rows.is_empty() || self.sent_layout.as_ref() == Some(&rows) {
+            self.pending_layout = None;
+            return;
+        }
+        // Only an arrangement that has held for a moment: monitors arriving one by one
+        // or being laid out again pass through states KDE should not be shown.
+        match &self.pending_layout {
+            Some((pending, since)) if *pending == rows => {
+                if since.elapsed() < Duration::from_millis(800) {
+                    return;
+                }
+            }
+            _ => {
+                self.pending_layout = Some((rows, Instant::now()));
+                return;
+            }
+        }
+        self.pending_layout = None;
+        info!(
+            "KDE arrangement: {}",
+            rows.iter()
+                .map(|r| format!("{:?}@{}", r.ids, r.offset))
+                .collect::<Vec<_>>()
+                .join(" / ")
+        );
+        self.order = rows.iter().flat_map(|r| r.ids.clone()).collect();
+        self.sent_layout = Some(rows.clone());
+        self.send(ClientMsg::SetLayout { rows });
     }
 
     fn mirror_size(&self) -> Option<(u8, u32, u32)> {
@@ -352,6 +396,7 @@ impl Scene {
         }
         self.grabs = [None, None];
         layout::save(&self.layout_path, &self.placements);
+        self.send_layout();
     }
 
     fn curve_radius(&self) -> Option<f32> {
@@ -760,6 +805,8 @@ fn run(app: &AndroidApp) -> Result<()> {
         confirm_remove: None,
         tab: Tab::Monitors,
         center: (Vec3::ZERO, 0.0),
+        sent_layout: None,
+        pending_layout: None,
         head: (Vec3::ZERO, -Vec3::Z),
         hands_in_view: false,
         keyboard_place: layout::load(&data_dir.join("keyboard.txt")).remove(&0),
@@ -1130,11 +1177,9 @@ fn run(app: &AndroidApp) -> Result<()> {
                     }
                 } else if !scene.settings.cinema {
                     layout::save(&scene.layout_path, &scene.placements);
-                    // Dropped somewhere else in the row: KDE's order follows what the eyes see.
+                    // Dropped somewhere else: KDE's arrangement follows what the eyes see.
                     if released.id != PANEL_ID && released.id != MIRROR_ID {
-                        let ids: Vec<u8> = scene.quest_sizes().iter().map(|m| m.0).collect();
-                        let by_direction = layout::order_by_direction(&scene.placements, &ids);
-                        scene.reorder(by_direction);
+                        scene.send_layout();
                     }
                 }
             }
@@ -1337,6 +1382,10 @@ fn run(app: &AndroidApp) -> Result<()> {
         // Far monitors first so nearer (and grabbed) ones draw on top.
         let grabbed: Vec<u8> = scene.grabs.iter().flatten().map(|g| g.id).collect();
         scene.animate(dt, &grabbed);
+        // Keep KDE's arrangement in step once nothing is being moved.
+        if grabbed.is_empty() && scene.scaling.is_none() && !scene.relayout_pending() {
+            scene.send_layout();
+        }
         let mut order: Vec<(f32, u8)> = scene
             .monitors
             .keys()
@@ -1538,6 +1587,7 @@ fn handle_net_event(
                 }
             }));
             scene.feedback = Some(feedback);
+            scene.sent_layout = None;
             if !scene.worn {
                 scene.tell_presence();
             }
@@ -1754,7 +1804,7 @@ fn handle_action(
             if let Some(i) = ids.iter().position(|x| *x == id) {
                 let j = (i as i32 + delta).clamp(0, ids.len() as i32 - 1) as usize;
                 ids.swap(i, j);
-                scene.reorder(ids);
+                scene.order = ids;
                 scene.arrange_all();
             }
         }
