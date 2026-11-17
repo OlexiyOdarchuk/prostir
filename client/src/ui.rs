@@ -369,6 +369,12 @@ impl Panel {
             build_intro(l, &mut items, lx, w - 2.0 * lx);
             return items;
         }
+        // No PC yet: how to get one, and the PCs found so far.
+        if s.host.is_none() {
+            build_welcome(l, &mut items, lx, lw, 150.0);
+            self.build_connection(s, &mut items, rx, rw, 150.0);
+            return items;
+        }
 
         // Tabs.
         let tabs = [
@@ -587,29 +593,7 @@ impl Panel {
         mut y: f32,
     ) -> f32 {
         let l = s.lang;
-        items.push(text(
-            lx,
-            y,
-            21.0,
-            false,
-            MUTED,
-            l.t("Підключення до ПК", "Connect to a PC"),
-        ));
-        y += 40.0;
-        for line in [
-            l.t(
-                "Запустіть Prostir на ноутбуці в тій самій мережі Wi‑Fi",
-                "Start Prostir on the PC on the same Wi‑Fi network",
-            ),
-            l.t(
-                "або підключіть шолом кабелем.",
-                "or connect the headset with a cable.",
-            ),
-        ] {
-            items.push(text(lx, y, 19.0, false, TEXT, line));
-            y += 28.0;
-        }
-        y += 12.0;
+        y += 18.0;
         if let Some(typed) = &s.ip_input {
             let shown = if typed.is_empty() {
                 "192.168.1.10"
@@ -1369,6 +1353,92 @@ fn build_look(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, rx: f32, rw:
     ] {
         items.push(text(rx, y, 19.0, false, MUTED, line));
         y += 28.0;
+    }
+}
+
+/// Before any PC is found: what Prostir needs and where to get the PC part.
+fn build_welcome(l: Lang, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
+    items.push(text(
+        x,
+        y + 6.0,
+        26.0,
+        true,
+        TEXT,
+        l.t(
+            "Prostir показує монітори вашого ПК",
+            "Prostir shows your PC's monitors",
+        ),
+    ));
+    y += 36.0;
+    items.push(text(
+        x,
+        y,
+        19.0,
+        false,
+        MUTED,
+        l.t(
+            "Потрібен ПК з KDE Plasma 6 і програма Prostir на ньому.",
+            "It needs a PC with KDE Plasma 6 and Prostir running on it.",
+        ),
+    ));
+    y += 30.0;
+    let steps: [(&str, &str, &str, &str, bool); 3] = [
+        (
+            "Встановіть Prostir на ПК",
+            "Install Prostir on the PC",
+            "prostir.ishawyha.dev",
+            "prostir.ishawyha.dev",
+            true,
+        ),
+        (
+            "Запустіть його",
+            "Start it",
+            "У треї з'явиться іконка Prostir.",
+            "The Prostir icon appears in the tray.",
+            false,
+        ),
+        (
+            "Шолом знайде ПК сам",
+            "The headset finds the PC",
+            "У тій самій мережі Wi‑Fi або через кабель USB.",
+            "On the same Wi‑Fi network, or over a USB cable.",
+            false,
+        ),
+    ];
+    for (n, (uk_title, en_title, uk, en, link)) in steps.into_iter().enumerate() {
+        y += 16.0;
+        let h = if link { 116.0 } else { 96.0 };
+        items.push(Item::Box(rect(x, y, w, h), [255, 255, 255, 12]));
+        items.push(text(
+            x + 22.0,
+            y + 40.0,
+            28.0,
+            true,
+            ACCENT,
+            &format!("{}", n + 1),
+        ));
+        items.push(text(
+            x + 64.0,
+            y + 38.0,
+            23.0,
+            true,
+            TEXT,
+            l.t(uk_title, en_title),
+        ));
+        let (size, color, medium) = if link {
+            (30.0, ACCENT, true)
+        } else {
+            (19.0, MUTED, false)
+        };
+        items.push(text(
+            x + 64.0,
+            y + if link { 88.0 } else { 72.0 },
+            size,
+            medium,
+            color,
+            l.t(uk, en),
+        ));
+        y += h;
     }
 }
 
