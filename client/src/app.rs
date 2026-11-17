@@ -1542,6 +1542,7 @@ fn handle_net_event(
             scene.feedback = None;
         }
         NetEvent::PrimaryChanged(id) => {
+            info!("primary monitor: Prostir-{}", id + 1);
             scene.primary = Some(id);
             if scene.relayout_pending() {
                 scene.arrange_all();

@@ -362,6 +362,8 @@ pub struct Displays {
     taken_off_at: Option<Instant>,
     /// Last time the laptop panel was switched back on (to avoid fighting the user).
     woke_display_at: Option<Instant>,
+    /// When KDE's primary output was last compared with ours.
+    primary_checked: Instant,
     screencast: Screencast,
     pub router: Arc<Router>,
     cfg: EncoderConfig,
@@ -386,6 +388,7 @@ impl Displays {
             taken_off_at: None,
             mirror_retry: Instant::now(),
             woke_display_at: None,
+            primary_checked: Instant::now(),
             screencast: Screencast::connect()?,
             router: Arc::new(Router::new(cfg.codec)),
             cfg,
@@ -448,6 +451,7 @@ impl Displays {
     /// laptop lid closes and comes back when it opens.
     pub fn tick(&mut self) {
         self.sync_audio();
+        self.check_primary();
         let broken = self.router.mirror_failed.swap(false, Ordering::Relaxed);
         if self
             .mirror
@@ -482,6 +486,32 @@ impl Displays {
                 self.apply_kde_layout();
             }
             Err(e) => warn!("cannot mirror {name}: {e:#}"),
+        }
+    }
+
+    /// Makes sure KDE's primary output (where the Plasma panel lives) is ours. Right
+    /// after outputs come and go (a profile switch) KDE can end up with another one.
+    fn check_primary(&mut self) {
+        if !self.manage_primary || self.primary_checked.elapsed() < Duration::from_secs(2) {
+            return;
+        }
+        self.primary_checked = Instant::now();
+        let Some(m) = self.primary.and_then(|id| self.monitors.get(&id)) else {
+            return;
+        };
+        let geometries = virtual_output::output_geometries();
+        let ours = m.output.output_name();
+        let kde_primary = geometries
+            .iter()
+            .filter(|(_, g)| g.enabled && g.w > 0)
+            .min_by_key(|(_, g)| g.priority.unwrap_or(u32::MAX))
+            .map(|(name, _)| name.clone());
+        if geometries.contains_key(ours) && kde_primary.as_deref() != Some(ours) {
+            info!(
+                "KDE's primary output is {}, not {ours}: setting it again",
+                kde_primary.as_deref().unwrap_or("none")
+            );
+            m.output.make_primary();
         }
     }
 

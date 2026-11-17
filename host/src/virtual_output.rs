@@ -446,6 +446,8 @@ pub struct Geometry {
     pub w: i32,
     pub h: i32,
     pub priority: Option<u32>,
+    /// `false` for an output KDE lists as disabled (a closed laptop lid).
+    pub enabled: bool,
 }
 
 pub fn output_geometries() -> HashMap<String, Geometry> {
@@ -460,11 +462,14 @@ pub fn output_geometries() -> HashMap<String, Geometry> {
     let mut map: HashMap<String, Geometry> = HashMap::new();
     // kscreen-doctor prints "priority N" before "Geometry:".
     let mut priorities: HashMap<String, Option<u32>> = HashMap::new();
+    let mut disabled: Vec<String> = Vec::new();
     for raw in text.lines() {
         let line = strip_ansi(raw);
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("Output:") {
             name = rest.split_whitespace().nth(1).map(str::to_owned);
+        } else if let (Some(n), "disabled") = (&name, line) {
+            disabled.push(n.clone());
         } else if let (Some(n), Some(rest)) = (&name, line.strip_prefix("priority ")) {
             if let Some(g) = map.get_mut(n) {
                 g.priority = rest.trim().parse().ok();
@@ -486,9 +491,15 @@ pub fn output_geometries() -> HashMap<String, Geometry> {
                         w,
                         h,
                         priority,
+                        enabled: true,
                     },
                 );
             }
+        }
+    }
+    for n in disabled {
+        if let Some(g) = map.get_mut(&n) {
+            g.enabled = false;
         }
     }
     map
