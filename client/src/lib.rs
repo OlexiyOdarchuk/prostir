@@ -5,6 +5,7 @@
 //! pass through this app's GPU code and text stays as sharp as the compositor
 //! can make it.
 
+pub mod background;
 pub mod layout;
 pub mod settings;
 pub mod ui;
