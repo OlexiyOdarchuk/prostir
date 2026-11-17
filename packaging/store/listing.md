@@ -72,6 +72,15 @@ Plasma. Миша переходить з одного монітора на ін
 Вимоги: ПК з KDE Plasma 6 на Wayland, графіка Intel або AMD і безкоштовна програма
 Prostir для ПК з prostir.ishawyha.dev. Prostir є вільною програмою (GPL-3.0).
 
+## Trailer
+
+`prostir-trailer.mp4`: the demo cut with music. The music needs this credit wherever the
+trailer is published (store page, posts):
+
+Music: "Digital Lemonade" by Kevin MacLeod (incompetech.com), licensed under Creative
+Commons: By Attribution 4.0, https://creativecommons.org/licenses/by/4.0/ (ISRC
+USUAN1700010)
+
 ## Details (draft answers)
 
 | Field | Answer |
