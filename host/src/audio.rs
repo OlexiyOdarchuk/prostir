@@ -86,7 +86,11 @@ pub struct AudioOut {
 
 impl AudioOut {
     pub fn start(router: Arc<Router>) -> Result<Self> {
-        let sink = VirtualNode::create(SINK, "Prostir — шолом", "Audio/Sink")?;
+        let sink = VirtualNode::create(
+            SINK,
+            crate::i18n::t("Prostir — шолом", "Prostir headset"),
+            "Audio/Sink",
+        )?;
         let previous_default = pactl(&["get-default-sink"]).filter(|s| s != SINK);
         // Low latency: 10 ms slices, at most 40 ms buffered on the PC.
         let desc = format!(
@@ -164,12 +168,14 @@ impl MicIn {
             "--capture-props",
             &format!(
                 "media.class=Audio/Sink audio.position=[ MONO ] node.name={MIC_FEED} \
-                 node.description=\"Prostir (службовий)\""
+                 node.description=\"{}\"",
+                crate::i18n::t("Prostir (службовий)", "Prostir (internal)")
             ),
             "--playback-props",
             &format!(
                 "media.class=Audio/Source audio.position=[ MONO ] node.name={MIC} \
-                 node.description=\"Prostir — мікрофон шолома\""
+                 node.description=\"{}\"",
+                crate::i18n::t("Prostir — мікрофон шолома", "Prostir headset microphone")
             ),
         ])
         .stdout(std::process::Stdio::null())

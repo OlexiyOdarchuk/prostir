@@ -3,6 +3,7 @@
 use std::path::Path;
 
 pub use crate::background::Sky;
+use crate::i18n::{Lang, Language};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Preset {
@@ -67,6 +68,9 @@ pub struct Settings {
     pub focus: bool,
     /// One big screen further away; the other monitors are hidden.
     pub cinema: bool,
+    pub language: Language,
+    /// The language of the PC last connected to (for "like the PC" before connecting).
+    pub pc_language: Option<Lang>,
 }
 
 impl Default for Settings {
@@ -78,6 +82,8 @@ impl Default for Settings {
             hands: HandMode::Visible,
             focus: false,
             cinema: false,
+            language: Language::LikePc,
+            pc_language: None,
         }
     }
 }
@@ -111,6 +117,14 @@ impl Settings {
                 }
                 Some(("focus", v)) => s.focus = v == "on",
                 Some(("cinema", v)) => s.cinema = v == "on",
+                Some(("language", v)) => {
+                    s.language = match v {
+                        "uk" => Language::Fixed(Lang::Uk),
+                        "en" => Language::Fixed(Lang::En),
+                        _ => Language::LikePc,
+                    }
+                }
+                Some(("pc-language", v)) => s.pc_language = Lang::from_code(v),
                 Some(("hands", v)) => {
                     s.hands = match v {
                         "hidden" => HandMode::Hidden,
@@ -170,9 +184,14 @@ impl Settings {
         let on = |b: bool| if b { "on" } else { "off" };
         format!(
             "preset {preset}\ncurve {curve}\nbackground {background}\nhands {hands}\n\
-             focus {}\ncinema {}\n",
+             focus {}\ncinema {}\nlanguage {}\npc-language {}\n",
             on(self.focus),
-            on(self.cinema)
+            on(self.cinema),
+            match self.language {
+                Language::LikePc => "like-pc",
+                Language::Fixed(l) => l.code(),
+            },
+            self.pc_language.map_or("", Lang::code)
         )
     }
 }
@@ -193,6 +212,8 @@ mod tests {
             hands: HandMode::Control,
             focus: true,
             cinema: true,
+            language: Language::Fixed(Lang::En),
+            pc_language: Some(Lang::Uk),
         };
         s.save(&path);
         assert_eq!(Settings::load(&path), s);

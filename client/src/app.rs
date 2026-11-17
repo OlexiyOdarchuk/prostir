@@ -22,7 +22,7 @@ use openxr as xr;
 use openxr::sys::Handle as _;
 use prostir_proto::{ClientMsg, MIRROR_ID};
 
-use crate::i18n::Lang;
+use crate::i18n::{Lang, Language};
 use crate::input::Controls;
 use crate::layout::{self, Cylinder, Grab, Hit, Placement, Ray};
 use crate::net::{Feedback, NetEvent};
@@ -134,6 +134,8 @@ struct Scene {
     confirm_remove: Option<(u8, Instant)>,
     /// Menu page shown.
     tab: Tab,
+    /// The headset's own system language.
+    system_lang: Option<Lang>,
     profiles: [Profile; profiles::SLOTS],
     profiles_path: PathBuf,
     /// The profile last switched to, until something is changed by hand.
@@ -306,8 +308,30 @@ impl Scene {
         let sent = self.feedback.as_ref().map(|f| f.send(&msg));
         match sent {
             Some(Ok(())) => {}
-            Some(Err(e)) => self.show_error(format!("Не вдалося надіслати на ПК: {e}")),
-            None => self.show_error("Немає з'єднання з ПК".into()),
+            Some(Err(e)) => {
+                let what = self
+                    .lang()
+                    .t("Не вдалося надіслати на ПК", "Could not send to the PC");
+                self.show_error(format!("{what}: {e}"))
+            }
+            None => {
+                let what = self
+                    .lang()
+                    .t("Немає з'єднання з ПК", "Not connected to a PC");
+                self.show_error(what.into())
+            }
+        }
+    }
+
+    /// The interface language: chosen in the menu, else the PC's, else the headset's.
+    fn lang(&self) -> Lang {
+        match self.settings.language {
+            Language::Fixed(l) => l,
+            Language::LikePc => self
+                .settings
+                .pc_language
+                .or(self.system_lang)
+                .unwrap_or(Lang::En),
         }
     }
 
@@ -351,7 +375,7 @@ impl Scene {
                 .filter(|(_, at)| at.elapsed() < CONFIRM_FOR)
                 .map(|(id, _)| id),
             tab: self.tab,
-            lang: Lang::Uk,
+            lang: self.lang(),
             profiles: self.profiles.to_vec(),
             active_profile: self.active_profile,
         }
@@ -561,6 +585,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         error: None,
         confirm_remove: None,
         tab: Tab::Monitors,
+        system_lang: crate::i18n::system(),
         profiles: profiles::load(&profiles_path),
         profiles_path,
         active_profile: None,
@@ -850,6 +875,7 @@ fn run(app: &AndroidApp) -> Result<()> {
             // The user may have copied a picture onto the headset meanwhile.
             custom_pano = custom_panorama_path(external_dir.as_deref()).is_some();
         }
+        crate::i18n::set_current(scene.lang());
         panel_was_open = scene.panel_open;
         if scene.panel_open {
             let ui_state = scene.ui_state(
@@ -1122,11 +1148,17 @@ fn handle_net_event(
             addr,
             name,
             feedback,
+            language,
         } => {
-            info!("connected to {addr} ({name:?})");
+            info!("connected to {addr} ({name:?}), language {language:?}");
+            if language.is_some() && language != scene.settings.pc_language {
+                scene.settings.pc_language = language;
+                scene.settings.save(&scene.settings_path);
+            }
+            let usb = scene.lang().t("ПК (USB)", "PC (USB)");
             scene.host = Some(name.unwrap_or_else(|| {
                 if addr.ip().is_loopback() {
-                    "ПК (USB)".into()
+                    usb.into()
                 } else {
                     addr.ip().to_string()
                 }
@@ -1254,7 +1286,8 @@ fn set_passthrough(scene: &mut Scene, passthrough: &mut Option<passthrough::Pass
     if let Some(pt) = passthrough
         && let Err(e) = pt.set_running(scene.settings.background == Background::Room)
     {
-        scene.show_error(format!("Камери недоступні: {e:#}"));
+        let what = scene.lang().t("Камери недоступні", "Cameras unavailable");
+        scene.show_error(format!("{what}: {e:#}"));
     }
 }
 
@@ -1294,6 +1327,10 @@ fn handle_action(
             }
         }
         Action::Tab(tab) => scene.tab = tab,
+        Action::Language(language) => {
+            scene.settings.language = language;
+            scene.settings.save(settings_path);
+        }
         Action::Cinema(on) => {
             scene.settings.cinema = on;
             scene.settings.save(settings_path);
@@ -1439,7 +1476,10 @@ fn handle_action(
                     scene.steering.connect_to(addr);
                     scene.ip_input = None;
                 }
-                None => scene.show_error(format!("«{typed}» — не IP-адреса")),
+                None => {
+                    let what = scene.lang().t("не IP-адреса", "is not an IP address");
+                    scene.show_error(format!("«{typed}» — {what}"))
+                }
             }
         }
         Action::CancelKeypad => scene.ip_input = None,

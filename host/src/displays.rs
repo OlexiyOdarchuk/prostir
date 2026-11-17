@@ -1,5 +1,6 @@
 //! The set of virtual monitors, their encoders, and delivery to the headset.
 
+use crate::i18n::t;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -401,7 +402,11 @@ impl Displays {
     /// position and scale KScreen remembers for that name.
     pub fn add(&mut self, spec: MonitorSpec) -> Result<u8> {
         if self.monitors.len() >= MAX_MONITORS {
-            bail!("Максимум {MAX_MONITORS} моніторів");
+            bail!(
+                "{} {MAX_MONITORS} {}",
+                t("Максимум", "At most"),
+                t("моніторів", "monitors")
+            );
         }
         let id = (0..=u8::MAX)
             .find(|id| !self.monitors.contains_key(id))
@@ -638,10 +643,16 @@ impl Displays {
 
     pub fn remove(&mut self, id: u8) -> Result<()> {
         if !self.monitors.contains_key(&id) {
-            bail!("Монітора {} немає", id + 1);
+            bail!("{} {}", t("Немає монітора", "No monitor"), id + 1);
         }
         if self.monitors.len() == 1 {
-            bail!("Останній монітор прибрати не можна");
+            bail!(
+                "{}",
+                t(
+                    "Останній монітор прибрати не можна",
+                    "The last monitor cannot be removed"
+                )
+            );
         }
         self.router.remove_stream(id);
         self.monitors.remove(&id);
@@ -789,7 +800,13 @@ impl Displays {
         let mut current: Vec<u8> = self.monitors.keys().copied().collect();
         current.sort_unstable();
         if sorted != current {
-            bail!("Порядок не збігається з моніторами");
+            bail!(
+                "{}",
+                t(
+                    "Порядок не збігається з моніторами",
+                    "The order does not match the monitors"
+                )
+            );
         }
         self.order = ids.to_vec();
         self.apply_kde_layout();

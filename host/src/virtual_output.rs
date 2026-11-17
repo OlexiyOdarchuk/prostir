@@ -349,7 +349,7 @@ impl Screencast {
         // (pixel size); scale is applied separately through KScreen.
         let (w, h) = (spec.width as i32, spec.height as i32);
         let stream = if self.screencast.version() >= 4 {
-            let description = format!("Prostir — монітор {number}");
+            let description = format!("Prostir {number}");
             self.screencast.stream_virtual_output_with_description(
                 name,
                 description,

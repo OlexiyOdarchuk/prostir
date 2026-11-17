@@ -85,8 +85,8 @@ fn main() -> Result<()> {
     .write(&mut w)?;
     loop {
         match HostMsg::read(&mut r)? {
-            HostMsg::Welcome { version } => {
-                println!("connected, host protocol v{version}");
+            HostMsg::Welcome { version, language } => {
+                println!("connected, host protocol v{version}, language {language}");
                 break;
             }
             HostMsg::PairingRequired => {

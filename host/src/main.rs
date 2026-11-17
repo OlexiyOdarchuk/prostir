@@ -2,6 +2,7 @@ mod audio;
 mod displays;
 mod encoder;
 mod focus;
+mod i18n;
 mod pairing;
 mod tray;
 mod virtual_output;

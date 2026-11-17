@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use fontdue::{Font, FontSettings, Metrics};
 use tiny_skia::{FillRule, Paint, Path, PathBuilder, Pixmap, Rect, Transform};
 
-use crate::i18n::Lang;
+use crate::i18n::{Lang, Language};
 use crate::profiles::Profile;
 use crate::settings::{Background, Curve, HandMode, Preset, Settings, Sky};
 
@@ -105,6 +105,7 @@ pub enum Action {
     ApplyProfile(usize),
     SaveProfile(usize),
     Tab(Tab),
+    Language(Language),
     /// Connect to the n-th PC in `UiState::found`.
     ConnectTo(usize),
     ShowKeypad,
@@ -281,7 +282,7 @@ impl Panel {
         let (lx, lw) = (44.0, 580.0);
         let (rx, rw) = (680.0, 556.0);
         if let Some(p) = &s.pairing {
-            self.build_pairing(p, &mut items, lx, lw, 150.0);
+            self.build_pairing(l, p, &mut items, lx, lw, 150.0);
             return items;
         }
 
@@ -290,7 +291,7 @@ impl Panel {
             (Tab::Monitors, l.t("Монітори", "Monitors")),
             (Tab::Profiles, l.t("Профілі", "Profiles")),
             (Tab::Look, l.t("Вигляд", "Look")),
-            (Tab::Sound, l.t("Звук", "Sound")),
+            (Tab::Sound, l.t("Звук і мова", "Sound, language")),
         ];
         for (i, (tab, label)) in tabs.into_iter().enumerate() {
             let r = rect(lx + i as f32 * 210.0, 128.0, 200.0, 50.0);
@@ -320,6 +321,34 @@ impl Panel {
             }
             Tab::Sound => {
                 build_sound(s, &mut items, lx, lw, top - 12.0);
+                let mut y = top;
+                segmented(
+                    &mut items,
+                    rx,
+                    rw,
+                    &mut y,
+                    l.t("Мова · Language", "Language · Мова"),
+                    vec![
+                        (
+                            l.t("Як на ПК", "Like the PC"),
+                            Action::Language(Language::LikePc),
+                            s.settings.language == Language::LikePc,
+                            true,
+                        ),
+                        (
+                            "Українська",
+                            Action::Language(Language::Fixed(Lang::Uk)),
+                            s.settings.language == Language::Fixed(Lang::Uk),
+                            true,
+                        ),
+                        (
+                            "English",
+                            Action::Language(Language::Fixed(Lang::En)),
+                            s.settings.language == Language::Fixed(Lang::En),
+                            true,
+                        ),
+                    ],
+                );
             }
         }
         if let Some(e) = &s.error {
@@ -331,6 +360,7 @@ impl Panel {
     /// The code to type on the PC, or a keypad for the PC's code.
     fn build_pairing(
         &mut self,
+        l: Lang,
         p: &PairingView,
         items: &mut Vec<Item>,
         lx: f32,
@@ -343,7 +373,7 @@ impl Panel {
             21.0,
             false,
             MUTED,
-            &format!("Сполучення з {}", p.host),
+            &format!("{} {}", l.t("Сполучення з", "Pairing with"), p.host),
         ));
         y += 40.0;
         if p.failed {
@@ -353,7 +383,10 @@ impl Panel {
                 20.0,
                 true,
                 DANGER,
-                "Код не підійшов — спробуйте ще раз",
+                l.t(
+                    "Код не підійшов — спробуйте ще раз",
+                    "The code did not match — try again",
+                ),
             ));
             y += 34.0;
         }
@@ -364,7 +397,10 @@ impl Panel {
                 20.0,
                 false,
                 TEXT,
-                "Введіть цей код у віконці Prostir на ноутбуці:",
+                l.t(
+                    "Введіть цей код у віконці Prostir на ноутбуці:",
+                    "Type this code into the Prostir window on the PC:",
+                ),
             ));
             y += 30.0;
             items.push(Item::Box(rect(lx, y, lw, 130.0), [255, 255, 255, 16]));
@@ -377,20 +413,32 @@ impl Panel {
                 18.0,
                 false,
                 MUTED,
-                "Це потрібно лише один раз для кожного ПК.",
+                l.t(
+                    "Це потрібно лише один раз для кожного ПК.",
+                    "This is needed only once per PC.",
+                ),
             ));
             y += 30.0;
             items.push(button(
                 rect(lx, y, lw, 50.0),
-                "Навпаки: код на ноутбуці, ввести тут",
+                l.t(
+                    "Навпаки: код на ноутбуці, ввести тут",
+                    "The other way: code on the PC, type it here",
+                ),
                 Style::Normal,
                 Some(Action::PairOtherWay),
             ));
             return y + 62.0;
         }
         for line in [
-            "Введіть код, який показує ноутбук",
-            "(сповіщення або іконка Prostir у треї):",
+            l.t(
+                "Введіть код, який показує ноутбук",
+                "Type the code the PC shows",
+            ),
+            l.t(
+                "(сповіщення або іконка Prostir у треї):",
+                "(a notification or the Prostir tray icon):",
+            ),
         ] {
             items.push(text(lx, y, 20.0, false, TEXT, line));
             y += 30.0;
@@ -411,19 +459,10 @@ impl Panel {
         ));
         y += 76.0;
         let ready = p.typed.len() == 6;
+        let erase = l.t("Стерти", "Delete");
+        let done = l.t("Готово", "Done");
         let keys = [
-            "1",
-            "2",
-            "3",
-            "4",
-            "5",
-            "6",
-            "7",
-            "8",
-            "9",
-            "Стерти",
-            "0",
-            "Готово",
+            "1", "2", "3", "4", "5", "6", "7", "8", "9", erase, "0", done,
         ];
         let (kw, kh) = ((lw - 20.0) / 3.0, 50.0);
         for (i, k) in keys.iter().enumerate() {
@@ -433,18 +472,21 @@ impl Panel {
                 kw,
                 kh,
             );
-            let (style, action) = match *k {
-                "Стерти" => (Style::Normal, Some(Action::Backspace)),
-                "Готово" if ready => (Style::Selected, Some(Action::ConnectTyped)),
-                "Готово" => (Style::Disabled, None),
-                d => (Style::Normal, d.chars().next().map(Action::Key)),
+            let (style, action) = match i {
+                9 => (Style::Normal, Some(Action::Backspace)),
+                11 if ready => (Style::Selected, Some(Action::ConnectTyped)),
+                11 => (Style::Disabled, None),
+                _ => (Style::Normal, k.chars().next().map(Action::Key)),
             };
             items.push(button(r, k, style, action));
         }
         y += 4.0 * (kh + 8.0) + 4.0;
         items.push(button(
             rect(lx, y, lw, 50.0),
-            "Навпаки: код у шоломі, ввести на ноутбуці",
+            l.t(
+                "Навпаки: код у шоломі, ввести на ноутбуці",
+                "The other way: code in the headset, type it on the PC",
+            ),
             Style::Normal,
             Some(Action::PairOtherWay),
         ));
@@ -460,11 +502,25 @@ impl Panel {
         lw: f32,
         mut y: f32,
     ) -> f32 {
-        items.push(text(lx, y, 21.0, false, MUTED, "Підключення до ПК"));
+        let l = s.lang;
+        items.push(text(
+            lx,
+            y,
+            21.0,
+            false,
+            MUTED,
+            l.t("Підключення до ПК", "Connect to a PC"),
+        ));
         y += 40.0;
         for line in [
-            "Запустіть Prostir на ноутбуці в тій самій мережі Wi‑Fi",
-            "або підключіть шолом кабелем.",
+            l.t(
+                "Запустіть Prostir на ноутбуці в тій самій мережі Wi‑Fi",
+                "Start Prostir on the PC on the same Wi‑Fi network",
+            ),
+            l.t(
+                "або підключіть шолом кабелем.",
+                "or connect the headset with a cable.",
+            ),
         ] {
             items.push(text(lx, y, 19.0, false, TEXT, line));
             y += 28.0;
@@ -492,7 +548,7 @@ impl Panel {
                 "9",
                 ".",
                 "0",
-                "Стерти",
+                l.t("Стерти", "Delete"),
             ];
             let (kw, kh) = ((lw - 20.0) / 3.0, 50.0);
             for (i, k) in keys.iter().enumerate() {
@@ -513,7 +569,7 @@ impl Panel {
             let ready = !typed.is_empty();
             items.push(button(
                 rect(lx, y, half, 50.0),
-                "Підключитися",
+                l.t("Підключитися", "Connect"),
                 if ready {
                     Style::Selected
                 } else {
@@ -523,17 +579,31 @@ impl Panel {
             ));
             items.push(button(
                 rect(lx + half + 10.0, y, half, 50.0),
-                "Скасувати",
+                l.t("Скасувати", "Cancel"),
                 Style::Normal,
                 Some(Action::CancelKeypad),
             ));
             return y + 62.0;
         }
         if s.found.is_empty() {
-            items.push(text(lx, y + 20.0, 21.0, true, MUTED, "Шукаю ПК у мережі…"));
+            items.push(text(
+                lx,
+                y + 20.0,
+                21.0,
+                true,
+                MUTED,
+                l.t("Шукаю ПК у мережі…", "Looking for PCs on the network…"),
+            ));
             y += 48.0;
         } else {
-            items.push(text(lx, y + 14.0, 21.0, false, MUTED, "Знайдено"));
+            items.push(text(
+                lx,
+                y + 14.0,
+                21.0,
+                false,
+                MUTED,
+                l.t("Знайдено", "Found"),
+            ));
             y += 30.0;
             for (i, (name, addr)) in s.found.iter().enumerate().take(5) {
                 let label = format!("{name}   {addr}");
@@ -548,7 +618,7 @@ impl Panel {
         }
         items.push(button(
             rect(lx, y + 6.0, 280.0, 48.0),
-            "Ввести IP вручну",
+            l.t("Ввести IP вручну", "Type an IP address"),
             Style::Normal,
             Some(Action::ShowKeypad),
         ));

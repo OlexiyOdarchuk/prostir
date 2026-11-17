@@ -49,6 +49,8 @@ pub enum NetEvent {
         addr: SocketAddr,
         name: Option<String>,
         feedback: Feedback,
+        /// The PC's interface language.
+        language: Option<crate::i18n::Lang>,
     },
     /// PCs currently seen on the network (sent when the list changes).
     Hosts(Vec<FoundHost>),
@@ -521,9 +523,9 @@ fn run_session(
     let mut reader = BufReader::with_capacity(1 << 20, reader);
     let feedback = Feedback(Arc::new(Mutex::new(writer)));
     let host = name.clone().unwrap_or_else(|| match stream.peer_addr() {
-        Ok(a) if a.ip().is_loopback() => "ПК (USB)".into(),
+        Ok(a) if a.ip().is_loopback() => crate::i18n::current().t("ПК (USB)", "PC (USB)").into(),
         Ok(a) => a.ip().to_string(),
-        Err(_) => "ПК".into(),
+        Err(_) => crate::i18n::current().t("ПК", "PC").into(),
     });
     let mut session = Session {
         stream: &stream,
@@ -542,9 +544,9 @@ fn run_session(
     feedback.send(&ClientMsg::Hello {
         version: PROTOCOL_VERSION,
     })?;
-    loop {
+    let language = loop {
         match HostMsg::read(session.reader)? {
-            HostMsg::Welcome { .. } => break,
+            HostMsg::Welcome { language, .. } => break crate::i18n::Lang::from_code(&language),
             HostMsg::PairingRequired => {
                 session.pair(trusted)?;
                 feedback.send(&ClientMsg::Hello {
@@ -556,7 +558,7 @@ fn run_session(
             }
             other => return Err(std::io::Error::other(format!("unexpected {other:?}"))),
         }
-    }
+    };
     // The host re-sends the last frame every 500 ms, so 10 s of silence means a dead link.
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     if let Ok(peer) = stream.peer_addr() {
@@ -564,6 +566,7 @@ fn run_session(
             addr: peer,
             name,
             feedback: feedback.clone(),
+            language,
         });
     }
 

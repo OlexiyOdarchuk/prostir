@@ -1,6 +1,7 @@
 //! System tray icon (StatusNotifierItem): connection status, video quality,
 //! start with the session, quit.
 
+use crate::i18n::t;
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 
@@ -18,10 +19,10 @@ pub enum Command {
 }
 
 /// Video quality presets offered in the menu, Mbit/s per monitor.
-const QUALITIES: [(u32, &str); 3] = [
-    (15, "Економна — 15 Мбіт/с"),
-    (30, "Звичайна — 30 Мбіт/с"),
-    (50, "Висока — 50 Мбіт/с"),
+const QUALITIES: [(u32, &str, &str); 3] = [
+    (15, "Економна — 15 Мбіт/с", "Economy — 15 Mbit/s"),
+    (30, "Звичайна — 30 Мбіт/с", "Normal — 30 Mbit/s"),
+    (50, "Висока — 50 Мбіт/с", "High — 50 Mbit/s"),
 ];
 
 #[derive(Clone, Default, PartialEq)]
@@ -123,21 +124,31 @@ fn icon() -> String {
 impl Tray {
     fn status_line(&self) -> String {
         match self.status.connected {
-            Some(_) if self.status.paused => "Шолом знято — трансляція на паузі".into(),
-            Some(via) => format!("Шолом підключено ({via})"),
-            None => "Чекаю на шолом…".into(),
+            Some(_) if self.status.paused => t(
+                "Шолом знято — трансляція на паузі",
+                "Headset taken off — streaming paused",
+            )
+            .into(),
+            Some(via) => format!("{} ({via})", t("Шолом підключено", "Headset connected")),
+            None => t("Чекаю на шолом…", "Waiting for the headset…").into(),
         }
     }
 
     fn monitors_line(&self) -> String {
         let mirror = if self.status.mirror {
-            ", екран ноутбука в шоломі"
+            t(
+                ", екран ноутбука в шоломі",
+                ", laptop screen in the headset",
+            )
         } else {
             ""
         };
         match self.status.monitors {
-            0 => "Віртуальних моніторів немає".into(),
-            n => format!("Віртуальних моніторів: {n}{mirror}"),
+            0 => t("Віртуальних моніторів немає", "No virtual monitors").into(),
+            n => format!(
+                "{}: {n}{mirror}",
+                t("Віртуальних моніторів", "Virtual monitors")
+            ),
         }
     }
 }
@@ -170,7 +181,7 @@ impl ksni::Tray for Tray {
         ToolTip {
             title: "Prostir".into(),
             description: match &self.pairing_code {
-                Some(code) => format!("Код сполучення: {code}"),
+                Some(code) => format!("{}: {code}", t("Код сполучення", "Pairing code")),
                 None => format!("{}\n{}", self.status_line(), self.monitors_line()),
             },
             ..Default::default()
@@ -180,13 +191,13 @@ impl ksni::Tray for Tray {
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let selected = QUALITIES
             .iter()
-            .position(|(m, _)| *m == self.bitrate)
+            .position(|(m, _, _)| *m == self.bitrate)
             .unwrap_or(1);
         let mut items: Vec<MenuItem<Self>> = Vec::new();
         if let Some(code) = &self.pairing_code {
             items.push(
                 StandardItem {
-                    label: format!("Код сполучення: {code}"),
+                    label: format!("{}: {code}", t("Код сполучення", "Pairing code")),
                     enabled: false,
                     ..Default::default()
                 }
@@ -209,7 +220,7 @@ impl ksni::Tray for Tray {
             .into(),
             MenuItem::Separator,
             SubMenu {
-                label: "Якість відео".into(),
+                label: t("Якість відео", "Video quality").into(),
                 submenu: vec![
                     RadioGroup {
                         selected,
@@ -220,8 +231,8 @@ impl ksni::Tray for Tray {
                         }),
                         options: QUALITIES
                             .iter()
-                            .map(|(_, label)| RadioItem {
-                                label: (*label).into(),
+                            .map(|(_, uk, en)| RadioItem {
+                                label: t(uk, en).into(),
                                 ..Default::default()
                             })
                             .collect(),
@@ -232,14 +243,14 @@ impl ksni::Tray for Tray {
             }
             .into(),
             CheckmarkItem {
-                label: "Запускати разом із системою".into(),
+                label: t("Запускати разом із системою", "Start with the system").into(),
                 checked: autostart_enabled(),
                 activate: Box::new(|_: &mut Self| set_autostart(!autostart_enabled())),
                 ..Default::default()
             }
             .into(),
             StandardItem {
-                label: "Забути сполучені шоломи".into(),
+                label: t("Забути сполучені шоломи", "Forget paired headsets").into(),
                 activate: Box::new(|tray: &mut Self| {
                     let _ = tray.commands.send(Command::ForgetHeadsets);
                 }),
@@ -248,7 +259,7 @@ impl ksni::Tray for Tray {
             .into(),
             MenuItem::Separator,
             StandardItem {
-                label: "Вийти".into(),
+                label: t("Вийти", "Quit").into(),
                 icon_name: "application-exit".into(),
                 activate: Box::new(|tray: &mut Self| {
                     let _ = tray.commands.send(Command::Quit);

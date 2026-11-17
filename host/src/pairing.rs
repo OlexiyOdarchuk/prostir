@@ -1,5 +1,6 @@
 //! Encrypted connections and pairing on the PC side.
 
+use crate::i18n::t;
 use std::io::{BufReader, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
@@ -67,6 +68,7 @@ pub fn accept(
             ClientMsg::Hello { .. } if security.trusted.contains(&peer.key) => {
                 HostMsg::Welcome {
                     version: PROTOCOL_VERSION,
+                    language: crate::i18n::code().into(),
                 }
                 .write(&mut writer)?;
                 writer.flush()?;
@@ -93,7 +95,10 @@ pub fn accept(
                 stream.set_read_timeout(Some(Duration::from_secs(300)))?;
                 let paired = match obtain_code(headset_shows, tray) {
                     Some(code) => pair(&mut reader, &mut writer, &security.identity, &peer, &code),
-                    None => refuse(&mut writer, "На ноутбуці код не введено"),
+                    None => refuse(
+                        &mut writer,
+                        t("На ноутбуці код не введено", "No code was typed on the PC"),
+                    ),
                 };
                 tray::set_pairing(tray, None);
                 stream.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -107,8 +112,11 @@ pub fn accept(
                         security.trusted.add(peer.key, &label)?;
                         info!("paired with {label} ({})", secure::fingerprint(&peer.key));
                         notify(
-                            "Шолом сполучено",
-                            &format!("{label} тепер може підключатися."),
+                            t("Шолом сполучено", "Headset paired"),
+                            &format!(
+                                "{label} {}",
+                                t("тепер може підключатися.", "can connect now.")
+                            ),
                         );
                     }
                     false => warn!("pairing failed: the codes did not match"),
@@ -130,8 +138,11 @@ fn obtain_code(headset_shows: bool, tray: Option<&tray::Handle>) -> Option<Strin
     info!("pairing code: {shown}");
     tray::set_pairing(tray, Some(shown.clone()));
     notify(
-        "Сполучення шолома",
-        &format!("Введіть у шоломі код {shown}"),
+        t("Сполучення шолома", "Pairing a headset"),
+        &format!(
+            "{} {shown}",
+            t("Введіть у шоломі код", "Type this code in the headset:")
+        ),
     );
     Some(code)
 }
@@ -184,7 +195,10 @@ fn pair(
 
 /// Asks for the code the headset shows, in a small dialog on the PC.
 fn ask_code() -> Option<String> {
-    let text = "Шолом хоче підключитися.\nВведіть код, який він показує:";
+    let text = t(
+        "Шолом хоче підключитися.\nВведіть код, який він показує:",
+        "A headset wants to connect.\nType the code it shows:",
+    );
     let attempts: [(&str, Vec<&str>); 2] = [
         ("kdialog", vec!["--title", "Prostir", "--inputbox", text]),
         ("zenity", vec!["--entry", "--title=Prostir", "--text", text]),

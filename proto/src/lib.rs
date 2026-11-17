@@ -52,6 +52,8 @@ pub enum HostMsg {
     /// Sent once after the handshake.
     Welcome {
         version: u32,
+        /// The PC's interface language (`uk`, `en`), which the headset follows by default.
+        language: String,
     },
     /// A virtual monitor appeared. `width`/`height` are in pixels.
     StreamStart {
@@ -284,7 +286,11 @@ impl<'a> Cursor<'a> {
 impl HostMsg {
     pub fn write(&self, w: &mut impl Write) -> io::Result<()> {
         match self {
-            HostMsg::Welcome { version } => write_frame(w, tag::WELCOME, &[&version.to_le_bytes()]),
+            HostMsg::Welcome { version, language } => write_frame(
+                w,
+                tag::WELCOME,
+                &[&version.to_le_bytes(), language.as_bytes()],
+            ),
             HostMsg::StreamStart {
                 id,
                 width,
@@ -337,7 +343,10 @@ impl HostMsg {
         let (t, payload) = read_frame(r)?;
         let mut c = Cursor(&payload);
         Ok(match t {
-            tag::WELCOME => HostMsg::Welcome { version: c.u32()? },
+            tag::WELCOME => HostMsg::Welcome {
+                version: c.u32()?,
+                language: String::from_utf8_lossy(c.rest()).into_owned(),
+            },
             tag::STREAM_START => {
                 let id = c.u8()?;
                 let codec = Codec::from_u8(c.u8()?)?;
@@ -522,7 +531,10 @@ mod tests {
     #[test]
     fn roundtrip() {
         let msgs = vec![
-            HostMsg::Welcome { version: 1 },
+            HostMsg::Welcome {
+                version: 1,
+                language: "uk".into(),
+            },
             HostMsg::StreamStart {
                 id: 2,
                 width: 2560,
