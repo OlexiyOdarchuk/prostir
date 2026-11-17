@@ -11,7 +11,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use log::{info, warn};
-use prostir_proto::{AUDIO_CHANNELS, AUDIO_RATE};
+use prostir_proto::{AUDIO_CHANNELS, AUDIO_RATE, MIC_CHANNELS};
 
 use crate::displays::Router;
 
@@ -139,4 +139,116 @@ impl Drop for AudioOut {
         let _ = self.pipeline.set_state(gst::State::Null);
         info!("PC sound back on the PC");
     }
+}
+
+const MIC: &str = "prostir_mic";
+const MIC_FEED: &str = "prostir_mic_feed";
+
+/// The headset microphone as a PC microphone ("Prostir — мікрофон шолома"), the
+/// default input while the headset streams. A `pw-loopback` pairs an internal input
+/// (which we play the headset's sound into) with the microphone apps record from.
+pub struct MicIn {
+    appsrc: gst_app::AppSrc,
+    pipeline: gst::Pipeline,
+    loopback: std::process::Child,
+    previous_default: Option<String>,
+}
+
+impl MicIn {
+    pub fn start() -> Result<Self> {
+        use std::os::unix::process::CommandExt;
+        let mut cmd = Command::new("pw-loopback");
+        cmd.args([
+            "-n",
+            "prostir-mic",
+            "--capture-props",
+            &format!(
+                "media.class=Audio/Sink audio.position=[ MONO ] node.name={MIC_FEED} \
+                 node.description=\"Prostir (службовий)\""
+            ),
+            "--playback-props",
+            &format!(
+                "media.class=Audio/Source audio.position=[ MONO ] node.name={MIC} \
+                 node.description=\"Prostir — мікрофон шолома\""
+            ),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+        // SAFETY: prctl only; the loopback dies with us even if we crash.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                Ok(())
+            });
+        }
+        let mut loopback = cmd
+            .spawn()
+            .context("pw-loopback is needed for the microphone")?;
+        let ready = (0..40).any(|_| {
+            std::thread::sleep(Duration::from_millis(50));
+            source_state(MIC).is_some()
+        });
+        if !ready {
+            let _ = loopback.kill();
+            bail!("the virtual microphone did not appear");
+        }
+        let desc = format!(
+            "appsrc name=src is-live=true do-timestamp=true format=time \
+             caps=audio/x-raw,format=S16LE,rate={AUDIO_RATE},channels={MIC_CHANNELS},layout=interleaved \
+             ! queue max-size-time=100000000 leaky=downstream \
+             ! pulsesink device={MIC_FEED} buffer-time=60000 latency-time=10000 sync=false"
+        );
+        let pipeline = gst::parse::launch(&desc)?
+            .downcast::<gst::Pipeline>()
+            .map_err(|_| anyhow!("not a pipeline"))?;
+        let appsrc = pipeline
+            .by_name("src")
+            .and_then(|e| e.downcast::<gst_app::AppSrc>().ok())
+            .ok_or_else(|| anyhow!("appsrc missing"))?;
+        pipeline.set_state(gst::State::Playing)?;
+        let previous_default = pactl(&["get-default-source"]).filter(|s| s != MIC);
+        if pactl(&["set-default-source", MIC]).is_none() {
+            warn!("cannot make {MIC} the default microphone");
+        }
+        info!("headset microphone is the PC's microphone");
+        Ok(Self {
+            appsrc,
+            pipeline,
+            loopback,
+            previous_default,
+        })
+    }
+
+    /// Plays a slice of the headset's microphone into the PC microphone.
+    pub fn push(&self, pcm: Vec<u8>) {
+        let _ = self.appsrc.push_buffer(gst::Buffer::from_slice(pcm));
+    }
+
+    /// Whether some PC app is recording from the microphone right now.
+    pub fn in_use(&self) -> bool {
+        source_state(MIC).is_some_and(|s| s == "RUNNING")
+    }
+}
+
+impl Drop for MicIn {
+    fn drop(&mut self) {
+        if let Some(prev) = &self.previous_default
+            && pactl(&["get-default-source"]).as_deref() == Some(MIC)
+        {
+            let _ = pactl(&["set-default-source", prev]);
+        }
+        let _ = self.pipeline.set_state(gst::State::Null);
+        let _ = self.loopback.kill();
+        let _ = self.loopback.wait();
+        info!("microphone back on the PC");
+    }
+}
+
+/// `RUNNING`, `IDLE` or `SUSPENDED` for a source, from `pactl list short sources`.
+fn source_state(name: &str) -> Option<String> {
+    let list = pactl(&["list", "short", "sources"])?;
+    list.lines().find_map(|l| {
+        let cols: Vec<&str> = l.split('\t').collect();
+        (cols.get(1) == Some(&name)).then(|| cols.last().unwrap_or(&"").trim().to_owned())
+    })
 }

@@ -30,6 +30,8 @@ pub struct Status {
     pub connected: Option<&'static str>,
     pub monitors: usize,
     pub mirror: bool,
+    /// Connected, but the headset is not worn: streaming paused.
+    pub paused: bool,
 }
 
 pub struct Tray {
@@ -121,6 +123,7 @@ fn icon() -> String {
 impl Tray {
     fn status_line(&self) -> String {
         match self.status.connected {
+            Some(_) if self.status.paused => "Шолом знято — трансляція на паузі".into(),
             Some(via) => format!("Шолом підключено ({via})"),
             None => "Чекаю на шолом…".into(),
         }

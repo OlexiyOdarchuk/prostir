@@ -103,6 +103,9 @@ struct Scene {
     primary: Option<u8>,
     mirror_wanted: bool,
     audio_wanted: bool,
+    mic_wanted: bool,
+    /// The headset is on the head (the session is visible); streaming pauses otherwise.
+    worn: bool,
     settings: Settings,
     curve_supported: bool,
     panel_open: bool,
@@ -268,6 +271,13 @@ impl Scene {
         self.panel_open = true;
     }
 
+    /// Tells the PC whether the headset is worn (quietly: nothing to show the user).
+    fn tell_presence(&self) {
+        if let Some(f) = &self.feedback {
+            let _ = f.send(&ClientMsg::Presence { worn: self.worn });
+        }
+    }
+
     fn send(&mut self, msg: ClientMsg) {
         let sent = self.feedback.as_ref().map(|f| f.send(&msg));
         match sent {
@@ -300,6 +310,7 @@ impl Scene {
             primary: self.primary,
             mirror_wanted: self.mirror_wanted,
             audio_wanted: self.audio_wanted,
+            mic_wanted: self.mic_wanted,
             mirror_active: self.monitors.contains_key(&MIRROR_ID),
             settings: self.settings,
             room_available: room,
@@ -496,6 +507,8 @@ fn run(app: &AndroidApp) -> Result<()> {
         primary: None,
         mirror_wanted: true,
         audio_wanted: true,
+        mic_wanted: true,
+        worn: true,
         settings,
         curve_supported: exts.khr_composition_layer_cylinder,
         panel_open: false,
@@ -553,6 +566,25 @@ fn run(app: &AndroidApp) -> Result<()> {
             match event {
                 xr::Event::SessionStateChanged(e) => {
                     info!("session state: {:?}", e.state());
+                    // Taking the headset off hides the app (and puts the headset to
+                    // sleep); the PC stops encoding until it is back on.
+                    let worn = matches!(
+                        e.state(),
+                        xr::SessionState::VISIBLE | xr::SessionState::FOCUSED
+                    );
+                    if worn != scene.worn
+                        && matches!(
+                            e.state(),
+                            xr::SessionState::VISIBLE
+                                | xr::SessionState::FOCUSED
+                                | xr::SessionState::SYNCHRONIZED
+                                | xr::SessionState::STOPPING
+                                | xr::SessionState::IDLE
+                        )
+                    {
+                        scene.worn = worn;
+                        scene.tell_presence();
+                    }
                     match e.state() {
                         xr::SessionState::READY => {
                             session.begin(xr::ViewConfigurationType::PRIMARY_STEREO)?;
@@ -1015,6 +1047,9 @@ fn handle_net_event(
                 }
             }));
             scene.feedback = Some(feedback);
+            if !scene.worn {
+                scene.tell_presence();
+            }
             scene.offline_since = None;
             scene.ip_input = None;
         }
@@ -1044,6 +1079,7 @@ fn handle_net_event(
         NetEvent::PrimaryChanged(id) => scene.primary = Some(id),
         NetEvent::MirrorWanted(enabled) => scene.mirror_wanted = enabled,
         NetEvent::AudioWanted(enabled) => scene.audio_wanted = enabled,
+        NetEvent::MicWanted(enabled) => scene.mic_wanted = enabled,
         NetEvent::Order(ids) => scene.order = ids,
         NetEvent::HostError(text) => scene.show_error(text),
         NetEvent::StreamStart {
@@ -1148,6 +1184,10 @@ fn handle_action(
                 scene.reorder(ids);
                 scene.arrange_all();
             }
+        }
+        Action::SetMic(enabled) => {
+            scene.mic_wanted = enabled;
+            scene.send(ClientMsg::SetMic { enabled });
         }
         Action::SetAudio(enabled) => {
             scene.audio_wanted = enabled;

@@ -56,6 +56,7 @@ pub enum NetEvent {
     MirrorWanted(bool),
     /// Whether PC sound comes to the headset.
     AudioWanted(bool),
+    MicWanted(bool),
     /// Left-to-right order of the Quest monitors.
     Order(Vec<u8>),
     /// A request failed on the host; shown in the menu.
@@ -547,6 +548,8 @@ fn run_session(
     let mut streams: HashMap<u8, StreamSlot> = HashMap::new();
     // Started on the first sound slice, stopped with the session.
     let mut player: Option<crate::audio::Player> = None;
+    // Runs only while a PC app records from the headset microphone.
+    let mut _recorder: Option<crate::mic::Recorder> = None;
     let result = loop {
         let msg = match HostMsg::read(&mut reader) {
             Ok(m) => m,
@@ -635,6 +638,12 @@ fn run_session(
                     player = None;
                 }
                 let _ = events.send(NetEvent::AudioWanted(enabled));
+            }
+            HostMsg::MicWanted { enabled } => {
+                let _ = events.send(NetEvent::MicWanted(enabled));
+            }
+            HostMsg::MicActive { active } => {
+                _recorder = active.then(|| crate::mic::Recorder::start(feedback.clone()));
             }
             HostMsg::Welcome { .. }
             | HostMsg::PairingRequired

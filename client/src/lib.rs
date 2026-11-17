@@ -21,6 +21,8 @@ mod egl;
 #[cfg(target_os = "android")]
 mod input;
 #[cfg(target_os = "android")]
+mod mic;
+#[cfg(target_os = "android")]
 mod net;
 #[cfg(target_os = "android")]
 mod overlay;

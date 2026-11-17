@@ -160,6 +160,8 @@ fn main() -> Result<()> {
                 audio.write_all(&pcm)?;
             }
             HostMsg::AudioWanted { enabled } => println!("sound to headset: {enabled}"),
+            HostMsg::MicWanted { enabled } => println!("headset microphone wanted: {enabled}"),
+            HostMsg::MicActive { active } => println!("PC is recording: {active}"),
             HostMsg::PairingRequired | HostMsg::PairMsg { .. } | HostMsg::PairResult { .. } => {}
             HostMsg::Welcome { .. } => {}
         }

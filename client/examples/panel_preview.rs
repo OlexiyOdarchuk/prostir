@@ -56,6 +56,7 @@ fn main() {
         primary: Some(1),
         mirror_wanted: true,
         audio_wanted: true,
+        mic_wanted: true,
         mirror_active: true,
         settings: Settings::default(),
         room_available: true,

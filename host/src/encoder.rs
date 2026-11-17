@@ -208,6 +208,19 @@ impl Encoder {
         }
     }
 
+    /// Stops capturing and encoding (headset not worn) or resumes with a fresh keyframe.
+    pub fn set_paused(&self, paused: bool) {
+        let state = if paused {
+            gst::State::Paused
+        } else {
+            gst::State::Playing
+        };
+        let _ = self.pipeline.set_state(state);
+        if !paused {
+            self.force_keyframe();
+        }
+    }
+
     /// Asks the encoder to emit an IDR frame (with parameter sets) as soon as possible.
     pub fn force_keyframe(&self) {
         request_keyframe(&self.sink);

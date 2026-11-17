@@ -121,6 +121,7 @@ impl Control {
             connected: via,
             monitors: displays.map_or(0, Displays::monitor_count),
             mirror: displays.is_some_and(Displays::mirror_active),
+            paused: displays.is_some_and(|d| !d.streaming()),
         };
         if self.shown.as_ref() != Some(&status) {
             tray::set_status(self.tray.as_ref(), status.clone());
@@ -189,7 +190,10 @@ fn serve_client(
     displays.router.send(HostMsg::AudioWanted {
         enabled: displays.audio_wanted(),
     });
-    displays.set_audio_active(true);
+    displays.router.send(HostMsg::MicWanted {
+        enabled: displays.mic_wanted(),
+    });
+    displays.set_streaming(true);
     displays.force_keyframes();
 
     // Housekeeping runs on a clock: the headset acknowledges every frame, so the
@@ -238,6 +242,12 @@ fn serve_client(
                 Ok(()) => displays.save(),
                 Err(e) => report(displays, format!("{e:#}")),
             },
+            Ok(Ok(ClientMsg::Mic { pcm })) => displays.push_mic(pcm),
+            Ok(Ok(ClientMsg::Presence { worn })) => displays.set_streaming(worn),
+            Ok(Ok(ClientMsg::SetMic { enabled })) => {
+                displays.set_mic_wanted(enabled);
+                displays.save();
+            }
             Ok(Ok(ClientMsg::SetAudio { enabled })) => {
                 displays.set_audio_wanted(enabled);
                 displays.save();
@@ -258,7 +268,7 @@ fn serve_client(
             Err(RecvTimeoutError::Disconnected) => break Ok(()),
         }
     };
-    displays.set_audio_active(false);
+    displays.set_streaming(false);
     displays.router.detach();
     let _ = stream.shutdown(Shutdown::Both);
     let _ = writer_thread.join();
@@ -386,6 +396,7 @@ fn create_displays(args: &Args, bitrate: u32) -> Result<Displays> {
             primary: None,
             mirror,
             audio: true,
+            mic: true,
             bitrate: None,
         },
         _ => SavedMonitors {
@@ -393,6 +404,7 @@ fn create_displays(args: &Args, bitrate: u32) -> Result<Displays> {
             primary: None,
             mirror,
             audio: true,
+            mic: true,
             bitrate: None,
         },
     };

@@ -11,7 +11,7 @@ use anyhow::{Result, bail};
 use log::{debug, error, info, warn};
 use prostir_proto::{Codec, HostMsg, MIRROR_ID};
 
-use crate::audio::AudioOut;
+use crate::audio::{AudioOut, MicIn};
 use crate::encoder::{Encoder, EncoderConfig, EncoderEvent};
 use crate::virtual_output::{self, MonitorSpec, Screencast, VirtualOutput};
 
@@ -267,6 +267,8 @@ pub struct SavedMonitors {
     pub mirror: bool,
     /// PC sound goes to the headset while it is connected.
     pub audio: bool,
+    /// The headset microphone is the PC's microphone while it is connected.
+    pub mic: bool,
     /// Mbit/s per monitor, if chosen in the tray.
     pub bitrate: Option<u32>,
 }
@@ -290,10 +292,15 @@ pub fn load_saved(parse: impl Fn(&str) -> Result<MonitorSpec, String>) -> Option
     let mut primary = None;
     let mut mirror = true;
     let mut audio = true;
+    let mut mic = true;
     let mut bitrate = None;
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
         if let Some(v) = line.strip_prefix("bitrate ") {
             bitrate = v.trim().parse().ok();
+            continue;
+        }
+        if let Some(v) = line.strip_prefix("mic ") {
+            mic = v.trim() != "off";
             continue;
         }
         if let Some(v) = line.strip_prefix("audio ") {
@@ -320,6 +327,7 @@ pub fn load_saved(parse: impl Fn(&str) -> Result<MonitorSpec, String>) -> Option
         primary,
         mirror,
         audio,
+        mic,
         bitrate,
     })
 }
@@ -335,6 +343,12 @@ pub struct Displays {
     /// PC sound to the headset, while one is connected.
     audio: Option<AudioOut>,
     audio_wanted: bool,
+    mic: Option<MicIn>,
+    mic_wanted: bool,
+    /// Last state told to the headset: a PC app is recording.
+    mic_recording: bool,
+    /// Connected and worn (encoders running).
+    streaming: bool,
     /// Last time the laptop panel was switched back on (to avoid fighting the user).
     woke_display_at: Option<Instant>,
     screencast: Screencast,
@@ -354,6 +368,10 @@ impl Displays {
             mirror_wanted: saved.mirror,
             audio: None,
             audio_wanted: saved.audio,
+            mic: None,
+            mic_wanted: saved.mic,
+            mic_recording: false,
+            streaming: true,
             mirror_retry: Instant::now(),
             woke_display_at: None,
             screencast: Screencast::connect()?,
@@ -413,6 +431,7 @@ impl Displays {
     /// Keeps the mirror in step with the physical display: it disappears when the
     /// laptop lid closes and comes back when it opens.
     pub fn tick(&mut self) {
+        self.sync_audio();
         let broken = self.router.mirror_failed.swap(false, Ordering::Relaxed);
         if self
             .mirror
@@ -502,23 +521,78 @@ impl Displays {
         self.mirror.is_some()
     }
 
-    /// Starts or stops sending PC sound (only while a headset is connected).
-    pub fn set_audio_active(&mut self, active: bool) {
-        let active = active && self.audio_wanted;
-        if active && self.audio.is_none() {
+    /// Streams while a headset is connected and worn; otherwise the encoders pause and
+    /// sound and microphone go back to the PC (the monitors and windows stay).
+    pub fn set_streaming(&mut self, on: bool) {
+        if on != self.streaming {
+            self.streaming = on;
+            info!(
+                "{}",
+                if on {
+                    "streaming"
+                } else {
+                    "paused: headset not worn or gone"
+                }
+            );
+            for (_, e) in self.encoders() {
+                e.set_paused(!on);
+            }
+        }
+        self.sync_audio();
+    }
+
+    pub fn streaming(&self) -> bool {
+        self.streaming
+    }
+
+    /// Starts or stops PC sound and microphone to match the wishes and the state.
+    fn sync_audio(&mut self) {
+        let audio = self.streaming && self.audio_wanted;
+        if audio && self.audio.is_none() {
             match AudioOut::start(self.router.clone()) {
                 Ok(a) => self.audio = Some(a),
                 Err(e) => warn!("no sound in the headset: {e:#}"),
             }
-        } else if !active {
+        } else if !audio {
             self.audio = None;
+        }
+        let mic = self.streaming && self.mic_wanted;
+        if mic && self.mic.is_none() {
+            match MicIn::start() {
+                Ok(m) => self.mic = Some(m),
+                Err(e) => warn!("no headset microphone: {e:#}"),
+            }
+        } else if !mic {
+            self.mic = None;
+        }
+        // The headset records only while some PC app listens.
+        let recording = self.mic.as_ref().is_some_and(MicIn::in_use);
+        if recording != self.mic_recording {
+            self.mic_recording = recording;
+            self.router.send(HostMsg::MicActive { active: recording });
+        }
+    }
+
+    pub fn push_mic(&self, pcm: Vec<u8>) {
+        if let Some(m) = &self.mic {
+            m.push(pcm);
         }
     }
 
     pub fn set_audio_wanted(&mut self, enabled: bool) {
         self.audio_wanted = enabled;
-        self.set_audio_active(enabled);
+        self.sync_audio();
         self.router.send(HostMsg::AudioWanted { enabled });
+    }
+
+    pub fn set_mic_wanted(&mut self, enabled: bool) {
+        self.mic_wanted = enabled;
+        self.sync_audio();
+        self.router.send(HostMsg::MicWanted { enabled });
+    }
+
+    pub fn mic_wanted(&self) -> bool {
+        self.mic_wanted
     }
 
     pub fn audio_wanted(&self) -> bool {
@@ -697,9 +771,10 @@ impl Displays {
                 format!("{}{star}\n", m.spec)
             })
             .chain(std::iter::once(format!(
-                "mirror {}\naudio {}\nbitrate {}\n",
+                "mirror {}\naudio {}\nmic {}\nbitrate {}\n",
                 if self.mirror_wanted { "on" } else { "off" },
                 if self.audio_wanted { "on" } else { "off" },
+                if self.mic_wanted { "on" } else { "off" },
                 self.cfg.bitrate_kbps / 1000
             )))
             .collect();

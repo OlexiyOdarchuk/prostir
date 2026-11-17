@@ -1,0 +1,194 @@
+//! Headset microphone to the PC: captured with AAudio only while a PC app is
+//! recording, in 10 ms slices.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+use jni::objects::{JObject, JValue};
+use log::{info, warn};
+use ndk_sys as ffi;
+use prostir_proto::{AUDIO_RATE, ClientMsg, MIC_CHANNELS};
+
+use crate::net::Feedback;
+
+const PERMISSION: &str = "android.permission.RECORD_AUDIO";
+/// 10 ms per slice.
+const FRAMES: usize = AUDIO_RATE as usize / 100;
+
+/// Records until dropped.
+pub struct Recorder {
+    stop: Arc<AtomicBool>,
+}
+
+impl Recorder {
+    pub fn start(feedback: Feedback) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        std::thread::Builder::new()
+            .name("mic".into())
+            .spawn(move || {
+                if !ensure_permission(&flag) {
+                    return;
+                }
+                match Input::open() {
+                    Ok(input) => record(&input, &feedback, &flag),
+                    Err(e) => warn!("no microphone: AAudio error {e}"),
+                }
+            })
+            .expect("spawn mic thread");
+        Self { stop }
+    }
+}
+
+impl Drop for Recorder {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+fn record(input: &Input, feedback: &Feedback, stop: &AtomicBool) {
+    let mut buf = vec![0i16; FRAMES * MIC_CHANNELS as usize];
+    info!("headset microphone on");
+    while !stop.load(Ordering::Relaxed) {
+        match input.read(&mut buf) {
+            Ok(0) => continue,
+            Ok(frames) => {
+                let pcm: Vec<u8> = buf[..frames * MIC_CHANNELS as usize]
+                    .iter()
+                    .flat_map(|s| s.to_le_bytes())
+                    .collect();
+                if feedback.send(&ClientMsg::Mic { pcm }).is_err() {
+                    break;
+                }
+            }
+            Err(e) => {
+                warn!("microphone: AAudio error {e}");
+                break;
+            }
+        }
+    }
+    info!("headset microphone off");
+}
+
+/// Asks for the microphone permission once (the headset shows a system dialog) and
+/// waits up to a minute for the answer.
+fn ensure_permission(stop: &AtomicBool) -> bool {
+    if has_permission() {
+        return true;
+    }
+    request_permission();
+    let until = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < until && !stop.load(Ordering::Relaxed) {
+        std::thread::sleep(Duration::from_millis(500));
+        if has_permission() {
+            return true;
+        }
+    }
+    warn!("no microphone permission");
+    false
+}
+
+fn with_activity<T>(
+    f: impl FnOnce(&mut jni::JNIEnv, &JObject) -> jni::errors::Result<T>,
+) -> Option<T> {
+    let ctx = ndk_context::android_context();
+    // SAFETY: the VM and activity come from the running NativeActivity.
+    let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }.ok()?;
+    let mut env = vm.attach_current_thread_permanently().ok()?;
+    let activity = unsafe { JObject::from_raw(ctx.context().cast()) };
+    let result = f(&mut env, &activity);
+    if result.is_err() {
+        let _ = env.exception_describe();
+        let _ = env.exception_clear();
+    }
+    result.ok()
+}
+
+fn has_permission() -> bool {
+    with_activity(|env, activity| {
+        let name = env.new_string(PERMISSION)?;
+        let granted = env
+            .call_method(
+                activity,
+                "checkSelfPermission",
+                "(Ljava/lang/String;)I",
+                &[JValue::Object(&name)],
+            )?
+            .i()?;
+        Ok(granted == 0) // PackageManager.PERMISSION_GRANTED
+    })
+    .unwrap_or(false)
+}
+
+fn request_permission() {
+    with_activity(|env, activity| {
+        let name = env.new_string(PERMISSION)?;
+        let list = env.new_object_array(1, "java/lang/String", &name)?;
+        env.call_method(
+            activity,
+            "requestPermissions",
+            "([Ljava/lang/String;I)V",
+            &[JValue::Object(&list), JValue::Int(1)],
+        )?;
+        Ok(())
+    });
+}
+
+/// An AAudio input stream (through `ndk-sys`, like the player).
+struct Input(*mut ffi::AAudioStream);
+
+// SAFETY: used by the mic thread only.
+unsafe impl Send for Input {}
+
+impl Input {
+    fn open() -> Result<Self, i32> {
+        // SAFETY: plain AAudio calls; the builder is deleted on every path.
+        unsafe {
+            let mut builder = std::ptr::null_mut();
+            check(ffi::AAudio_createStreamBuilder(&mut builder))?;
+            ffi::AAudioStreamBuilder_setDirection(builder, ffi::AAUDIO_DIRECTION_INPUT as i32);
+            ffi::AAudioStreamBuilder_setFormat(builder, ffi::AAUDIO_FORMAT_PCM_I16);
+            ffi::AAudioStreamBuilder_setChannelCount(builder, MIC_CHANNELS as i32);
+            ffi::AAudioStreamBuilder_setSampleRate(builder, AUDIO_RATE as i32);
+            ffi::AAudioStreamBuilder_setPerformanceMode(
+                builder,
+                ffi::AAUDIO_PERFORMANCE_MODE_LOW_LATENCY as i32,
+            );
+            ffi::AAudioStreamBuilder_setInputPreset(
+                builder,
+                ffi::AAUDIO_INPUT_PRESET_VOICE_COMMUNICATION as i32,
+            );
+            let mut stream = std::ptr::null_mut();
+            let opened = ffi::AAudioStreamBuilder_openStream(builder, &mut stream);
+            ffi::AAudioStreamBuilder_delete(builder);
+            check(opened)?;
+            let input = Self(stream);
+            check(ffi::AAudioStream_requestStart(stream))?;
+            Ok(input)
+        }
+    }
+
+    /// Reads up to `buf.len()` samples, waiting at most 100 ms; returns frames read.
+    fn read(&self, buf: &mut [i16]) -> Result<usize, i32> {
+        let frames = (buf.len() / MIC_CHANNELS as usize) as i32;
+        // SAFETY: `buf` has room for `frames` frames; the stream is open.
+        let n =
+            unsafe { ffi::AAudioStream_read(self.0, buf.as_mut_ptr().cast(), frames, 100_000_000) };
+        if n < 0 { Err(n) } else { Ok(n as usize) }
+    }
+}
+
+impl Drop for Input {
+    fn drop(&mut self) {
+        // SAFETY: opened by `Input::open`, closed once.
+        unsafe {
+            ffi::AAudioStream_requestStop(self.0);
+            ffi::AAudioStream_close(self.0);
+        }
+    }
+}
+
+fn check(result: i32) -> Result<(), i32> {
+    if result < 0 { Err(result) } else { Ok(()) }
+}

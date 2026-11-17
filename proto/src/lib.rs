@@ -10,10 +10,12 @@ use std::io::{self, Read, Write};
 
 pub const TCP_PORT: u16 = 47830;
 pub const DISCOVERY_PORT: u16 = 47831;
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 /// PC sound sent to the headset: interleaved signed 16-bit little-endian stereo.
 pub const AUDIO_RATE: u32 = 48_000;
 pub const AUDIO_CHANNELS: u32 = 2;
+/// Headset microphone sent to the PC: interleaved signed 16-bit little-endian mono.
+pub const MIC_CHANNELS: u32 = 1;
 /// Stream id of the mirrored physical display (laptop panel); Quest monitors use 0..
 pub const MIRROR_ID: u8 = 100;
 /// Prefix of the UDP discovery beacon: `MAGIC ++ tcp_port (u16 LE) ++ hostname (utf-8)`.
@@ -91,6 +93,14 @@ pub enum HostMsg {
     AudioWanted {
         enabled: bool,
     },
+    /// Whether the headset microphone should be the PC's microphone.
+    MicWanted {
+        enabled: bool,
+    },
+    /// A PC app is recording from the headset microphone right now: capture it.
+    MicActive {
+        active: bool,
+    },
     /// The PC does not know this headset yet: pair first.
     PairingRequired,
     /// The PC's SPAKE2 message (see [`secure::Pairing`]).
@@ -141,6 +151,18 @@ pub enum ClientMsg {
     SetAudio {
         enabled: bool,
     },
+    /// Use the headset microphone as the PC's microphone.
+    SetMic {
+        enabled: bool,
+    },
+    /// A slice of headset microphone sound (see [`MIC_CHANNELS`]).
+    Mic {
+        pcm: Vec<u8>,
+    },
+    /// Whether the headset is being worn; streaming pauses while it is not.
+    Presence {
+        worn: bool,
+    },
     /// Start pairing. `headset_shows`: the headset displays the code and the PC asks
     /// for it; otherwise the PC displays it and the headset asks.
     PairBegin {
@@ -171,6 +193,8 @@ mod tag {
     pub const PAIR_RESULT: u8 = 11;
     pub const AUDIO: u8 = 12;
     pub const AUDIO_WANTED: u8 = 13;
+    pub const MIC_WANTED: u8 = 14;
+    pub const MIC_ACTIVE: u8 = 15;
     pub const HELLO: u8 = 101;
     pub const REQUEST_KEYFRAME: u8 = 102;
     pub const FRAME_SHOWN: u8 = 103;
@@ -183,6 +207,9 @@ mod tag {
     pub const PAIR_MSG_CLIENT: u8 = 110;
     pub const PAIR_CONFIRM: u8 = 111;
     pub const SET_AUDIO: u8 = 112;
+    pub const SET_MIC: u8 = 113;
+    pub const MIC: u8 = 114;
+    pub const PRESENCE: u8 = 115;
 }
 
 fn invalid(msg: &str) -> io::Error {
@@ -275,6 +302,8 @@ impl HostMsg {
             HostMsg::Order { ids } => write_frame(w, tag::ORDER, &[ids]),
             HostMsg::PairingRequired => write_frame(w, tag::PAIRING_REQUIRED, &[]),
             HostMsg::Audio { pcm } => write_frame(w, tag::AUDIO, &[pcm]),
+            HostMsg::MicWanted { enabled } => write_frame(w, tag::MIC_WANTED, &[&[*enabled as u8]]),
+            HostMsg::MicActive { active } => write_frame(w, tag::MIC_ACTIVE, &[&[*active as u8]]),
             HostMsg::AudioWanted { enabled } => {
                 write_frame(w, tag::AUDIO_WANTED, &[&[*enabled as u8]])
             }
@@ -322,6 +351,12 @@ impl HostMsg {
             tag::STREAM_END => HostMsg::StreamEnd { id: c.u8()? },
             tag::PRIMARY_CHANGED => HostMsg::PrimaryChanged { id: c.u8()? },
             tag::PAIRING_REQUIRED => HostMsg::PairingRequired,
+            tag::MIC_WANTED => HostMsg::MicWanted {
+                enabled: c.u8()? != 0,
+            },
+            tag::MIC_ACTIVE => HostMsg::MicActive {
+                active: c.u8()? != 0,
+            },
             tag::AUDIO => HostMsg::Audio {
                 pcm: c.rest().to_vec(),
             },
@@ -375,6 +410,9 @@ impl ClientMsg {
             ),
             ClientMsg::PairMsg { msg } => write_frame(w, tag::PAIR_MSG_CLIENT, &[msg]),
             ClientMsg::SetAudio { enabled } => write_frame(w, tag::SET_AUDIO, &[&[*enabled as u8]]),
+            ClientMsg::SetMic { enabled } => write_frame(w, tag::SET_MIC, &[&[*enabled as u8]]),
+            ClientMsg::Mic { pcm } => write_frame(w, tag::MIC, &[pcm]),
+            ClientMsg::Presence { worn } => write_frame(w, tag::PRESENCE, &[&[*worn as u8]]),
             ClientMsg::PairConfirm { tag } => write_frame(w, tag::PAIR_CONFIRM, &[tag]),
             ClientMsg::SetMirror { enabled } => {
                 write_frame(w, tag::SET_MIRROR, &[&[*enabled as u8]])
@@ -402,6 +440,13 @@ impl ClientMsg {
                 headset_shows: c.u8()? != 0,
                 name: String::from_utf8_lossy(c.rest()).into_owned(),
             },
+            tag::SET_MIC => ClientMsg::SetMic {
+                enabled: c.u8()? != 0,
+            },
+            tag::MIC => ClientMsg::Mic {
+                pcm: c.rest().to_vec(),
+            },
+            tag::PRESENCE => ClientMsg::Presence { worn: c.u8()? != 0 },
             tag::SET_AUDIO => ClientMsg::SetAudio {
                 enabled: c.u8()? != 0,
             },
@@ -467,6 +512,8 @@ mod tests {
                 pcm: vec![0, 1, 2, 3],
             },
             HostMsg::AudioWanted { enabled: false },
+            HostMsg::MicWanted { enabled: true },
+            HostMsg::MicActive { active: true },
             HostMsg::PairMsg { msg: vec![4, 5] },
             HostMsg::PairResult {
                 ok: true,
@@ -518,6 +565,11 @@ mod tests {
             ClientMsg::PairMsg { msg: vec![1, 2, 3] },
             ClientMsg::PairConfirm { tag: vec![9; 32] },
             ClientMsg::SetAudio { enabled: true },
+            ClientMsg::SetMic { enabled: false },
+            ClientMsg::Mic {
+                pcm: vec![1, 0, 2, 0],
+            },
+            ClientMsg::Presence { worn: true },
         ] {
             let mut buf = Vec::new();
             m.write(&mut buf).unwrap();
