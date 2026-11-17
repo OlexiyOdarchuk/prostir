@@ -59,10 +59,8 @@ impl Passthrough {
         };
         let mut feature = xr::sys::PassthroughFB::NULL;
         // SAFETY: valid session, create info and out-pointer.
-        check(
-            unsafe { (fp.create_passthrough)(session.as_raw(), &info, &mut feature) },
-            "xrCreatePassthroughFB",
-        )?;
+        let created = unsafe { (fp.create_passthrough)(session.as_raw(), &info, &mut feature) };
+        check(created, "xrCreatePassthroughFB")?;
         let mut this = Self {
             fp,
             mesh_fp: exts.fb_triangle_mesh,
@@ -92,10 +90,9 @@ impl Passthrough {
         };
         let mut layer = xr::sys::PassthroughLayerFB::NULL;
         // SAFETY: `feature` belongs to this session.
-        check(
-            unsafe { (self.fp.create_passthrough_layer)(self.session, &info, &mut layer) },
-            "xrCreatePassthroughLayerFB",
-        )?;
+        let created =
+            unsafe { (self.fp.create_passthrough_layer)(self.session, &info, &mut layer) };
+        check(created, "xrCreatePassthroughLayerFB")?;
         Ok(layer)
     }
 
@@ -152,10 +149,8 @@ impl Passthrough {
         let Some((pose, width, depth)) = place else {
             if let Some(w) = self.window.as_mut().filter(|w| w.shown) {
                 // SAFETY: the layer is alive for the lifetime of `self`.
-                check(
-                    unsafe { (self.fp.passthrough_layer_pause)(w.layer) },
-                    "xrPassthroughLayerPauseFB",
-                )?;
+                let paused = unsafe { (self.fp.passthrough_layer_pause)(w.layer) };
+                check(paused, "xrPassthroughLayerPauseFB")?;
                 w.shown = false;
             }
             return self.update_cameras();
@@ -172,10 +167,8 @@ impl Passthrough {
         let w = self.window.as_mut().expect("created above");
         if !w.shown {
             // SAFETY: the layer is alive for the lifetime of `self`.
-            check(
-                unsafe { (self.fp.passthrough_layer_resume)(w.layer) },
-                "xrPassthroughLayerResumeFB",
-            )?;
+            let resumed = unsafe { (self.fp.passthrough_layer_resume)(w.layer) };
+            check(resumed, "xrPassthroughLayerResumeFB")?;
             w.shown = true;
         }
         let transform = xr::sys::GeometryInstanceTransformFB {

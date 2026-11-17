@@ -37,7 +37,11 @@ fn symbol<T>(lib: *mut c_void, name: &str) -> Option<T> {
     let name = CString::new(name).ok()?;
     // SAFETY: `lib` is a live handle; the symbol has the signature `T` per the SDK.
     let ptr = unsafe { libc::dlsym(lib, name.as_ptr()) };
-    (!ptr.is_null()).then(|| unsafe { std::mem::transmute_copy::<*mut c_void, T>(&ptr) })
+    (!ptr.is_null()).then(|| {
+        // SAFETY: `T` is a function pointer type of the same size as `ptr`, matching
+        // the exported symbol's C signature.
+        unsafe { std::mem::transmute_copy::<*mut c_void, T>(&ptr) }
+    })
 }
 
 impl Entitlement {
@@ -85,6 +89,7 @@ impl Entitlement {
             if msg.is_null() {
                 break;
             }
+            // SAFETY: `msg` is a live message from `pop`, freed exactly once here.
             unsafe {
                 if (self.get_type)(msg) == ENTITLEMENT_MESSAGE {
                     self.answer = Some(!(self.is_error)(msg));

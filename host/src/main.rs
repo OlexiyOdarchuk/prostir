@@ -1,3 +1,5 @@
+// Every unsafe block says why it is sound.
+#![deny(clippy::undocumented_unsafe_blocks)]
 mod audio;
 mod displays;
 mod encoder;

@@ -96,6 +96,7 @@ fn with_activity<T>(
     // SAFETY: the VM and activity come from the running NativeActivity.
     let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }.ok()?;
     let mut env = vm.attach_current_thread_permanently().ok()?;
+    // SAFETY: the activity object stays alive while the app runs.
     let activity = unsafe { JObject::from_raw(ctx.context().cast()) };
     let result = f(&mut env, &activity);
     if result.is_err() {

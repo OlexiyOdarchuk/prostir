@@ -5,6 +5,9 @@
 //! pass through this app's GPU code and text stays as sharp as the compositor
 //! can make it.
 
+// Every unsafe block says why it is sound.
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 pub mod background;
 pub mod i18n;
 pub mod layout;

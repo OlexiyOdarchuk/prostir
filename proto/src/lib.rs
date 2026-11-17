@@ -4,6 +4,9 @@
 //! The client connects over TCP (USB via `adb reverse`, or Wi-Fi after
 //! discovering the host through a UDP broadcast beacon).
 
+// Everything here parses data from the network: no unsafe code at all.
+#![forbid(unsafe_code)]
+
 pub mod secure;
 
 use std::io::{self, Read, Write};
