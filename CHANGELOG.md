@@ -41,3 +41,7 @@ First public version.
 - Menu → Monitors → "Bring everything in front of me" lays everything out where you look.
 - The version is shown in the tray, in the headset menu and in the logs; the APK takes
   it from Cargo.toml.
+- Fixed: after switching profiles, the Plasma panel could stay on the former primary
+  monitor; Prostir now checks Plasma's screen order and corrects it.
+- Fixed: touching the menu could also trigger a pinch while pulling the hand back,
+  pressing a second button.
