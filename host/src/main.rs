@@ -495,7 +495,11 @@ fn main() -> Result<()> {
     let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, args.port))
         .with_context(|| format!("cannot listen on port {}", args.port))?;
     listener.set_nonblocking(true)?;
-    info!("waiting for the headset on port {}", args.port);
+    info!(
+        "Prostir {} waiting for the headset on port {}",
+        env!("CARGO_PKG_VERSION"),
+        args.port
+    );
     if !args.no_discovery {
         spawn_discovery(args.port)?;
     }

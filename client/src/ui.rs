@@ -314,6 +314,15 @@ impl Panel {
 
         // Header.
         items.push(text(44.0, 70.0, 34.0, true, TEXT, "Prostir"));
+        let title_w = self.text_width("Prostir", 34.0, true);
+        items.push(text(
+            44.0 + title_w + 12.0,
+            70.0,
+            18.0,
+            false,
+            MUTED,
+            env!("CARGO_PKG_VERSION"),
+        ));
         let status = match &s.host {
             _ if s.pairing.is_some() => l.t("Сполучення…", "Pairing…").to_owned(),
             Some(h) => format!("{} {h}", l.t("Підключено до", "Connected to")),

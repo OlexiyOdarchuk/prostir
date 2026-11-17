@@ -183,7 +183,7 @@ impl ksni::Tray for Tray {
 
     fn tool_tip(&self) -> ToolTip {
         ToolTip {
-            title: "Prostir".into(),
+            title: format!("Prostir {}", env!("CARGO_PKG_VERSION")),
             description: match &self.pairing_code {
                 Some(code) => format!("{}: {code}", t("Код сполучення", "Pairing code")),
                 None => format!("{}\n{}", self.status_line(), self.monitors_line()),
@@ -276,6 +276,12 @@ impl ksni::Tray for Tray {
             }
             .into(),
             MenuItem::Separator,
+            StandardItem {
+                label: format!("Prostir {}", env!("CARGO_PKG_VERSION")),
+                enabled: false,
+                ..Default::default()
+            }
+            .into(),
             StandardItem {
                 label: t("Вийти", "Quit").into(),
                 icon_name: "application-exit".into(),

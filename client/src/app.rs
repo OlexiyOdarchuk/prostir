@@ -542,7 +542,8 @@ fn run(app: &AndroidApp) -> Result<()> {
         &platform,
     )?;
     info!(
-        "cylinder layers: {}, equirect: {}, hand interaction: {}",
+        "Prostir {}: cylinder layers: {}, equirect: {}, hand interaction: {}",
+        env!("CARGO_PKG_VERSION"),
         exts.khr_composition_layer_cylinder,
         exts.khr_composition_layer_equirect2,
         exts.ext_hand_interaction

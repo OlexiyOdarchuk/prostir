@@ -38,7 +38,10 @@ unzip -p "$AAR" jni/arm64-v8a/libopenxr_loader.so > "$STAGE/lib/arm64-v8a/libope
 echo ">> packaging with $(basename "$BUILD_TOOLS") / $(basename "$PLATFORM")"
 rm -rf "$OUT/res" && mkdir -p "$OUT/res"
 "$BUILD_TOOLS/aapt2" compile --dir "$ROOT/client/res" -o "$OUT/res"
-link_flags=()
+# The APK version follows the workspace version: 1.2.3 -> versionCode 10203.
+VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
+IFS=. read -r v_major v_minor v_patch <<< "$VERSION"
+link_flags=(--version-name "$VERSION" --version-code "$((v_major * 10000 + v_minor * 100 + v_patch))" --replace-version)
 # PROSTIR_DEBUG=1: debuggable build (adb run-as can read the app's files). Never for releases.
 if [[ "${PROSTIR_DEBUG:-}" == 1 ]]; then
     link_flags+=(--debug-mode)
