@@ -58,7 +58,7 @@ fn pipeline_description(node: u32, cfg: &EncoderConfig) -> String {
         ),
         (Codec::H264, false) => (
             format!(
-                "vapostproc ! video/x-raw(memory:VAMemory),format=NV12 ! vah264enc rate-control=cbr bitrate={} \
+                "vapostproc name=enc_in ! video/x-raw(memory:VAMemory),format=NV12 ! vah264enc rate-control=cbr bitrate={} \
                  key-int-max=600 b-frames=0 ref-frames=1 target-usage=6",
                 cfg.bitrate_kbps
             ),
@@ -67,7 +67,7 @@ fn pipeline_description(node: u32, cfg: &EncoderConfig) -> String {
         ),
         (Codec::H265, _) => (
             format!(
-                "vapostproc ! video/x-raw(memory:VAMemory),format=NV12 ! vah265enc rate-control=cbr bitrate={} \
+                "vapostproc name=enc_in ! video/x-raw(memory:VAMemory),format=NV12 ! vah265enc rate-control=cbr bitrate={} \
                  key-int-max=600 b-frames=0 ref-frames=1 target-usage=6",
                 cfg.bitrate_kbps
             ),
