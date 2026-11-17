@@ -1,0 +1,98 @@
+//! Meta Horizon Store builds only (feature `store`): the entitlement check the store
+//! requires within 10 seconds of launch.
+//!
+//! The Meta Platform SDK is loaded at run time with `dlopen` from the APK's own
+//! libraries (`libovrplatformloader.so`, added by `build-apk.sh` for store builds), so
+//! nothing of it is linked into Prostir. Licensing: see LICENSE-EXCEPTION.md.
+
+use std::ffi::{CString, c_char, c_void};
+
+use log::{info, warn};
+
+/// Prostir's application id on the Meta Horizon Developer Dashboard.
+const APP_ID: &str = match option_env!("PROSTIR_HORIZON_APP_ID") {
+    Some(id) => id,
+    None => "1489021784287834",
+};
+/// `ovrMessage_Entitlement_GetIsViewerEntitled` (OVR_MessageType.h).
+const ENTITLEMENT_MESSAGE: u32 = 0x186B_58B1;
+
+type Init = unsafe extern "C" fn(*const c_char, *mut c_void, *mut c_void) -> i32;
+type Request = unsafe extern "C" fn() -> u64;
+type Pop = unsafe extern "C" fn() -> *mut c_void;
+type GetType = unsafe extern "C" fn(*const c_void) -> u32;
+type IsError = unsafe extern "C" fn(*const c_void) -> bool;
+type Free = unsafe extern "C" fn(*mut c_void);
+
+/// The running check: poll it every frame until it answers.
+pub struct Entitlement {
+    pop: Pop,
+    get_type: GetType,
+    is_error: IsError,
+    free: Free,
+    answer: Option<bool>,
+}
+
+fn symbol<T>(lib: *mut c_void, name: &str) -> Option<T> {
+    let name = CString::new(name).ok()?;
+    // SAFETY: `lib` is a live handle; the symbol has the signature `T` per the SDK.
+    let ptr = unsafe { libc::dlsym(lib, name.as_ptr()) };
+    (!ptr.is_null()).then(|| unsafe { std::mem::transmute_copy::<*mut c_void, T>(&ptr) })
+}
+
+impl Entitlement {
+    /// Initializes the platform and asks whether the user owns the app. `None` means
+    /// the check could not even start: treat it as a failure.
+    pub fn start() -> Option<Self> {
+        let name = CString::new("libovrplatformloader.so").ok()?;
+        // SAFETY: plain dlopen; the handle is kept for the life of the process.
+        let lib = unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_NOW) };
+        if lib.is_null() {
+            warn!("store: libovrplatformloader.so is missing");
+            return None;
+        }
+        let init: Init = symbol(lib, "ovr_PlatformInitializeAndroid")?;
+        let request: Request = symbol(lib, "ovr_Entitlement_GetIsViewerEntitled")?;
+        let this = Self {
+            pop: symbol(lib, "ovr_PopMessage")?,
+            get_type: symbol(lib, "ovr_Message_GetType")?,
+            is_error: symbol(lib, "ovr_Message_IsError")?,
+            free: symbol(lib, "ovr_FreeMessage")?,
+            answer: None,
+        };
+        let ctx = ndk_context::android_context();
+        // SAFETY: the VM and activity come from the running NativeActivity.
+        let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }.ok()?;
+        let env = vm.attach_current_thread_permanently().ok()?;
+        let app_id = CString::new(APP_ID).ok()?;
+        // SAFETY: valid app id, activity and JNIEnv for this thread.
+        let result = unsafe { init(app_id.as_ptr(), ctx.context(), env.get_raw().cast()) };
+        if result != 0 {
+            warn!("store: platform initialization failed ({result})");
+            return None;
+        }
+        // SAFETY: the platform is initialized.
+        unsafe { request() };
+        info!("store: entitlement check started");
+        Some(this)
+    }
+
+    /// `Some(true)` once the user is entitled, `Some(false)` if not.
+    pub fn poll(&mut self) -> Option<bool> {
+        while self.answer.is_none() {
+            // SAFETY: the SDK owns the message until it is freed below.
+            let msg = unsafe { (self.pop)() };
+            if msg.is_null() {
+                break;
+            }
+            unsafe {
+                if (self.get_type)(msg) == ENTITLEMENT_MESSAGE {
+                    self.answer = Some(!(self.is_error)(msg));
+                    info!("store: entitled: {:?}", self.answer);
+                }
+                (self.free)(msg);
+            }
+        }
+        self.answer
+    }
+}

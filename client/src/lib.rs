@@ -30,5 +30,7 @@ mod net;
 mod overlay;
 #[cfg(target_os = "android")]
 mod passthrough;
+#[cfg(all(target_os = "android", feature = "store"))]
+mod store;
 #[cfg(target_os = "android")]
 mod xrutil;

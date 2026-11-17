@@ -822,6 +822,11 @@ fn run(app: &AndroidApp) -> Result<()> {
 
     let mut hold_since: [Option<Instant>; 2] = [None, None];
     let mut pokes = [Poke::default(); 2];
+    // Store builds: the store requires checking the user owns the app at launch.
+    #[cfg(feature = "store")]
+    let mut entitlement = crate::store::Entitlement::start();
+    #[cfg(feature = "store")]
+    let mut not_entitled_since: Option<Instant> = entitlement.is_none().then(Instant::now);
     let mut session_running = false;
     let mut last_time: Option<xr::Time> = None;
     let mut event_storage = xr::EventDataBuffer::new();
@@ -841,6 +846,28 @@ fn run(app: &AndroidApp) -> Result<()> {
         });
         if destroy {
             break;
+        }
+        #[cfg(feature = "store")]
+        {
+            if entitlement.as_mut().and_then(|e| e.poll()) == Some(false)
+                && not_entitled_since.is_none()
+            {
+                not_entitled_since = Some(Instant::now());
+            }
+            if let Some(since) = not_entitled_since {
+                let what = scene.lang().t(
+                    "Не вдалося підтвердити, що Prostir отримано з Meta Horizon Store",
+                    "Could not confirm Prostir came from the Meta Horizon Store",
+                );
+                if scene.error.as_ref().is_none_or(|(t, _)| t != what) {
+                    scene.show_error(what.into());
+                    scene.panel_open = true;
+                }
+                // Long enough to read, then close as the store expects.
+                if since.elapsed() > Duration::from_secs(6) {
+                    break;
+                }
+            }
         }
         if input_waiting {
             // Android waits for every key event (e.g. the volume buttons) to be taken

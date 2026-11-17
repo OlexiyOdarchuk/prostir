@@ -1748,6 +1748,7 @@ dependencies = [
  "image",
  "jni 0.21.1",
  "khronos-egl",
+ "libc",
  "log",
  "ndk",
  "ndk-context",

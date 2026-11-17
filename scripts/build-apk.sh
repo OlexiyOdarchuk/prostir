@@ -23,6 +23,13 @@ export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TC/aarch64-linux-android$API-
 export CC_aarch64_linux_android="$TC/aarch64-linux-android$API-clang"
 export AR_aarch64_linux_android="$TC/llvm-ar"
 cargo_flags=(-p prostir-client --target aarch64-linux-android)
+# PROSTIR_STORE=1: Meta Horizon Store build, with the entitlement check. Needs the Meta
+# Platform SDK unpacked at PROSTIR_PLATFORM_SDK (its libovrplatformloader.so goes into
+# the APK). Builds from this repository leave both out.
+if [[ "${PROSTIR_STORE:-}" == 1 ]]; then
+    : "${PROSTIR_PLATFORM_SDK:?set PROSTIR_PLATFORM_SDK to the unpacked Meta Platform SDK}"
+    cargo_flags+=(--features store)
+fi
 [[ "$PROFILE" == release ]] && cargo_flags+=(--release)
 (cd "$ROOT" && cargo build "${cargo_flags[@]}")
 cp "$ROOT/target/aarch64-linux-android/$PROFILE/libprostir.so" "$STAGE/lib/arm64-v8a/"
@@ -34,6 +41,13 @@ if [[ ! -f "$AAR" ]]; then
     curl -sfL -o "$AAR" "https://repo1.maven.org/maven2/org/khronos/openxr/openxr_loader_for_android/$LOADER_VERSION/openxr_loader_for_android-$LOADER_VERSION.aar"
 fi
 unzip -p "$AAR" jni/arm64-v8a/libopenxr_loader.so > "$STAGE/lib/arm64-v8a/libopenxr_loader.so"
+APK=prostir.apk
+rm -f "$STAGE/lib/arm64-v8a/libovrplatformloader.so"
+if [[ "${PROSTIR_STORE:-}" == 1 ]]; then
+    cp "$PROSTIR_PLATFORM_SDK/Android/libs/arm64-v8a/libovrplatformloader.so" "$STAGE/lib/arm64-v8a/"
+    APK=prostir-store.apk
+    echo ">> store build: Meta Platform SDK included"
+fi
 
 echo ">> packaging with $(basename "$BUILD_TOOLS") / $(basename "$PLATFORM")"
 rm -rf "$OUT/res" && mkdir -p "$OUT/res"
@@ -75,11 +89,11 @@ if [[ ! -f "$KEYSTORE" ]]; then
 fi
 "$BUILD_TOOLS/apksigner" sign --ks "$KEYSTORE" --ks-key-alias "$KEY_ALIAS" \
     --ks-pass "pass:$KEYSTORE_PASS" --key-pass "pass:$KEY_PASS" \
-    --out "$OUT/prostir.apk" "$OUT/aligned.apk"
-rm -f "$OUT/unaligned.apk" "$OUT/aligned.apk" "$OUT/prostir.apk.idsig"
-echo ">> $OUT/prostir.apk"
+    --out "$OUT/$APK" "$OUT/aligned.apk"
+rm -f "$OUT/unaligned.apk" "$OUT/aligned.apk" "$OUT/$APK.idsig"
+echo ">> $OUT/$APK"
 
 if [[ "${1:-}" == "--install" ]]; then
-    adb install -r "$OUT/prostir.apk"
+    adb install -r "$OUT/$APK"
     adb shell am start -n dev.prostir.client/android.app.NativeActivity
 fi
