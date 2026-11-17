@@ -144,6 +144,10 @@ struct Scene {
     focus: Option<u8>,
     /// Current brightness of each monitor, easing towards 1 or the dimmed level.
     brightness: HashMap<u8, f32>,
+    /// Where each monitor is drawn: follows `placements`, easing into new spots.
+    shown: HashMap<u8, Placement>,
+    /// How far each monitor has faded in (0 to 1) since it appeared.
+    appear: HashMap<u8, f32>,
     /// The headset is on the head (the session is visible); streaming pauses otherwise.
     worn: bool,
     settings: Settings,
@@ -242,6 +246,37 @@ impl Scene {
         if let Some(p) = all.get(&MIRROR_ID) {
             self.placements.insert(MIRROR_ID, *p);
         }
+    }
+
+    /// Moves the drawn monitors towards their places (held ones follow at once) and
+    /// fades new ones in.
+    fn animate(&mut self, dt: f32, held: &[u8]) {
+        // About a quarter of a second to settle.
+        let k = 1.0 - (-dt * 12.0).exp();
+        for (id, target) in &self.placements {
+            match self.shown.get_mut(id) {
+                Some(s) if !held.contains(id) => {
+                    s.position = s.position.lerp(target.position, k);
+                    s.rotation = s.rotation.slerp(target.rotation, k);
+                    s.width += (target.width - s.width) * k;
+                    if s.position.distance(target.position) < 0.0005 {
+                        *s = *target;
+                    }
+                }
+                Some(s) => *s = *target,
+                None => {
+                    self.shown.insert(*id, *target);
+                }
+            }
+        }
+        let placements = &self.placements;
+        self.shown.retain(|id, _| placements.contains_key(id));
+        for id in self.monitors.keys() {
+            let a = self.appear.entry(*id).or_insert(0.0);
+            *a = (*a + dt / 0.3).min(1.0);
+        }
+        let monitors = &self.monitors;
+        self.appear.retain(|id, _| monitors.contains_key(id));
     }
 
     fn relayout_pending(&self) -> bool {
@@ -667,6 +702,8 @@ fn run(app: &AndroidApp) -> Result<()> {
         mic_wanted: true,
         focus: None,
         brightness: HashMap::new(),
+        shown: HashMap::new(),
+        appear: HashMap::new(),
         worn: true,
         settings,
         curve_supported: exts.khr_composition_layer_cylinder,
@@ -1213,11 +1250,12 @@ fn run(app: &AndroidApp) -> Result<()> {
 
         // Far monitors first so nearer (and grabbed) ones draw on top.
         let grabbed: Vec<u8> = scene.grabs.iter().flatten().map(|g| g.id).collect();
+        scene.animate(dt, &grabbed);
         let mut order: Vec<(f32, u8)> = scene
             .monitors
             .keys()
             .filter_map(|id| {
-                let d = scene.placements.get(id)?.position.distance(head);
+                let d = scene.shown.get(id)?.position.distance(head);
                 Some((if grabbed.contains(id) { -1.0 } else { d }, *id))
             })
             .collect();
@@ -1242,7 +1280,10 @@ fn run(app: &AndroidApp) -> Result<()> {
         let dims: Vec<xr::sys::CompositionLayerColorScaleBiasKHR> = order
             .iter()
             .map(|(_, id)| {
-                let b = scene.brightness.get(id).copied().unwrap_or(1.0);
+                // Fading in: premultiplied, so colour and alpha scale together.
+                let t = scene.appear.get(id).copied().unwrap_or(1.0);
+                let t = t * t * (3.0 - 2.0 * t);
+                let b = scene.brightness.get(id).copied().unwrap_or(1.0) * t;
                 xr::sys::CompositionLayerColorScaleBiasKHR {
                     ty: xr::sys::CompositionLayerColorScaleBiasKHR::TYPE,
                     next: video_next,
@@ -1250,7 +1291,7 @@ fn run(app: &AndroidApp) -> Result<()> {
                         r: b,
                         g: b,
                         b,
-                        a: 1.0,
+                        a: t,
                     },
                     color_bias: xr::Color4f {
                         r: 0.0,
@@ -1264,14 +1305,20 @@ fn run(app: &AndroidApp) -> Result<()> {
         let mut quads = Vec::new();
         let mut cylinders = Vec::new();
         for (i, (_, id)) in order.iter().enumerate() {
-            let next = if exts.khr_composition_layer_color_scale_bias && dims[i].color_scale.r < 1.0
-            {
+            let scale = dims[i].color_scale;
+            let fading = exts.khr_composition_layer_color_scale_bias && scale.a < 1.0;
+            let layer_flags = if fading {
+                xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA
+            } else {
+                xr::CompositionLayerFlags::EMPTY
+            };
+            let next = if exts.khr_composition_layer_color_scale_bias && scale.r < 1.0 {
                 (&dims[i] as *const xr::sys::CompositionLayerColorScaleBiasKHR).cast()
             } else {
                 video_next
             };
             let m = &scene.monitors[id];
-            let p = &scene.placements[id];
+            let p = &scene.shown[id];
             let height = p.width * m.aspect();
             let sub_image = xr::sys::SwapchainSubImage {
                 swapchain: m.swapchain.as_raw(),
@@ -1289,7 +1336,7 @@ fn run(app: &AndroidApp) -> Result<()> {
                 cylinders.push(xr::sys::CompositionLayerCylinderKHR {
                     ty: xr::sys::CompositionLayerCylinderKHR::TYPE,
                     next,
-                    layer_flags: xr::CompositionLayerFlags::EMPTY,
+                    layer_flags,
                     space: local.as_raw(),
                     eye_visibility: xr::EyeVisibility::BOTH,
                     sub_image,
@@ -1302,7 +1349,7 @@ fn run(app: &AndroidApp) -> Result<()> {
                 quads.push(xr::sys::CompositionLayerQuad {
                     ty: xr::sys::CompositionLayerQuad::TYPE,
                     next,
-                    layer_flags: xr::CompositionLayerFlags::EMPTY,
+                    layer_flags,
                     space: local.as_raw(),
                     eye_visibility: xr::EyeVisibility::BOTH,
                     sub_image,
