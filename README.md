@@ -65,8 +65,8 @@ the middle is the primary one and gets the Plasma panel.
 Text stays sharp because the video goes straight into the Quest compositor's own
 layers (`XR_KHR_android_surface_swapchain`) instead of a flat window inside an app.
 The PC encodes with the GPU's video engine (VA-API HEVC on Intel or AMD) and the Quest
-decodes in hardware. Over Wi-Fi a frame takes about 14 ms from the encoder to the
-display on my setup.
+decodes in hardware. Over Wi-Fi an encoded frame reaches the display in about 14 ms
+on my setup; capturing and encoding the screen add a few milliseconds before that.
 
 Monitors can sit on an arc, in a grid, in a column, or above your head for lying down.
 They can be flat or curved, and on an arc they touch edge to edge, so three of them
