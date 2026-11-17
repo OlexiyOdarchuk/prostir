@@ -77,18 +77,20 @@ fn create_surface_swapchain(
         .khr_android_surface_swapchain
         .as_ref()
         .context("XR_KHR_android_surface_swapchain is not enabled")?;
+    // Meta's runtime rejects surface swapchains with a format or non-zero counts
+    // ("info format validation failure"): MediaCodec decides those.
     let info = xr::sys::SwapchainCreateInfo {
         ty: xr::sys::SwapchainCreateInfo::TYPE,
         next: ptr::null(),
         create_flags: xr::SwapchainCreateFlags::EMPTY,
         usage_flags: xr::SwapchainUsageFlags::SAMPLED | xr::SwapchainUsageFlags::COLOR_ATTACHMENT,
         format: 0,
-        sample_count: 1,
+        sample_count: 0,
         width,
         height,
-        face_count: 1,
-        array_size: 1,
-        mip_count: 1,
+        face_count: 0,
+        array_size: 0,
+        mip_count: 0,
     };
     let mut handle = xr::sys::Swapchain::NULL;
     let mut surface = ptr::null_mut();
@@ -240,6 +242,7 @@ fn run(app: &AndroidApp) -> Result<()> {
     exts.fb_passthrough = available.fb_passthrough;
     exts.fb_display_refresh_rate = available.fb_display_refresh_rate;
     exts.fb_composition_layer_settings = available.fb_composition_layer_settings;
+    exts.fb_composition_layer_image_layout = available.fb_composition_layer_image_layout;
     let instance = entry.create_instance(
         &xr::ApplicationInfo {
             application_name: "Quest Monitors",
@@ -531,10 +534,22 @@ fn run(app: &AndroidApp) -> Result<()> {
             layer_flags: xr::sys::CompositionLayerSettingsFlagsFB::QUALITY_SUPER_SAMPLING
                 | xr::sys::CompositionLayerSettingsFlagsFB::QUALITY_SHARPENING,
         };
-        let quality_next = if exts.fb_composition_layer_settings {
+        let quality_next: *const std::ffi::c_void = if exts.fb_composition_layer_settings {
             (&quality as *const xr::sys::CompositionLayerSettingsFB).cast()
         } else {
             ptr::null()
+        };
+        // Android surfaces store rows top-down while the compositor samples them
+        // GL-style (bottom-up), which shows the desktop upside down.
+        let flip = xr::sys::CompositionLayerImageLayoutFB {
+            ty: xr::sys::CompositionLayerImageLayoutFB::TYPE,
+            next: quality_next.cast_mut(),
+            flags: xr::sys::CompositionLayerImageLayoutFlagsFB::VERTICAL_FLIP,
+        };
+        let quad_next = if exts.fb_composition_layer_image_layout {
+            (&flip as *const xr::sys::CompositionLayerImageLayoutFB).cast()
+        } else {
+            quality_next
         };
         let quads: Vec<xr::sys::CompositionLayerQuad> = order
             .iter()
@@ -543,7 +558,7 @@ fn run(app: &AndroidApp) -> Result<()> {
                 let p = &placements[id];
                 xr::sys::CompositionLayerQuad {
                     ty: xr::sys::CompositionLayerQuad::TYPE,
-                    next: quality_next,
+                    next: quad_next,
                     layer_flags: xr::CompositionLayerFlags::EMPTY,
                     space: local.as_raw(),
                     eye_visibility: xr::EyeVisibility::BOTH,
