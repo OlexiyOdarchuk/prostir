@@ -32,7 +32,11 @@ type Gfx = xr::OpenGlEs;
 pub fn android_main(app: AndroidApp) {
     android_logger::init_once(
         android_logger::Config::default()
-            .with_max_level(log::LevelFilter::Info)
+            .with_max_level(if cfg!(debug_assertions) {
+                log::LevelFilter::Debug
+            } else {
+                log::LevelFilter::Info
+            })
             .with_tag("questmon"),
     );
     if let Err(e) = run(&app) {

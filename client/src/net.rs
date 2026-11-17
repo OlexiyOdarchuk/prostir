@@ -11,6 +11,8 @@ use log::{info, warn};
 use qmon_proto::{ClientMsg, Codec, HostMsg, PROTOCOL_VERSION};
 
 pub struct Frame {
+    /// When the frame arrived from the network.
+    pub received: std::time::Instant,
     pub pts_us: u64,
     pub keyframe: bool,
     pub data: Vec<u8>,
@@ -224,6 +226,7 @@ fn run_session(stream: TcpStream, events: &Sender<NetEvent>) -> std::io::Result<
                     continue;
                 }
                 match slot.tx.try_send(Frame {
+                    received: std::time::Instant::now(),
                     pts_us,
                     keyframe,
                     data,
