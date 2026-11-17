@@ -45,14 +45,24 @@ pub enum Background {
     Custom,
 }
 
+/// What tracked hands do in the headset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandMode {
+    /// Not drawn and not tracked by the app (saves rendering every frame).
+    Hidden,
+    /// Drawn, e.g. to see them over the keyboard, but they do not click or drag.
+    Visible,
+    /// Drawn and point, click and drag. Off by default: hands over a keyboard
+    /// would otherwise click things while typing.
+    Control,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Settings {
     pub preset: Preset,
     pub curve: Curve,
     pub background: Background,
-    /// Hands drive the pointer too. Off by default: hands over a keyboard would
-    /// otherwise click and drag things while typing.
-    pub hands: bool,
+    pub hands: HandMode,
 }
 
 impl Default for Settings {
@@ -61,7 +71,7 @@ impl Default for Settings {
             preset: Preset::Arc,
             curve: Curve::Flat,
             background: Background::Black,
-            hands: false,
+            hands: HandMode::Visible,
         }
     }
 }
@@ -89,7 +99,13 @@ impl Settings {
                         _ => Curve::Flat,
                     }
                 }
-                Some(("hands", v)) => s.hands = v == "on",
+                Some(("hands", v)) => {
+                    s.hands = match v {
+                        "hidden" => HandMode::Hidden,
+                        "on" | "control" => HandMode::Control,
+                        _ => HandMode::Visible,
+                    }
+                }
                 Some(("background", v)) => {
                     s.background = match v {
                         "room" => Background::Room,
@@ -128,7 +144,11 @@ impl Settings {
             Background::Sky(Sky::Space) => "sky-space",
             Background::Sky(Sky::Aurora) => "sky-aurora",
         };
-        let hands = if self.hands { "on" } else { "off" };
+        let hands = match self.hands {
+            HandMode::Hidden => "hidden",
+            HandMode::Visible => "visible",
+            HandMode::Control => "control",
+        };
         let text =
             format!("preset {preset}\ncurve {curve}\nbackground {background}\nhands {hands}\n");
         if let Err(e) = std::fs::write(path, text) {
@@ -150,7 +170,7 @@ mod tests {
             preset: Preset::Overhead,
             curve: Curve::Gentle,
             background: Background::Sky(Sky::Aurora),
-            hands: true,
+            hands: HandMode::Control,
         };
         s.save(&path);
         assert_eq!(Settings::load(&path), s);

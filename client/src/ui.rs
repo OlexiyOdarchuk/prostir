@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use fontdue::{Font, FontSettings, Metrics};
 use tiny_skia::{FillRule, Paint, Path, PathBuilder, Pixmap, Rect, Transform};
 
-use crate::settings::{Background, Curve, Preset, Settings, Sky};
+use crate::settings::{Background, Curve, HandMode, Preset, Settings, Sky};
 
 pub const WIDTH: u32 = 1280;
 pub const HEIGHT: u32 = 960;
@@ -61,8 +61,7 @@ pub enum Action {
     Preset(Preset),
     Curve(Curve),
     Background(Background),
-    /// Let tracked hands point and click.
-    Hands(bool),
+    Hands(HandMode),
     Close,
 }
 
@@ -474,10 +473,26 @@ impl Panel {
         segmented(
             &mut items,
             &mut y,
-            "Керування руками",
+            "Руки",
             vec![
-                ("Вимкнено", Action::Hands(false), !st.hands, true),
-                ("Увімкнено", Action::Hands(true), st.hands, true),
+                (
+                    "Сховати",
+                    Action::Hands(HandMode::Hidden),
+                    st.hands == HandMode::Hidden,
+                    true,
+                ),
+                (
+                    "Показувати",
+                    Action::Hands(HandMode::Visible),
+                    st.hands == HandMode::Visible,
+                    true,
+                ),
+                (
+                    "І керувати",
+                    Action::Hands(HandMode::Control),
+                    st.hands == HandMode::Control,
+                    true,
+                ),
             ],
         );
         items

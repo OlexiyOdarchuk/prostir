@@ -26,7 +26,7 @@ use crate::input::Controls;
 use crate::layout::{self, Cylinder, Grab, Hit, Placement, Ray};
 use crate::net::{Feedback, NetEvent};
 use crate::overlay::{self, Overlay, Sphere};
-use crate::settings::{Background, Settings};
+use crate::settings::{Background, HandMode, Settings};
 use crate::ui::{self, Action, MonitorEntry, Panel, UiState};
 use crate::xrutil::{self, Gfx, ImageLayer, as_layer, pose, posef, vec3};
 use crate::{background, decoder, egl, net, passthrough};
@@ -420,7 +420,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         session.create_reference_space(xr::ReferenceSpaceType::LOCAL, xr::Posef::IDENTITY)?;
     let view = session.create_reference_space(xr::ReferenceSpaceType::VIEW, xr::Posef::IDENTITY)?;
     let mut controls = Controls::new(&instance, &session, exts.ext_hand_interaction)?;
-    controls.hands_enabled = settings.hands;
+    controls.hands_enabled = settings.hands == HandMode::Control;
 
     let format = xrutil::color_format(&session);
     let mut panel_layer = ImageLayer::new(&session, format, ui::WIDTH, ui::HEIGHT, false)?;
@@ -742,7 +742,8 @@ fn run(app: &AndroidApp) -> Result<()> {
 
         // Hands and rays: only rendered when there is something to show.
         let mut spheres: Vec<Sphere> = Vec::new();
-        for tracker in hand_trackers.iter().flatten() {
+        let show_hands = scene.settings.hands != HandMode::Hidden;
+        for tracker in hand_trackers.iter().flatten().filter(|_| show_hands) {
             if let Ok(Some(locations)) = local.locate_hand_joints(tracker, time)
                 && let Some(joints) = overlay::joints(&locations)
             {
@@ -1051,10 +1052,10 @@ fn handle_action(
                 scene.confirm_remove = Some((id, Instant::now()));
             }
         }
-        Action::Hands(enabled) => {
-            scene.settings.hands = enabled;
+        Action::Hands(mode) => {
+            scene.settings.hands = mode;
             scene.settings.save(settings_path);
-            controls.hands_enabled = enabled;
+            controls.hands_enabled = mode == HandMode::Control;
         }
         Action::MakePrimary(id) => scene.send(ClientMsg::SetPrimary { id }),
         Action::Move { id, delta } => {
