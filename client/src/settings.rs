@@ -63,6 +63,8 @@ pub struct Settings {
     pub curve: Curve,
     pub background: Background,
     pub hands: HandMode,
+    /// Dim the monitors the mouse is not on.
+    pub focus: bool,
 }
 
 impl Default for Settings {
@@ -72,6 +74,7 @@ impl Default for Settings {
             curve: Curve::Flat,
             background: Background::Black,
             hands: HandMode::Visible,
+            focus: false,
         }
     }
 }
@@ -99,6 +102,7 @@ impl Settings {
                         _ => Curve::Flat,
                     }
                 }
+                Some(("focus", v)) => s.focus = v == "on",
                 Some(("hands", v)) => {
                     s.hands = match v {
                         "hidden" => HandMode::Hidden,
@@ -149,8 +153,10 @@ impl Settings {
             HandMode::Visible => "visible",
             HandMode::Control => "control",
         };
-        let text =
-            format!("preset {preset}\ncurve {curve}\nbackground {background}\nhands {hands}\n");
+        let focus = if self.focus { "on" } else { "off" };
+        let text = format!(
+            "preset {preset}\ncurve {curve}\nbackground {background}\nhands {hands}\nfocus {focus}\n"
+        );
         if let Err(e) = std::fs::write(path, text) {
             log::warn!("cannot save settings to {}: {e}", path.display());
         }
@@ -171,6 +177,7 @@ mod tests {
             curve: Curve::Gentle,
             background: Background::Sky(Sky::Aurora),
             hands: HandMode::Control,
+            focus: true,
         };
         s.save(&path);
         assert_eq!(Settings::load(&path), s);

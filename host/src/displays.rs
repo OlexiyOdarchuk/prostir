@@ -591,6 +591,21 @@ impl Displays {
         self.router.send(HostMsg::MicWanted { enabled });
     }
 
+    /// The id the headset knows an output by (`MIRROR_ID` for the physical display).
+    pub fn id_of_output(&self, name: &str) -> Option<u8> {
+        if let Some((id, _)) = self
+            .monitors
+            .iter()
+            .find(|(_, m)| m.output.output_name() == name)
+        {
+            return Some(*id);
+        }
+        self.mirror
+            .as_ref()
+            .filter(|m| m.output.output_name() == name)
+            .map(|_| MIRROR_ID)
+    }
+
     pub fn mic_wanted(&self) -> bool {
         self.mic_wanted
     }

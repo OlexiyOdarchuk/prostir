@@ -12,7 +12,7 @@ use log::{info, warn};
 use prostir_proto::secure::{
     self, Identity, Pairing, SecureReader, SecureWriter, TrustStore, confirmation, tags_match,
 };
-use prostir_proto::{ClientMsg, Codec, HostMsg, PROTOCOL_VERSION};
+use prostir_proto::{ClientMsg, Codec, HostMsg, NO_FOCUS, PROTOCOL_VERSION};
 
 pub struct Frame {
     /// When the frame arrived from the network.
@@ -57,6 +57,8 @@ pub enum NetEvent {
     /// Whether PC sound comes to the headset.
     AudioWanted(bool),
     MicWanted(bool),
+    /// The monitor the mouse is on, if it is one of ours.
+    Focus(Option<u8>),
     /// Left-to-right order of the Quest monitors.
     Order(Vec<u8>),
     /// A request failed on the host; shown in the menu.
@@ -621,6 +623,9 @@ fn run_session(
             }
             HostMsg::MirrorWanted { enabled } => {
                 let _ = events.send(NetEvent::MirrorWanted(enabled));
+            }
+            HostMsg::Focus { id } => {
+                let _ = events.send(NetEvent::Focus((id != NO_FOCUS).then_some(id)));
             }
             HostMsg::Order { ids } => {
                 let _ = events.send(NetEvent::Order(ids));

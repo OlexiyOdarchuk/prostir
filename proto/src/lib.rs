@@ -16,6 +16,8 @@ pub const AUDIO_RATE: u32 = 48_000;
 pub const AUDIO_CHANNELS: u32 = 2;
 /// Headset microphone sent to the PC: interleaved signed 16-bit little-endian mono.
 pub const MIC_CHANNELS: u32 = 1;
+/// [`HostMsg::Focus`] when the mouse is on none of the streamed displays.
+pub const NO_FOCUS: u8 = 255;
 /// Stream id of the mirrored physical display (laptop panel); Quest monitors use 0..
 pub const MIRROR_ID: u8 = 100;
 /// Prefix of the UDP discovery beacon: `MAGIC ++ tcp_port (u16 LE) ++ hostname (utf-8)`.
@@ -100,6 +102,10 @@ pub enum HostMsg {
     /// A PC app is recording from the headset microphone right now: capture it.
     MicActive {
         active: bool,
+    },
+    /// The monitor the mouse is on ([`NO_FOCUS`] if none of the streamed ones).
+    Focus {
+        id: u8,
     },
     /// The PC does not know this headset yet: pair first.
     PairingRequired,
@@ -195,6 +201,7 @@ mod tag {
     pub const AUDIO_WANTED: u8 = 13;
     pub const MIC_WANTED: u8 = 14;
     pub const MIC_ACTIVE: u8 = 15;
+    pub const FOCUS: u8 = 16;
     pub const HELLO: u8 = 101;
     pub const REQUEST_KEYFRAME: u8 = 102;
     pub const FRAME_SHOWN: u8 = 103;
@@ -302,6 +309,7 @@ impl HostMsg {
             HostMsg::Order { ids } => write_frame(w, tag::ORDER, &[ids]),
             HostMsg::PairingRequired => write_frame(w, tag::PAIRING_REQUIRED, &[]),
             HostMsg::Audio { pcm } => write_frame(w, tag::AUDIO, &[pcm]),
+            HostMsg::Focus { id } => write_frame(w, tag::FOCUS, &[&[*id]]),
             HostMsg::MicWanted { enabled } => write_frame(w, tag::MIC_WANTED, &[&[*enabled as u8]]),
             HostMsg::MicActive { active } => write_frame(w, tag::MIC_ACTIVE, &[&[*active as u8]]),
             HostMsg::AudioWanted { enabled } => {
@@ -351,6 +359,7 @@ impl HostMsg {
             tag::STREAM_END => HostMsg::StreamEnd { id: c.u8()? },
             tag::PRIMARY_CHANGED => HostMsg::PrimaryChanged { id: c.u8()? },
             tag::PAIRING_REQUIRED => HostMsg::PairingRequired,
+            tag::FOCUS => HostMsg::Focus { id: c.u8()? },
             tag::MIC_WANTED => HostMsg::MicWanted {
                 enabled: c.u8()? != 0,
             },
@@ -514,6 +523,7 @@ mod tests {
             HostMsg::AudioWanted { enabled: false },
             HostMsg::MicWanted { enabled: true },
             HostMsg::MicActive { active: true },
+            HostMsg::Focus { id: 2 },
             HostMsg::PairMsg { msg: vec![4, 5] },
             HostMsg::PairResult {
                 ok: true,

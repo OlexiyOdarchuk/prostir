@@ -22,12 +22,13 @@ use openxr as xr;
 use openxr::sys::Handle as _;
 use prostir_proto::{ClientMsg, MIRROR_ID};
 
+use crate::i18n::Lang;
 use crate::input::Controls;
 use crate::layout::{self, Cylinder, Grab, Hit, Placement, Ray};
 use crate::net::{Feedback, NetEvent};
 use crate::overlay::{self, Overlay, Sphere};
 use crate::settings::{Background, HandMode, Settings};
-use crate::ui::{self, Action, MonitorEntry, Panel, UiState};
+use crate::ui::{self, Action, MonitorEntry, Panel, Tab, UiState};
 use crate::xrutil::{self, Gfx, ImageLayer, as_layer, pose, posef, vec3};
 use crate::{background, decoder, egl, net, passthrough};
 
@@ -104,6 +105,10 @@ struct Scene {
     mirror_wanted: bool,
     audio_wanted: bool,
     mic_wanted: bool,
+    /// The monitor the mouse is on (from the PC).
+    focus: Option<u8>,
+    /// Current brightness of each monitor, easing towards 1 or the dimmed level.
+    brightness: HashMap<u8, f32>,
     /// The headset is on the head (the session is visible); streaming pauses otherwise.
     worn: bool,
     settings: Settings,
@@ -126,6 +131,8 @@ struct Scene {
     error: Option<(String, Instant)>,
     /// "×" pressed once on this monitor; a second press within a few seconds removes it.
     confirm_remove: Option<(u8, Instant)>,
+    /// Menu page shown.
+    tab: Tab,
     layout_path: PathBuf,
     settings_path: PathBuf,
 }
@@ -326,6 +333,8 @@ impl Scene {
                 .confirm_remove
                 .filter(|(_, at)| at.elapsed() < CONFIRM_FOR)
                 .map(|(id, _)| id),
+            tab: self.tab,
+            lang: Lang::Uk,
         }
     }
 }
@@ -395,6 +404,7 @@ fn run(app: &AndroidApp) -> Result<()> {
     exts.khr_composition_layer_equirect2 = available.khr_composition_layer_equirect2;
     exts.ext_hand_interaction = available.ext_hand_interaction;
     exts.ext_hand_tracking = available.ext_hand_tracking;
+    exts.khr_composition_layer_color_scale_bias = available.khr_composition_layer_color_scale_bias;
     let instance = entry.create_instance(
         &xr::ApplicationInfo {
             application_name: "Prostir",
@@ -508,6 +518,8 @@ fn run(app: &AndroidApp) -> Result<()> {
         mirror_wanted: true,
         audio_wanted: true,
         mic_wanted: true,
+        focus: None,
+        brightness: HashMap::new(),
         worn: true,
         settings,
         curve_supported: exts.khr_composition_layer_cylinder,
@@ -528,6 +540,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         feedback: None,
         error: None,
         confirm_remove: None,
+        tab: Tab::Monitors,
         layout_path,
         settings_path,
     };
@@ -930,9 +943,53 @@ fn run(app: &AndroidApp) -> Result<()> {
             .collect();
         order.sort_by(|a, b| b.0.total_cmp(&a.0));
         let curve = scene.curve_radius();
+        // Focus mode: monitors without the mouse fade to DIMMED (colour scale on the
+        // compositor layer, no extra rendering).
+        const DIMMED: f32 = 0.4;
+        for id in scene.monitors.keys() {
+            let target = match scene.focus {
+                Some(f) if scene.settings.focus && f != *id && !grabbed.contains(id) => DIMMED,
+                _ => 1.0,
+            };
+            let b = scene.brightness.entry(*id).or_insert(1.0);
+            let step = dt * 5.0;
+            *b = if *b < target {
+                (*b + step).min(target)
+            } else {
+                (*b - step).max(target)
+            };
+        }
+        let dims: Vec<xr::sys::CompositionLayerColorScaleBiasKHR> = order
+            .iter()
+            .map(|(_, id)| {
+                let b = scene.brightness.get(id).copied().unwrap_or(1.0);
+                xr::sys::CompositionLayerColorScaleBiasKHR {
+                    ty: xr::sys::CompositionLayerColorScaleBiasKHR::TYPE,
+                    next: video_next,
+                    color_scale: xr::Color4f {
+                        r: b,
+                        g: b,
+                        b,
+                        a: 1.0,
+                    },
+                    color_bias: xr::Color4f {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 0.0,
+                    },
+                }
+            })
+            .collect();
         let mut quads = Vec::new();
         let mut cylinders = Vec::new();
-        for (_, id) in &order {
+        for (i, (_, id)) in order.iter().enumerate() {
+            let next = if exts.khr_composition_layer_color_scale_bias && dims[i].color_scale.r < 1.0
+            {
+                (&dims[i] as *const xr::sys::CompositionLayerColorScaleBiasKHR).cast()
+            } else {
+                video_next
+            };
             let m = &scene.monitors[id];
             let p = &scene.placements[id];
             let height = p.width * m.aspect();
@@ -951,7 +1008,7 @@ fn run(app: &AndroidApp) -> Result<()> {
                 let c = Cylinder::new(p, radius);
                 cylinders.push(xr::sys::CompositionLayerCylinderKHR {
                     ty: xr::sys::CompositionLayerCylinderKHR::TYPE,
-                    next: video_next,
+                    next,
                     layer_flags: xr::CompositionLayerFlags::EMPTY,
                     space: local.as_raw(),
                     eye_visibility: xr::EyeVisibility::BOTH,
@@ -964,7 +1021,7 @@ fn run(app: &AndroidApp) -> Result<()> {
             } else {
                 quads.push(xr::sys::CompositionLayerQuad {
                     ty: xr::sys::CompositionLayerQuad::TYPE,
-                    next: video_next,
+                    next,
                     layer_flags: xr::CompositionLayerFlags::EMPTY,
                     space: local.as_raw(),
                     eye_visibility: xr::EyeVisibility::BOTH,
@@ -1080,6 +1137,7 @@ fn handle_net_event(
         NetEvent::MirrorWanted(enabled) => scene.mirror_wanted = enabled,
         NetEvent::AudioWanted(enabled) => scene.audio_wanted = enabled,
         NetEvent::MicWanted(enabled) => scene.mic_wanted = enabled,
+        NetEvent::Focus(id) => scene.focus = id,
         NetEvent::Order(ids) => scene.order = ids,
         NetEvent::HostError(text) => scene.show_error(text),
         NetEvent::StreamStart {
@@ -1169,6 +1227,11 @@ fn handle_action(
             } else {
                 scene.confirm_remove = Some((id, Instant::now()));
             }
+        }
+        Action::Tab(tab) => scene.tab = tab,
+        Action::Focus(on) => {
+            scene.settings.focus = on;
+            scene.settings.save(settings_path);
         }
         Action::Hands(mode) => {
             scene.settings.hands = mode;

@@ -1,6 +1,7 @@
 mod audio;
 mod displays;
 mod encoder;
+mod focus;
 mod pairing;
 mod tray;
 mod virtual_output;
@@ -14,7 +15,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use log::{error, info, warn};
 use prostir_proto::secure::{SecureReader, SecureWriter};
-use prostir_proto::{ClientMsg, Codec, HostMsg};
+use prostir_proto::{ClientMsg, Codec, HostMsg, NO_FOCUS};
 
 use displays::{Displays, SavedMonitors};
 use encoder::EncoderConfig;
@@ -199,7 +200,22 @@ fn serve_client(
     // Housekeeping runs on a clock: the headset acknowledges every frame, so the
     // channel is rarely quiet long enough for a receive timeout.
     let mut next_tick = Instant::now();
+    // The display under the mouse, for dimming the others in the headset.
+    let active_output = focus::ActiveOutput::new();
+    let mut focus = None;
+    let mut next_focus = Instant::now();
     let result = loop {
+        if Instant::now() >= next_focus {
+            next_focus = Instant::now() + Duration::from_millis(150);
+            let id = active_output
+                .get()
+                .and_then(|name| displays.id_of_output(&name))
+                .unwrap_or(NO_FOCUS);
+            if focus != Some(id) {
+                focus = Some(id);
+                displays.router.send(HostMsg::Focus { id });
+            }
+        }
         if Instant::now() >= next_tick {
             next_tick = Instant::now() + Duration::from_millis(500);
             if control.poll(Some(displays)) {
@@ -211,7 +227,9 @@ fn serve_client(
                 break Err(anyhow::anyhow!("virtual monitor or encoder stopped"));
             }
         }
-        let wait = next_tick.saturating_duration_since(Instant::now());
+        let wait = next_tick
+            .min(next_focus)
+            .saturating_duration_since(Instant::now());
         match msg_rx.recv_timeout(wait) {
             Ok(Ok(ClientMsg::RequestKeyframe { id })) => displays.force_keyframe(id),
             Ok(Ok(ClientMsg::FrameShown { id, pts_us })) => displays.router.frame_shown(id, pts_us),

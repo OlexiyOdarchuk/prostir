@@ -162,6 +162,7 @@ fn main() -> Result<()> {
             HostMsg::AudioWanted { enabled } => println!("sound to headset: {enabled}"),
             HostMsg::MicWanted { enabled } => println!("headset microphone wanted: {enabled}"),
             HostMsg::MicActive { active } => println!("PC is recording: {active}"),
+            HostMsg::Focus { id } => println!("mouse on: {id}"),
             HostMsg::PairingRequired | HostMsg::PairMsg { .. } | HostMsg::PairResult { .. } => {}
             HostMsg::Welcome { .. } => {}
         }

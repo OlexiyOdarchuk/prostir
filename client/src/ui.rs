@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use fontdue::{Font, FontSettings, Metrics};
 use tiny_skia::{FillRule, Paint, Path, PathBuilder, Pixmap, Rect, Transform};
 
+use crate::i18n::Lang;
 use crate::settings::{Background, Curve, HandMode, Preset, Settings, Sky};
 
 pub const WIDTH: u32 = 1280;
@@ -61,6 +62,17 @@ pub struct UiState {
     pub error: Option<String>,
     /// Monitor whose "×" was pressed once and now asks for confirmation.
     pub confirm_remove: Option<u8>,
+    pub tab: Tab,
+    pub lang: Lang,
+}
+
+/// Pages of the menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Tab {
+    #[default]
+    Monitors,
+    Look,
+    Sound,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -83,6 +95,8 @@ pub enum Action {
     Curve(Curve),
     Background(Background),
     Hands(HandMode),
+    Focus(bool),
+    Tab(Tab),
     /// Connect to the n-th PC in `UiState::found`.
     ConnectTo(usize),
     ShowKeypad,
@@ -216,15 +230,16 @@ impl Panel {
     }
 
     fn build(&mut self, s: &UiState) -> Vec<Item> {
+        let l = s.lang;
         let mut items = vec![Item::Panel(rect(0.0, 0.0, WIDTH as f32, HEIGHT as f32))];
         let w = WIDTH as f32;
 
         // Header.
-        items.push(text(44.0, 70.0, 34.0, true, TEXT, "Монітори в шоломі"));
+        items.push(text(44.0, 70.0, 34.0, true, TEXT, "Prostir"));
         let status = match &s.host {
-            _ if s.pairing.is_some() => "Сполучення…".to_owned(),
-            Some(h) => format!("Підключено до {h}"),
-            None => "Шукаю ПК…".to_owned(),
+            _ if s.pairing.is_some() => l.t("Сполучення…", "Pairing…").to_owned(),
+            Some(h) => format!("{} {h}", l.t("Підключено до", "Connected to")),
+            None => l.t("Шукаю ПК…", "Looking for a PC…").to_owned(),
         };
         let sw = self.text_width(&status, 21.0, false);
         let change_w = if s.host.is_some() { 190.0 } else { 0.0 };
@@ -239,7 +254,7 @@ impl Panel {
         if s.host.is_some() {
             items.push(button(
                 rect(w - 98.0 - 170.0, 32.0, 170.0, 48.0),
-                "Змінити ПК",
+                l.t("Змінити ПК", "Change PC"),
                 Style::Normal,
                 Some(Action::ChangeHost),
             ));
@@ -255,343 +270,49 @@ impl Panel {
             [255, 255, 255, 18],
         ));
 
-        // Left column: the connection screen, or the monitor list.
         let (lx, lw) = (44.0, 580.0);
-        let mut y = 150.0;
+        let (rx, rw) = (680.0, 556.0);
         if let Some(p) = &s.pairing {
-            y = self.build_pairing(p, &mut items, lx, lw, y);
-        } else if s.host.is_none() {
-            y = self.build_connection(s, &mut items, lx, lw, y);
-        } else {
-            items.push(text(lx, y, 21.0, false, MUTED, "Монітори"));
-            y += 18.0;
-            let removable = s.monitors.len() > 1;
-            let count = s.monitors.len();
-            for (i, m) in s.monitors.iter().enumerate() {
-                items.push(Item::Box(rect(lx, y, lw, 62.0), [255, 255, 255, 12]));
-                // Move left / right in the row (also reorders KDE's layout).
-                for (k, (label, delta)) in [("‹", -1), ("›", 1)].into_iter().enumerate() {
-                    let enabled = if delta < 0 { i > 0 } else { i + 1 < count };
-                    items.push(button(
-                        rect(lx + 8.0 + k as f32 * 48.0, y + 7.0, 44.0, 48.0),
-                        label,
-                        if enabled {
-                            Style::Normal
-                        } else {
-                            Style::Disabled
-                        },
-                        enabled.then_some(Action::Move { id: m.id, delta }),
-                    ));
-                }
-                items.push(text(
-                    lx + 116.0,
-                    y + 29.0,
-                    22.0,
-                    true,
-                    TEXT,
-                    &format!("Монітор {}", m.id + 1),
-                ));
-                items.push(text(
-                    lx + 116.0,
-                    y + 52.0,
-                    16.0,
-                    false,
-                    MUTED,
-                    &format!("{} × {}", m.width, m.height),
-                ));
-                let remove = rect(lx + lw - 58.0, y + 7.0, 48.0, 48.0);
-                let primary = rect(lx + lw - 58.0 - 10.0 - 210.0, y + 7.0, 210.0, 48.0);
-                if s.confirm_remove == Some(m.id) {
-                    let both = rect(
-                        primary.left(),
-                        y + 7.0,
-                        remove.right() - primary.left(),
-                        48.0,
-                    );
-                    items.push(button(
-                        both,
-                        "Прибрати? Ще раз",
-                        Style::Armed,
-                        Some(Action::Remove(m.id)),
-                    ));
-                    y += 70.0;
-                    continue;
-                }
-                if s.primary == Some(m.id) {
-                    items.push(button(primary, "Головний", Style::Selected, None));
-                } else {
-                    items.push(button(
-                        primary,
-                        "Зробити головним",
-                        Style::Normal,
-                        Some(Action::MakePrimary(m.id)),
-                    ));
-                }
-                let style = if removable {
-                    Style::Danger
-                } else {
-                    Style::Disabled
-                };
-                items.push(button(
-                    remove,
-                    "×",
-                    style,
-                    removable.then_some(Action::Remove(m.id)),
-                ));
-                y += 70.0;
-            }
-            // Physical display mirror.
-            items.push(Item::Box(rect(lx, y, lw, 62.0), [255, 255, 255, 12]));
-            items.push(text(
-                lx + 20.0,
-                y + 40.0,
-                24.0,
-                true,
-                TEXT,
-                "Екран ноутбука",
-            ));
-            let note = match (s.mirror_wanted, s.mirror_active) {
-                (true, true) => "показано",
-                (true, false) => "кришка закрита",
-                (false, _) => "приховано",
-            };
-            items.push(text(lx + 228.0, y + 40.0, 20.0, false, MUTED, note));
-            let toggle = rect(lx + lw - 10.0 - 160.0, y + 7.0, 160.0, 48.0);
-            let (label, style) = if s.mirror_wanted {
-                ("Приховати", Style::Normal)
-            } else {
-                ("Показати", Style::Normal)
-            };
-            items.push(button(
-                toggle,
-                label,
-                style,
-                Some(Action::SetMirror(!s.mirror_wanted)),
-            ));
-            y += 70.0;
-            // Sound.
-            items.push(Item::Box(rect(lx, y, lw, 62.0), [255, 255, 255, 12]));
-            items.push(text(lx + 20.0, y + 40.0, 24.0, true, TEXT, "Звук"));
-            let where_ = if s.audio_wanted {
-                "у шоломі"
-            } else {
-                "на ноутбуці"
-            };
-            items.push(text(lx + 100.0, y + 40.0, 20.0, false, MUTED, where_));
-            let (label, enable) = if s.audio_wanted {
-                ("На ноутбук", false)
-            } else {
-                ("У шолом", true)
-            };
-            items.push(button(
-                rect(lx + lw - 10.0 - 160.0, y + 7.0, 160.0, 48.0),
-                label,
-                Style::Normal,
-                Some(Action::SetAudio(enable)),
-            ));
-            y += 70.0;
-            // Microphone.
-            items.push(Item::Box(rect(lx, y, lw, 62.0), [255, 255, 255, 12]));
-            items.push(text(lx + 20.0, y + 40.0, 24.0, true, TEXT, "Мікрофон"));
-            let where_ = if s.mic_wanted {
-                "шолома"
-            } else {
-                "ноутбука"
-            };
-            items.push(text(lx + 160.0, y + 40.0, 20.0, false, MUTED, where_));
-            let (label, enable) = if s.mic_wanted {
-                ("З ноутбука", false)
-            } else {
-                ("Зі шолома", true)
-            };
-            items.push(button(
-                rect(lx + lw - 10.0 - 160.0, y + 7.0, 160.0, 48.0),
-                label,
-                Style::Normal,
-                Some(Action::SetMic(enable)),
-            ));
-            y += 70.0;
+            self.build_pairing(p, &mut items, lx, lw, 150.0);
+            return items;
         }
 
-        // Hints under the list.
-        y = y.max(560.0) + 30.0;
-        for line in [
-            "Контролер: курок — натиснути, grip — перенести",
-            "Стік, поки тримаєте, — відстань і розмір · A — вирівняти",
-            "Руки: щипок — натиснути, щипок і тримати — перенести",
-            "Відсуньте або наблизьте руку — монітор далі чи ближче",
-        ] {
-            items.push(text(lx, y, 19.0, false, MUTED, line));
-            y += 30.0;
+        // Tabs.
+        let tabs = [
+            (Tab::Monitors, l.t("Монітори", "Monitors")),
+            (Tab::Look, l.t("Вигляд", "Look")),
+            (Tab::Sound, l.t("Звук", "Sound")),
+        ];
+        for (i, (tab, label)) in tabs.into_iter().enumerate() {
+            let r = rect(lx + i as f32 * 210.0, 128.0, 200.0, 50.0);
+            if s.tab == tab {
+                items.push(button(r, label, Style::Selected, None));
+            } else {
+                items.push(button(r, label, Style::Normal, Some(Action::Tab(tab))));
+            }
+        }
+
+        let top = 230.0;
+        match s.tab {
+            Tab::Monitors => {
+                if s.host.is_none() {
+                    self.build_connection(s, &mut items, lx, lw, top);
+                } else {
+                    let y = monitor_list(s, &mut items, lx, lw, top - 12.0);
+                    hints(l, &mut items, lx, y.max(640.0) + 30.0);
+                }
+                build_monitor_options(s, &mut items, rx, rw, top);
+            }
+            Tab::Look => {
+                build_look(s, &mut items, lx, lw, rx, rw, top);
+            }
+            Tab::Sound => {
+                build_sound(s, &mut items, lx, lw, top - 12.0);
+            }
         }
         if let Some(e) = &s.error {
             items.push(text(lx, HEIGHT as f32 - 34.0, 21.0, true, DANGER, e));
         }
-
-        // Right column: add, layout, curve, background.
-        let (rx, rw) = (680.0, 556.0);
-        let mut y = 150.0;
-        items.push(text(rx, y, 21.0, false, MUTED, "Додати монітор"));
-        y += 18.0;
-        let full = s.monitors.len() >= MAX_MONITORS || s.host.is_none();
-        let sizes = [
-            (1920, 1080, "1920 × 1080"),
-            (2560, 1440, "2560 × 1440"),
-            (3840, 2160, "3840 × 2160"),
-            (3440, 1440, "3440 × 1440 широкий"),
-            (1440, 2560, "1440 × 2560 портрет"),
-        ];
-        let bw = (rw - 10.0) / 2.0;
-        for (i, (width, height, label)) in sizes.iter().enumerate() {
-            let r = rect(
-                rx + (i % 2) as f32 * (bw + 10.0),
-                y + (i / 2) as f32 * 58.0,
-                bw,
-                48.0,
-            );
-            let (style, action) = if full {
-                (Style::Disabled, None)
-            } else {
-                (
-                    Style::Normal,
-                    Some(Action::Add {
-                        width: *width,
-                        height: *height,
-                    }),
-                )
-            };
-            items.push(button(r, label, style, action));
-        }
-        y += 3.0 * 58.0 + 40.0;
-
-        let segmented = |items: &mut Vec<Item>,
-                         y: &mut f32,
-                         title: &str,
-                         options: Vec<(&str, Action, bool, bool)>| {
-            if !title.is_empty() {
-                items.push(text(rx, *y, 21.0, false, MUTED, title));
-                *y += 18.0;
-            } else {
-                // Second row of the previous group.
-                *y -= 30.0;
-            }
-            let n = options.len() as f32;
-            let bw = (rw - 10.0 * (n - 1.0)) / n;
-            for (i, (label, action, selected, enabled)) in options.into_iter().enumerate() {
-                let r = rect(rx + i as f32 * (bw + 10.0), *y, bw, 48.0);
-                let style = match (enabled, selected) {
-                    (false, _) => Style::Disabled,
-                    (true, true) => Style::Selected,
-                    (true, false) => Style::Normal,
-                };
-                items.push(button(
-                    r,
-                    label,
-                    style,
-                    (enabled && !selected).then_some(action),
-                ));
-            }
-            *y += 48.0 + 40.0;
-        };
-        let st = s.settings;
-        segmented(
-            &mut items,
-            &mut y,
-            "Розкладка",
-            vec![
-                ("Дуга", Action::Preset(Preset::Arc), false, true),
-                ("Сітка", Action::Preset(Preset::Grid), false, true),
-                ("Стовпчик", Action::Preset(Preset::Column), false, true),
-                ("Над головою", Action::Preset(Preset::Overhead), false, true),
-            ],
-        );
-        segmented(
-            &mut items,
-            &mut y,
-            "Вигин",
-            vec![
-                (
-                    "Пласкі",
-                    Action::Curve(Curve::Flat),
-                    st.curve == Curve::Flat,
-                    true,
-                ),
-                (
-                    "Легкий",
-                    Action::Curve(Curve::Gentle),
-                    st.curve == Curve::Gentle,
-                    s.curve_available,
-                ),
-                (
-                    "Сильний",
-                    Action::Curve(Curve::Strong),
-                    st.curve == Curve::Strong,
-                    s.curve_available,
-                ),
-            ],
-        );
-        let bg = |b: Background| (Action::Background(b), st.background == b);
-        let (a1, s1) = bg(Background::Black);
-        let (a2, s2) = bg(Background::Room);
-        let (a3, s3) = bg(Background::Custom);
-        segmented(
-            &mut items,
-            &mut y,
-            "Фон",
-            vec![
-                ("Чорний", a1, s1, true),
-                ("Кімната", a2, s2, s.room_available),
-                (
-                    "Своє фото",
-                    a3,
-                    s3,
-                    s.panorama_available && s.custom_available,
-                ),
-            ],
-        );
-        let skies = [
-            ("Ніч", Sky::Night),
-            ("Захід", Sky::Sunset),
-            ("Космос", Sky::Space),
-            ("Сяйво", Sky::Aurora),
-        ];
-        segmented(
-            &mut items,
-            &mut y,
-            "",
-            skies
-                .iter()
-                .map(|(label, sky)| {
-                    let (a, sel) = bg(Background::Sky(*sky));
-                    (*label, a, sel, s.panorama_available)
-                })
-                .collect(),
-        );
-        segmented(
-            &mut items,
-            &mut y,
-            "Руки",
-            vec![
-                (
-                    "Сховати",
-                    Action::Hands(HandMode::Hidden),
-                    st.hands == HandMode::Hidden,
-                    true,
-                ),
-                (
-                    "Показувати",
-                    Action::Hands(HandMode::Visible),
-                    st.hands == HandMode::Visible,
-                    true,
-                ),
-                (
-                    "І керувати",
-                    Action::Hands(HandMode::Control),
-                    st.hands == HandMode::Control,
-                    true,
-                ),
-            ],
-        );
         items
     }
 
@@ -965,6 +686,487 @@ pub fn menu_button_image(size: u32, hovered: bool) -> Vec<u8> {
     p.take()
 }
 
+/// Quest monitors with reorder / primary / remove, then the laptop screen.
+fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32) -> f32 {
+    let l = s.lang;
+    let removable = s.monitors.len() > 1;
+    let count = s.monitors.len();
+    for (i, m) in s.monitors.iter().enumerate() {
+        items.push(Item::Box(rect(lx, y, lw, 62.0), [255, 255, 255, 12]));
+        // Move left / right in the row (also reorders KDE's layout).
+        for (k, (label, delta)) in [("‹", -1), ("›", 1)].into_iter().enumerate() {
+            let enabled = if delta < 0 { i > 0 } else { i + 1 < count };
+            items.push(button(
+                rect(lx + 8.0 + k as f32 * 48.0, y + 7.0, 44.0, 48.0),
+                label,
+                if enabled {
+                    Style::Normal
+                } else {
+                    Style::Disabled
+                },
+                enabled.then_some(Action::Move { id: m.id, delta }),
+            ));
+        }
+        items.push(text(
+            lx + 116.0,
+            y + 29.0,
+            22.0,
+            true,
+            TEXT,
+            &format!("{} {}", l.t("Монітор", "Monitor"), m.id + 1),
+        ));
+        items.push(text(
+            lx + 116.0,
+            y + 52.0,
+            16.0,
+            false,
+            MUTED,
+            &format!("{} × {}", m.width, m.height),
+        ));
+        let remove = rect(lx + lw - 58.0, y + 7.0, 48.0, 48.0);
+        let primary = rect(lx + lw - 58.0 - 10.0 - 210.0, y + 7.0, 210.0, 48.0);
+        if s.confirm_remove == Some(m.id) {
+            let both = rect(
+                primary.left(),
+                y + 7.0,
+                remove.right() - primary.left(),
+                48.0,
+            );
+            items.push(button(
+                both,
+                l.t("Прибрати? Ще раз", "Remove? Press again"),
+                Style::Armed,
+                Some(Action::Remove(m.id)),
+            ));
+            y += 70.0;
+            continue;
+        }
+        if s.primary == Some(m.id) {
+            items.push(button(
+                primary,
+                l.t("Головний", "Primary"),
+                Style::Selected,
+                None,
+            ));
+        } else {
+            items.push(button(
+                primary,
+                l.t("Зробити головним", "Make primary"),
+                Style::Normal,
+                Some(Action::MakePrimary(m.id)),
+            ));
+        }
+        let style = if removable {
+            Style::Danger
+        } else {
+            Style::Disabled
+        };
+        items.push(button(
+            remove,
+            "×",
+            style,
+            removable.then_some(Action::Remove(m.id)),
+        ));
+        y += 70.0;
+    }
+    // Physical display mirror.
+    let note = match (s.mirror_wanted, s.mirror_active) {
+        (true, true) => l.t("показано", "shown"),
+        (true, false) => l.t("кришка закрита", "lid closed"),
+        (false, _) => l.t("приховано", "hidden"),
+    };
+    let (label, style) = if s.mirror_wanted {
+        (l.t("Приховати", "Hide"), Style::Normal)
+    } else {
+        (l.t("Показати", "Show"), Style::Normal)
+    };
+    toggle_row(
+        items,
+        lx,
+        lw,
+        y,
+        l.t("Екран ноутбука", "Laptop screen"),
+        note,
+        (label, style, Action::SetMirror(!s.mirror_wanted)),
+    );
+    y + 70.0
+}
+
+/// A row with a title, a muted note and one button on the right.
+fn toggle_row(
+    items: &mut Vec<Item>,
+    lx: f32,
+    lw: f32,
+    y: f32,
+    title: &str,
+    note: &str,
+    (label, style, action): (&str, Style, Action),
+) {
+    items.push(Item::Box(rect(lx, y, lw, 62.0), [255, 255, 255, 12]));
+    items.push(text(lx + 20.0, y + 40.0, 24.0, true, TEXT, title));
+    items.push(text(lx + 228.0, y + 40.0, 20.0, false, MUTED, note));
+    items.push(button(
+        rect(lx + lw - 10.0 - 180.0, y + 7.0, 180.0, 48.0),
+        label,
+        style,
+        Some(action),
+    ));
+}
+
+fn hints(l: Lang, items: &mut Vec<Item>, lx: f32, mut y: f32) {
+    for line in [
+        l.t(
+            "Контролер: курок — натиснути, grip — перенести",
+            "Controller: trigger to press, grip to move",
+        ),
+        l.t(
+            "Стік, поки тримаєте, — відстань і розмір · A — вирівняти",
+            "Stick while holding: distance and size · A: line up",
+        ),
+        l.t(
+            "Руки: щипок — натиснути, щипок і тримати — перенести",
+            "Hands: pinch to press, pinch and hold to move",
+        ),
+        l.t(
+            "Відсуньте або наблизьте руку — монітор далі чи ближче",
+            "Move the hand away or closer to push or pull",
+        ),
+    ] {
+        items.push(text(lx, y, 19.0, false, MUTED, line));
+        y += 30.0;
+    }
+}
+
+/// A titled group of buttons where one option is selected:
+/// `(label, action, selected, enabled)`. An empty title continues the previous group.
+fn segmented(
+    items: &mut Vec<Item>,
+    x: f32,
+    w: f32,
+    y: &mut f32,
+    title: &str,
+    options: Vec<(&str, Action, bool, bool)>,
+) {
+    if !title.is_empty() {
+        items.push(text(x, *y, 21.0, false, MUTED, title));
+        *y += 18.0;
+    } else {
+        *y -= 30.0;
+    }
+    let n = options.len() as f32;
+    let bw = (w - 10.0 * (n - 1.0)) / n;
+    for (i, (label, action, selected, enabled)) in options.into_iter().enumerate() {
+        let r = rect(x + i as f32 * (bw + 10.0), *y, bw, 48.0);
+        let style = match (enabled, selected) {
+            (false, _) => Style::Disabled,
+            (true, true) => Style::Selected,
+            (true, false) => Style::Normal,
+        };
+        items.push(button(
+            r,
+            label,
+            style,
+            (enabled && !selected).then_some(action),
+        ));
+    }
+    *y += 48.0 + 40.0;
+}
+
+/// Add a monitor, layout, curve.
+fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, mut y: f32) {
+    let l = s.lang;
+    items.push(text(
+        rx,
+        y,
+        21.0,
+        false,
+        MUTED,
+        l.t("Додати монітор", "Add a monitor"),
+    ));
+    y += 18.0;
+    let full = s.monitors.len() >= MAX_MONITORS || s.host.is_none();
+    let wide = format!("3440 × 1440 {}", l.t("широкий", "wide"));
+    let tall = format!("1440 × 2560 {}", l.t("портрет", "portrait"));
+    let sizes = [
+        (1920, 1080, "1920 × 1080"),
+        (2560, 1440, "2560 × 1440"),
+        (3840, 2160, "3840 × 2160"),
+        (3440, 1440, wide.as_str()),
+        (1440, 2560, tall.as_str()),
+    ];
+    let bw = (rw - 10.0) / 2.0;
+    for (i, (width, height, label)) in sizes.iter().enumerate() {
+        let r = rect(
+            rx + (i % 2) as f32 * (bw + 10.0),
+            y + (i / 2) as f32 * 58.0,
+            bw,
+            48.0,
+        );
+        let (style, action) = if full {
+            (Style::Disabled, None)
+        } else {
+            (
+                Style::Normal,
+                Some(Action::Add {
+                    width: *width,
+                    height: *height,
+                }),
+            )
+        };
+        items.push(button(r, label, style, action));
+    }
+    y += 3.0 * 58.0 + 40.0;
+    if s.monitors.len() >= MAX_MONITORS {
+        items.push(text(
+            rx,
+            y - 22.0,
+            18.0,
+            false,
+            MUTED,
+            &format!(
+                "{} {MAX_MONITORS} {}",
+                l.t("Максимум", "At most"),
+                l.t("моніторів", "monitors")
+            ),
+        ));
+        y += 10.0;
+    }
+
+    let st = s.settings;
+    segmented(
+        items,
+        rx,
+        rw,
+        &mut y,
+        l.t("Розкладка", "Layout"),
+        vec![
+            (l.t("Дуга", "Arc"), Action::Preset(Preset::Arc), false, true),
+            (
+                l.t("Сітка", "Grid"),
+                Action::Preset(Preset::Grid),
+                false,
+                true,
+            ),
+            (
+                l.t("Стовпчик", "Column"),
+                Action::Preset(Preset::Column),
+                false,
+                true,
+            ),
+            (
+                l.t("Над головою", "Overhead"),
+                Action::Preset(Preset::Overhead),
+                false,
+                true,
+            ),
+        ],
+    );
+    segmented(
+        items,
+        rx,
+        rw,
+        &mut y,
+        l.t("Вигин", "Curve"),
+        vec![
+            (
+                l.t("Пласкі", "Flat"),
+                Action::Curve(Curve::Flat),
+                st.curve == Curve::Flat,
+                true,
+            ),
+            (
+                l.t("Легкий", "Gentle"),
+                Action::Curve(Curve::Gentle),
+                st.curve == Curve::Gentle,
+                s.curve_available,
+            ),
+            (
+                l.t("Сильний", "Strong"),
+                Action::Curve(Curve::Strong),
+                st.curve == Curve::Strong,
+                s.curve_available,
+            ),
+        ],
+    );
+}
+
+/// Background and hands on the left, focus mode on the right.
+fn build_look(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, rx: f32, rw: f32, top: f32) {
+    let l = s.lang;
+    let st = s.settings;
+    let mut y = top;
+    let bg = |b: Background| (Action::Background(b), st.background == b);
+    let (a1, s1) = bg(Background::Black);
+    let (a2, s2) = bg(Background::Room);
+    let (a3, s3) = bg(Background::Custom);
+    segmented(
+        items,
+        lx,
+        lw,
+        &mut y,
+        l.t("Фон", "Background"),
+        vec![
+            (l.t("Чорний", "Black"), a1, s1, true),
+            (l.t("Кімната", "Room"), a2, s2, s.room_available),
+            (
+                l.t("Своє фото", "Own photo"),
+                a3,
+                s3,
+                s.panorama_available && s.custom_available,
+            ),
+        ],
+    );
+    let skies = [
+        (l.t("Ніч", "Night"), Sky::Night),
+        (l.t("Захід", "Sunset"), Sky::Sunset),
+        (l.t("Космос", "Space"), Sky::Space),
+        (l.t("Сяйво", "Aurora"), Sky::Aurora),
+    ];
+    segmented(
+        items,
+        lx,
+        lw,
+        &mut y,
+        "",
+        skies
+            .iter()
+            .map(|(label, sky)| {
+                let (a, sel) = bg(Background::Sky(*sky));
+                (*label, a, sel, s.panorama_available)
+            })
+            .collect(),
+    );
+    segmented(
+        items,
+        lx,
+        lw,
+        &mut y,
+        l.t("Руки", "Hands"),
+        vec![
+            (
+                l.t("Сховати", "Hide"),
+                Action::Hands(HandMode::Hidden),
+                st.hands == HandMode::Hidden,
+                true,
+            ),
+            (
+                l.t("Показувати", "Show"),
+                Action::Hands(HandMode::Visible),
+                st.hands == HandMode::Visible,
+                true,
+            ),
+            (
+                l.t("І керувати", "Show and use"),
+                Action::Hands(HandMode::Control),
+                st.hands == HandMode::Control,
+                true,
+            ),
+        ],
+    );
+
+    let mut y = top;
+    segmented(
+        items,
+        rx,
+        rw,
+        &mut y,
+        l.t("Фокус", "Focus"),
+        vec![
+            (
+                l.t("Вимкнено", "Off"),
+                Action::Focus(false),
+                !st.focus,
+                true,
+            ),
+            (
+                l.t("Затемнювати інші", "Dim the others"),
+                Action::Focus(true),
+                st.focus,
+                true,
+            ),
+        ],
+    );
+    y -= 12.0;
+    for line in [
+        l.t(
+            "Монітори, на яких немає миші,",
+            "Monitors without the mouse",
+        ),
+        l.t("стають темнішими.", "get darker."),
+    ] {
+        items.push(text(rx, y, 19.0, false, MUTED, line));
+        y += 28.0;
+    }
+}
+
+/// PC sound and headset microphone.
+fn build_sound(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32) {
+    let l = s.lang;
+    let (note, label) = if s.audio_wanted {
+        (
+            l.t("у шоломі", "in the headset"),
+            l.t("На ноутбук", "To the PC"),
+        )
+    } else {
+        (
+            l.t("на ноутбуці", "on the PC"),
+            l.t("У шолом", "To the headset"),
+        )
+    };
+    toggle_row(
+        items,
+        lx,
+        lw,
+        y,
+        l.t("Звук", "Sound"),
+        note,
+        (label, Style::Normal, Action::SetAudio(!s.audio_wanted)),
+    );
+    y += 70.0;
+    let (note, label) = if s.mic_wanted {
+        (
+            l.t("шолома", "headset's"),
+            l.t("З ноутбука", "Use the PC's"),
+        )
+    } else {
+        (
+            l.t("ноутбука", "PC's"),
+            l.t("Зі шолома", "Use the headset's"),
+        )
+    };
+    toggle_row(
+        items,
+        lx,
+        lw,
+        y,
+        l.t("Мікрофон", "Microphone"),
+        note,
+        (label, Style::Normal, Action::SetMic(!s.mic_wanted)),
+    );
+    y += 100.0;
+    for line in [
+        l.t(
+            "Поки шолом підключено, звук із ПК грає в шоломі,",
+            "While the headset is connected, PC sound plays in it",
+        ),
+        l.t(
+            "а програми на ПК чують мікрофон шолома.",
+            "and PC apps hear the headset microphone.",
+        ),
+        l.t(
+            "Мікрофон вмикається, лише коли програма записує.",
+            "The microphone turns on only while an app records.",
+        ),
+        l.t(
+            "Коли шолом знято, звук і мікрофон повертаються на ПК.",
+            "Take the headset off and both return to the PC.",
+        ),
+    ] {
+        items.push(text(lx, y, 19.0, false, MUTED, line));
+        y += 30.0;
+    }
+}
+
 fn circle(cx: f32, cy: f32, r: f32) -> Path {
     PathBuilder::from_circle(cx, cy, r).expect("valid circle")
 }
@@ -1063,6 +1265,8 @@ mod tests {
             curve_available: true,
             error: None,
             confirm_remove: None,
+            tab: Tab::Monitors,
+            lang: Lang::Uk,
         }
     }
 

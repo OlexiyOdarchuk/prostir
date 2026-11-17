@@ -6,6 +6,7 @@
 //! can make it.
 
 pub mod background;
+pub mod i18n;
 pub mod layout;
 pub mod settings;
 pub mod ui;

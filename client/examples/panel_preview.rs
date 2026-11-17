@@ -1,8 +1,10 @@
 //! Renders the headset menu to a PNG for checking the design on the desktop.
 //! cargo run -p prostir-client --example panel_preview -- panel.png [hover_x hover_y]
+//! Environment: TAB=look|sound, LANG_UI=en, PAIR=show|type|failed, OFFLINE=1, KEYPAD=…
 
+use prostir::i18n::Lang;
 use prostir::settings::Settings;
-use prostir::ui::{MonitorEntry, PairingView, Panel, UiState};
+use prostir::ui::{MonitorEntry, PairingView, Panel, Tab, UiState};
 
 fn questmon_pairing(mode: &str) -> PairingView {
     PairingView {
@@ -63,8 +65,18 @@ fn main() {
         panorama_available: true,
         custom_available: false,
         curve_available: true,
-        error: Some("Максимум 6 моніторів".into()),
+        error: None,
         confirm_remove: Some(2),
+        tab: match std::env::var("TAB").as_deref() {
+            Ok("look") => Tab::Look,
+            Ok("sound") => Tab::Sound,
+            _ => Tab::Monitors,
+        },
+        lang: if std::env::var("LANG_UI").as_deref() == Ok("en") {
+            Lang::En
+        } else {
+            Lang::Uk
+        },
     };
     let mut panel = Panel::new();
     panel.set_state(&state);
