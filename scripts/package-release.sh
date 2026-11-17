@@ -17,7 +17,7 @@ cp target/release/prostir "$DIST/$NAME/"
 strip --strip-debug "$DIST/$NAME/prostir"
 mkdir -p "$DIST/$NAME/packaging"
 cp packaging/prostir.svg packaging/prostir.desktop "$DIST/$NAME/packaging/"
-cp scripts/install.sh LICENSE README.md README.uk.md CHANGELOG.md "$DIST/$NAME/"
+cp scripts/install.sh LICENSE LICENSE-EXCEPTION.md README.md README.uk.md CHANGELOG.md "$DIST/$NAME/"
 tar -C "$DIST" -czf "$DIST/$NAME.tar.gz" "$NAME"
 rm -rf "$DIST/$NAME"
 

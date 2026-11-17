@@ -320,7 +320,9 @@ docs/     картинки для цього README
 
 ## Ліцензія
 
-[GPL-3.0-or-later](LICENSE). Вбудований шрифт Noto Sans поширюється під
+[GPL-3.0-or-later](LICENSE) з [додатковим дозволом](LICENSE-EXCEPTION.md) лінкуватися з
+Meta Platform SDK (потрібен лише для збірки в Horizon Store). Вбудований шрифт Noto Sans
+поширюється під
 [SIL Open Font License 1.1](client/assets/OFL-NotoSans.txt).
 
 Meta і Meta Quest є торговими марками Meta Platforms, Inc. KDE і Plasma є торговими

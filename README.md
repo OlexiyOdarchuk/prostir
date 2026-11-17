@@ -328,7 +328,9 @@ menu to a PNG (`TAB=profiles|look|sound`, `LANG_UI=en`), and
 
 ## License
 
-[GPL-3.0-or-later](LICENSE). The bundled Noto Sans font is under the
+[GPL-3.0-or-later](LICENSE), with an [additional permission](LICENSE-EXCEPTION.md) to
+link with the Meta Platform SDK (needed only for a Horizon Store build). The bundled
+Noto Sans font is under the
 [SIL Open Font License 1.1](client/assets/OFL-NotoSans.txt).
 
 Meta and Meta Quest are trademarks of Meta Platforms, Inc. KDE and Plasma are
