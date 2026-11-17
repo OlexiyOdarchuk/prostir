@@ -585,6 +585,46 @@ pub fn kscreen_apply(settings: &[String]) {
 
 /// Applies `output.<name>.<setting>` through kscreen-doctor, retrying while KScreen
 /// has not caught up with a just-created output.
+/// The geometry Plasma gives its first screen (the one with the panel):
+/// `(x, y, width, height)`.
+pub fn plasma_first_screen() -> Option<(i32, i32, i32, i32)> {
+    const SCRIPT: &str =
+        "var g = screenGeometry(0); print(g.x + ' ' + g.y + ' ' + g.width + ' ' + g.height);";
+    let out = ["qdbus6", "qdbus"].iter().find_map(|q| {
+        std::process::Command::new(q)
+            .args([
+                "org.kde.plasmashell",
+                "/PlasmaShell",
+                "org.kde.PlasmaShell.evaluateScript",
+                SCRIPT,
+            ])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+    })?;
+    let nums: Vec<i32> = String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .filter_map(|t| t.parse().ok())
+        .collect();
+    match nums[..] {
+        [x, y, w, h] => Some((x, y, w, h)),
+        _ => None,
+    }
+}
+
+/// Plasma sometimes keeps its old screen order after outputs come and go quickly,
+/// leaving the panel on a former primary. Making another output primary for a moment
+/// and then `output` again makes it re-read the order. Runs in the background.
+pub fn nudge_primary(output: String, other: String) {
+    let _ = std::thread::Builder::new()
+        .name("primary".into())
+        .spawn(move || {
+            kscreen(&other, "priority.1");
+            std::thread::sleep(Duration::from_millis(800));
+            kscreen(&output, "priority.1");
+        });
+}
+
 fn kscreen(output: &str, setting: &str) {
     let arg = format!("output.{output}.{setting}");
     for _ in 0..10 {

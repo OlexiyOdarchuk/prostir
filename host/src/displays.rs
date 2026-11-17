@@ -364,6 +364,8 @@ pub struct Displays {
     woke_display_at: Option<Instant>,
     /// When KDE's primary output was last compared with ours.
     primary_checked: Instant,
+    /// When Plasma was last nudged to follow the primary output.
+    primary_nudged: Option<Instant>,
     screencast: Screencast,
     pub router: Arc<Router>,
     cfg: EncoderConfig,
@@ -389,6 +391,7 @@ impl Displays {
             mirror_retry: Instant::now(),
             woke_display_at: None,
             primary_checked: Instant::now(),
+            primary_nudged: None,
             screencast: Screencast::connect()?,
             router: Arc::new(Router::new(cfg.codec)),
             cfg,
@@ -506,12 +509,36 @@ impl Displays {
             .filter(|(_, g)| g.enabled && g.w > 0)
             .min_by_key(|(_, g)| g.priority.unwrap_or(u32::MAX))
             .map(|(name, _)| name.clone());
-        if geometries.contains_key(ours) && kde_primary.as_deref() != Some(ours) {
+        let Some(g) = geometries.get(ours) else {
+            return;
+        };
+        if kde_primary.as_deref() != Some(ours) {
             info!(
                 "KDE's primary output is {}, not {ours}: setting it again",
                 kde_primary.as_deref().unwrap_or("none")
             );
             m.output.make_primary();
+            return;
+        }
+        // KDE agrees; Plasma may still keep the panel on the former primary.
+        let Some(first) = virtual_output::plasma_first_screen() else {
+            return;
+        };
+        if first == (g.x, g.y, g.w, g.h)
+            || self
+                .primary_nudged
+                .is_some_and(|t| t.elapsed() < Duration::from_secs(10))
+        {
+            return;
+        }
+        let other = geometries
+            .iter()
+            .find(|(name, g)| g.enabled && g.w > 0 && name.as_str() != ours)
+            .map(|(name, _)| name.clone());
+        if let Some(other) = other {
+            info!("Plasma's first screen is not {ours}: nudging it to follow");
+            self.primary_nudged = Some(Instant::now());
+            virtual_output::nudge_primary(ours.to_owned(), other);
         }
     }
 
