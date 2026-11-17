@@ -73,6 +73,8 @@ pub struct Settings {
     pub cinema_screen: Option<u8>,
     /// The first-run tips were shown and dismissed.
     pub intro_seen: bool,
+    /// A passthrough window onto the real keyboard.
+    pub keyboard_window: bool,
     pub language: Language,
     /// The language of the PC last connected to (for "like the PC" before connecting).
     pub pc_language: Option<Lang>,
@@ -89,6 +91,7 @@ impl Default for Settings {
             cinema: false,
             cinema_screen: None,
             intro_seen: false,
+            keyboard_window: false,
             language: Language::LikePc,
             pc_language: None,
         }
@@ -126,6 +129,7 @@ impl Settings {
                 Some(("cinema", v)) => s.cinema = v == "on",
                 Some(("cinema-screen", v)) => s.cinema_screen = v.parse().ok(),
                 Some(("intro", v)) => s.intro_seen = v == "seen",
+                Some(("keyboard-window", v)) => s.keyboard_window = v == "on",
                 Some(("language", v)) => {
                     s.language = match v {
                         "uk" => Language::Fixed(Lang::Uk),
@@ -193,7 +197,7 @@ impl Settings {
         let on = |b: bool| if b { "on" } else { "off" };
         format!(
             "preset {preset}\ncurve {curve}\nbackground {background}\nhands {hands}\n\
-             focus {}\ncinema {}\ncinema-screen {}\nlanguage {}\npc-language {}\nintro {}\n",
+             focus {}\ncinema {}\ncinema-screen {}\nlanguage {}\npc-language {}\nintro {}\nkeyboard-window {}\n",
             on(self.focus),
             on(self.cinema),
             self.cinema_screen
@@ -203,7 +207,8 @@ impl Settings {
                 Language::Fixed(l) => l.code(),
             },
             self.pc_language.map_or("", Lang::code),
-            if self.intro_seen { "seen" } else { "new" }
+            if self.intro_seen { "seen" } else { "new" },
+            on(self.keyboard_window)
         )
     }
 }
@@ -226,6 +231,7 @@ mod tests {
             cinema: true,
             cinema_screen: Some(2),
             intro_seen: true,
+            keyboard_window: true,
             language: Language::Fixed(Lang::En),
             pc_language: Some(Lang::Uk),
         };

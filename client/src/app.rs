@@ -35,6 +35,10 @@ use crate::{background, decoder, egl, net, passthrough};
 
 /// Grab id for the menu panel (monitor ids are 0..=MIRROR_ID).
 const PANEL_ID: u8 = 250;
+/// Grab id for the keyboard window.
+const KEYBOARD_ID: u8 = 251;
+/// The keyboard window's depth as a share of its width (a keyboard's shape).
+const KEYBOARD_ASPECT: f32 = 0.44;
 const PANEL_WIDTH: f32 = 0.62;
 const BUTTON_SIZE: f32 = 0.075;
 const CURSOR_PX: u32 = 64;
@@ -115,6 +119,15 @@ enum Target {
     Panel,
     MenuButton,
     Monitor(u8),
+    Keyboard,
+}
+
+/// Lying flat (facing up) with its far edge pointing away from `head`, like a
+/// keyboard on a desk.
+fn lying_flat(position: Vec3, head: Vec3) -> glam::Quat {
+    let away = Vec3::new(position.x - head.x, 0.0, position.z - head.z).normalize_or(-Vec3::Z);
+    glam::Quat::from_rotation_y((-away.x).atan2(-away.z))
+        * glam::Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)
 }
 
 /// Everything shown in the headset and how it is arranged.
@@ -155,6 +168,9 @@ struct Scene {
     confirm_remove: Option<(u8, Instant)>,
     /// Menu page shown.
     tab: Tab,
+    /// Where the keyboard window lies (set the first time it is shown).
+    keyboard_place: Option<Placement>,
+    keyboard_path: PathBuf,
     /// The headset's own system language.
     system_lang: Option<Lang>,
     profiles: [Profile; profiles::SLOTS],
@@ -282,6 +298,14 @@ impl Scene {
                 layout::hit_surface(ray, &self.panel_place, panel_height(), None),
             );
         }
+        if self.settings.keyboard_window
+            && let Some(k) = &self.keyboard_place
+        {
+            consider(
+                Target::Keyboard,
+                layout::hit_surface(ray, k, k.width * KEYBOARD_ASPECT, None),
+            );
+        }
         if let Some(b) = &self.button_place {
             consider(
                 Target::MenuButton,
@@ -394,7 +418,7 @@ impl Scene {
         self.error = Some((text, Instant::now()));
     }
 
-    fn ui_state(&self, room: bool, panorama: bool, custom: bool) -> UiState {
+    fn ui_state(&self, room: bool, keyboard: bool, panorama: bool, custom: bool) -> UiState {
         UiState {
             host: self.host.clone(),
             found: self
@@ -419,6 +443,7 @@ impl Scene {
             panorama_available: panorama,
             custom_available: custom,
             curve_available: self.curve_supported,
+            keyboard_available: keyboard,
             error: self
                 .error
                 .as_ref()
@@ -502,6 +527,7 @@ fn run(app: &AndroidApp) -> Result<()> {
     exts.khr_composition_layer_equirect2 = available.khr_composition_layer_equirect2;
     exts.ext_hand_interaction = available.ext_hand_interaction;
     exts.ext_hand_tracking = available.ext_hand_tracking;
+    exts.fb_triangle_mesh = available.fb_triangle_mesh;
     exts.khr_composition_layer_color_scale_bias = available.khr_composition_layer_color_scale_bias;
     let instance = entry.create_instance(
         &xr::ApplicationInfo {
@@ -640,6 +666,8 @@ fn run(app: &AndroidApp) -> Result<()> {
         error: None,
         confirm_remove: None,
         tab: Tab::Monitors,
+        keyboard_place: layout::load(&data_dir.join("keyboard.txt")).remove(&0),
+        keyboard_path: data_dir.join("keyboard.txt"),
         system_lang: crate::i18n::system(),
         profiles: profiles::load(&profiles_path),
         profiles_path,
@@ -961,27 +989,34 @@ fn run(app: &AndroidApp) -> Result<()> {
                 (input.grab.pressed, input.grab.released)
             };
 
-            if end_grab
-                && let Some(released) = scene.grabs[hand].take()
-                && !scene.settings.cinema
-            {
-                layout::save(&scene.layout_path, &scene.placements);
-                // Dropped somewhere else in the row: KDE's order follows what the eyes see.
-                if released.id != PANEL_ID && released.id != MIRROR_ID {
-                    let ids: Vec<u8> = scene.quest_sizes().iter().map(|m| m.0).collect();
-                    let by_direction = layout::order_by_direction(&scene.placements, &ids);
-                    scene.reorder(by_direction);
+            if end_grab && let Some(released) = scene.grabs[hand].take() {
+                if released.id == KEYBOARD_ID {
+                    if let Some(k) = scene.keyboard_place {
+                        layout::save(&scene.keyboard_path, &HashMap::from([(0, k)]));
+                    }
+                } else if !scene.settings.cinema {
+                    layout::save(&scene.layout_path, &scene.placements);
+                    // Dropped somewhere else in the row: KDE's order follows what the eyes see.
+                    if released.id != PANEL_ID && released.id != MIRROR_ID {
+                        let ids: Vec<u8> = scene.quest_sizes().iter().map(|m| m.0).collect();
+                        let by_direction = layout::order_by_direction(&scene.placements, &ids);
+                        scene.reorder(by_direction);
+                    }
                 }
             }
             let Some(ray) = input.ray else { continue };
             if let Some(mut grab) = scene.grabs[hand] {
-                let target = if grab.id == PANEL_ID {
-                    Some(&mut scene.panel_place)
-                } else {
-                    scene.placements.get_mut(&grab.id)
+                let target = match grab.id {
+                    PANEL_ID => Some(&mut scene.panel_place),
+                    KEYBOARD_ID => scene.keyboard_place.as_mut(),
+                    id => scene.placements.get_mut(&id),
                 };
                 if let Some(p) = target {
                     grab.update(p, ray, head, input.stick, dt);
+                    if grab.id == KEYBOARD_ID {
+                        // It follows the hand but stays flat, like the desk.
+                        p.rotation = lying_flat(p.position, head);
+                    }
                     scene.grabs[hand] = Some(grab);
                 }
             } else if start_grab {
@@ -991,6 +1026,9 @@ fn run(app: &AndroidApp) -> Result<()> {
                     Some((Target::Panel, hit)) if other != Some(PANEL_ID) => {
                         Some(Grab::start(PANEL_ID, hit.t, hit.local, &scene.panel_place))
                     }
+                    Some((Target::Keyboard, hit)) if other != Some(KEYBOARD_ID) => scene
+                        .keyboard_place
+                        .map(|k| Grab::start(KEYBOARD_ID, hit.t, hit.local, &k)),
                     Some((Target::Monitor(id), hit)) if other != Some(id) => {
                         Some(Grab::start(id, hit.t, hit.local, &scene.placements[&id]))
                     }
@@ -1020,6 +1058,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         if scene.panel_open {
             let ui_state = scene.ui_state(
                 passthrough.is_some(),
+                passthrough.as_ref().is_some_and(|p| p.window_supported()),
                 exts.khr_composition_layer_equirect2,
                 custom_pano,
             );
@@ -1094,15 +1133,39 @@ fn run(app: &AndroidApp) -> Result<()> {
             quality_next
         };
 
-        let passthrough_layer = passthrough.as_ref().filter(|pt| pt.running()).map(|pt| {
-            xr::sys::CompositionLayerPassthroughFB {
+        // The keyboard window: placed in front of the user at desk height the first
+        // time, then wherever it was moved.
+        if let Some(pt) = passthrough.as_mut().filter(|pt| pt.window_supported()) {
+            let place = scene.settings.keyboard_window.then(|| {
+                *scene.keyboard_place.get_or_insert_with(|| {
+                    let flat = Vec3::new(forward.x, 0.0, forward.z).normalize_or(-Vec3::Z);
+                    let position = head + flat * 0.42 - Vec3::Y * 0.42;
+                    Placement {
+                        position,
+                        rotation: lying_flat(position, head),
+                        width: 0.5,
+                    }
+                })
+            });
+            let shown = place.map(|p| (posef(&p), p.width, p.width * KEYBOARD_ASPECT));
+            if let Err(e) = pt.set_window(&local, time, shown) {
+                warn!("keyboard window: {e:#}");
+                scene.settings.keyboard_window = false;
+            }
+        }
+        let passthrough_layer = |handle: Option<xr::sys::PassthroughLayerFB>| {
+            handle.map(|layer_handle| xr::sys::CompositionLayerPassthroughFB {
                 ty: xr::sys::CompositionLayerPassthroughFB::TYPE,
                 next: ptr::null(),
                 flags: xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA,
                 space: xr::sys::Space::NULL,
-                layer_handle: pt.layer(),
-            }
-        });
+                layer_handle,
+            })
+        };
+        let keyboard_layer =
+            passthrough_layer(passthrough.as_ref().and_then(|pt| pt.window_layer()));
+        let passthrough_layer =
+            passthrough_layer(passthrough.as_ref().and_then(|pt| pt.room_layer()));
         let pano = pano_layer
             .as_ref()
             .filter(|(b, _)| *b == scene.settings.background)
@@ -1270,6 +1333,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         } else if let Some(l) = &pano {
             layers.push(as_layer(l));
         }
+        layers.extend(keyboard_layer.iter().map(as_layer));
         layers.extend(cylinders.iter().map(as_layer));
         layers.extend(quads.iter().map(as_layer));
         layers.extend(button.iter().map(as_layer));
@@ -1424,7 +1488,7 @@ fn handle_net_event(
 /// Passthrough cameras on only for the "room" background.
 fn set_passthrough(scene: &mut Scene, passthrough: &mut Option<passthrough::Passthrough>) {
     if let Some(pt) = passthrough
-        && let Err(e) = pt.set_running(scene.settings.background == Background::Room)
+        && let Err(e) = pt.set_room(scene.settings.background == Background::Room)
     {
         let what = scene.lang().t("Камери недоступні", "Cameras unavailable");
         scene.show_error(format!("{what}: {e:#}"));
@@ -1499,6 +1563,10 @@ fn handle_action(
                     scene.arrange_all();
                 }
             }
+        }
+        Action::KeyboardWindow(on) => {
+            scene.settings.keyboard_window = on;
+            scene.settings.save(settings_path);
         }
         Action::Focus(on) => {
             scene.settings.focus = on;

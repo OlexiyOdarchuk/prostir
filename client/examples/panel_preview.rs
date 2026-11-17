@@ -65,6 +65,7 @@ fn main() {
         panorama_available: true,
         custom_available: false,
         curve_available: true,
+        keyboard_available: true,
         error: None,
         confirm_remove: std::env::var("CONFIRM").is_ok().then_some(2),
         intro: std::env::var("INTRO").is_ok(),

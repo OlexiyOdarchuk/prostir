@@ -60,6 +60,8 @@ pub struct UiState {
     /// The user put a `background.jpg/png` on the headset.
     pub custom_available: bool,
     pub curve_available: bool,
+    /// The headset can show a passthrough window onto the keyboard.
+    pub keyboard_available: bool,
     pub error: Option<String>,
     /// Monitor whose "×" was pressed once and now asks for confirmation.
     pub confirm_remove: Option<u8>,
@@ -103,6 +105,7 @@ pub enum Action {
     Background(Background),
     Hands(HandMode),
     Focus(bool),
+    KeyboardWindow(bool),
     Cinema(bool),
     /// Which monitor (position in the row) cinema mode shows.
     CinemaScreen(u8),
@@ -1306,6 +1309,46 @@ fn build_look(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, rx: f32, rw:
         items.push(text(rx, y, 19.0, false, MUTED, line));
         y += 28.0;
     }
+    y += 40.0;
+    segmented(
+        items,
+        rx,
+        rw,
+        &mut y,
+        l.t("Вікно на клавіатуру", "Keyboard window"),
+        vec![
+            (
+                l.t("Вимкнено", "Off"),
+                Action::KeyboardWindow(false),
+                !st.keyboard_window,
+                s.keyboard_available,
+            ),
+            (
+                l.t("Показувати", "Show"),
+                Action::KeyboardWindow(true),
+                st.keyboard_window,
+                s.keyboard_available,
+            ),
+        ],
+    );
+    y -= 12.0;
+    for line in [
+        l.t(
+            "Прямокутник, крізь який видно справжній стіл.",
+            "A rectangle you see the real desk through.",
+        ),
+        l.t(
+            "Перенесіть його на клавіатуру, як монітор.",
+            "Move it onto the keyboard like a monitor.",
+        ),
+        l.t(
+            "Поки він увімкнений, камери шолома працюють.",
+            "The headset cameras run while it is on.",
+        ),
+    ] {
+        items.push(text(rx, y, 19.0, false, MUTED, line));
+        y += 28.0;
+    }
 }
 
 /// The first-run page: how to reach the menu, move and line up monitors, and what
@@ -1653,6 +1696,7 @@ mod tests {
             panorama_available: true,
             custom_available: false,
             curve_available: true,
+            keyboard_available: true,
             error: None,
             confirm_remove: None,
             tab: Tab::Monitors,
