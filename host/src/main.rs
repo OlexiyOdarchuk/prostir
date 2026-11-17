@@ -1,5 +1,6 @@
 mod displays;
 mod encoder;
+mod pairing;
 mod tray;
 mod virtual_output;
 
@@ -8,10 +9,11 @@ use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream, UdpSocket};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::Parser;
 use log::{error, info, warn};
-use prostir_proto::{ClientMsg, Codec, HostMsg, PROTOCOL_VERSION};
+use prostir_proto::secure::{SecureReader, SecureWriter};
+use prostir_proto::{ClientMsg, Codec, HostMsg};
 
 use displays::{Displays, SavedMonitors};
 use encoder::EncoderConfig;
@@ -73,28 +75,10 @@ fn parse_monitor(s: &str) -> Result<MonitorSpec, String> {
     Ok(spec)
 }
 
-/// Validates the client's greeting before anything (like creating monitors) happens.
-fn handshake(stream: &TcpStream) -> Result<BufReader<TcpStream>> {
-    stream.set_nodelay(true)?;
-    // Over Wi-Fi a vanished headset would otherwise block writes for minutes and
-    // keep a reconnecting headset waiting in the accept queue.
-    stream.set_write_timeout(Some(Duration::from_secs(3)))?;
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-    let mut reader = BufReader::new(stream.try_clone()?);
-    match ClientMsg::read(&mut reader)? {
-        ClientMsg::Hello { version } if version == PROTOCOL_VERSION => {}
-        ClientMsg::Hello { version } => {
-            bail!("client speaks protocol v{version}, host v{PROTOCOL_VERSION}")
-        }
-        other => bail!("unexpected first message {other:?}"),
-    }
-    stream.set_read_timeout(None)?;
-    Ok(reader)
-}
-
 /// Tray icon and the commands it sends.
 struct Control {
     tray: Option<tray::Handle>,
+    security: pairing::Security,
     commands: Receiver<tray::Command>,
     bitrate: u32,
     quit: bool,
@@ -113,6 +97,15 @@ impl Control {
                     if let Some(d) = displays.as_deref_mut() {
                         d.set_bitrate(mbps);
                         d.save();
+                    }
+                }
+                tray::Command::ForgetHeadsets => {
+                    info!(
+                        "forgetting {} paired headset(s)",
+                        self.security.trusted.len()
+                    );
+                    if let Err(e) = self.security.trusted.clear() {
+                        warn!("cannot forget headsets: {e}");
                     }
                 }
                 tray::Command::Quit => self.quit = true,
@@ -137,17 +130,13 @@ impl Control {
 
 fn serve_client(
     stream: TcpStream,
-    mut reader: BufReader<TcpStream>,
+    mut reader: BufReader<SecureReader>,
+    writer: SecureWriter,
     displays: &mut Displays,
     control: &mut Control,
     via: &'static str,
 ) -> Result<()> {
-    let mut writer = BufWriter::with_capacity(1 << 20, stream.try_clone()?);
-    HostMsg::Welcome {
-        version: PROTOCOL_VERSION,
-    }
-    .write(&mut writer)?;
-    writer.flush()?;
+    let mut writer = BufWriter::with_capacity(1 << 20, writer);
 
     let (tx, rx) = mpsc::sync_channel::<HostMsg>(16);
     let writer_thread = {
@@ -421,6 +410,7 @@ fn main() -> Result<()> {
         .unwrap_or(30);
     let (command_tx, commands) = mpsc::channel();
     let mut control = Control {
+        security: pairing::Security::load()?,
         tray: tray::spawn(command_tx, bitrate),
         commands,
         bitrate,
@@ -440,13 +430,14 @@ fn main() -> Result<()> {
         match listener.accept() {
             Ok((stream, addr)) => {
                 stream.set_nonblocking(false)?;
-                let reader = match handshake(&stream) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        warn!("rejected connection from {addr}: {e:#}");
-                        continue;
-                    }
-                };
+                let (reader, writer) =
+                    match pairing::accept(&stream, &mut control.security, control.tray.as_ref()) {
+                        Ok(halves) => halves,
+                        Err(e) => {
+                            warn!("rejected connection from {addr}: {e:#}");
+                            continue;
+                        }
+                    };
                 let via = if addr.ip().is_loopback() {
                     "USB"
                 } else {
@@ -469,6 +460,7 @@ fn main() -> Result<()> {
                 if let Err(e) = serve_client(
                     stream,
                     reader,
+                    writer,
                     displays.as_mut().unwrap(),
                     &mut control,
                     via,

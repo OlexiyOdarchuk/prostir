@@ -9,7 +9,51 @@ use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
+use prostir_proto::secure::{
+    self, Identity, Pairing, SecureReader, SecureWriter, TrustStore, confirmation, tags_match,
+};
 use prostir_proto::{ClientMsg, Codec, HostMsg, PROTOCOL_VERSION};
+
+/// Shows a code here; the PC asks for it in a dialog.
+fn pair(
+    r: &mut BufReader<SecureReader>,
+    w: &mut SecureWriter,
+    identity: &Identity,
+    peer: &secure::Peer,
+) -> Result<()> {
+    let code = secure::pairing_code();
+    println!("pairing: type {} {} on the PC", &code[..3], &code[3..]);
+    ClientMsg::PairBegin {
+        headset_shows: true,
+        name: "prostir-probe".into(),
+    }
+    .write(w)?;
+    let (pairing, msg) = Pairing::start(&code);
+    ClientMsg::PairMsg { msg }.write(w)?;
+    let theirs = loop {
+        match HostMsg::read(r)? {
+            HostMsg::PairMsg { msg } => break msg,
+            HostMsg::PairResult { .. } => bail!("the PC gave up pairing"),
+            HostMsg::Error { text } => println!("PC: {text}"),
+            other => bail!("unexpected {other:?}"),
+        }
+    };
+    let key = pairing.finish(&theirs)?;
+    ClientMsg::PairConfirm {
+        tag: confirmation(&key, "headset", peer, &identity.public),
+    }
+    .write(w)?;
+    match HostMsg::read(r)? {
+        HostMsg::PairResult { ok: true, tag }
+            if tags_match(&tag, &confirmation(&key, "pc", peer, &identity.public)) =>
+        {
+            println!("paired");
+            Ok(())
+        }
+        HostMsg::PairResult { .. } => bail!("the codes did not match"),
+        other => bail!("unexpected {other:?}"),
+    }
+}
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
@@ -21,17 +65,41 @@ fn main() -> Result<()> {
 
     let stream = TcpStream::connect(&addr)?;
     stream.set_nodelay(true)?;
-    stream.set_read_timeout(Some(Duration::from_secs(15)))?;
-    let mut w = stream.try_clone()?;
+    stream.set_read_timeout(Some(Duration::from_secs(300)))?;
+    // The probe pairs like a headset, with its own key.
+    let dir_cfg = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default()
+        .join(".config/prostir/probe");
+    let identity = Identity::load_or_create(&dir_cfg.join("identity"))?;
+    let mut trusted = TrustStore::load(&dir_cfg.join("paired_hosts"));
+    let (reader, mut w, peer) = secure::handshake(&stream, &identity, true)?;
+    let mut r = BufReader::new(reader);
+    if !trusted.contains(&peer.key) {
+        pair(&mut r, &mut w, &identity, &peer)?;
+        trusted.add(peer.key, &addr)?;
+    }
     ClientMsg::Hello {
         version: PROTOCOL_VERSION,
     }
     .write(&mut w)?;
-    let mut r = BufReader::new(stream);
-    match HostMsg::read(&mut r)? {
-        HostMsg::Welcome { version } => println!("connected, host protocol v{version}"),
-        other => bail!("unexpected {other:?}"),
+    loop {
+        match HostMsg::read(&mut r)? {
+            HostMsg::Welcome { version } => {
+                println!("connected, host protocol v{version}");
+                break;
+            }
+            HostMsg::PairingRequired => {
+                pair(&mut r, &mut w, &identity, &peer)?;
+                ClientMsg::Hello {
+                    version: PROTOCOL_VERSION,
+                }
+                .write(&mut w)?;
+            }
+            other => bail!("unexpected {other:?}"),
+        }
     }
+    stream.set_read_timeout(Some(Duration::from_secs(15)))?;
 
     struct Stats {
         file: BufWriter<std::fs::File>,
@@ -84,6 +152,7 @@ fn main() -> Result<()> {
             HostMsg::Error { text } => println!("host error: {text}"),
             HostMsg::MirrorWanted { enabled } => println!("mirror wanted: {enabled}"),
             HostMsg::Order { ids } => println!("order: {ids:?}"),
+            HostMsg::PairingRequired | HostMsg::PairMsg { .. } | HostMsg::PairResult { .. } => {}
             HostMsg::Welcome { .. } => {}
         }
     }

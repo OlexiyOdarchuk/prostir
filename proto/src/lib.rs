@@ -4,11 +4,13 @@
 //! The client connects over TCP (USB via `adb reverse`, or Wi-Fi after
 //! discovering the host through a UDP broadcast beacon).
 
+pub mod secure;
+
 use std::io::{self, Read, Write};
 
 pub const TCP_PORT: u16 = 47830;
 pub const DISCOVERY_PORT: u16 = 47831;
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 /// Stream id of the mirrored physical display (laptop panel); Quest monitors use 0..
 pub const MIRROR_ID: u8 = 100;
 /// Prefix of the UDP discovery beacon: `MAGIC ++ tcp_port (u16 LE) ++ hostname (utf-8)`.
@@ -66,7 +68,6 @@ pub enum HostMsg {
     PrimaryChanged {
         id: u8,
     },
-    /// Something the user asked for failed; shown in the headset menu.
     /// Left-to-right order of the Quest monitors (as in KDE's layout).
     Order {
         ids: Vec<u8>,
@@ -75,8 +76,20 @@ pub enum HostMsg {
     MirrorWanted {
         enabled: bool,
     },
+    /// Something the user asked for failed; shown in the headset menu.
     Error {
         text: String,
+    },
+    /// The PC does not know this headset yet: pair first.
+    PairingRequired,
+    /// The PC's SPAKE2 message (see [`secure::Pairing`]).
+    PairMsg {
+        msg: Vec<u8>,
+    },
+    /// Whether the codes matched; on success `tag` proves it from the PC's side.
+    PairResult {
+        ok: bool,
+        tag: Vec<u8>,
     },
 }
 
@@ -101,7 +114,6 @@ pub enum ClientMsg {
     RemoveMonitor {
         id: u8,
     },
-    /// Make this monitor KDE's primary one.
     /// New left-to-right order of the Quest monitors.
     SetOrder {
         ids: Vec<u8>,
@@ -110,8 +122,23 @@ pub enum ClientMsg {
     SetMirror {
         enabled: bool,
     },
+    /// Make this monitor KDE's primary one.
     SetPrimary {
         id: u8,
+    },
+    /// Start pairing. `headset_shows`: the headset displays the code and the PC asks
+    /// for it; otherwise the PC displays it and the headset asks.
+    PairBegin {
+        headset_shows: bool,
+        name: String,
+    },
+    /// The headset's SPAKE2 message.
+    PairMsg {
+        msg: Vec<u8>,
+    },
+    /// Proof that the headset derived the same pairing key.
+    PairConfirm {
+        tag: Vec<u8>,
     },
 }
 
@@ -124,6 +151,9 @@ mod tag {
     pub const ERROR: u8 = 6;
     pub const MIRROR_WANTED: u8 = 7;
     pub const ORDER: u8 = 8;
+    pub const PAIRING_REQUIRED: u8 = 9;
+    pub const PAIR_MSG_HOST: u8 = 10;
+    pub const PAIR_RESULT: u8 = 11;
     pub const HELLO: u8 = 101;
     pub const REQUEST_KEYFRAME: u8 = 102;
     pub const FRAME_SHOWN: u8 = 103;
@@ -132,6 +162,9 @@ mod tag {
     pub const SET_PRIMARY: u8 = 106;
     pub const SET_MIRROR: u8 = 107;
     pub const SET_ORDER: u8 = 108;
+    pub const PAIR_BEGIN: u8 = 109;
+    pub const PAIR_MSG_CLIENT: u8 = 110;
+    pub const PAIR_CONFIRM: u8 = 111;
 }
 
 fn invalid(msg: &str) -> io::Error {
@@ -222,6 +255,11 @@ impl HostMsg {
             HostMsg::PrimaryChanged { id } => write_frame(w, tag::PRIMARY_CHANGED, &[&[*id]]),
             HostMsg::Error { text } => write_frame(w, tag::ERROR, &[text.as_bytes()]),
             HostMsg::Order { ids } => write_frame(w, tag::ORDER, &[ids]),
+            HostMsg::PairingRequired => write_frame(w, tag::PAIRING_REQUIRED, &[]),
+            HostMsg::PairMsg { msg } => write_frame(w, tag::PAIR_MSG_HOST, &[msg]),
+            HostMsg::PairResult { ok, tag } => {
+                write_frame(w, tag::PAIR_RESULT, &[&[*ok as u8], tag])
+            }
             HostMsg::MirrorWanted { enabled } => {
                 write_frame(w, tag::MIRROR_WANTED, &[&[*enabled as u8]])
             }
@@ -261,6 +299,14 @@ impl HostMsg {
             }
             tag::STREAM_END => HostMsg::StreamEnd { id: c.u8()? },
             tag::PRIMARY_CHANGED => HostMsg::PrimaryChanged { id: c.u8()? },
+            tag::PAIRING_REQUIRED => HostMsg::PairingRequired,
+            tag::PAIR_MSG_HOST => HostMsg::PairMsg {
+                msg: c.rest().to_vec(),
+            },
+            tag::PAIR_RESULT => HostMsg::PairResult {
+                ok: c.u8()? != 0,
+                tag: c.rest().to_vec(),
+            },
             tag::ORDER => HostMsg::Order {
                 ids: c.rest().to_vec(),
             },
@@ -291,6 +337,16 @@ impl ClientMsg {
             ClientMsg::RemoveMonitor { id } => write_frame(w, tag::REMOVE_MONITOR, &[&[*id]]),
             ClientMsg::SetPrimary { id } => write_frame(w, tag::SET_PRIMARY, &[&[*id]]),
             ClientMsg::SetOrder { ids } => write_frame(w, tag::SET_ORDER, &[ids]),
+            ClientMsg::PairBegin {
+                headset_shows,
+                name,
+            } => write_frame(
+                w,
+                tag::PAIR_BEGIN,
+                &[&[*headset_shows as u8], name.as_bytes()],
+            ),
+            ClientMsg::PairMsg { msg } => write_frame(w, tag::PAIR_MSG_CLIENT, &[msg]),
+            ClientMsg::PairConfirm { tag } => write_frame(w, tag::PAIR_CONFIRM, &[tag]),
             ClientMsg::SetMirror { enabled } => {
                 write_frame(w, tag::SET_MIRROR, &[&[*enabled as u8]])
             }
@@ -313,6 +369,16 @@ impl ClientMsg {
             },
             tag::REMOVE_MONITOR => ClientMsg::RemoveMonitor { id: c.u8()? },
             tag::SET_PRIMARY => ClientMsg::SetPrimary { id: c.u8()? },
+            tag::PAIR_BEGIN => ClientMsg::PairBegin {
+                headset_shows: c.u8()? != 0,
+                name: String::from_utf8_lossy(c.rest()).into_owned(),
+            },
+            tag::PAIR_MSG_CLIENT => ClientMsg::PairMsg {
+                msg: c.rest().to_vec(),
+            },
+            tag::PAIR_CONFIRM => ClientMsg::PairConfirm {
+                tag: c.rest().to_vec(),
+            },
             tag::SET_ORDER => ClientMsg::SetOrder {
                 ids: c.rest().to_vec(),
             },
@@ -364,6 +430,12 @@ mod tests {
             HostMsg::PrimaryChanged { id: 1 },
             HostMsg::MirrorWanted { enabled: true },
             HostMsg::Order { ids: vec![0, 3, 1] },
+            HostMsg::PairingRequired,
+            HostMsg::PairMsg { msg: vec![4, 5] },
+            HostMsg::PairResult {
+                ok: true,
+                tag: vec![1; 32],
+            },
             HostMsg::Error {
                 text: "Не вдалося".into(),
             },
@@ -403,6 +475,12 @@ mod tests {
             ClientMsg::SetPrimary { id: 1 },
             ClientMsg::SetMirror { enabled: true },
             ClientMsg::SetOrder { ids: vec![2, 0, 1] },
+            ClientMsg::PairBegin {
+                headset_shows: true,
+                name: "Meta Quest 3".into(),
+            },
+            ClientMsg::PairMsg { msg: vec![1, 2, 3] },
+            ClientMsg::PairConfirm { tag: vec![9; 32] },
         ] {
             let mut buf = Vec::new();
             m.write(&mut buf).unwrap();

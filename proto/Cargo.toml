@@ -9,3 +9,8 @@ rust-version.workspace = true
 description = "Wire protocol between the Prostir host (KDE Plasma) and the Meta Quest client"
 
 [dependencies]
+getrandom = "0.3"
+hmac = "0.12"
+sha2 = "0.10"
+snow = "0.10"
+spake2 = "0.4"

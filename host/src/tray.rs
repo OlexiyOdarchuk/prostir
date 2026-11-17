@@ -12,6 +12,8 @@ use log::warn;
 /// What the tray asks the main loop to do.
 pub enum Command {
     SetBitrate(u32),
+    /// Drop all paired headsets: each must pair again.
+    ForgetHeadsets,
     Quit,
 }
 
@@ -32,6 +34,8 @@ pub struct Status {
 
 pub struct Tray {
     status: Status,
+    /// Code to type in the headset, while pairing.
+    pairing_code: Option<String>,
     bitrate: u32,
     commands: Sender<Command>,
 }
@@ -42,6 +46,7 @@ pub type Handle = ksni::blocking::Handle<Tray>;
 pub fn spawn(commands: Sender<Command>, bitrate: u32) -> Option<Handle> {
     let tray = Tray {
         status: Status::default(),
+        pairing_code: None,
         bitrate,
         commands,
     };
@@ -54,6 +59,13 @@ pub fn spawn(commands: Sender<Command>, bitrate: u32) -> Option<Handle> {
 pub fn set_status(handle: Option<&Handle>, status: Status) {
     if let Some(h) = handle {
         h.update(|t| t.status = status);
+    }
+}
+
+/// Shows (or hides) the pairing code in the tray.
+pub fn set_pairing(handle: Option<&Handle>, code: Option<String>) {
+    if let Some(h) = handle {
+        h.update(|t| t.pairing_code = code);
     }
 }
 
@@ -142,7 +154,9 @@ impl ksni::Tray for Tray {
 
     fn status(&self) -> ksni::Status {
         // Waiting quietly sits in the tray's overflow; a session is shown.
-        if self.status.connected.is_some() {
+        if self.pairing_code.is_some() {
+            ksni::Status::NeedsAttention
+        } else if self.status.connected.is_some() {
             ksni::Status::Active
         } else {
             ksni::Status::Passive
@@ -152,7 +166,10 @@ impl ksni::Tray for Tray {
     fn tool_tip(&self) -> ToolTip {
         ToolTip {
             title: "Prostir".into(),
-            description: format!("{}\n{}", self.status_line(), self.monitors_line()),
+            description: match &self.pairing_code {
+                Some(code) => format!("Код сполучення: {code}"),
+                None => format!("{}\n{}", self.status_line(), self.monitors_line()),
+            },
             ..Default::default()
         }
     }
@@ -162,7 +179,19 @@ impl ksni::Tray for Tray {
             .iter()
             .position(|(m, _)| *m == self.bitrate)
             .unwrap_or(1);
-        vec![
+        let mut items: Vec<MenuItem<Self>> = Vec::new();
+        if let Some(code) = &self.pairing_code {
+            items.push(
+                StandardItem {
+                    label: format!("Код сполучення: {code}"),
+                    enabled: false,
+                    ..Default::default()
+                }
+                .into(),
+            );
+            items.push(MenuItem::Separator);
+        }
+        items.extend([
             StandardItem {
                 label: self.status_line(),
                 enabled: false,
@@ -206,6 +235,14 @@ impl ksni::Tray for Tray {
                 ..Default::default()
             }
             .into(),
+            StandardItem {
+                label: "Забути сполучені шоломи".into(),
+                activate: Box::new(|tray: &mut Self| {
+                    let _ = tray.commands.send(Command::ForgetHeadsets);
+                }),
+                ..Default::default()
+            }
+            .into(),
             MenuItem::Separator,
             StandardItem {
                 label: "Вийти".into(),
@@ -216,6 +253,7 @@ impl ksni::Tray for Tray {
                 ..Default::default()
             }
             .into(),
-        ]
+        ]);
+        items
     }
 }
