@@ -32,6 +32,11 @@ use wayland_protocols_wlr::screencopy::v1::client::{
     zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
 };
 
+/// The rate Prostir's outputs run at. Told to the encoder: with an unknown rate VA-API
+/// budgets every frame as if there were 30 a second, which on a busy screen means about
+/// twice the chosen bitrate. Frames still come only when something changes.
+const FRAME_RATE: i32 = 60;
+
 /// Buffers captured into in turn; the encoder holds at most a few at a time.
 const SLOTS: usize = 4;
 /// With nothing changing on screen, the last frame is sent again this often (the
@@ -488,7 +493,7 @@ impl Pool {
             .field("drm-format", caps_name.unwrap_or_default())
             .field("width", width as i32)
             .field("height", height as i32)
-            .field("framerate", gst::Fraction::new(0, 1))
+            .field("framerate", gst::Fraction::new(FRAME_RATE, 1))
             .build();
         Ok((
             Self {
@@ -555,7 +560,7 @@ impl Pool {
             })
             .collect();
         let caps = gst_video::VideoInfo::builder(video_format, width, height)
-            .fps(gst::Fraction::new(0, 1))
+            .fps(gst::Fraction::new(FRAME_RATE, 1))
             .build()?
             .to_caps()?;
         Ok((
