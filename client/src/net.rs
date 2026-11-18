@@ -22,17 +22,48 @@ pub struct Frame {
     pub data: Vec<u8>,
 }
 
-/// Sends small messages back to the host from any thread (net, decoders).
+/// Messages to the PC. Sending only queues them: a writer thread puts them on the
+/// network, so the frame loop, the microphone and the decoders never wait on Wi-Fi.
 #[derive(Clone)]
-pub struct Feedback(Arc<Mutex<SecureWriter>>);
+pub struct Feedback(SyncSender<ClientMsg>);
 
 impl Feedback {
+    /// Starts the writer thread for one session. It ends (and shuts the socket down,
+    /// which ends the session) when a write fails or times out.
+    fn start(mut writer: SecureWriter, stream: TcpStream) -> std::io::Result<Self> {
+        // About 2.5 s of microphone sound, plus room for everything else.
+        let (tx, rx) = mpsc::sync_channel::<ClientMsg>(256);
+        stream.set_write_timeout(Some(Duration::from_secs(3)))?;
+        std::thread::Builder::new()
+            .name("net-writer".into())
+            .spawn(move || {
+                let mut buf = Vec::with_capacity(4096);
+                while let Ok(msg) = rx.recv() {
+                    // Everything already waiting goes out as one encrypted chunk.
+                    buf.clear();
+                    let _ = msg.write(&mut buf);
+                    while buf.len() < 64 * 1024
+                        && let Ok(more) = rx.try_recv()
+                    {
+                        let _ = more.write(&mut buf);
+                    }
+                    if let Err(e) = writer.write_all(&buf) {
+                        warn!("sending to the PC failed: {e}");
+                        let _ = stream.shutdown(Shutdown::Both);
+                        return;
+                    }
+                }
+            })?;
+        Ok(Self(tx))
+    }
+
+    /// Queues a message. When the queue is full (the network is stuck) the message is
+    /// dropped; an error means the session is over.
     pub fn send(&self, msg: &ClientMsg) -> std::io::Result<()> {
-        let mut stream = self.0.lock().unwrap();
-        // One write per message: one encrypted chunk, sent right away (TCP_NODELAY).
-        let mut buf = Vec::with_capacity(16);
-        msg.write(&mut buf)?;
-        stream.write_all(&buf)
+        match self.0.try_send(msg.clone()) {
+            Ok(()) | Err(TrySendError::Full(_)) => Ok(()),
+            Err(TrySendError::Disconnected(_)) => Err(std::io::ErrorKind::BrokenPipe.into()),
+        }
     }
 }
 
@@ -671,7 +702,15 @@ fn run_session(
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     let (reader, writer, peer) = secure::handshake(&stream, identity, true)?;
     let mut reader = BufReader::with_capacity(1 << 20, reader);
-    let feedback = Feedback(Arc::new(Mutex::new(writer)));
+    let feedback = Feedback::start(writer, stream.try_clone()?)?;
+    // However the session ends, the socket closes: nothing stays blocked on it.
+    struct CloseOnExit<'a>(&'a TcpStream);
+    impl Drop for CloseOnExit<'_> {
+        fn drop(&mut self) {
+            let _ = self.0.shutdown(Shutdown::Both);
+        }
+    }
+    let _close = CloseOnExit(&stream);
     let host = name.clone().unwrap_or_else(|| match stream.peer_addr() {
         Ok(a) if a.ip().is_loopback() => crate::i18n::current().t("ПК (USB)", "PC (USB)").into(),
         Ok(a) => a.ip().to_string(),

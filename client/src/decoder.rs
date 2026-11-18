@@ -148,6 +148,8 @@ struct Timing {
     feedback: Option<Feedback>,
     /// pts → (received, queued) for frames inside the decoder.
     in_flight: HashMap<u64, (Instant, Instant)>,
+    /// When a shown frame was last reported to the PC.
+    last_ack: Option<Instant>,
     frames: u32,
     wait_ms: f32,
     wait_max: f32,
@@ -166,7 +168,14 @@ impl Timing {
     }
 
     fn decoded(&mut self, pts_us: u64) {
-        if let Some(f) = &self.feedback {
+        // Enough for the PC's latency figures: one frame every 100 ms, not every frame
+        // as its own network packet.
+        if let Some(f) = &self.feedback
+            && self
+                .last_ack
+                .is_none_or(|t| t.elapsed() >= Duration::from_millis(100))
+        {
+            self.last_ack = Some(Instant::now());
             let _ = f.send(&ClientMsg::FrameShown {
                 id: self.id,
                 pts_us,
