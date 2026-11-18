@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use fontdue::{Font, FontSettings, Metrics};
-use tiny_skia::{FillRule, Paint, Path, PathBuilder, Pixmap, Rect, Transform};
+use tiny_skia::{FillRule, Paint, Path, PathBuilder, Pixmap, Rect, Stroke, Transform};
 
 use crate::i18n::{Lang, Language};
 use crate::profiles::Profile;
@@ -145,6 +145,9 @@ pub enum Action {
 enum Style {
     Normal,
     Selected,
+    /// A tab: the current one, or one to switch to.
+    TabOn,
+    TabOff,
     Danger,
     /// Asking to confirm a destructive action.
     Armed,
@@ -154,6 +157,15 @@ enum Style {
 enum Item {
     Panel(Rect),
     Box(Rect, [u8; 4]),
+    /// A thin outline around a card (the active profile).
+    Outline(Rect, [u8; 4]),
+    /// A small filled circle: a status light.
+    Dot {
+        x: f32,
+        y: f32,
+        r: f32,
+        color: [u8; 4],
+    },
     Text {
         x: f32,
         baseline: f32,
@@ -171,7 +183,13 @@ enum Item {
 }
 
 const TEXT: [u8; 4] = [232, 234, 240, 255];
-const MUTED: [u8; 4] = [150, 156, 170, 255];
+/// Secondary text: light enough to read comfortably in the headset.
+const MUTED: [u8; 4] = [168, 175, 190, 255];
+/// Section titles above groups of options.
+const SECTION: [u8; 4] = [206, 211, 222, 255];
+/// Status lights.
+const GOOD: [u8; 4] = [74, 222, 128, 255];
+const WAIT: [u8; 4] = [251, 191, 36, 255];
 const ACCENT: [u8; 4] = [61, 126, 255, 255];
 const DANGER: [u8; 4] = [255, 107, 107, 255];
 
@@ -335,22 +353,28 @@ impl Panel {
             MUTED,
             env!("CARGO_PKG_VERSION"),
         ));
-        let status = match &s.host {
-            _ if s.update.is_some() => l.t("Потрібне оновлення", "Update needed").to_owned(),
-            _ if s.pairing.is_some() => l.t("Сполучення…", "Pairing…").to_owned(),
-            Some(h) => format!("{} {h}", l.t("Підключено до", "Connected to")),
-            None => l.t("Шукаю ПК…", "Looking for a PC…").to_owned(),
+        let (status, light) = match &s.host {
+            _ if s.update.is_some() => (
+                l.t("Потрібне оновлення", "Update needed").to_owned(),
+                DANGER,
+            ),
+            _ if s.pairing.is_some() => (l.t("Сполучення…", "Pairing…").to_owned(), WAIT),
+            Some(h) => (
+                format!("{} {h}", l.t("Підключено до", "Connected to")),
+                GOOD,
+            ),
+            None => (l.t("Шукаю ПК…", "Looking for a PC…").to_owned(), WAIT),
         };
         let sw = self.text_width(&status, 21.0, false);
         let change_w = if s.host.is_some() { 190.0 } else { 0.0 };
-        items.push(text(
-            w - 120.0 - change_w - sw,
-            66.0,
-            21.0,
-            false,
-            MUTED,
-            &status,
-        ));
+        let sx = w - 120.0 - change_w - sw;
+        items.push(Item::Dot {
+            x: sx - 16.0,
+            y: 59.0,
+            r: 6.0,
+            color: light,
+        });
+        items.push(text(sx, 66.0, 21.0, false, MUTED, &status));
         if s.host.is_some() {
             items.push(button(
                 rect(w - 98.0 - 170.0, 32.0, 170.0, 48.0),
@@ -402,12 +426,18 @@ impl Panel {
             (Tab::Look, l.t("Вигляд", "Look")),
             (Tab::Sound, l.t("Звук і мова", "Sound, language")),
         ];
+        // A track the tabs sit in, so they read as one control, apart from the
+        // option buttons below.
+        items.push(Item::Box(
+            rect(lx - 6.0, 122.0, 4.0 * 210.0 + 2.0, 62.0),
+            [255, 255, 255, 10],
+        ));
         for (i, (tab, label)) in tabs.into_iter().enumerate() {
             let r = rect(lx + i as f32 * 210.0, 128.0, 200.0, 50.0);
             if s.tab == tab {
-                items.push(button(r, label, Style::Selected, None));
+                items.push(button(r, label, Style::TabOn, None));
             } else {
-                items.push(button(r, label, Style::Normal, Some(Action::Tab(tab))));
+                items.push(button(r, label, Style::TabOff, Some(Action::Tab(tab))));
             }
         }
 
@@ -418,7 +448,12 @@ impl Panel {
                     self.build_connection(s, &mut items, lx, lw, top);
                 } else {
                     let y = monitor_list(s, &mut items, lx, lw, top - 12.0);
-                    hints(l, &mut items, lx, y.max(640.0) + 30.0);
+                    // The control hints, where there is room for them (not with six
+                    // monitors listed) above the error line.
+                    let at = y.max(640.0) + 30.0;
+                    if at + 4.0 * 30.0 < HEIGHT as f32 - 60.0 {
+                        hints(l, &mut items, lx, at);
+                    }
                 }
                 build_monitor_options(s, &mut items, rx, rw, top);
             }
@@ -755,6 +790,8 @@ impl Panel {
             match item {
                 Item::Panel(r) => fill(&mut pixmap, rounded(*r, 36.0), [16, 18, 24, 240]),
                 Item::Box(r, color) => fill(&mut pixmap, rounded(*r, 14.0), *color),
+                Item::Outline(r, color) => stroke(&mut pixmap, rounded(*r, 14.0), *color, 2.0),
+                Item::Dot { x, y, r, color } => fill(&mut pixmap, circle(*x, *y, *r), *color),
                 Item::Text {
                     x,
                     baseline,
@@ -772,13 +809,32 @@ impl Panel {
                     let hovered = self.hovered == Some(i);
                     let (bg, fg) = match (style, hovered) {
                         (Style::Selected, _) => (ACCENT, [255, 255, 255, 255]),
+                        (Style::TabOn, _) => ([255, 255, 255, 34], [255, 255, 255, 255]),
+                        (Style::TabOff, true) => ([255, 255, 255, 22], [255, 255, 255, 255]),
+                        (Style::TabOff, false) => ([0, 0, 0, 0], MUTED),
                         (Style::Armed, _) => ([220, 70, 70, 255], [255, 255, 255, 255]),
-                        (Style::Disabled, _) => ([255, 255, 255, 8], [110, 115, 128, 255]),
+                        // Unavailable: an outline only, so it does not look pressable.
+                        (Style::Disabled, _) => ([0, 0, 0, 0], [112, 118, 132, 255]),
                         (Style::Danger, true) => ([220, 70, 70, 255], [255, 255, 255, 255]),
                         (_, true) => ([255, 255, 255, 46], [255, 255, 255, 255]),
                         _ => ([255, 255, 255, 20], TEXT),
                     };
                     fill(&mut pixmap, rounded(*r, 12.0), bg);
+                    match style {
+                        Style::Disabled => {
+                            stroke(&mut pixmap, rounded(*r, 12.0), [255, 255, 255, 26], 1.5);
+                        }
+                        // The current tab: an accent bar along its bottom edge.
+                        Style::TabOn => fill(
+                            &mut pixmap,
+                            rounded(
+                                rect(r.left() + 28.0, r.bottom() - 6.0, r.width() - 56.0, 4.0),
+                                2.0,
+                            ),
+                            ACCENT,
+                        ),
+                        _ => {}
+                    }
                     let size = button_font_size(label);
                     let tw = self.text_width(label, size, true);
                     let baseline = r.top() + r.height() / 2.0 + size * 0.36;
@@ -954,27 +1010,39 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
         ));
         y += 70.0;
     }
-    // Physical display mirror.
-    let note = match (s.mirror_wanted, s.mirror_active) {
-        (true, true) => l.t("показано", "shown"),
-        (true, false) => l.t("кришка закрита", "lid closed"),
-        (false, _) => l.t("приховано", "hidden"),
-    };
-    let (label, style) = if s.mirror_wanted {
-        (l.t("Приховати", "Hide"), Style::Normal)
+    // Physical display mirror: shown or hidden, said by the highlighted option.
+    let title = if s.mirror_wanted && !s.mirror_active {
+        format!(
+            "{} · {}",
+            l.t("Екран ноутбука", "Laptop screen"),
+            l.t("кришка закрита", "lid closed")
+        )
     } else {
-        (l.t("Показати", "Show"), Style::Normal)
+        l.t("Екран ноутбука", "Laptop screen").to_owned()
     };
-    toggle_row(
+    y += 34.0;
+    segmented(
         items,
         lx,
         lw,
-        y,
-        l.t("Екран ноутбука", "Laptop screen"),
-        note,
-        (label, style, Action::SetMirror(!s.mirror_wanted)),
+        &mut y,
+        &title,
+        vec![
+            (
+                l.t("Показано", "Shown"),
+                Action::SetMirror(true),
+                s.mirror_wanted,
+                true,
+            ),
+            (
+                l.t("Приховано", "Hidden"),
+                Action::SetMirror(false),
+                !s.mirror_wanted,
+                true,
+            ),
+        ],
     );
-    y += 82.0;
+    y -= 16.0;
     items.push(button(
         rect(lx, y, lw, 52.0),
         l.t(
@@ -988,26 +1056,6 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
 }
 
 /// A row with a title, a muted note and one button on the right.
-fn toggle_row(
-    items: &mut Vec<Item>,
-    lx: f32,
-    lw: f32,
-    y: f32,
-    title: &str,
-    note: &str,
-    (label, style, action): (&str, Style, Action),
-) {
-    items.push(Item::Box(rect(lx, y, lw, 62.0), [255, 255, 255, 12]));
-    items.push(text(lx + 20.0, y + 40.0, 24.0, true, TEXT, title));
-    items.push(text(lx + 228.0, y + 40.0, 20.0, false, MUTED, note));
-    items.push(button(
-        rect(lx + lw - 10.0 - 180.0, y + 7.0, 180.0, 48.0),
-        label,
-        style,
-        Some(action),
-    ));
-}
-
 fn hints(l: Lang, items: &mut Vec<Item>, lx: f32, mut y: f32) {
     for line in [
         l.t(
@@ -1043,7 +1091,7 @@ fn segmented(
     options: Vec<(&str, Action, bool, bool)>,
 ) {
     if !title.is_empty() {
-        items.push(text(x, *y, 21.0, false, MUTED, title));
+        items.push(text(x, *y, 21.0, true, SECTION, title));
         *y += 18.0;
     } else {
         *y -= 30.0;
@@ -1747,11 +1795,22 @@ fn build_profiles(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32
         let save = rect(x + w - 16.0 - 230.0, y + 28.0, 230.0, 48.0);
         let apply = rect(save.left() - 10.0 - 200.0, y + 28.0, 200.0, 48.0);
         if s.active_profile == Some(i) {
-            items.push(button(
-                apply,
-                l.t("Увімкнено", "Active"),
-                Style::Selected,
-                None,
+            // A state, not a button: the card is marked instead.
+            items.push(Item::Outline(rect(x, y, w, 104.0), [61, 126, 255, 170]));
+            let label = l.t("Увімкнено", "Active");
+            items.push(Item::Dot {
+                x: apply.left() + 34.0,
+                y: apply.top() + 24.0,
+                r: 6.0,
+                color: ACCENT,
+            });
+            items.push(text(
+                apply.left() + 50.0,
+                apply.top() + 31.0,
+                21.0,
+                true,
+                ACCENT,
+                label,
             ));
         } else {
             let (style, action) = if s.host.is_some() {
@@ -1797,42 +1856,51 @@ fn build_profiles(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32
 /// PC sound and headset microphone.
 fn build_sound(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32) {
     let l = s.lang;
-    let (note, label) = if s.audio_wanted {
-        (
-            l.t("у шоломі", "in the headset"),
-            l.t("На ноутбук", "To the PC"),
-        )
-    } else {
-        (
-            l.t("на ноутбуці", "on the PC"),
-            l.t("У шолом", "To the headset"),
-        )
-    };
-    toggle_row(
+    // The current state is the highlighted option, not a button label to decode.
+    y += 18.0;
+    segmented(
         items,
         lx,
         lw,
-        y,
-        l.t("Звук", "Sound"),
-        note,
-        (label, Style::Normal, Action::SetAudio(!s.audio_wanted)),
+        &mut y,
+        l.t("Звук ПК грає", "PC sound plays"),
+        vec![
+            (
+                l.t("У шоломі", "In the headset"),
+                Action::SetAudio(true),
+                s.audio_wanted,
+                true,
+            ),
+            (
+                l.t("На ПК", "On the PC"),
+                Action::SetAudio(false),
+                !s.audio_wanted,
+                true,
+            ),
+        ],
     );
-    y += 70.0;
-    let (note, label) = if s.mic_wanted {
-        (l.t("шолома", "headset"), l.t("З ноутбука", "Use the PC's"))
-    } else {
-        (l.t("ноутбука", "PC"), l.t("Зі шолома", "Use the headset's"))
-    };
-    toggle_row(
+    segmented(
         items,
         lx,
         lw,
-        y,
-        l.t("Мікрофон", "Microphone"),
-        note,
-        (label, Style::Normal, Action::SetMic(!s.mic_wanted)),
+        &mut y,
+        l.t("Програми на ПК чують", "PC apps hear"),
+        vec![
+            (
+                l.t("Мікрофон шолома", "The headset's mic"),
+                Action::SetMic(true),
+                s.mic_wanted,
+                true,
+            ),
+            (
+                l.t("Мікрофон ПК", "The PC's mic"),
+                Action::SetMic(false),
+                !s.mic_wanted,
+                true,
+            ),
+        ],
     );
-    y += 70.0;
+    y -= 24.0;
     if s.mic_denied {
         for line in [
             l.t(
@@ -1929,6 +1997,17 @@ fn rounded(r: Rect, radius: f32) -> Path {
     pb.cubic_to(l, t + rad - k, l + rad - k, t, l + rad, t);
     pb.close();
     pb.finish().expect("valid path")
+}
+
+fn stroke(pixmap: &mut Pixmap, path: Path, [r, g, b, a]: [u8; 4], width: f32) {
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(r, g, b, a);
+    paint.anti_alias = true;
+    let stroke = Stroke {
+        width,
+        ..Stroke::default()
+    };
+    pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
 }
 
 fn fill(pixmap: &mut Pixmap, path: Path, [r, g, b, a]: [u8; 4]) {
