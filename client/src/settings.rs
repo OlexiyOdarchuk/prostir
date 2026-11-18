@@ -89,6 +89,8 @@ pub struct Settings {
     pub last_tab: u8,
     /// The monitors come along when the user turns or moves away.
     pub follow: bool,
+    /// A monitor let go almost against another sticks to it.
+    pub magnet: bool,
     /// The mouse goes to the monitor the user looks at (where the PC allows it).
     pub gaze_mouse: bool,
     /// A bigger menu, easier to read and hit.
@@ -121,6 +123,7 @@ impl Default for Settings {
             mic: true,
             last_tab: 0,
             follow: false,
+            magnet: true,
             gaze_mouse: false,
             large_menu: false,
             left_handed: false,
@@ -167,6 +170,7 @@ impl Settings {
                 Some(("mic", v)) => s.mic = v != "off",
                 Some(("tab", v)) => s.last_tab = v.trim().parse().unwrap_or(0),
                 Some(("follow", v)) => s.follow = v == "on",
+                Some(("magnet", v)) => s.magnet = v != "off",
                 Some(("gaze-mouse", v)) => s.gaze_mouse = v == "on",
                 Some(("large-menu", v)) => s.large_menu = v == "on",
                 Some(("left-handed", v)) => s.left_handed = v == "on",
@@ -242,7 +246,7 @@ impl Settings {
         format!(
             "preset {preset}\ncurve {curve}\nbackground {background}\nhands {hands}\n\
              focus {}\ncinema {}\ncinema-screen {}\nlanguage {}\npc-language {}\nintro {}\nkeyboard-window {}\nmic {}\ntab {}\nfollow {}\n\
-             gaze-mouse {}\nlarge-menu {}\nleft-handed {}\nbattery-saver {}\nnotifications {}\nrest-every {}\n",
+             gaze-mouse {}\nlarge-menu {}\nleft-handed {}\nbattery-saver {}\nnotifications {}\nrest-every {}\nmagnet {}\n",
             on(self.focus),
             on(self.cinema),
             self.cinema_screen
@@ -262,7 +266,8 @@ impl Settings {
             on(self.left_handed),
             on(self.battery_saver),
             on(self.notifications),
-            self.rest_every
+            self.rest_every,
+            on(self.magnet)
         )
     }
 }
@@ -289,6 +294,7 @@ mod tests {
             mic: false,
             last_tab: 2,
             follow: true,
+            magnet: false,
             gaze_mouse: true,
             large_menu: true,
             left_handed: true,

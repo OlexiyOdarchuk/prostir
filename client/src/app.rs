@@ -867,7 +867,7 @@ impl Scene {
             layout::snap(
                 &self.placements,
                 &self.layout_sizes(),
-                self.center,
+                self.center.0,
                 self.primary,
             )
         };
@@ -904,6 +904,7 @@ impl Scene {
         // Lying down the monitors are a tilted band the presets keep exact; window
         // panels float on their own.
         if self.settings.cinema
+            || !self.settings.magnet
             || self.settings.preset == crate::settings::Preset::Overhead
             || is_window_panel(id)
             || !self.monitors.contains_key(&id)
@@ -913,7 +914,7 @@ impl Scene {
         if self.settings.preset == crate::settings::Preset::Wall {
             layout::stick_on_wall(&self.placements, &self.layout_sizes(), self.center, id)
         } else {
-            layout::stick(&self.placements, &self.layout_sizes(), self.center, id)
+            layout::stick(&self.placements, &self.layout_sizes(), self.center.0, id)
         }
     }
 
@@ -2873,6 +2874,10 @@ fn handle_action(
             let (head, forward) = scene.head;
             let touch = scene.hands_in_view;
             scene.open_panel(head, forward, touch);
+        }
+        Action::Magnet(on) => {
+            scene.settings.magnet = on;
+            scene.settings.save(settings_path);
         }
         Action::Follow(on) => {
             scene.settings.follow = on;

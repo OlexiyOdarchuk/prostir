@@ -223,6 +223,8 @@ pub enum Action {
     ShowTips,
     /// The monitors follow the head.
     Follow(bool),
+    /// A monitor let go almost against another sticks to it.
+    Magnet(bool),
     /// Put the PC's active window on a panel of its own.
     DetachWindow,
     /// Move the PC's active window to the monitor in front.
@@ -1682,10 +1684,13 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
             ),
         ],
     );
+    // Two switches side by side.
+    let half = (rw - 16.0) / 2.0;
+    let mut y2 = y;
     segmented(
         items,
         rx,
-        rw,
+        half,
         &mut y,
         l.t("Слідом за головою", "Follow my head"),
         vec![
@@ -1693,6 +1698,18 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
             (l.t("Так", "On"), Action::Follow(true), st.follow, true),
         ],
     );
+    segmented(
+        items,
+        rx + half + 16.0,
+        half,
+        &mut y2,
+        l.t("Прилипання", "Stick together"),
+        vec![
+            (l.t("Ні", "Off"), Action::Magnet(false), !st.magnet, true),
+            (l.t("Так", "On"), Action::Magnet(true), st.magnet, true),
+        ],
+    );
+    y = y.max(y2);
     // The cinema screen can be picked before switching to cinema.
     if s.monitors.len() > 1 {
         let sizes: Vec<(u8, u32, u32)> = s
