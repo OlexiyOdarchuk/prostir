@@ -98,9 +98,10 @@ put it, the PC puts it there as well, and the mouse crosses where you see them m
 Line up and Stick together treat it like any other monitor (on the Wall layout, Line
 up puts it back under the main monitor). It disappears when you close the lid.
 
-Profiles switch the whole setup at once. Out of the box there is "Work" (three 1440p
-monitors and the laptop screen), "Cinema" (one 4K screen, big and far away, the rest
-hidden) and "Lying down" (two monitors overhead). Save your own setup into any of them (Monitors → Save as profile).
+Profiles switch the whole setup at once. "Work" is the setup you build yourself: the
+first time you pick a profile, the monitors you have then are saved as "Work", so you can
+always come back to them. "Cinema" (one 4K screen, big and far away, the rest
+hidden) and "Lying down" (two monitors overhead) are ready from the start. Save your own setup into any of them (Monitors → Save as profile).
 Monitors that are the same size in both profiles stay, so their windows do not move.
 In cinema mode you pick which monitor becomes the big screen.
 
@@ -134,12 +135,12 @@ only so many video decoders. "Attach" under the panel (it shows while you point 
 it) puts the window back on the monitor it came from, out of full screen; closing the
 window removes the panel too. "Window here" moves
 the active window to the monitor in front of you, and a screenshot of that monitor
-lands in `~/Pictures/Prostir`.
+lands in a Prostir folder in your Pictures folder (usually `~/Pictures/Prostir`).
 
 The arrangement can follow your head: turn or move away and, once you have clearly
 looked elsewhere, the monitors glide after you. On Hyprland the mouse can follow your
-gaze, jumping to the monitor you look at, and "Where is the mouse?" shows it with
-rings.
+gaze, jumping to the monitor you look at. On both desktops the "Mouse?" button shows
+where the pointer is, with rings.
 
 With your hands shown, hold your left palm open towards your face for a quarter of a
 second and a round menu appears on it: In front, Focus, Cinema, Mouse?, Screenshot and
@@ -173,7 +174,7 @@ has not been paired with.
   buffers.
 - PipeWire with its PulseAudio server (`pipewire-pulse`), `pw-cli`, `pw-loopback` and
   `pactl`.
-- GStreamer 1.22 or newer with the `va` plugin (hardware encoding), `h264parse` and
+- GStreamer 1.24 or newer with the `va` plugin (hardware encoding), `h264parse` and
   `h265parse`, and the PipeWire and PulseAudio plugins.
 - For hardware encoding, a GPU with a VA-API H.265 or H.264 encoder and its VA driver:
   Intel is tested, AMD should work but is untested. NVIDIA goes through NVENC
@@ -208,7 +209,7 @@ HEVC when encoding works. Without it, Prostir falls back to the CPU.
 
 **Headset**
 
-- Meta Quest 3 or 3S. Quest 2 and Pro should work, but I have not tried them.
+- Meta Quest 3 or 3S, which Prostir is made for. Quest 2 and Pro are untested.
 - Developer mode, to install the app with `adb`. Turn it on in the Meta Horizon phone
   app: Devices → Headset settings → Developer mode.
 
@@ -331,16 +332,19 @@ rustup target add aarch64-linux-android
    appears in the system tray. The first time, a notification explains the usage
    counter and how to turn it off (see [Security](#security)).
 2. On the headset, open Prostir from Library → Unknown sources.
-3. The headset tries the USB cable first (developer mode only), then Wi-Fi. If it
-   finds several PCs, pick yours, or type the PC's IP address on the keypad.
-4. The first time, the headset asks "Pair with <PC name>?". Confirm, and the headset
-   shows a 6-digit code; type it into the small dialog that opens on the PC. If you
-   would rather do it the other way round, the button under the code shows the code
-   on the PC (in the tray and a notification), and you type it in the headset.
-5. The monitors appear in front of you. Press A to line them up.
+3. The headset tries the USB cable first (developer mode only), then Wi-Fi. When it
+   finds exactly one PC, it connects to it by itself. If it finds several, pick yours,
+   or type the PC's IP address on the keypad.
+4. The first time, the headset shows "A new PC" with the PC's name and address. Press
+   "Pair" (or "Not now" if it is not your PC), and the headset shows a 6-digit code;
+   type it into the small dialog that opens on the PC. If you would rather do it the
+   other way round, the button under the code shows the code on the PC (in the tray
+   and a notification), and you type it in the headset.
+5. A 2560×1440 monitor appears in front of you. Add more in the menu's Monitors tab,
+   and press A to line them up.
 
-If the connection drops, the monitors wait 30 seconds in KDE (`--linger`) for the
-headset to come back before the windows move back to the laptop.
+If the connection drops, the monitors wait 30 seconds (`--linger`) for the headset to
+come back before the windows move back to the laptop.
 
 ### Wi-Fi or USB
 
@@ -493,7 +497,7 @@ connection; when the two are too far apart, the headset says which side to updat
   Mesa should work but is untested; NVIDIA through NVENC is experimental and untested.
   Where neither works, Prostir encodes on the CPU, which costs CPU time and some
   latency.
-- Tested on Quest 3. Quest 3S should behave the same; Quest 2 and Pro are untested.
+- Made for Quest 3 and 3S, and tested on Quest 3. Quest 2 and Pro are untested.
 - Not in the Meta Horizon Store yet: you install it in developer mode with `adb`, and
   the Quest lists it under Unknown sources by its package name, `dev.prostir.client`.
 - One headset per PC at a time.
@@ -520,8 +524,10 @@ screen in the headset:
 Every connection starts with a Noise `XX` handshake (Curve25519, AES-256-GCM,
 BLAKE2s). After it, the picture, sound and microphone are encrypted and authenticated.
 
-A headset and a PC pair once. Until then, the PC creates no monitors and sends
-nothing, and the headset does not pair with a PC on its own: it asks first. The
+A headset and a PC pair once. Until then, the PC sends only what pairing needs (the
+pairing messages, an error text, or its version when the two versions cannot work
+together), never creates monitors and never sends any picture or sound. The headset
+does not pair with a PC on its own: it asks first. The
 6-digit code goes through SPAKE2, so someone who records the traffic cannot guess it
 offline, and the confirmation is tied to that connection's handshake, which stops a
 man in the middle. After failed attempts the PC waits longer and longer before it
@@ -634,7 +640,7 @@ proto/    the wire protocol and encryption, a library used by the other two
 host/     the PC program: virtual outputs, encoders, sound, tray, discovery
 client/   the Quest app: OpenXR loop (app.rs), menu (ui.rs), layouts (layout.rs), …
 scripts/  build-apk.sh, install.sh, package-release.sh, third-party-licenses.py
-docs/     pictures for this README
+docs/     the website (prostir.ishawyha.dev) and the pictures for this README
 ```
 
 On Hyprland the same jobs go through its IPC socket: `output create headless`, monitor

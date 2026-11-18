@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.0 (2026-11-18)
 
 First public version.
 
@@ -29,8 +29,8 @@ First public version.
 - Cinema mode (one big screen, and you pick which), focus mode (other monitors dim) and
   follow my head.
 - Detach up to three PC windows into floating panels and attach them back; move the
-  active window to the monitor in front of you; save a screenshot of that monitor to
-  `~/Pictures/Prostir` (on KDE taken from that monitor's own stream).
+  active window to the monitor in front of you; save a screenshot of that monitor to a
+  Prostir folder in your Pictures folder (on KDE taken from that monitor's own stream).
 - Monitor brightness for all monitors at once (100, 80, 60 or 40 %).
 
 ### In the headset
@@ -46,8 +46,8 @@ First public version.
 - Backgrounds: black, your room through the passthrough cameras (plain or dimmed),
   four built-in panoramas or a picture of your own. A keyboard window shows the real
   desk.
-- "Where is the mouse?" shows the pointer with rings; on Hyprland the mouse can follow
-  your gaze.
+- The "Mouse?" button shows where the pointer is, with rings; on Hyprland the mouse can
+  follow your gaze.
 - Optional PC notifications in the headset and rest reminders; a 72 Hz display rate to
   save battery.
 - First-run tips, and a start screen that explains where to get the PC part.

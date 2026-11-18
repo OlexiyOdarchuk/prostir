@@ -18,11 +18,11 @@ body:
     validations:
       required: true
   - type: input
-    id: plasma
+    id: desktop
     attributes:
-      label: KDE Plasma version and distribution
-      description: System Settings → About this System, or `plasmashell --version`.
-      placeholder: Plasma 6.4, Arch Linux
+      label: Desktop (KDE Plasma or Hyprland) and its version, distribution
+      description: "`plasmashell --version` on KDE Plasma, `hyprctl version` on Hyprland."
+      placeholder: Plasma 6.8, Arch Linux
     validations:
       required: true
   - type: input
@@ -40,8 +40,7 @@ body:
       options:
         - Meta Quest 3
         - Meta Quest 3S
-        - Meta Quest Pro
-        - Meta Quest 2
+        - Other
     validations:
       required: true
   - type: dropdown

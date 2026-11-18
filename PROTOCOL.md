@@ -212,10 +212,11 @@ Host (implementation-defined values from `host/src/pairing.rs`):
 | Failed attempts in a row (all connections) | The first 3 are free. After the 4th, the next attempt has to wait 30 s, then 60 s, 120 s, 240 s, 480 s, and at most 900 s. A success resets the count |
 | During a wait | `PairBegin` is answered with `Error` ("Too many wrong codes. Try again in N min.") and `PairResult{ok=0}`, and the connection is closed |
 
-A host that has no code to offer (cancelled dialog, no dialog program) does not count
-that as a failed attempt. When the headset shows the code, its `PairMsg` (sent right
-after `PairBegin`) is then read and dropped by the host, so the next `PairBegin` can
-follow on the same connection.
+Every attempt that does not succeed counts as a failed one: a wrong code, a host that
+has no code to offer (cancelled dialog, no dialog program) and an exchange that breaks
+off. When the headset shows the code and the host has none, the host reads and drops the
+headset's `PairMsg` (sent right after `PairBegin`), so the next `PairBegin` can follow on
+the same connection.
 
 Client (implementation-defined, `client/src/net.rs`): read timeout 10 s, 300 s while
 pairing; at most 3 attempts per connection, after which it stops and asks the user
@@ -244,8 +245,11 @@ into encrypted transport frames.
 - `tag`: which message (see [Message reference](#5-message-reference)). Host→client tags
   are 1 to 23, client→host tags 101 to 126.
 - `length`: payload length in bytes, **little-endian**.
-- Maximum payload: 64 MiB (`64 * 1024 * 1024`). A reader rejects a larger length and
-  the connection ends.
+- Maximum payload: 64 MiB (`64 * 1024 * 1024`) for a message from the host, 64 KiB
+  (`64 * 1024`) for a message from the headset. A reader rejects a larger length and
+  the connection ends. The biggest headset message in use, a slice of microphone sound,
+  is under 1 KiB; the lower limit keeps what a peer that is not trusted yet can make the
+  host allocate small.
 
 Inside payloads:
 
@@ -466,6 +470,9 @@ Host behaviour for monitor requests (implementation-defined): at most 6 monitors
 from 320×240 to 7680×4320; the last monitor cannot be removed; at most 3 window panels.
 A request that fails is answered with `Error`.
 
+`SetMonitors` may list at most 16 sizes; a reader rejects a longer list as invalid, and
+the connection ends. (`SetLayout` has similar limits, see [Layout](#7-layout).)
+
 ## 6. Streams, sound and microphone
 
 ### Stream ids
@@ -566,7 +573,9 @@ row:   count:u8, then count times:
 ```
 
 Each entry is 9 bytes. Rows go from top to bottom, entries in a row from left to right.
-An empty payload means no rows. A row cut off in the middle is an error.
+An empty payload means no rows. A row cut off in the middle is an error. A `SetLayout`
+may list at most 16 rows and at most 16 monitors in all its rows together; a reader
+rejects a larger one as invalid, and the connection ends.
 
 - `id`: a monitor id, or `100` for the mirror if the headset placed it. Window panels
   are not part of the layout.
@@ -591,7 +600,7 @@ comparable between monitors and to the monitors' own pixel sizes.
 
 (Implementation-defined; `host/src/displays.rs`.)
 
-1. Clamps every known `center` to ±100000. (`middle` is not clamped.)
+1. Clamps every known `center` and `middle` to ±100000.
 2. Keeps the rows, drops ids that are neither a current monitor nor the active mirror,
    and appends monitors missing from the rows to the end of the last row with `NEXT`.
 3. Sets the monitor order to the ids of all rows, top to bottom and left to right,

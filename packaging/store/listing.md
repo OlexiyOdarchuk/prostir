@@ -39,8 +39,8 @@ as a panel of its own, closer than the monitors.
   with the time, the date and the battery in the middle
 - Dim all monitors at once for the evening
 - Move one monitor or the whole arrangement at once
-- Focus mode dims every monitor except the one with the mouse; "Where is the mouse?"
-  shows the pointer with rings, and on Hyprland the mouse can follow your gaze
+- Focus mode dims every monitor except the one with the mouse; the "Mouse?" button
+  shows where the pointer is, with rings, and on Hyprland the mouse can follow your gaze
 - PC sound in the headset; PC apps hear the headset microphone while they record, and a
   switch in the headset menu turns the microphone off
 - Optional sound from the screen: it comes from the monitor whose window is playing it
@@ -96,8 +96,8 @@ Plasma або Hyprland). Це справжні виходи ПК: перенос
   ній з'явиться кругле меню з часом, датою й зарядом посередині
 - Приглушуйте всі монітори разом на вечір
 - Переносьте один монітор або всю розстановку разом
-- Режим фокусу притемнює всі монітори, крім того, де миша; «Де миша?» показує
-  вказівник кільцями, а в Hyprland миша може йти за поглядом
+- Режим фокусу притемнює всі монітори, крім того, де миша; кнопка «Де миша?» показує
+  кільцями, де вказівник, а в Hyprland миша може йти за поглядом
 - Звук ПК у шоломі; програми на ПК чують мікрофон шолома, поки записують, а перемикач
   у меню шолома вимикає мікрофон
 - За бажанням звук з боку екрана: він лунає з того монітора, де вікно, яке його грає
@@ -150,12 +150,18 @@ USUAN1700010)
   user's own PC. It records only while a PC app is recording and the microphone switch
   in the headset menu (Quick, or Settings → Sound) is on, and the sound goes only to that PC,
   encrypted. The PC can ask for the microphone but cannot turn the switch on.
-- **Hand tracking:** pointing, pinching and touching the menu; drawing the hands.
-- **Passthrough (no camera images):** the room backgrounds (plain and dimmed) and the
-  keyboard window. The
-  system composites the cameras; the app never receives images.
-- **Network (INTERNET, Wi-Fi state):** finding and talking to the user's PC on the local
-  network.
+- **Hand tracking (HAND_TRACKING):** pointing, pinching and touching the menu; drawing
+  the hands.
+- **OpenXR (org.khronos.openxr.permission.OPENXR and OPENXR_SYSTEM):** running as an
+  OpenXR app on the headset's own runtime.
+- **Network (INTERNET, ACCESS_NETWORK_STATE, ACCESS_WIFI_STATE):** finding and talking
+  to the user's PC on the local network.
+- **Keep awake (WAKE_LOCK):** keeps the headset's Wi-Fi in its low-latency mode while
+  the app runs, so frames from the PC are not held back by the radio's power saving.
+
+Not a permission: passthrough is an optional feature (`com.oculus.feature.PASSTHROUGH`,
+not required) for the room backgrounds (plain and dimmed) and the keyboard window. The
+system composites the cameras; the app never receives camera images.
 
 ### Data use
 
@@ -163,6 +169,9 @@ USUAN1700010)
   between the headset and the user's own PC, encrypted. It collects no account data,
   no analytics and no crash reports.
 - Platform features used: entitlement check only.
+- Finding the PC: the headset listens for the PC's broadcast on UDP port 47831. When it
+  hears none, it also tries TCP port 47830 on every address of its own local /24 subnet
+  to find the PC there. It sends nothing else to those addresses.
 - The PC app is not part of the store listing. Its official builds count users: once a
   day, when a headset connects, the PC sends GoatCounter one request with only the date
   in it (and `/install` the first time). No identifier, host name or settings. A
@@ -196,10 +205,12 @@ Steps:
    firewall runs on the PC, allow TCP 47830 and UDP 47831.
 2. On the headset, open Prostir. Without a PC it shows the start page with these
    requirements and "Looking for PCs on the network".
-3. The PC appears in the list. Select it and confirm "Pair with <PC name>?".
+3. When the headset finds exactly one PC, it connects to it by itself; with several,
+   select the PC in the list. The headset shows "A new PC" with the PC's name: press
+   "Pair".
 4. The headset shows a 6-digit code. Type it into the dialog that opens on the PC.
-5. Three monitors appear around you. Point at one, hold the grip button and move it;
-   press A to line them up again. Open the menu (☰ or X on the left controller) and try the
+5. One 2560×1440 monitor appears in front of you. Add more in the menu's Monitors tab.
+   Point at one, hold the grip button and move it; press A to line them up again. Open the menu (☰ or X on the left controller) and try the
    tabs: Quick (the Work, Cinema and Lying down profiles, and tiles such as in front of
    me, focus, cinema, PC sound, microphone, detach window and screenshot), Monitors (a
    map of the monitors to pick one, make primary, remove, add, line up, layout, curve,
@@ -217,14 +228,15 @@ If you cannot set up such a PC, the trailer attached to this submission shows Pr
 in use with a real PC: monitors around the user, windows moving between them, the menu
 and hands. A short clip is also at https://prostir.ishawyha.dev/demo.mp4.
 
-## End-user license (to do)
+## End-user license (decision for the developer, to do)
 
 Without a custom EULA, the store applies Meta's default end-user license, which grants
 personal, non-commercial use and forbids modification unless the developer allows it.
 Prostir is GPL-3.0-or-later, and once it includes code from other contributors the
 store version must not add such restrictions (GPLv3 section 10).
 
-TODO for the developer: in the Developer Dashboard, set a custom EULA along these lines:
+**Decision for the developer, not settled yet.** One option: in the Developer Dashboard,
+set a custom EULA along these lines:
 
 > Prostir is free software, licensed under the GNU General Public License, version 3 or
 > (at your option) any later version, with an additional permission for linking the

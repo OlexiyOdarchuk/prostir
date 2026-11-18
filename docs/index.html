@@ -31,6 +31,7 @@
   "name": "Prostir",
   "url": "https://prostir.ishawyha.dev/",
   "description": "Prostir adds virtual monitors to a Linux laptop or desktop with KDE Plasma or Hyprland, around you in a Meta Quest 3. Real desktop outputs and floating windows, streamed over Wi-Fi or USB and encoded on the GPU. Free and open source.",
+  "softwareVersion": "0.1.0",
   "applicationCategory": "UtilitiesApplication",
   "operatingSystem": "Linux (KDE Plasma 6, Hyprland), Meta Horizon OS",
   "inLanguage": "en",
@@ -180,9 +181,9 @@
         <li><h3>Headset off, desk back</h3><p>After 10 seconds off your head, windows, panel and sound return to the laptop.</p></li>
         <li><h3>Keyboard window</h3><p>A rectangle over the real keyboard shows the desk through the cameras.</p></li>
         <li><h3>Detach a window</h3><p>The PC's active window gets an output of its own and floats as a panel without a frame, closer than the monitors. Up to three at a time. "Attach" under it puts the window back on its monitor, out of full screen.</p></li>
-        <li><h3>Window here, screenshot</h3><p>Move the active window to the monitor in front of you, or save a screenshot of that monitor to <code>~/Pictures/Prostir</code>.</p></li>
-        <li><h3>Where is the mouse?</h3><p>Rings show the mouse pointer, on KDE and on Hyprland. On Hyprland the mouse can also follow your gaze.</p></li>
-        <li><h3>Palm menu</h3><p>Hold an open palm towards your face and a round menu appears on it: in front of me, focus, cinema, where is the mouse, screenshot, line up and the main menu, with the time, the date and the headset battery in the middle. Press it with the other hand. Left or right hand, as you choose.</p></li>
+        <li><h3>Window here, screenshot</h3><p>Move the active window to the monitor in front of you, or save a screenshot of that monitor to a Prostir folder in your Pictures folder.</p></li>
+        <li><h3>Find the pointer</h3><p>The "Mouse?" button shows where the pointer is, with rings, on KDE and on Hyprland. On Hyprland the mouse can also follow your gaze.</p></li>
+        <li><h3>Palm menu</h3><p>Hold an open palm towards your face and a round menu appears on it: In front, Focus, Cinema, Mouse?, Screenshot, Line up and Menu, with the time, the date and the headset battery in the middle. Press it with the other hand. Left or right hand, as you choose.</p></li>
         <li><h3>Brightness</h3><p>Dim all monitors at once for the evening: 100, 80, 60 or 40 %.</p></li>
         <li><h3>Notifications and battery</h3><p>The PC's notifications can show in the headset (off until you turn them on). The tray shows the headset battery, and the PC warns you at 15 %.</p></li>
         <li><h3>Paired and encrypted</h3><p>A PC streams nothing to a headset it has not been paired with. Pairing starts only after you confirm it in the headset and type a 6-digit code.</p></li>
@@ -204,10 +205,9 @@
 <pre><code>yay -S prostir-bin</code></pre></li>
                 <li><h4>Debian, Ubuntu</h4>Download the <code>.deb</code> file from the release, then:
 <pre><code>sudo apt install ./prostir_*.deb</code></pre></li>
-                <li><h4>Fedora, openSUSE</h4>Download the <code>.rpm</code> file from the release, then on Fedora:
+                <li><h4>Fedora</h4>Download the <code>.rpm</code> file from the release, then:
 <pre><code>sudo dnf install ./prostir-*.rpm</code></pre>
-                  or on openSUSE:
-<pre><code>sudo zypper install --allow-unsigned-rpm ./prostir-*.rpm</code></pre></li>
+                  The <code>.rpm</code> is built for Fedora. On openSUSE, use the tarball below.</li>
                 <li><h4>Nix and NixOS</h4>The repository is a flake:
 <pre><code>nix run github:OlexiyOdarchuk/prostir</code></pre>
                   On NixOS, add it as a flake input and put <code>inputs.prostir.packages.${pkgs.system}.default</code> in <code>environment.systemPackages</code>.</li>
@@ -239,7 +239,7 @@ cd prostir-*/
             <li>Install the APK from the same release:
 <pre><code>adb install prostir-*.apk</code></pre></li>
             <li>In the headset, open the Library, pick Unknown sources in the filter and start Prostir. Some Horizon OS versions list it there by its package name, <code>dev.prostir.client</code>.</li>
-            <li>The headset finds the PC on the same Wi-Fi network or over the cable. The first time, confirm "Pair with &lt;PC name&gt;?" in the headset, then type the 6-digit code it shows into the dialog that opens on the PC.</li>
+            <li>The headset finds the PC on the same Wi-Fi network or over the cable; when it finds exactly one PC, it connects by itself. The first time, the headset shows "A new PC" with the PC's name: press "Pair", then type the 6-digit code it shows into the dialog that opens on the PC. A 2560×1440 monitor appears; add more in the menu's Monitors tab.</li>
           </ol>
           <p class="note">Over the cable, the PC forwards the connection with adb, so USB needs adb on the PC and developer mode on the headset. Wi-Fi needs neither once the app is installed.</p>
         </div>
@@ -274,7 +274,7 @@ cd prostir-*/
         <div id="uninstall">
           <h3>Uninstall</h3>
           <ul>
-            <li>AUR: <code>sudo pacman -R prostir-bin</code>. Debian, Ubuntu: <code>sudo apt remove prostir</code>. Fedora: <code>sudo dnf remove prostir</code>. openSUSE: <code>sudo zypper remove prostir</code>.</li>
+            <li>AUR: <code>sudo pacman -R prostir-bin</code>. Debian, Ubuntu: <code>sudo apt remove prostir</code>. Fedora: <code>sudo dnf remove prostir</code>.</li>
             <li>Tarball: run <code class="nw">./install.sh --uninstall</code> in the unpacked folder.</li>
             <li>Settings and pairings stay in <code>~/.config/prostir</code>. Delete that folder to remove them, and <code>~/.config/autostart/prostir.desktop</code> if you turned on autostart.</li>
             <li>Headset: <code>adb uninstall dev.prostir.client</code>, or uninstall it from Unknown sources in the Library.</li>
@@ -293,7 +293,7 @@ cd prostir-*/
           <ul>
             <li>KDE Plasma 6 or Hyprland, on Wayland. X11 sessions are not supported.</li>
             <li>GNOME is not supported yet. <a href="https://github.com/OlexiyOdarchuk/prostir/issues/1">Want it? Vote with a 👍 on GitHub.</a></li>
-            <li>PipeWire with <code>pw-cli</code> and <code>pw-loopback</code>, and GStreamer 1.22 or newer with its PipeWire and PulseAudio plugins.</li>
+            <li>PipeWire with its PulseAudio server (<code>pipewire-pulse</code>), <code>pw-cli</code>, <code>pw-loopback</code> and <code>pactl</code>, and GStreamer 1.24 or newer with its PipeWire and PulseAudio plugins.</li>
             <li>For encoding on the GPU: VA-API H.264 or HEVC encoding and the GStreamer <code>va</code> plugin (<code>gst-plugin-va</code> on Arch, part of gst-plugins-bad elsewhere). Tested on Intel; AMD through Mesa should work but is untested.</li>
             <li>NVIDIA: NVENC through the GStreamer <code>nvcodec</code> plugin, experimental and untested.</li>
             <li>Without a GPU encoder, Prostir encodes on the CPU with x264, which works everywhere and needs <code>x264enc</code> from gst-plugins-ugly. See <a href="#help">Help</a>.</li>
@@ -301,13 +301,13 @@ cd prostir-*/
             <li>On Hyprland, a bar with a tray for Prostir's menu (Waybar with its <code>tray</code> module), and a notification daemon such as mako, dunst or swaync.</li>
             <li>A firewall, if you have one, must allow TCP 47830 and UDP 47831. See <a href="#help">Help</a>.</li>
             <li>For USB: <code>adb</code> on the PC.</li>
-            <li>For screenshots: <code>spectacle</code> on KDE, <code>grim</code> on Hyprland.</li>
+            <li>For screenshots on Hyprland: <code>grim</code>. On KDE, Prostir takes the picture from the monitor's own stream and uses <code>spectacle</code> (the whole desktop) only if that fails.</li>
           </ul>
         </div>
         <div>
           <h3>Headset</h3>
           <ul>
-            <li>Meta Quest 3, where it is tested; Quest 3S should behave the same. Quest 2 and Pro are untested.</li>
+            <li>Meta Quest 3 or 3S, which Prostir is made for (tested on Quest 3). Quest 2 and Pro are untested.</li>
             <li>Developer mode to install the app; it is not in the Horizon Store yet.</li>
             <li>One headset per PC at a time.</li>
           </ul>

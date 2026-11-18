@@ -31,6 +31,7 @@
   "name": "Prostir",
   "url": "https://prostir.ishawyha.dev/uk/",
   "description": "Prostir додає віртуальні монітори ноутбуку чи ПК з Linux (KDE Plasma або Hyprland) навколо вас у Meta Quest 3. Справжні виходи робочого столу й окремі вікна по Wi-Fi або USB, кодування відеокартою. Вільна програма з відкритим кодом.",
+  "softwareVersion": "0.1.0",
   "applicationCategory": "UtilitiesApplication",
   "operatingSystem": "Linux (KDE Plasma 6, Hyprland), Meta Horizon OS",
   "inLanguage": "uk",
@@ -180,8 +181,8 @@
         <li><h3>Зняли шолом</h3><p>Через 10 секунд вікна, панель і звук повертаються на ноутбук.</p></li>
         <li><h3>Вікно на клавіатуру</h3><p>Прямокутник на справжній клавіатурі показує стіл через камери.</p></li>
         <li><h3>Відкріпити вікно</h3><p>Активне вікно ПК отримує власний вихід і висить окремою панеллю без рамки, ближче за монітори. До трьох водночас. «Прикріпити» під нею повертає вікно на його монітор і виводить із повного екрана.</p></li>
-        <li><h3>Вікно сюди, знімок екрана</h3><p>Перенесіть активне вікно на монітор перед вами або збережіть знімок цього монітора в <code>~/Pictures/Prostir</code>.</p></li>
-        <li><h3>Де миша?</h3><p>Кільця показують вказівник миші, і в KDE, і в Hyprland. У Hyprland миша ще й може йти за поглядом.</p></li>
+        <li><h3>Вікно сюди, знімок екрана</h3><p>Перенесіть активне вікно на монітор перед вами або збережіть знімок цього монітора в теку Prostir у вашій теці зображень.</p></li>
+        <li><h3>Де вказівник</h3><p>Кнопка «Де миша?» показує кільцями, де вказівник, і в KDE, і в Hyprland. У Hyprland миша ще й може йти за поглядом.</p></li>
         <li><h3>Меню на долоні</h3><p>Потримайте розкриту долоню до обличчя, і на ній з'явиться кругле меню: «Перед собою», «Фокус», «Кінотеатр», «Де миша?», «Знімок», «Вирівняти» і «Меню», а посередині час, дата й заряд шолома. Натискайте його другою рукою. На лівій чи правій руці, як вам зручніше.</p></li>
         <li><h3>Яскравість</h3><p>Приглушіть усі монітори разом на вечір: 100, 80, 60 чи 40 %.</p></li>
         <li><h3>Сповіщення й заряд</h3><p>Сповіщення ПК можуть з'являтися в шоломі (вимкнено, доки не ввімкнете). Трей показує заряд шолома, а на 15 % ПК попереджає.</p></li>
@@ -204,10 +205,9 @@
 <pre><code>yay -S prostir-bin</code></pre></li>
                 <li><h4>Debian, Ubuntu</h4>Завантажте файл <code>.deb</code> з релізу, тоді:
 <pre><code>sudo apt install ./prostir_*.deb</code></pre></li>
-                <li><h4>Fedora, openSUSE</h4>Завантажте файл <code>.rpm</code> з релізу, тоді у Fedora:
+                <li><h4>Fedora</h4>Завантажте файл <code>.rpm</code> з релізу, тоді:
 <pre><code>sudo dnf install ./prostir-*.rpm</code></pre>
-                  або в openSUSE:
-<pre><code>sudo zypper install --allow-unsigned-rpm ./prostir-*.rpm</code></pre></li>
+                  Файл <code>.rpm</code> зібрано для Fedora. В openSUSE користуйтеся архівом нижче.</li>
                 <li><h4>Nix і NixOS</h4>Репозиторій є flake:
 <pre><code>nix run github:OlexiyOdarchuk/prostir</code></pre>
                   У NixOS додайте його як вхід flake і покладіть <code>inputs.prostir.packages.${pkgs.system}.default</code> у <code>environment.systemPackages</code>.</li>
@@ -239,7 +239,7 @@ cd prostir-*/
             <li>Встановіть APK з того самого релізу:
 <pre><code>adb install prostir-*.apk</code></pre></li>
             <li>У шоломі відкрийте бібліотеку (Library), у фільтрі виберіть «Невідомі джерела» (Unknown sources) і запустіть Prostir. Деякі версії Horizon OS показують його там за назвою пакета, <code>dev.prostir.client</code>.</li>
-            <li>Шолом знайде ПК у тій самій мережі Wi-Fi або через кабель. Першого разу підтвердьте в шоломі сполучення з цим ПК, а тоді введіть 6-значний код, який покаже шолом, у віконці на ПК.</li>
+            <li>Шолом знайде ПК у тій самій мережі Wi-Fi або через кабель; якщо знайде рівно один ПК, підключиться сам. Першого разу шолом покаже «Новий ПК» з іменем ПК: натисніть «Сполучити», а тоді введіть 6-значний код, який покаже шолом, у віконці на ПК. З'явиться монітор 2560×1440; більше додасте на вкладці меню «Монітори».</li>
           </ol>
           <p class="note">Через кабель ПК передає з'єднання за допомогою adb, тож для USB потрібні adb на ПК і режим розробника на шоломі. Для Wi-Fi, коли застосунок уже встановлено, не потрібне ні те, ні інше.</p>
         </div>
@@ -274,7 +274,7 @@ cd prostir-*/
         <div id="uninstall">
           <h3>Видалення</h3>
           <ul>
-            <li>AUR: <code>sudo pacman -R prostir-bin</code>. Debian, Ubuntu: <code>sudo apt remove prostir</code>. Fedora: <code>sudo dnf remove prostir</code>. openSUSE: <code>sudo zypper remove prostir</code>.</li>
+            <li>AUR: <code>sudo pacman -R prostir-bin</code>. Debian, Ubuntu: <code>sudo apt remove prostir</code>. Fedora: <code>sudo dnf remove prostir</code>.</li>
             <li>Архів: запустіть <code class="nw">./install.sh --uninstall</code> у розпакованій папці.</li>
             <li>Налаштування й сполучення лишаються в <code>~/.config/prostir</code>. Щоб прибрати їх, видаліть цю папку, а якщо вмикали автозапуск, то й <code>~/.config/autostart/prostir.desktop</code>.</li>
             <li>Шолом: <code>adb uninstall dev.prostir.client</code> або видаліть застосунок у бібліотеці, у «Невідомих джерелах».</li>
@@ -293,7 +293,7 @@ cd prostir-*/
           <ul>
             <li>KDE Plasma 6 або Hyprland, на Wayland. Сеанси X11 не підтримуються.</li>
             <li>GNOME поки не підтримується. <a href="https://github.com/OlexiyOdarchuk/prostir/issues/1">Хочете його? Проголосуйте 👍 на GitHub.</a></li>
-            <li>PipeWire з <code>pw-cli</code> і <code>pw-loopback</code>, GStreamer 1.22 або новіший із плагінами PipeWire і PulseAudio.</li>
+            <li>PipeWire з його сервером PulseAudio (<code>pipewire-pulse</code>), <code>pw-cli</code>, <code>pw-loopback</code> і <code>pactl</code>, GStreamer 1.24 або новіший із плагінами PipeWire і PulseAudio.</li>
             <li>Для кодування відеокартою: кодування H.264 чи HEVC через VA-API і плагін GStreamer <code>va</code> (<code>gst-plugin-va</code> в Arch, в інших дистрибутивах він у gst-plugins-bad). Перевірено на Intel; AMD через Mesa має працювати, але не перевірялася.</li>
             <li>NVIDIA: NVENC через плагін GStreamer <code>nvcodec</code>, експериментально й без перевірки.</li>
             <li>Без кодера відеокарти Prostir кодує процесором через x264; це працює будь-де, і потрібен <code>x264enc</code> з gst-plugins-ugly. Див. <a href="#help">Допомогу</a>.</li>
@@ -301,13 +301,13 @@ cd prostir-*/
             <li>У Hyprland панель із треєм для меню Prostir (Waybar з модулем <code>tray</code>) і служба сповіщень, наприклад mako, dunst чи swaync.</li>
             <li>Брандмауер, якщо він є, має пропускати TCP 47830 і UDP 47831. Див. <a href="#help">Допомогу</a>.</li>
             <li>Для USB: <code>adb</code> на ПК.</li>
-            <li>Для знімків екрана: <code>spectacle</code> у KDE, <code>grim</code> у Hyprland.</li>
+            <li>Для знімків екрана в Hyprland: <code>grim</code>. У KDE Prostir бере кадр із потоку самого монітора, а <code>spectacle</code> (весь робочий стіл) потрібен, лише якщо це не вдалося.</li>
           </ul>
         </div>
         <div>
           <h3>Шолом</h3>
           <ul>
-            <li>Meta Quest 3, на ньому перевірено; Quest 3S має працювати так само. Quest 2 і Pro не перевірялися.</li>
+            <li>Meta Quest 3 або 3S, для яких Prostir і зроблено (перевірено на Quest 3). Quest 2 і Pro не перевірялися.</li>
             <li>Режим розробника, щоб встановити застосунок; у Horizon Store його ще немає.</li>
             <li>Один шолом на ПК водночас.</li>
           </ul>
