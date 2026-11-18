@@ -302,6 +302,7 @@ fn serve_client(
                     .unwrap_or(NO_FOCUS);
                 if sound_from != Some(id) {
                     sound_from = Some(id);
+                    info!("sound comes from monitor {id}");
                     displays.router.send(HostMsg::SoundFrom { id });
                 }
             }
