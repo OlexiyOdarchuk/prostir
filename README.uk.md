@@ -236,6 +236,22 @@ sudo dnf install ./prostir-<версія>-1.x86_64.rpm    # Fedora
 
 `.rpm` зібрано для Fedora. В openSUSE та інших дистрибутивах беріть архів.
 
+### Через Nix
+
+Репозиторій є flake з частиною для ПК:
+
+```sh
+nix run github:OlexiyOdarchuk/prostir          # спробувати
+nix profile install github:OlexiyOdarchuk/prostir
+```
+
+У NixOS додайте `github:OlexiyOdarchuk/prostir` як вхід flake і покладіть
+`inputs.prostir.packages.${pkgs.system}.default` у `environment.systemPackages`.
+GStreamer з плагінами йде разом. Кодування відеокартою бере системний драйвер VA-API
+у NixOS (`hardware.graphics.enable`), а в інших дистрибутивах вбудовані драйвери Intel
+і Mesa (AMD); NVIDIA потребує системного драйвера, тож поза NixOS кодує процесор.
+`nix develop` відкриває оболонку для роботи над частиною для ПК.
+
 ### З архіву релізу
 
 1. Завантажте `prostir-<версія>-x86_64-linux.tar.gz`, `prostir-<версія>.apk` і

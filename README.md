@@ -238,6 +238,23 @@ sudo dnf install ./prostir-<version>-1.x86_64.rpm   # Fedora
 
 The `.rpm` is built for Fedora. On openSUSE and other distributions, use the tarball.
 
+### With Nix
+
+The repository is a flake with the PC part:
+
+```sh
+nix run github:OlexiyOdarchuk/prostir          # try it
+nix profile install github:OlexiyOdarchuk/prostir
+```
+
+On NixOS, add `github:OlexiyOdarchuk/prostir` as a flake input and put
+`inputs.prostir.packages.${pkgs.system}.default` in `environment.systemPackages`.
+GStreamer and its plugins come with it. Encoding on the graphics card uses the
+system's VA-API driver on NixOS (`hardware.graphics.enable`), and the bundled Intel
+and Mesa (AMD) drivers on other distributions; NVIDIA needs its driver from the
+system, so outside NixOS it falls back to the CPU. `nix develop` opens a shell for
+working on the PC part.
+
 ### From a release tarball
 
 1. Download `prostir-<version>-x86_64-linux.tar.gz`, `prostir-<version>.apk` and
