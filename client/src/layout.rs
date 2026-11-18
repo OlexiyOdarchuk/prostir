@@ -1280,7 +1280,10 @@ mod tests {
         assert_eq!(rows[0].ids, vec![0, 1, 2]);
     }
 
-    fn case(positions: &[(u8, Vec3, f32)]) -> (HashMap<u8, Placement>, Vec<(u8, u32, u32)>) {
+    /// Placements and the monitors' pixel sizes, for the A and magnet tests.
+    type Case = (HashMap<u8, Placement>, Vec<(u8, u32, u32)>);
+
+    fn case(positions: &[(u8, Vec3, f32)]) -> Case {
         let sizes: Vec<(u8, u32, u32)> = positions.iter().map(|p| (p.0, 2560, 1440)).collect();
         let placements = positions
             .iter()
