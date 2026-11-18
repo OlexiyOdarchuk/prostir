@@ -82,6 +82,9 @@ struct Poke {
     touched_at: Option<Instant>,
 }
 
+/// How long the ring of a touch spreads.
+const TOUCH_RING: Duration = Duration::from_millis(350);
+
 /// Pinches of a hand that just touched the menu are ignored this long.
 const AFTER_TOUCH: Duration = Duration::from_millis(600);
 
@@ -843,6 +846,8 @@ fn run(app: &AndroidApp) -> Result<()> {
 
     let mut hold_since: [Option<Instant>; 2] = [None, None];
     let mut pokes = [Poke::default(); 2];
+    // Touches that just happened: (where, when), drawn as a ring spreading out.
+    let mut rings: Vec<(Vec3, Instant)> = Vec::new();
     // Store builds: the store requires checking the user owns the app at launch.
     #[cfg(feature = "store")]
     let mut entitlement = crate::store::Entitlement::start();
@@ -1137,6 +1142,10 @@ fn run(app: &AndroidApp) -> Result<()> {
             if !poke.pressed && arrived && settled && l.z < POKE_PRESS {
                 poke.pressed = true;
                 poke.touched_at = Some(Instant::now());
+                rings.push((
+                    place.position + place.rotation * Vec3::new(l.x, l.y, 0.003),
+                    Instant::now(),
+                ));
                 panel.hover(Some(px));
                 match panel.hovered_action() {
                     Some(action) => {
@@ -1196,12 +1205,14 @@ fn run(app: &AndroidApp) -> Result<()> {
                     Some((Target::Panel, hit)) => {
                         panel.hover(Some(panel_point(&hit)));
                         if let Some(action) = panel.hovered_action() {
+                            rings.push((hit.point, Instant::now()));
                             clicked = true;
                             controls.pulse(&session, hand);
                             handle_action(&mut scene, action, &mut passthrough, &mut controls);
                         }
                     }
-                    Some((Target::MenuButton, _)) => {
+                    Some((Target::MenuButton, hit)) => {
+                        rings.push((hit.point, Instant::now()));
                         clicked = true;
                         controls.pulse(&session, hand);
                         if scene.panel_open {
@@ -1330,6 +1341,42 @@ fn run(app: &AndroidApp) -> Result<()> {
 
         // Hands and rays: only rendered when there is something to show.
         let mut spheres: Vec<Sphere> = Vec::new();
+        // Light on the menu where a fingertip is about to touch: wide and faint from a
+        // few centimetres away, small and bright right before contact.
+        let place = scene.panel_place;
+        for (h, hover) in poke_hover.iter().enumerate() {
+            let Some((at, z)) = hover else { continue };
+            let near = (1.0 - z.max(0.0) / POKE_HOVER).clamp(0.0, 1.0);
+            let pressed = if pokes[h].pressed { 0.25 } else { 0.0 };
+            spheres.push(Sphere::glow(
+                place.position + place.rotation * Vec3::new(at.x, at.y, 0.003),
+                0.034 - 0.020 * near,
+                [
+                    0.72,
+                    0.84,
+                    1.0,
+                    (0.12 + 0.6 * near * near + pressed).min(1.0),
+                ],
+            ));
+        }
+        // A touch spreads out as a ring for a moment.
+        rings.retain(|(_, at)| at.elapsed() < TOUCH_RING);
+        for (center, at) in &rings {
+            let k = at.elapsed().as_secs_f32() / TOUCH_RING.as_secs_f32();
+            spheres.push(Sphere::ring(
+                *center,
+                0.012 + 0.03 * k,
+                [0.8, 0.9, 1.0, 0.9 * (1.0 - k)],
+            ));
+        }
+        // Where a ray points: a small light on the menu, a wider faint one on monitors.
+        for pick in picks.iter().flatten() {
+            let (radius, alpha) = match pick.0 {
+                Target::Panel | Target::MenuButton | Target::Keyboard => (0.012, 0.55),
+                Target::Monitor(_) => (0.03, 0.3),
+            };
+            spheres.push(Sphere::glow(pick.1.point, radius, [0.72, 0.84, 1.0, alpha]));
+        }
         for j in joints.iter().flatten() {
             overlay::hand_spheres(j, &mut spheres);
         }
@@ -1343,6 +1390,7 @@ fn run(app: &AndroidApp) -> Result<()> {
                         center: ray.origin,
                         radius: 0.012,
                         color: [0.30, 0.32, 0.38, 1.0],
+                        kind: overlay::Kind::Ball,
                     });
                 }
             }

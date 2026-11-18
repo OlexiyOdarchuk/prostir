@@ -18,6 +18,39 @@ pub struct Sphere {
     pub center: Vec3,
     pub radius: f32,
     pub color: [f32; 4],
+    pub kind: Kind,
+}
+
+/// How a [`Sphere`] is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// A shaded ball (hands, rays).
+    Ball,
+    /// A soft light that brightens what is behind it: where a fingertip or a ray is
+    /// about to touch the menu, like the Quest's own windows.
+    Glow,
+    /// A thin bright ring: a touch that just happened.
+    Ring,
+}
+
+impl Sphere {
+    pub fn glow(center: Vec3, radius: f32, color: [f32; 4]) -> Self {
+        Self {
+            center,
+            radius,
+            color,
+            kind: Kind::Glow,
+        }
+    }
+
+    pub fn ring(center: Vec3, radius: f32, color: [f32; 4]) -> Self {
+        Self {
+            center,
+            radius,
+            color,
+            kind: Kind::Ring,
+        }
+    }
 }
 
 const HAND_COLOR: [f32; 4] = [0.62, 0.66, 0.74, 1.0];
@@ -46,6 +79,7 @@ pub fn hand_spheres(joints: &[(Vec3, f32); 26], out: &mut Vec<Sphere>) {
                 center: pa.lerp(pb, t),
                 radius: (ra + (rb - ra) * t) * scale,
                 color: HAND_COLOR,
+                kind: Kind::Ball,
             });
         }
     };
@@ -75,6 +109,7 @@ pub fn ray_spheres(origin: Vec3, dir: Vec3, length: f32, out: &mut Vec<Sphere>) 
                 RAY_COLOR[2],
                 0.85 * (1.0 - t * 0.7),
             ],
+            kind: Kind::Ball,
         });
     }
 }
@@ -83,16 +118,19 @@ const VERTEX: &str = r#"#version 300 es
 layout(location = 0) in vec2 corner;
 layout(location = 1) in vec4 sphere;
 layout(location = 2) in vec4 color;
+layout(location = 3) in float kind;
 uniform mat4 view;
 uniform mat4 proj;
 out vec2 v_uv;
 out vec4 v_color;
+flat out float v_kind;
 void main() {
     vec4 c = view * vec4(sphere.xyz, 1.0);
     c.xy += corner * sphere.w;
     gl_Position = proj * c;
     v_uv = corner;
     v_color = color;
+    v_kind = kind;
 }
 "#;
 
@@ -100,10 +138,27 @@ const FRAGMENT: &str = r#"#version 300 es
 precision mediump float;
 in vec2 v_uv;
 in vec4 v_color;
+flat in float v_kind;
 out vec4 o;
 void main() {
     float r2 = dot(v_uv, v_uv);
     if (r2 > 1.0) discard;
+    float r = sqrt(r2);
+    if (v_kind > 1.5) {
+        // Ring: a thin band near the edge.
+        float band = smoothstep(0.72, 0.84, r) * (1.0 - smoothstep(0.88, 1.0, r));
+        float a = v_color.a * band;
+        o = vec4(v_color.rgb * a, a * 0.5);
+        return;
+    }
+    if (v_kind > 0.5) {
+        // Glow: bright in the middle, fading out; mostly added light, so the menu
+        // under it lights up rather than being covered.
+        float f = 1.0 - r;
+        float a = v_color.a * f * f;
+        o = vec4(v_color.rgb * a, a * 0.25);
+        return;
+    }
     vec3 n = vec3(v_uv, sqrt(1.0 - r2));
     float light = 0.45 + 0.55 * max(dot(n, normalize(vec3(-0.35, 0.6, 0.7))), 0.0);
     float edge = 1.0 - smoothstep(0.82, 1.0, r2);
@@ -181,9 +236,9 @@ impl Overlay {
             gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, 8, 0);
             let instances = gl.create_buffer().map_err(|e| anyhow!(e))?;
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(instances));
-            for (loc, offset) in [(1, 0), (2, 16)] {
+            for (loc, size, offset) in [(1, 4, 0), (2, 4, 16), (3, 1, 32)] {
                 gl.enable_vertex_attrib_array(loc);
-                gl.vertex_attrib_pointer_f32(loc, 4, glow::FLOAT, false, 32, offset);
+                gl.vertex_attrib_pointer_f32(loc, size, glow::FLOAT, false, 36, offset);
                 gl.vertex_attrib_divisor(loc, 1);
             }
             gl.bind_vertex_array(None);
@@ -266,9 +321,14 @@ impl Overlay {
             let data: Vec<f32> = spheres
                 .iter()
                 .flat_map(|s| {
+                    let kind = match s.kind {
+                        Kind::Ball => 0.0,
+                        Kind::Glow => 1.0,
+                        Kind::Ring => 2.0,
+                    };
                     [
                         s.center.x, s.center.y, s.center.z, s.radius, s.color[0], s.color[1],
-                        s.color[2], s.color[3],
+                        s.color[2], s.color[3], kind,
                     ]
                 })
                 .collect();
