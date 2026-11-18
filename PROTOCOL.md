@@ -212,8 +212,10 @@ Host (implementation-defined values from `host/src/pairing.rs`):
 | Failed attempts in a row (all connections) | The first 3 are free. After the 4th, the next attempt has to wait 30 s, then 60 s, 120 s, 240 s, 480 s, and at most 900 s. A success resets the count |
 | During a wait | `PairBegin` is answered with `Error` ("Too many wrong codes. Try again in N min.") and `PairResult{ok=0}`, and the connection is closed |
 
-A host that has no code to offer (cancelled dialog, no dialog program) also counts as a
-failed attempt in the current code.
+A host that has no code to offer (cancelled dialog, no dialog program) does not count
+that as a failed attempt. When the headset shows the code, its `PairMsg` (sent right
+after `PairBegin`) is then read and dropped by the host, so the next `PairBegin` can
+follow on the same connection.
 
 Client (implementation-defined, `client/src/net.rs`): read timeout 10 s, 300 s while
 pairing; at most 3 attempts per connection, after which it stops and asks the user
