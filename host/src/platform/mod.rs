@@ -61,6 +61,31 @@ pub struct ActiveWindow {
     pub output: String,
 }
 
+/// What the tray asks the main loop to do.
+pub enum TrayCommand {
+    SetBitrate(u32),
+    /// Clearer text at about 2 ms more encoding per frame.
+    SetSharp(bool),
+    /// Count this PC among users (see `usage`).
+    SetCounting(bool),
+    /// Drop all paired headsets: each must pair again.
+    ForgetHeadsets,
+    /// Turn the monitors in the headset to face the user.
+    Recenter,
+    Quit,
+}
+
+/// What the tray shows.
+#[derive(Clone, Default, PartialEq)]
+pub struct TrayStatus {
+    /// "Wi-Fi" or "USB" while a headset is connected.
+    pub connected: Option<&'static str>,
+    pub monitors: usize,
+    pub mirror: bool,
+    /// Connected, but the headset is not worn: streaming paused.
+    pub paused: bool,
+}
+
 /// Why there is no pairing code typed on the PC (see `dialogs::ask_code`).
 pub enum NoCode {
     Cancelled,

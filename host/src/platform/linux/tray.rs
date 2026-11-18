@@ -11,20 +11,7 @@ use ksni::{MenuItem, ToolTip};
 use log::warn;
 
 use crate::platform::linux::autostart;
-
-/// What the tray asks the main loop to do.
-pub enum Command {
-    SetBitrate(u32),
-    /// Clearer text at about 2 ms more encoding per frame.
-    SetSharp(bool),
-    /// Count this PC among users (see `usage`).
-    SetCounting(bool),
-    /// Drop all paired headsets: each must pair again.
-    ForgetHeadsets,
-    /// Turn the monitors in the headset to face the user.
-    Recenter,
-    Quit,
-}
+use crate::platform::{TrayCommand as Command, TrayStatus as Status};
 
 /// Video quality presets offered in the menu, Mbit/s per monitor.
 const QUALITIES: [(u32, &str, &str); 3] = [
@@ -32,16 +19,6 @@ const QUALITIES: [(u32, &str, &str); 3] = [
     (30, "Звичайна: 30 Мбіт/с", "Normal: 30 Mbit/s"),
     (50, "Висока: 50 Мбіт/с", "High: 50 Mbit/s"),
 ];
-
-#[derive(Clone, Default, PartialEq)]
-pub struct Status {
-    /// "Wi-Fi" or "USB" while a headset is connected.
-    pub connected: Option<&'static str>,
-    pub monitors: usize,
-    pub mirror: bool,
-    /// Connected, but the headset is not worn: streaming paused.
-    pub paused: bool,
-}
 
 pub struct Tray {
     status: Status,

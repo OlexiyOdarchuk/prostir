@@ -24,7 +24,7 @@ use prostir_proto::{ClientMsg, Codec, HostMsg, NO_FOCUS};
 use displays::{Displays, SavedMonitors};
 use encoder::EncoderConfig;
 use platform::MonitorSpec;
-use platform::{focus, notifications, sound_source, tray};
+use platform::{TrayCommand, TrayStatus, focus, notifications, sound_source, tray};
 
 #[derive(Parser, Debug)]
 #[command(about = "Virtual monitors for KDE Plasma and Hyprland, streamed to a Meta Quest 3")]
@@ -89,11 +89,11 @@ fn parse_monitor(s: &str) -> Result<MonitorSpec, String> {
 struct Control {
     tray: Option<tray::Handle>,
     security: pairing::Security,
-    commands: Receiver<tray::Command>,
+    commands: Receiver<TrayCommand>,
     bitrate: u32,
     sharp: bool,
     quit: bool,
-    shown: Option<tray::Status>,
+    shown: Option<TrayStatus>,
 }
 
 impl Control {
@@ -105,7 +105,7 @@ impl Control {
         let mut displays = displays;
         while let Ok(cmd) = self.commands.try_recv() {
             match cmd {
-                tray::Command::SetBitrate(mbps) => {
+                TrayCommand::SetBitrate(mbps) => {
                     info!("video quality: {mbps} Mbit/s per monitor");
                     self.bitrate = mbps;
                     if let Some(d) = displays.as_deref_mut() {
@@ -114,7 +114,7 @@ impl Control {
                         d.announce_pc_settings();
                     }
                 }
-                tray::Command::SetSharp(sharp) => {
+                TrayCommand::SetSharp(sharp) => {
                     info!("clearer text: {sharp}");
                     self.sharp = sharp;
                     if let Some(d) = displays.as_deref_mut() {
@@ -123,13 +123,13 @@ impl Control {
                         d.announce_pc_settings();
                     }
                 }
-                tray::Command::SetCounting(on) => usage::set_enabled(on),
-                tray::Command::Recenter => {
+                TrayCommand::SetCounting(on) => usage::set_enabled(on),
+                TrayCommand::Recenter => {
                     if let Some(d) = displays.as_deref_mut() {
                         d.router.send(HostMsg::Recenter);
                     }
                 }
-                tray::Command::ForgetHeadsets => {
+                TrayCommand::ForgetHeadsets => {
                     info!(
                         "forgetting {} paired headset(s)",
                         self.security.trusted.len()
@@ -138,7 +138,7 @@ impl Control {
                         warn!("cannot forget headsets: {e}");
                     }
                 }
-                tray::Command::Quit => self.quit = true,
+                TrayCommand::Quit => self.quit = true,
             }
         }
         self.quit
@@ -146,7 +146,7 @@ impl Control {
 
     /// Shows the current state in the tray (only when it changed).
     fn show(&mut self, via: Option<&'static str>, displays: Option<&Displays>) {
-        let status = tray::Status {
+        let status = TrayStatus {
             connected: via,
             monitors: displays.map_or(0, Displays::monitor_count),
             mirror: displays.is_some_and(Displays::mirror_active),
