@@ -111,6 +111,14 @@ def main() -> None:
     g = glyph(512)
     icon.alpha_composite(g, (0, 0))
     icon.convert("RGB").save(out / "icon-512x512.png")
+
+    # Spatialized tile: a solid background and the mark on transparency, which comes
+    # forward on hover (the mark stays inside the 392 px safe area).
+    for size in (512, 180):
+        Image.new("RGB", (size, size), BG).save(out / f"tile-background-{size}x{size}.png")
+        glyph(512).resize((size, size), Image.LANCZOS).save(
+            out / f"tile-foreground-{size}x{size}.png"
+        )
     for p in sorted(out.glob("*.png")):
         im = Image.open(p)
         print(f"{p.name}: {im.size[0]}x{im.size[1]} {im.mode}")
