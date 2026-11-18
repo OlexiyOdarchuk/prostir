@@ -55,6 +55,8 @@
             android:excludeFromRecents="false"
             android:exported="true">
             <meta-data android:name="android.app.lib_name" android:value="prostir" />
+            <!-- Keeps drawing under the system menu (it then has the input). -->
+            <meta-data android:name="com.oculus.vr.focusaware" android:value="true" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

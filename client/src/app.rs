@@ -1649,6 +1649,9 @@ fn run(app: &AndroidApp) -> Result<()> {
     #[cfg(feature = "store")]
     let mut not_entitled_since: Option<Instant> = entitlement.is_none().then(Instant::now);
     let mut session_running = false;
+    // The input is the app's: false while the system menu is open over it (the app
+    // keeps drawing, but shows no hands or rays of its own and takes no input).
+    let mut focused = false;
     let mut last_time: Option<xr::Time> = None;
     let mut event_storage = xr::EventDataBuffer::new();
 
@@ -1708,6 +1711,14 @@ fn run(app: &AndroidApp) -> Result<()> {
             match event {
                 xr::Event::SessionStateChanged(e) => {
                     info!("session state: {:?}", e.state());
+                    let now_focused = e.state() == xr::SessionState::FOCUSED;
+                    if focused && !now_focused {
+                        // A drag cannot go on under the system menu.
+                        scene.grabs = [None, None];
+                        scene.scaling = None;
+                        layout::save(&scene.layout_path, &scene.placements);
+                    }
+                    focused = now_focused;
                     // Taking the headset off hides the app (and puts the headset to
                     // sleep); the PC stops encoding until it is back on.
                     let worn = matches!(
@@ -1796,6 +1807,9 @@ fn run(app: &AndroidApp) -> Result<()> {
         last_time = Some(time);
 
         controls.sync(&session, &local, time)?;
+        if !focused {
+            controls.state = Default::default();
+        }
         let (head, forward, right) =
             view.locate(&local, time)
                 .map_or((Vec3::ZERO, -Vec3::Z, Vec3::X), |l| {
@@ -1811,11 +1825,13 @@ fn run(app: &AndroidApp) -> Result<()> {
         if std::mem::take(&mut scene.refresh_due) && exts.fb_display_refresh_rate {
             set_refresh_rate(&session, scene.settings.battery_saver);
         }
-        scene.follow_gaze();
+        if focused {
+            scene.follow_gaze();
+        }
 
         // Tracked hands: joints for drawing, fingertips for touching the menu.
         let joints: [Option<[(Vec3, f32); 26]>; 2] = match &hand_trackers {
-            Some(trackers) if scene.settings.hands != HandMode::Hidden => {
+            Some(trackers) if focused && scene.settings.hands != HandMode::Hidden => {
                 std::array::from_fn(|h| {
                     local
                         .locate_hand_joints(&trackers[h], time)
