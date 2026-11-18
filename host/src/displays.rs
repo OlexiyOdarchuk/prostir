@@ -818,6 +818,8 @@ impl Displays {
             self.primary = None;
         }
         self.ensure_primary();
+        // Close the gap the monitor leaves.
+        self.apply_kde_layout();
         Ok(())
     }
 
@@ -891,13 +893,41 @@ impl Displays {
             placed.insert(*id, (x - left, *w));
         }
         // The laptop screen under the primary monitor, below every row.
-        if let (Some(mirror), Some(&(px, pw))) =
-            (&self.mirror, self.primary.and_then(|p| placed.get(&p)))
+        let primary_at = self.primary.and_then(|p| placed.get(&p)).copied();
+        let mut bottom_x = primary_at.map_or(0, |(px, _)| px);
+        let mirror_name = self
+            .mirror
+            .as_ref()
+            .map(|m| m.output.output_name().to_owned());
+        if let (Some(name), Some((px, pw))) = (&mirror_name, primary_at)
+            && let Some((w, _)) = size(name, None)
         {
-            let name = mirror.output.output_name();
-            if let Some((w, _)) = size(name, None) {
-                positions.push((name.to_owned(), (px + (pw - w) / 2).max(0), top));
-            }
+            let x = (px + (pw - w) / 2).max(0);
+            positions.push((name.clone(), x, top));
+            bottom_x = x + w;
+        }
+        // Other real displays (the laptop panel next to a mirrored external monitor,
+        // say) go on the bottom row too, so nothing overlaps the Prostir monitors.
+        let ours: Vec<&str> = self
+            .monitors
+            .values()
+            .map(|m| m.output.output_name())
+            .collect();
+        let mut others: Vec<(&String, &virtual_output::Geometry)> = geometries
+            .iter()
+            .filter(|(name, g)| {
+                g.enabled
+                    && g.w > 0
+                    && !ours.contains(&name.as_str())
+                    && Some(name.as_str()) != mirror_name.as_deref()
+                    && !name.starts_with("Virtual-")
+                    && !name.starts_with(crate::hyprland::PREFIX)
+            })
+            .collect();
+        others.sort_by_key(|(name, _)| name.as_str());
+        for (name, g) in others {
+            positions.push((name.clone(), bottom_x, top));
+            bottom_x += g.w;
         }
         let primary = self
             .primary
@@ -998,7 +1028,12 @@ impl Displays {
     }
 
     /// Arranges KDE's outputs in the rows the headset shows them in.
-    pub fn set_layout(&mut self, rows: Vec<LayoutRow>) {
+    pub fn set_layout(&mut self, mut rows: Vec<LayoutRow>) {
+        // Offsets are desktop pixels; anything this far out is nonsense (and would
+        // overflow the arithmetic below).
+        for r in &mut rows {
+            r.offset = r.offset.clamp(-100_000, 100_000);
+        }
         self.rows = rows;
         let rows = self.effective_rows();
         self.order = rows.iter().flat_map(|r| r.ids.clone()).collect();

@@ -387,9 +387,14 @@ impl Drop for Pool {
         match &self.slots {
             Slots::Dma(slots) => slots.iter().for_each(|s| s.buffer.destroy()),
             Slots::Shm {
-                slots, map, len, ..
+                slots,
+                map,
+                len,
+                _pool,
+                ..
             } => {
                 slots.iter().for_each(|s| s.buffer.destroy());
+                _pool.destroy();
                 // SAFETY: `map` came from mmap with this length and is not used after.
                 unsafe { libc::munmap(map.cast(), *len) };
             }
@@ -674,6 +679,7 @@ fn run(
     let mut pool: Option<Pool> = None;
     let mut next = 0;
     let mut last: Option<usize> = None;
+    let mut last_y_invert = false;
     let mut last_push = Instant::now();
     let mut failures = 0;
     while !stop.load(Ordering::Relaxed) {
@@ -749,7 +755,7 @@ fn run(
                 && !paused.load(Ordering::Relaxed)
                 && let Some(l) = last
             {
-                let _ = appsrc.push_buffer(p.frame(l, false)?);
+                let _ = appsrc.push_buffer(p.frame(l, last_y_invert)?);
                 last_push = Instant::now();
             }
         }
@@ -758,6 +764,7 @@ fn run(
             failures = 0;
             let _ = appsrc.push_buffer(p.frame(slot, state.frame.y_invert)?);
             last = Some(slot);
+            last_y_invert = state.frame.y_invert;
             last_push = Instant::now();
         } else if state.frame.failed {
             failures += 1;

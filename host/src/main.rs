@@ -621,7 +621,10 @@ fn main() -> Result<()> {
         }
         match listener.accept() {
             Ok((stream, addr)) => {
-                stream.set_nonblocking(false)?;
+                if let Err(e) = stream.set_nonblocking(false) {
+                    warn!("connection from {addr}: {e}");
+                    continue;
+                }
                 let (reader, writer) =
                     match pairing::accept(&stream, &mut control.security, control.tray.as_ref()) {
                         Ok(halves) => halves,
@@ -695,7 +698,12 @@ fn main() -> Result<()> {
                 }
                 std::thread::sleep(Duration::from_millis(200));
             }
-            Err(e) => return Err(e.into()),
+            // Pending network errors (ENETDOWN, EHOSTUNREACH…) or running out of file
+            // descriptors: not a reason to quit.
+            Err(e) => {
+                warn!("accepting a connection failed: {e}");
+                std::thread::sleep(Duration::from_millis(500));
+            }
         }
     }
 }

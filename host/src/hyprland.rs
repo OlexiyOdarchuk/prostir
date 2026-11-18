@@ -150,7 +150,8 @@ pub fn physical_output() -> Option<String> {
 fn pick_physical(monitors: &[Monitor], lid_open: bool) -> Option<String> {
     let mut names: Vec<&str> = monitors
         .iter()
-        .filter(|m| !m.disabled && !m.name.starts_with(PREFIX))
+        // HEADLESS-N: virtual outputs of other tools (Sunshine, wayvnc), not displays.
+        .filter(|m| !m.disabled && !m.name.starts_with(PREFIX) && !m.name.starts_with("HEADLESS-"))
         .map(|m| m.name.as_str())
         .filter(|n| lid_open || !is_panel(n))
         .collect();
@@ -363,6 +364,7 @@ pub fn remove(name: &str) {
 /// Removes outputs a previous run left behind (Hyprland keeps headless outputs after
 /// the program that made them is gone), so the windows on them come back.
 pub fn remove_leftovers() {
+    restore_real_outputs();
     for m in monitors() {
         if m.name.starts_with(PREFIX) {
             remove(&m.name);
@@ -370,9 +372,54 @@ pub fn remove_leftovers() {
     }
 }
 
+/// Where real displays stood before Prostir moved them, to put them back after.
+static ORIGINAL: Mutex<BTreeMap<String, (i32, i32)>> = Mutex::new(BTreeMap::new());
+
+/// Puts the real displays back where they were and forgets the rules for them, so a
+/// later config reload does not move them again.
+pub fn restore_real_outputs() {
+    let original = std::mem::take(&mut *ORIGINAL.lock().unwrap());
+    {
+        let mut applied = APPLIED.lock().unwrap();
+        for name in original.keys() {
+            applied.remove(name);
+        }
+    }
+    let current = monitors();
+    let rules: Vec<Rule> = original
+        .into_iter()
+        .filter_map(|(name, (x, y))| {
+            let m = current.iter().find(|m| m.name == name && !m.disabled)?;
+            ((m.x, m.y) != (x, y)).then_some(Rule {
+                name,
+                width: m.width,
+                height: m.height,
+                refresh: m.refresh,
+                x,
+                y,
+                scale: m.scale,
+            })
+        })
+        .collect();
+    if !rules.is_empty() {
+        info!("putting {} display(s) back where they were", rules.len());
+        send(&rules);
+    }
+}
+
 /// Moves outputs to new logical positions, keeping their modes and scales.
 pub fn place(positions: &[(String, i32, i32)]) {
     let current = monitors();
+    {
+        let mut original = ORIGINAL.lock().unwrap();
+        for (name, _, _) in positions {
+            if !name.starts_with(PREFIX)
+                && let Some(m) = current.iter().find(|m| &m.name == name)
+            {
+                original.entry(name.clone()).or_insert((m.x, m.y));
+            }
+        }
+    }
     let rules: Vec<Rule> = positions
         .iter()
         .filter_map(|(name, x, y)| {

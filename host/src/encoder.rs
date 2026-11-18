@@ -317,16 +317,20 @@ impl Encoder {
                 })?
         };
 
-        pipeline
-            .set_state(gst::State::Playing)
-            .context("cannot start encoder pipeline")?;
-        Ok(Self {
+        // Built first, so a failed start below stops the bus thread and the pipeline
+        // through Drop instead of leaking them.
+        let encoder = Self {
             pipeline,
             sink,
             stop,
             paused: Arc::new(AtomicBool::new(false)),
             bus_thread: Some(bus_thread),
-        })
+        };
+        encoder
+            .pipeline
+            .set_state(gst::State::Playing)
+            .context("cannot start encoder pipeline")?;
+        Ok(encoder)
     }
 
     /// The `appsrc` to push frames into, for [`Input::Pushed`].

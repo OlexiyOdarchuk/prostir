@@ -237,6 +237,17 @@ impl Screencast {
                             break;
                         }
                     }
+                    // KWin went away (or the connection broke): every stream is over,
+                    // so the outputs get recreated on a fresh connection.
+                    if !stop.load(Ordering::Relaxed) {
+                        warn!("lost the connection to KWin");
+                        let mut streams = state.shared.streams.lock().unwrap();
+                        for s in streams.values_mut() {
+                            s.closed = true;
+                        }
+                        drop(streams);
+                        state.shared.changed.notify_all();
+                    }
                 })?
         };
         Ok(Self {

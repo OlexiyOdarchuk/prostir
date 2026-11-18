@@ -15,6 +15,15 @@ pub enum Desktop {
     Hyprland,
 }
 
+impl Drop for Desktop {
+    fn drop(&mut self) {
+        // Real displays moved for the layout go back where they were.
+        if let Self::Hyprland = self {
+            hyprland::restore_real_outputs();
+        }
+    }
+}
+
 impl Desktop {
     pub fn connect() -> Result<Self> {
         if hyprland::running() {
