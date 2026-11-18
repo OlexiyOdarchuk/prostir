@@ -454,13 +454,14 @@ fn write_frame(w: &mut impl Write, t: u8, parts: &[&[u8]]) -> io::Result<()> {
 fn read_frame(r: &mut impl Read, max: u32) -> io::Result<(u8, Vec<u8>)> {
     let mut header = [0u8; 5];
     r.read_exact(&mut header)?;
-    let len = u32::from_le_bytes(header[1..].try_into().unwrap());
+    let [t, len @ ..] = header;
+    let len = u32::from_le_bytes(len);
     if len > max {
         return Err(invalid("payload too large"));
     }
     let mut payload = vec![0u8; len as usize];
     r.read_exact(&mut payload)?;
-    Ok((header[0], payload))
+    Ok((t, payload))
 }
 
 struct Cursor<'a>(&'a [u8]);
@@ -478,13 +479,19 @@ impl<'a> Cursor<'a> {
         Ok(self.take(1)?[0])
     }
     fn u16(&mut self) -> io::Result<u16> {
-        Ok(u16::from_le_bytes(self.take(2)?.try_into().unwrap()))
+        Ok(u16::from_le_bytes(
+            self.take(2)?.try_into().expect("take returns 2 bytes"),
+        ))
     }
     fn u32(&mut self) -> io::Result<u32> {
-        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+        Ok(u32::from_le_bytes(
+            self.take(4)?.try_into().expect("take returns 4 bytes"),
+        ))
     }
     fn u64(&mut self) -> io::Result<u64> {
-        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+        Ok(u64::from_le_bytes(
+            self.take(8)?.try_into().expect("take returns 8 bytes"),
+        ))
     }
     fn rest(self) -> &'a [u8] {
         self.0

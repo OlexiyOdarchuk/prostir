@@ -1768,7 +1768,7 @@ fn run(app: &AndroidApp) -> Result<()> {
             ));
         }
         if pano_job.as_ref().is_some_and(|(_, j)| j.is_finished()) {
-            let (made_for, job) = pano_job.take().unwrap();
+            let (made_for, job) = pano_job.take().expect("checked just above");
             match job.join() {
                 Ok((w, h, pixels)) => {
                     let mut layer = ImageLayer::new(&session, format, w, h, true)?;

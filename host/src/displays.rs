@@ -533,7 +533,8 @@ fn arrange(rows: &[Vec<Seat>], main: u8) -> Vec<(u8, i32, i32)> {
         ) {
             const REACH: i32 = 200;
             for (m, x) in &mut row {
-                *x = (*x).clamp(lo - m.w + REACH.min(m.w), hi - REACH.min(m.w));
+                // Not clamp: next to a narrow monitor the bounds can cross, and clamp panics.
+                *x = (*x).max(lo - m.w + REACH.min(m.w)).min(hi - REACH.min(m.w));
             }
             for i in 1..row.len() {
                 let right = row[i - 1].1 + row[i - 1].0.w;
@@ -817,7 +818,7 @@ impl Displays {
         }
         let id = (0..=u8::MAX)
             .find(|id| !self.monitors.contains_key(id))
-            .unwrap();
+            .expect("fewer than MAX_MONITORS ids are taken");
         let mut output = self.desktop.create(u32::from(id) + 1, &spec)?;
         let encoder = self.start_encoder(id, &output.input())?;
         output.attach(&encoder, self.cfg.backend.takes_dmabuf())?;

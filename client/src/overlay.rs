@@ -204,9 +204,10 @@ impl Overlay {
             system,
             xr::ViewConfigurationType::PRIMARY_STEREO,
         )?;
+        let view = views.first().context("no stereo views")?;
         // Hands and dots do not need full resolution; the compositor scales them up.
-        let width = (views[0].recommended_image_rect_width as f32 * 0.7) as u32;
-        let height = (views[0].recommended_image_rect_height as f32 * 0.7) as u32;
+        let width = (view.recommended_image_rect_width as f32 * 0.7) as u32;
+        let height = (view.recommended_image_rect_height as f32 * 0.7) as u32;
         // SAFETY: plain GL object creation on the current context.
         unsafe {
             let program = gl.create_program().map_err(|e| anyhow!(e))?;

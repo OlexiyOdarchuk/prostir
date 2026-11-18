@@ -57,7 +57,7 @@ impl Recorder {
     pub fn start(feedback: Feedback) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
-        std::thread::Builder::new()
+        let _ = std::thread::Builder::new()
             .name("mic".into())
             .spawn(move || {
                 if !ensure_permission(&flag) {
@@ -81,7 +81,7 @@ impl Recorder {
                     std::thread::sleep(Duration::from_millis(300));
                 }
             })
-            .expect("spawn mic thread");
+            .inspect_err(|e| warn!("no microphone: {e}"));
         Self { stop }
     }
 }
@@ -100,7 +100,7 @@ fn record(input: &Input, feedback: &Feedback, stop: &AtomicBool) -> bool {
         match input.read(&mut buf) {
             Ok(0) => continue,
             Ok(frames) => {
-                let pcm: Vec<u8> = buf[..frames * MIC_CHANNELS as usize]
+                let pcm: Vec<u8> = buf[..(frames * MIC_CHANNELS as usize).min(buf.len())]
                     .iter()
                     .flat_map(|s| s.to_le_bytes())
                     .collect();

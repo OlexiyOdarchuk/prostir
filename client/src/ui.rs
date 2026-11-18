@@ -1106,7 +1106,10 @@ impl Panel {
     }
 
     fn render(&mut self) {
-        let mut pixmap = std::mem::replace(&mut self.pixmap, Pixmap::new(1, 1).unwrap());
+        let mut pixmap = std::mem::replace(
+            &mut self.pixmap,
+            Pixmap::new(1, 1).expect("1x1 is a valid size"),
+        );
         pixmap.fill(tiny_skia::Color::TRANSPARENT);
         let items = std::mem::take(&mut self.items);
         for (i, item) in items.iter().enumerate() {

@@ -315,7 +315,12 @@ impl Screencast {
         let deadline = Instant::now() + timeout;
         let mut streams = self.shared.streams.lock().unwrap();
         let node = loop {
-            let s = streams.get(&number).expect("stream state");
+            let Some(s) = streams.get(&number) else {
+                drop(streams);
+                stream.close();
+                let _ = self.conn.flush();
+                bail!("stream for {name} went away");
+            };
             if let Some(error) = &s.failed {
                 let error = error.clone();
                 streams.remove(&number);

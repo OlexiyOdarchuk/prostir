@@ -108,7 +108,7 @@ fn playing() -> Vec<(u32, String)> {
 fn parent(pid: u32) -> Option<u32> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     // "pid (comm) state ppid ...": comm may hold spaces and parentheses.
-    let rest = &stat[stat.rfind(')')? + 2..];
+    let rest = stat.get(stat.rfind(')')? + 2..)?;
     rest.split_whitespace().nth(1)?.parse().ok()
 }
 

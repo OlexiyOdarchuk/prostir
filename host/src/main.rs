@@ -836,7 +836,7 @@ fn main() -> Result<()> {
                     stream,
                     reader,
                     writer,
-                    displays.as_mut().unwrap(),
+                    displays.as_mut().expect("made above if it was missing"),
                     &mut control,
                     via,
                 ) {

@@ -66,7 +66,7 @@ pub struct Player {
 impl Player {
     pub fn spawn() -> Self {
         let (tx, rx) = mpsc::sync_channel(32);
-        std::thread::Builder::new()
+        let _ = std::thread::Builder::new()
             .name("audio".into())
             .spawn(move || {
                 // An AAudio stream dies when the audio route changes (headphones in or
@@ -86,7 +86,7 @@ impl Player {
                     std::thread::sleep(Duration::from_millis(300));
                 }
             })
-            .expect("spawn audio thread");
+            .inspect_err(|e| warn!("no sound: {e}"));
         Self { tx }
     }
 
