@@ -202,6 +202,7 @@ fn main() -> Result<()> {
             HostMsg::Notice { text } => println!("PC says: {text}"),
             HostMsg::MouseAt { id, x, y } => println!("mouse on {id} at {x},{y}"),
             HostMsg::Abilities { bits } => println!("PC abilities: {bits:#b}"),
+            HostMsg::SoundFrom { id } => println!("sound from monitor {id}"),
             HostMsg::PcSettings { settings, encoders } => {
                 println!("PC encodes: {settings:?}, can use {encoders:#05b}")
             }

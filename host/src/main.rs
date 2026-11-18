@@ -11,6 +11,7 @@ mod notifications;
 mod outbox;
 mod pairing;
 mod screencopy;
+mod sound_source;
 mod tray;
 mod usage;
 mod virtual_output;
@@ -278,6 +279,9 @@ fn serve_client(
     let mut battery_warned = false;
     // PC notifications passed to the headset, while it asks for them.
     let mut notifications: Option<notifications::Watcher> = None;
+    // Which monitor the sound comes from, while the headset wants to know.
+    let mut sound_source: Option<sound_source::Watcher> = None;
+    let mut sound_from = None;
     let mut focus = None;
     let mut next_focus = Instant::now();
     let result = loop {
@@ -290,6 +294,16 @@ fn serve_client(
             if focus != Some(id) {
                 focus = Some(id);
                 displays.router.send(HostMsg::Focus { id });
+            }
+            if let Some(w) = &sound_source {
+                let id = w
+                    .output()
+                    .and_then(|name| displays.id_of_output(&name))
+                    .unwrap_or(NO_FOCUS);
+                if sound_from != Some(id) {
+                    sound_from = Some(id);
+                    displays.router.send(HostMsg::SoundFrom { id });
+                }
             }
         }
         if Instant::now() >= next_tick {
@@ -404,6 +418,14 @@ fn serve_client(
                 } else {
                     None
                 };
+            }
+            Ok(Ok(ClientMsg::SetSoundFromScreen { enabled })) => {
+                sound_source = enabled.then(|| {
+                    sound_source
+                        .take()
+                        .unwrap_or_else(sound_source::Watcher::start)
+                });
+                sound_from = None;
             }
             Ok(Ok(ClientMsg::FindMouse)) => {
                 if let Some((id, x, y)) = displays.find_mouse() {

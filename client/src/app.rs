@@ -330,6 +330,8 @@ struct Scene {
     selected: Option<u8>,
     /// The PC can move the mouse.
     can_move_mouse: bool,
+    /// The monitor the sound comes from, as the PC says.
+    sound_from: Option<u8>,
     /// The display rate setting changed: apply it.
     refresh_due: bool,
     /// Time worn since the last rest reminder.
@@ -741,6 +743,25 @@ impl Scene {
             )
         };
         self.show_toast(text.to_owned());
+    }
+
+    /// "Sound from the screen": the sound placed towards the monitor whose window plays
+    /// it, as the head turns.
+    fn place_sound(&self) {
+        let angle = self
+            .sound_from
+            .filter(|_| self.settings.sound_from_screen)
+            .and_then(|id| self.shown.get(&id))
+            .map(|p| {
+                let (head, forward) = self.head;
+                let to = p.position - head;
+                let look = (-forward.x).atan2(-forward.z);
+                let at = (-to.x).atan2(-to.z);
+                // Right of where the user looks is positive.
+                (look - at + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
+                    - std::f32::consts::PI
+            });
+        crate::audio::place(angle);
     }
 
     /// Shows `text` for a few seconds, below the line of sight.
@@ -1499,6 +1520,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         wrist: None,
         selected: None,
         can_move_mouse: false,
+        sound_from: None,
         refresh_due: false,
         worn_for: Duration::ZERO,
         off_since: None,
@@ -1692,6 +1714,7 @@ fn run(app: &AndroidApp) -> Result<()> {
 
         scene.head = (head, forward);
         scene.follow_head(dt);
+        scene.place_sound();
         scene.remind_rest(dt);
         if std::mem::take(&mut scene.refresh_due) && exts.fb_display_refresh_rate {
             set_refresh_rate(&session, scene.settings.battery_saver);
@@ -2620,6 +2643,9 @@ fn handle_net_event(
             if scene.settings.notifications {
                 scene.send(ClientMsg::SetNotifications { enabled: true });
             }
+            if scene.settings.sound_from_screen {
+                scene.send(ClientMsg::SetSoundFromScreen { enabled: true });
+            }
             if !scene.worn {
                 scene.tell_presence();
             }
@@ -2633,6 +2659,7 @@ fn handle_net_event(
         NetEvent::Recenter => scene.recenter(),
         NetEvent::Notice(text) => scene.show_toast(text),
         NetEvent::MouseAt(id, x, y) => scene.finder = Some((id, Vec2::new(x, y), Instant::now())),
+        NetEvent::SoundFrom(id) => scene.sound_from = id,
         NetEvent::Abilities(bits) => {
             info!("PC abilities {bits:#b}");
             scene.can_move_mouse = bits & prostir_proto::abilities::MOVE_MOUSE != 0;
@@ -2908,6 +2935,14 @@ fn handle_action(
             scene.settings.rest_every = minutes;
             scene.settings.save(settings_path);
             scene.worn_for = Duration::ZERO;
+        }
+        Action::SoundFromScreen(on) => {
+            scene.settings.sound_from_screen = on;
+            scene.settings.save(settings_path);
+            scene.send(ClientMsg::SetSoundFromScreen { enabled: on });
+            if !on {
+                scene.sound_from = None;
+            }
         }
         Action::Notifications(on) => {
             scene.settings.notifications = on;

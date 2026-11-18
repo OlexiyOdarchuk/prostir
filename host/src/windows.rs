@@ -36,6 +36,8 @@ enum Report {
     Cursor(i32, i32),
     /// A window on a panel output closed or left it: the output name.
     Left(String),
+    /// Every window: process id, class and output, one per line, tab-separated.
+    Windows(String),
 }
 
 /// Smallest window panel, in logical pixels.
@@ -76,6 +78,55 @@ pub fn cursor() -> Option<(i32, i32)> {
         Report::Cursor(x, y) => Some((*x, *y)),
         _ => None,
     })
+}
+
+/// Every normal window: (process id, class, output name).
+pub fn all_windows() -> Vec<(u32, String, String)> {
+    if hyprland::running() {
+        let monitors = hyprland_monitors();
+        let Ok(json) = hyprland::request("j/clients") else {
+            return Vec::new();
+        };
+        let Ok(Value::Array(clients)) = serde_json::from_str::<Value>(&json) else {
+            return Vec::new();
+        };
+        return clients
+            .iter()
+            .filter_map(|c| {
+                let pid = c.get("pid")?.as_i64()? as u32;
+                let class = c.get("class")?.as_str()?.to_owned();
+                let monitor = c.get("monitor")?.as_i64()?;
+                let output = monitors.iter().find(|m| m.0 == monitor)?.1.clone();
+                Some((pid, class, output))
+            })
+            .collect();
+    }
+    let script = format!(
+        "var lines = [];
+         workspace.windowList().forEach(function (w) {{
+           if (w.normalWindow && w.output) {{
+             lines.push(w.pid + '\\t' + w.resourceClass + '\\t' + w.output.name);
+           }}
+         }});
+         callDBus('{BUS}', '{PATH}', '{BUS}', 'Windows', lines.join('\\n'));"
+    );
+    ask_kwin(&script, |r| match r {
+        Report::Windows(list) => Some(list.clone()),
+        _ => None,
+    })
+    .map(|list| {
+        list.lines()
+            .filter_map(|l| {
+                let mut f = l.split('\t');
+                Some((
+                    f.next()?.parse().ok()?,
+                    f.next()?.to_owned(),
+                    f.next()?.to_owned(),
+                ))
+            })
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 /// Whether the mouse can be moved from here (Hyprland; KWin scripts cannot).
@@ -368,6 +419,11 @@ impl Host {
             output,
         });
         let _ = self.0.try_send(Report::Window(w));
+    }
+
+    /// Every window, one per line: pid, class, output (tab-separated).
+    fn windows(&self, list: String) {
+        let _ = self.0.try_send(Report::Windows(list));
     }
 
     /// The mouse position.

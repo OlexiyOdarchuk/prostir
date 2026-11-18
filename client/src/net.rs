@@ -126,6 +126,8 @@ pub enum NetEvent {
     MouseAt(u8, f32, f32),
     /// What the PC can do (bits of `prostir_proto::abilities`).
     Abilities(u8),
+    /// The monitor the sound comes from (`None`: not known).
+    SoundFrom(Option<u8>),
     /// A PC announces itself on the network but does not accept the connection
     /// (a firewall on the PC); `None` once connecting works again.
     Unreachable(Option<String>),
@@ -931,6 +933,9 @@ fn run_session(
             }
             HostMsg::Abilities { bits } => {
                 let _ = events.send(NetEvent::Abilities(bits));
+            }
+            HostMsg::SoundFrom { id } => {
+                let _ = events.send(NetEvent::SoundFrom((id != NO_FOCUS).then_some(id)));
             }
             // The PC asks; the headset's own switch decides (checked below too).
             HostMsg::MicActive { active } => mic_asked = active,

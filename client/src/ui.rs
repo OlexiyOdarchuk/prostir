@@ -255,6 +255,8 @@ pub enum Action {
     RestEvery(u16),
     /// Forget paired PC number `n` (second press confirms).
     ForgetPc(usize),
+    /// Sound comes from the monitor of the window playing it.
+    SoundFromScreen(bool),
     Close,
 }
 
@@ -2939,6 +2941,39 @@ fn build_sound(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32)
         ));
         y += 52.0;
     }
+    y += 24.0;
+    segmented(
+        items,
+        lx,
+        lw,
+        &mut y,
+        l.t("Звук з боку екрана", "Sound from the screen"),
+        vec![
+            (
+                l.t("Вимкнено", "Off"),
+                Action::SoundFromScreen(false),
+                !s.settings.sound_from_screen,
+                true,
+            ),
+            (
+                l.t("Увімкнено", "On"),
+                Action::SoundFromScreen(true),
+                s.settings.sound_from_screen,
+                true,
+            ),
+        ],
+    );
+    items.push(text(
+        lx,
+        y - 18.0,
+        18.0,
+        false,
+        MUTED,
+        l.t(
+            "Звук лунає з того монітора, де вікно, яке грає.",
+            "Sound comes from the monitor with the window playing it.",
+        ),
+    ));
     y += 30.0;
     for line in [
         l.t(

@@ -222,6 +222,10 @@ pub enum HostMsg {
     Abilities {
         bits: u8,
     },
+    /// The sound comes from the window on monitor `id` ([`NO_FOCUS`]: not known).
+    SoundFrom {
+        id: u8,
+    },
     /// The PC's encoding settings and what it can encode with (bits of [`encoders`]).
     PcSettings {
         settings: PcSettings,
@@ -344,6 +348,10 @@ pub enum ClientMsg {
     SetNotifications {
         enabled: bool,
     },
+    /// Say which monitor the sound comes from ([`HostMsg::SoundFrom`]).
+    SetSoundFromScreen {
+        enabled: bool,
+    },
     /// Put the mouse on monitor `id`, at `x`/`y` across its image (0..=65535).
     MouseTo {
         id: u8,
@@ -389,6 +397,7 @@ mod tag {
     pub const NOTICE: u8 = 20;
     pub const MOUSE_AT: u8 = 21;
     pub const ABILITIES: u8 = 22;
+    pub const SOUND_FROM: u8 = 23;
     pub const HELLO: u8 = 101;
     pub const REQUEST_KEYFRAME: u8 = 102;
     pub const FRAME_SHOWN: u8 = 103;
@@ -414,6 +423,7 @@ mod tag {
     pub const FIND_MOUSE: u8 = 123;
     pub const MOUSE_TO: u8 = 124;
     pub const SET_NOTIFICATIONS: u8 = 125;
+    pub const SET_SOUND_FROM_SCREEN: u8 = 126;
 }
 
 fn invalid(msg: &str) -> io::Error {
@@ -527,6 +537,7 @@ impl HostMsg {
                 &[&[*id], &x.to_le_bytes(), &y.to_le_bytes()],
             ),
             HostMsg::Abilities { bits } => write_frame(w, tag::ABILITIES, &[&[*bits]]),
+            HostMsg::SoundFrom { id } => write_frame(w, tag::SOUND_FROM, &[&[*id]]),
             HostMsg::Incompatible { protocol, app } => write_frame(
                 w,
                 tag::INCOMPATIBLE,
@@ -595,6 +606,7 @@ impl HostMsg {
                 y: c.u16()?,
             },
             tag::ABILITIES => HostMsg::Abilities { bits: c.u8()? },
+            tag::SOUND_FROM => HostMsg::SoundFrom { id: c.u8()? },
             tag::NOTICE => HostMsg::Notice {
                 text: String::from_utf8_lossy(c.rest()).into_owned(),
             },
@@ -710,6 +722,9 @@ impl ClientMsg {
             ClientMsg::SetNotifications { enabled } => {
                 write_frame(w, tag::SET_NOTIFICATIONS, &[&[*enabled as u8]])
             }
+            ClientMsg::SetSoundFromScreen { enabled } => {
+                write_frame(w, tag::SET_SOUND_FROM_SCREEN, &[&[*enabled as u8]])
+            }
             ClientMsg::MouseTo { id, x, y } => write_frame(
                 w,
                 tag::MOUSE_TO,
@@ -758,6 +773,9 @@ impl ClientMsg {
             tag::SCREENSHOT => ClientMsg::Screenshot { id: c.u8()? },
             tag::FIND_MOUSE => ClientMsg::FindMouse,
             tag::SET_NOTIFICATIONS => ClientMsg::SetNotifications {
+                enabled: c.u8()? != 0,
+            },
+            tag::SET_SOUND_FROM_SCREEN => ClientMsg::SetSoundFromScreen {
                 enabled: c.u8()? != 0,
             },
             tag::MOUSE_TO => ClientMsg::MouseTo {
@@ -922,6 +940,7 @@ mod tests {
                 y: 300,
             },
             HostMsg::Abilities { bits: 1 },
+            HostMsg::SoundFrom { id: 2 },
             HostMsg::PcSettings {
                 settings: PcSettings {
                     quality: 30,
@@ -1018,6 +1037,7 @@ mod tests {
             ClientMsg::Screenshot { id: 0 },
             ClientMsg::FindMouse,
             ClientMsg::SetNotifications { enabled: true },
+            ClientMsg::SetSoundFromScreen { enabled: true },
             ClientMsg::MouseTo {
                 id: 2,
                 x: 1,
