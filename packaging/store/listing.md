@@ -35,7 +35,9 @@ as a panel of its own, closer than the monitors.
 - Profiles for work, cinema and lying down, switched in one press
 - Detach up to three PC windows into floating panels; move the active window to the
   monitor in front of you; save a screenshot of that monitor on the PC
-- Monitors can follow your head; hold an open palm to your face for a round menu on it
+- Monitors can follow your head; hold an open palm to your face for a round menu on it,
+  with the time, the date and the battery in the middle
+- Dim all monitors at once for the evening
 - Move one monitor or the whole arrangement at once
 - Focus mode dims every monitor except the one with the mouse; "Where is the mouse?"
   shows the pointer with rings, and on Hyprland the mouse can follow your gaze
@@ -91,7 +93,8 @@ Plasma або Hyprland). Це справжні виходи ПК: перенос
 - До трьох вікон ПК окремими панелями; активне вікно на монітор перед вами одним
   натиском; знімок цього монітора зберігається на ПК
 - Монітори можуть іти слідом за головою; потримайте розкриту долоню до обличчя, і на
-  ній з'явиться кругле меню
+  ній з'явиться кругле меню з часом, датою й зарядом посередині
+- Приглушуйте всі монітори разом на вечір
 - Переносьте один монітор або всю розстановку разом
 - Режим фокусу притемнює всі монітори, крім того, де миша; «Де миша?» показує
   вказівник кільцями, а в Hyprland миша може йти за поглядом
@@ -185,7 +188,7 @@ everything you need:
 - a PC running Linux with KDE Plasma 6 (Wayland session) or Hyprland, on the same Wi-Fi
   network as the headset, with no client isolation between devices;
 - the free Prostir app for the PC from https://prostir.ishawyha.dev (packages for Arch,
-  Debian/Ubuntu and Fedora, or a tarball with `install.sh`).
+  Debian/Ubuntu and Fedora, a Nix flake, or a tarball with `install.sh`).
 
 Steps:
 

@@ -313,9 +313,9 @@ pub enum ClientMsg {
         /// Index into `sizes`.
         primary: u8,
     },
-    /// How the monitors stand around the user, for KDE's arrangement: rows from top to
-    /// bottom, each left to right, with the left edge of the row in desktop pixels
-    /// (relative; only differences between rows matter).
+    /// How the monitors stand around the user, for the desktop's arrangement: rows from
+    /// top to bottom, each left to right, with where each monitor is seen (see
+    /// [`LayoutRow`]); the PC lays its outputs out to match.
     SetLayout {
         rows: Vec<LayoutRow>,
     },

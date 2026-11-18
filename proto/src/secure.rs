@@ -2,7 +2,7 @@
 //!
 //! * Every device has a long-term Curve25519 key ([`Identity`]).
 //! * Each connection starts with a Noise `XX` handshake (mutual, encrypted); after it
-//!   the byte stream is encrypted with ChaCha20-Poly1305 ([`SecureReader`], [`SecureWriter`]).
+//!   the byte stream is encrypted with AES-256-GCM ([`SecureReader`], [`SecureWriter`]).
 //! * Devices trust each other's keys after pairing once ([`TrustStore`]): one side shows a
 //!   6-digit code, the user types it on the other side, and SPAKE2 turns it into a shared
 //!   key without exposing it to offline guessing. A confirmation tag bound to this
@@ -272,7 +272,9 @@ pub struct SecureReader {
 
 impl Read for SecureReader {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
-        if self.pos >= self.plain.len() {
+        // An empty chunk carries nothing: read on, so `Ok(0)` only ever means the
+        // stream ended.
+        while self.pos >= self.plain.len() {
             let mut len = [0u8; 2];
             // A clean end of stream between chunks is a normal close.
             match self.inner.read(&mut len[..1])? {

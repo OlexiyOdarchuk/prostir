@@ -236,24 +236,36 @@ pub fn accept(
                 // The user needs time to read and type the code.
                 stream.set_read_timeout(Some(PAIRING_TIME))?;
                 deadline.extend(PAIRING_TIME);
+                // `None`: no attempt (the dialog was cancelled or there is none), which
+                // is not a wrong code.
                 let paired = match obtain_code(headset_shows, tray) {
-                    Ok(code) => pair(&mut reader, &mut writer, &security.identity, &peer, &code),
+                    Ok(code) => {
+                        pair(&mut reader, &mut writer, &security.identity, &peer, &code).map(Some)
+                    }
                     Err(NoCode::Cancelled) => refuse(
                         &mut writer,
                         t("На ПК код не введено", "No code was typed on the PC"),
-                    ),
+                    )
+                    .map(|_| None),
                     Err(NoCode::NoDialog) => refuse(
                         &mut writer,
                         t(
                             "На ПК немає вікна для коду. Виберіть «Навпаки: код на ноутбуці, ввести тут».",
                             "The PC has no dialog for the code. Choose \"The other way: code on the PC, type it here\".",
                         ),
-                    ),
+                    )
+                    .map(|_| None),
                 };
                 stream.set_read_timeout(Some(Duration::from_secs(5)))?;
                 deadline.extend(SETUP_TIME);
+                // The headset sent its half of the exchange with its request: with no
+                // attempt made, it is read and dropped so the next request can follow.
+                if headset_shows && matches!(paired, Ok(None)) {
+                    let _ = ClientMsg::read(&mut reader);
+                }
                 match paired? {
-                    true => {
+                    None => info!("pairing not attempted: no code on the PC"),
+                    Some(true) => {
                         LIMITER.lock().unwrap().succeeded();
                         *PC_CODE.lock().unwrap() = None;
                         tray::set_pairing(tray, None);
@@ -272,7 +284,7 @@ pub fn accept(
                             ),
                         );
                     }
-                    false => {
+                    Some(false) => {
                         warn!("pairing failed: the codes did not match");
                         LIMITER.lock().unwrap().failed();
                     }

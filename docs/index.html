@@ -182,7 +182,8 @@
         <li><h3>Detach a window</h3><p>The PC's active window gets an output of its own and floats as a panel without a frame, closer than the monitors. Up to three at a time. "Attach" under it puts the window back on its monitor, out of full screen.</p></li>
         <li><h3>Window here, screenshot</h3><p>Move the active window to the monitor in front of you, or save a screenshot of that monitor to <code>~/Pictures/Prostir</code>.</p></li>
         <li><h3>Where is the mouse?</h3><p>Rings show the mouse pointer, on KDE and on Hyprland. On Hyprland the mouse can also follow your gaze.</p></li>
-        <li><h3>Palm menu</h3><p>Hold an open palm towards your face and a round menu appears on it: in front of me, focus, cinema, where is the mouse, screenshot, line up and the main menu. Press it with the other hand. Left or right hand, as you choose.</p></li>
+        <li><h3>Palm menu</h3><p>Hold an open palm towards your face and a round menu appears on it: in front of me, focus, cinema, where is the mouse, screenshot, line up and the main menu, with the time, the date and the headset battery in the middle. Press it with the other hand. Left or right hand, as you choose.</p></li>
+        <li><h3>Brightness</h3><p>Dim all monitors at once for the evening: 100, 80, 60 or 40 %.</p></li>
         <li><h3>Notifications and battery</h3><p>The PC's notifications can show in the headset (off until you turn them on). The tray shows the headset battery, and the PC warns you at 15 %.</p></li>
         <li><h3>Paired and encrypted</h3><p>A PC streams nothing to a headset it has not been paired with. Pairing starts only after you confirm it in the headset and type a 6-digit code.</p></li>
       </ul>
@@ -207,6 +208,9 @@
 <pre><code>sudo dnf install ./prostir-*.rpm</code></pre>
                   or on openSUSE:
 <pre><code>sudo zypper install --allow-unsigned-rpm ./prostir-*.rpm</code></pre></li>
+                <li><h4>Nix and NixOS</h4>The repository is a flake:
+<pre><code>nix run github:OlexiyOdarchuk/prostir</code></pre>
+                  On NixOS, add it as a flake input and put <code>inputs.prostir.packages.${pkgs.system}.default</code> in <code>environment.systemPackages</code>.</li>
                 <li><h4>Any distribution, without root</h4>Download <code>prostir-&lt;version&gt;-x86_64-linux.tar.gz</code>, unpack it and run the installer, which installs into <code>~/.local</code>:
 <pre><code>tar xf prostir-*-x86_64-linux.tar.gz
 cd prostir-*/

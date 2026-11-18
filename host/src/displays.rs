@@ -594,9 +594,8 @@ pub struct SavedMonitors {
     pub codec: Option<Codec>,
     /// Encode on the CPU, chosen in the headset menu.
     pub software: bool,
-    /// Rows from top to bottom: (left edge in pixels, number of monitors), covering
-    /// `specs` in order. Empty: one row.
-    /// Rows: the seen centre of each monitor in it ([`NEXT`] if unknown).
+    /// Rows from top to bottom, covering `specs` in order: the seen centre of each
+    /// monitor in it ([`NEXT`] if unknown). Empty: one row.
     pub rows: Vec<Vec<i32>>,
 }
 
@@ -1538,7 +1537,7 @@ impl Displays {
         // Offsets are desktop pixels; anything this far out is nonsense (and would
         // overflow the arithmetic below).
         for r in &mut rows {
-            for c in &mut r.centers {
+            for c in r.centers.iter_mut().chain(r.middles.iter_mut()) {
                 if *c != NEXT {
                     *c = (*c).clamp(-100_000, 100_000);
                 }

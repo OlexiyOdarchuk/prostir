@@ -517,7 +517,7 @@ screen in the headset:
 
 ## Security
 
-Every connection starts with a Noise `XX` handshake (Curve25519, ChaCha20-Poly1305,
+Every connection starts with a Noise `XX` handshake (Curve25519, AES-256-GCM,
 BLAKE2s). After it, the picture, sound and microphone are encrypted and authenticated.
 
 A headset and a PC pair once. Until then, the PC creates no monitors and sends
@@ -624,6 +624,8 @@ flowchart LR
     Mic["Microphone"] -. "only while a PC app records" .-> Net
   end
 ```
+
+The protocol is described in [PROTOCOL.md](PROTOCOL.md).
 
 The code is split into three Rust crates:
 

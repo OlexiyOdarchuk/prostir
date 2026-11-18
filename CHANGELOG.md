@@ -30,14 +30,17 @@ First public version.
   follow my head.
 - Detach up to three PC windows into floating panels and attach them back; move the
   active window to the monitor in front of you; save a screenshot of that monitor to
-  `~/Pictures/Prostir`.
+  `~/Pictures/Prostir` (on KDE taken from that monitor's own stream).
+- Monitor brightness for all monitors at once (100, 80, 60 or 40 %).
 
 ### In the headset
 
 - A menu with Quick, Monitors and Settings tabs, which you can touch with a finger when
   your hands are in view.
 - A round palm menu: hold an open palm to your face for In front, Focus, Cinema,
-  Mouse?, Screenshot, Line up and Menu. Left or right hand.
+  Mouse?, Screenshot, Line up and Menu, with the time, the date and the headset's
+  battery in the middle. Left or right hand; 24- or 12-hour clock, the date in
+  Ukrainian, English or numbers. The round menu button by the monitor can be hidden.
 - Hands shown, and if you like used for pointing: pinch to click, pinch and hold to
   drag.
 - Backgrounds: black, your room through the passthrough cameras (plain or dimmed),
@@ -71,9 +74,10 @@ First public version.
   again.
 - When the headset and the PC run versions that cannot talk, both say which one to
   update.
-- Packages: `prostir-bin` on the AUR, a `.deb` and an `.rpm` (Fedora), and a tarball with
-  `install.sh` (with `--autostart` and `--uninstall --purge`). Every release ships
-  `THIRD-PARTY-LICENSES.txt`.
+- Packages: `prostir-bin` on the AUR, a `.deb` and an `.rpm` (Fedora), a tarball with
+  `install.sh` (with `--autostart` and `--uninstall --purge`), and a Nix flake
+  (`nix run github:OlexiyOdarchuk/prostir`, NixOS and `nix develop`). Every release
+  ships `THIRD-PARTY-LICENSES.txt`.
 - Official builds count how many PCs use Prostir: one anonymous request a day with only
   the date in it, announced on the first start; off in the tray or with
   `PROSTIR_NO_COUNT=1`. Builds from source never count.
@@ -86,4 +90,5 @@ First public version.
   confirmed in the headset first and typed on either side. The PC slows down repeated
   failed attempts.
 - The headset lists the paired PCs, and you can forget any of them.
+- The protocol between the headset and the PC is documented in `PROTOCOL.md`.
 - Website with downloads and the privacy policy: prostir.ishawyha.dev.
