@@ -90,6 +90,8 @@ pub struct Settings {
     pub battery_saver: bool,
     /// The PC's desktop notifications shown in the headset.
     pub notifications: bool,
+    /// Rest reminders: minutes of wearing between them (0: none).
+    pub rest_every: u16,
     pub language: Language,
     /// The language of the PC last connected to (for "like the PC" before connecting).
     pub pc_language: Option<Lang>,
@@ -115,6 +117,7 @@ impl Default for Settings {
             left_handed: false,
             battery_saver: false,
             notifications: false,
+            rest_every: 0,
             language: Language::LikePc,
             pc_language: None,
         }
@@ -160,6 +163,7 @@ impl Settings {
                 Some(("left-handed", v)) => s.left_handed = v == "on",
                 Some(("battery-saver", v)) => s.battery_saver = v == "on",
                 Some(("notifications", v)) => s.notifications = v == "on",
+                Some(("rest-every", v)) => s.rest_every = v.trim().parse().unwrap_or(0),
                 Some(("language", v)) => {
                     s.language = match v {
                         "uk" => Language::Fixed(Lang::Uk),
@@ -227,7 +231,7 @@ impl Settings {
         format!(
             "preset {preset}\ncurve {curve}\nbackground {background}\nhands {hands}\n\
              focus {}\ncinema {}\ncinema-screen {}\nlanguage {}\npc-language {}\nintro {}\nkeyboard-window {}\nmic {}\ntab {}\nfollow {}\n\
-             gaze-mouse {}\nlarge-menu {}\nleft-handed {}\nbattery-saver {}\nnotifications {}\n",
+             gaze-mouse {}\nlarge-menu {}\nleft-handed {}\nbattery-saver {}\nnotifications {}\nrest-every {}\n",
             on(self.focus),
             on(self.cinema),
             self.cinema_screen
@@ -246,7 +250,8 @@ impl Settings {
             on(self.large_menu),
             on(self.left_handed),
             on(self.battery_saver),
-            on(self.notifications)
+            on(self.notifications),
+            self.rest_every
         )
     }
 }
@@ -278,6 +283,7 @@ mod tests {
             left_handed: true,
             battery_saver: true,
             notifications: true,
+            rest_every: 20,
             language: Language::Fixed(Lang::En),
             pc_language: Some(Lang::Uk),
         };

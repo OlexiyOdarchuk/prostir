@@ -121,6 +121,27 @@ fn main() {
             Lang::Uk
         },
     };
+    // TOAST="text": a toast instead.
+    if let Ok(message) = std::env::var("TOAST") {
+        let mut panel = Panel::new();
+        let (w, h) = (1024, 132);
+        let rgba = panel.toast_image(&message, w, h);
+        let pixmap =
+            tiny_skia::Pixmap::from_vec(rgba, tiny_skia::IntSize::from_wh(w, h).unwrap()).unwrap();
+        let mut bg = tiny_skia::Pixmap::new(w, h).unwrap();
+        bg.fill(tiny_skia::Color::from_rgba8(90, 96, 110, 255));
+        bg.draw_pixmap(
+            0,
+            0,
+            pixmap.as_ref(),
+            &tiny_skia::PixmapPaint::default(),
+            tiny_skia::Transform::identity(),
+            None,
+        );
+        bg.save_png(&out).unwrap();
+        println!("{out}");
+        return;
+    }
     // WRIST=1: the wrist menu instead.
     let wrist = std::env::var("WRIST").is_ok();
     let (w, h) = if wrist {

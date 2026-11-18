@@ -232,6 +232,8 @@ pub enum Action {
     BatterySaver(bool),
     /// Show the PC's notifications in the headset.
     Notifications(bool),
+    /// Rest reminders every so many minutes of wearing (0: none).
+    RestEvery(u16),
     Close,
 }
 
@@ -1024,33 +1026,60 @@ impl Panel {
 }
 
 impl Panel {
-    /// A short message on a dark pill, `width`×`height`, for a toast layer.
+    /// A short message on a dark pill, `width`×`height`, for a toast layer: one
+    /// line, or two when long (the end cut off with "…" if even that is not enough).
     /// Premultiplied RGBA.
     pub fn toast_image(&mut self, message: &str, width: u32, height: u32) -> Vec<u8> {
         let mut p = Pixmap::new(width, height).expect("toast size");
         let (w, h) = (width as f32, height as f32);
         fill(
             &mut p,
-            rounded(rect(0.0, 0.0, w, h), h / 2.0),
+            rounded(rect(0.0, 0.0, w, h), 28.0),
             [16, 18, 24, 235],
         );
-        let size = h * 0.36;
-        // Too long: cut, keeping the end (a file name) readable.
-        let mut shown: String = message.to_owned();
-        while self.text_width(&shown, size, true) > w - h && shown.chars().count() > 8 {
-            let rest: String = shown.chars().skip(2).collect();
-            shown = format!("…{rest}");
+        let room = w - 72.0;
+        let one = h * 0.3;
+        if self.text_width(message, one, true) <= room {
+            let tw = self.text_width(message, one, true);
+            self.draw_text(
+                &mut p,
+                (w - tw) / 2.0,
+                h / 2.0 + one * 0.36,
+                one,
+                true,
+                TEXT,
+                message,
+            );
+            return p.take();
         }
-        let tw = self.text_width(&shown, size, true);
-        self.draw_text(
-            &mut p,
-            (w - tw) / 2.0,
-            h / 2.0 + size * 0.36,
-            size,
-            true,
-            TEXT,
-            &shown,
-        );
+        // Two lines, split at a word.
+        let size = h * 0.24;
+        let mut first = String::new();
+        let mut rest = message;
+        for (at, _) in message.match_indices(' ') {
+            if self.text_width(&message[..at], size, true) > room {
+                break;
+            }
+            first = message[..at].to_owned();
+            rest = message[at + 1..].trim_start();
+        }
+        if first.is_empty() {
+            first = message.to_owned();
+            rest = "";
+        }
+        let mut second = rest.to_owned();
+        while self.text_width(&second, size, true) > room && second.chars().count() > 1 {
+            second = second
+                .chars()
+                .take(second.chars().count() - 2)
+                .collect::<String>()
+                + "…";
+        }
+        for (k, line) in [first, second].iter().enumerate() {
+            let tw = self.text_width(line, size, true).min(room);
+            let baseline = h / 2.0 - size * 0.25 + k as f32 * size * 1.25;
+            self.draw_text(&mut p, (w - tw) / 2.0, baseline, size, k == 0, TEXT, line);
+        }
         p.take()
     }
 }
@@ -1635,6 +1664,23 @@ fn build_look(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, rx: f32, rw:
         items.push(text(rx, y, 19.0, false, MUTED, line));
         y += 28.0;
     }
+    y += 34.0;
+    let every = st.rest_every;
+    segmented(
+        items,
+        rx,
+        rw,
+        &mut y,
+        l.t("Нагадування про відпочинок", "Rest reminders"),
+        [
+            (0, l.t("Вимкнено", "Off")),
+            (20, l.t("Кожні 20 хв", "Every 20 min")),
+            (60, l.t("Щогодини", "Hourly")),
+        ]
+        .into_iter()
+        .map(|(m, label)| (label, Action::RestEvery(m), every == m, true))
+        .collect(),
+    );
 }
 
 /// A PC this headset has not paired with: pair only if the user says so.

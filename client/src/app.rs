@@ -44,8 +44,8 @@ const BUTTON_SIZE: f32 = 0.075;
 const CURSOR_PX: u32 = 64;
 const BUTTON_PX: u32 = 128;
 /// Toast texture and its size in the room.
-const TOAST_PX: (u32, u32) = (1024, 96);
-const TOAST_WIDTH: f32 = 0.42;
+const TOAST_PX: (u32, u32) = (1024, 132);
+const TOAST_WIDTH: f32 = 0.46;
 /// How long a toast stays.
 const TOAST_FOR: Duration = Duration::from_secs(4);
 const ERROR_SHOWN_FOR: Duration = Duration::from_secs(8);
@@ -299,6 +299,10 @@ struct Scene {
     can_move_mouse: bool,
     /// The display rate setting changed: apply it.
     refresh_due: bool,
+    /// Time worn since the last rest reminder.
+    worn_for: Duration,
+    /// Since when the headset is off the head (for rest reminders).
+    off_since: Option<Instant>,
     /// Mouse follows the gaze: the monitor looked at and since when.
     gaze_on: Option<(u8, Instant)>,
     /// When the mouse was last sent somewhere by the gaze.
@@ -637,6 +641,45 @@ impl Scene {
             }
             _ => self.gaze_on = Some((id, Instant::now())),
         }
+    }
+
+    /// Rest reminders: after so many minutes of wearing, a short message. Every 20
+    /// minutes it is the 20-20-20 rule (look 6 m away for 20 seconds); hourly, a break.
+    /// Taking the headset off for 5 minutes counts as a rest.
+    fn remind_rest(&mut self, dt: f32) {
+        let every = u64::from(self.settings.rest_every) * 60;
+        if every == 0 {
+            return;
+        }
+        if !self.worn {
+            self.off_since.get_or_insert_with(Instant::now);
+            return;
+        }
+        if self
+            .off_since
+            .take()
+            .is_some_and(|t| t.elapsed() >= Duration::from_secs(5 * 60))
+        {
+            self.worn_for = Duration::ZERO;
+        }
+        self.worn_for += Duration::from_secs_f32(dt);
+        if self.worn_for.as_secs() < every {
+            return;
+        }
+        self.worn_for = Duration::ZERO;
+        let l = self.lang();
+        let text = if every <= 20 * 60 {
+            l.t(
+                "Перепочиньте очі: 20 секунд подивіться вдалину",
+                "Rest your eyes: look into the distance for 20 seconds",
+            )
+        } else {
+            l.t(
+                "Година в шоломі: час на коротку перерву",
+                "An hour in the headset: time for a short break",
+            )
+        };
+        self.show_toast(text.to_owned());
     }
 
     /// Shows `text` for a few seconds, below the line of sight.
@@ -1271,6 +1314,8 @@ fn run(app: &AndroidApp) -> Result<()> {
         wrist: None,
         can_move_mouse: false,
         refresh_due: false,
+        worn_for: Duration::ZERO,
+        off_since: None,
         gaze_on: None,
         gaze_moved: None,
         finder: None,
@@ -1461,6 +1506,7 @@ fn run(app: &AndroidApp) -> Result<()> {
 
         scene.head = (head, forward);
         scene.follow_head(dt);
+        scene.remind_rest(dt);
         if std::mem::take(&mut scene.refresh_due) && exts.fb_display_refresh_rate {
             set_refresh_rate(&session, scene.settings.battery_saver);
         }
@@ -2624,6 +2670,11 @@ fn handle_action(
             scene.settings.save(settings_path);
             set_menu_scale(on);
             scene.panel_place.width = panel_width();
+        }
+        Action::RestEvery(minutes) => {
+            scene.settings.rest_every = minutes;
+            scene.settings.save(settings_path);
+            scene.worn_for = Duration::ZERO;
         }
         Action::Notifications(on) => {
             scene.settings.notifications = on;
