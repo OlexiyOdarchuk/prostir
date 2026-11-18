@@ -17,8 +17,8 @@ impl ActiveOutput {
 
     /// The output name, e.g. `Virtual-Prostir-1` or `eDP-1`.
     pub fn get(&self) -> Option<String> {
-        if crate::platform::hyprland::running() {
-            return crate::platform::hyprland::focused();
+        if crate::platform::linux::hyprland::running() {
+            return crate::platform::linux::hyprland::focused();
         }
         let reply = self
             .bus

@@ -12,7 +12,6 @@ mod usage;
 use std::io::{BufReader, BufWriter, ErrorKind, Write};
 use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream, UdpSocket};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
@@ -25,7 +24,7 @@ use prostir_proto::{ClientMsg, Codec, HostMsg, NO_FOCUS};
 use displays::{Displays, SavedMonitors};
 use encoder::EncoderConfig;
 use platform::MonitorSpec;
-use platform::{audio, focus, hyprland, notifications, sound_source, tray};
+use platform::{focus, notifications, sound_source, tray};
 
 #[derive(Parser, Debug)]
 #[command(about = "Virtual monitors for KDE Plasma and Hyprland, streamed to a Meta Quest 3")]
@@ -100,7 +99,7 @@ struct Control {
 impl Control {
     /// Applies tray commands; returns `true` when asked to quit.
     fn poll(&mut self, displays: Option<&mut Displays>) -> bool {
-        if QUIT.load(Ordering::Relaxed) {
+        if platform::quit_requested() {
             self.quit = true;
         }
         let mut displays = displays;
@@ -162,34 +161,6 @@ impl Control {
 
 /// Taken off for this long, the headset counts as gone.
 const TAKEN_OFF_GRACE: Duration = Duration::from_secs(10);
-
-/// Notices a headset that vanished without closing the connection (switched off,
-/// out of Wi-Fi) within about 10 s, instead of waiting forever.
-fn set_keepalive(stream: &TcpStream) {
-    use std::os::fd::AsRawFd;
-    let fd = stream.as_raw_fd();
-    let set = |level, name, value: libc::c_int| {
-        // SAFETY: a valid socket and a c_int option value.
-        unsafe {
-            libc::setsockopt(
-                fd,
-                level,
-                name,
-                (&value as *const libc::c_int).cast(),
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            )
-        }
-    };
-    set(libc::SOL_SOCKET, libc::SO_KEEPALIVE, 1);
-    set(libc::IPPROTO_TCP, libc::TCP_KEEPIDLE, 4);
-    set(libc::IPPROTO_TCP, libc::TCP_KEEPINTVL, 2);
-    set(libc::IPPROTO_TCP, libc::TCP_KEEPCNT, 3);
-    // Unacknowledged data (frames) also gives up after 10 s.
-    set(libc::IPPROTO_TCP, libc::TCP_USER_TIMEOUT, 10_000);
-    // Keep little unsent data in the kernel (Linux would let it grow to megabytes):
-    // frames wait in the outbox instead, where late ones can still be dropped.
-    set(libc::IPPROTO_TCP, libc::TCP_NOTSENT_LOWAT, 256 * 1024);
-}
 
 fn serve_client(
     stream: TcpStream,
@@ -475,23 +446,17 @@ fn report(displays: &Displays, text: String) {
     displays.router.send(HostMsg::Error { text });
 }
 
-fn hostname() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/hostname")
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|_| "linux".into())
-}
-
 fn spawn_discovery(port: u16) -> Result<()> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
     socket.set_broadcast(true)?;
-    let beacon = prostir_proto::encode_beacon(port, &hostname());
+    let beacon = prostir_proto::encode_beacon(port, &platform::hostname());
     std::thread::Builder::new()
         .name("discovery".into())
         .spawn(move || {
             loop {
                 // 255.255.255.255 only leaves through the default route, so also send to the
                 // broadcast address of every interface (Wi-Fi, Ethernet, hotspot).
-                let mut targets = broadcast_addresses();
+                let mut targets = platform::broadcast_addresses();
                 targets.push(Ipv4Addr::BROADCAST);
                 for ip in targets {
                     let _ = socket.send_to(&beacon, (ip, prostir_proto::DISCOVERY_PORT));
@@ -500,36 +465,6 @@ fn spawn_discovery(port: u16) -> Result<()> {
             }
         })?;
     Ok(())
-}
-
-/// IPv4 broadcast addresses of all interfaces that are up.
-fn broadcast_addresses() -> Vec<Ipv4Addr> {
-    let mut out = Vec::new();
-    let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
-    // SAFETY: getifaddrs fills `list`, which is walked read-only and freed once.
-    unsafe {
-        if libc::getifaddrs(&mut list) != 0 {
-            return out;
-        }
-        let mut cur = list;
-        while let Some(ifa) = cur.as_ref() {
-            let flags = ifa.ifa_flags;
-            let up = flags & libc::IFF_UP as u32 != 0
-                && flags & libc::IFF_BROADCAST as u32 != 0
-                && flags & libc::IFF_LOOPBACK as u32 == 0;
-            let addr = ifa.ifa_ifu; // broadcast address when IFF_BROADCAST is set
-            if up && !addr.is_null() && i32::from((*addr).sa_family) == libc::AF_INET {
-                let sin = &*(addr as *const libc::sockaddr_in);
-                let ip = Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
-                if !out.contains(&ip) {
-                    out.push(ip);
-                }
-            }
-            cur = ifa.ifa_next;
-        }
-        libc::freeifaddrs(list);
-    }
-    out
 }
 
 /// Keeps `adb reverse` set up so a headset on USB reaches the host via 127.0.0.1.
@@ -634,114 +569,22 @@ fn notify_battery(percent: u8) {
         "{} {percent}%.",
         i18n::t("Заряд шолома:", "Headset battery:")
     );
-    if let Ok(mut child) = std::process::Command::new("notify-send")
-        .args([
-            "--app-name=Prostir",
-            "--icon=prostir",
-            i18n::t("Шолом скоро розрядиться", "The headset battery is low"),
-            &body,
-        ])
-        .spawn()
-    {
-        let _ = std::thread::Builder::new()
-            .name("notify".into())
-            .spawn(move || child.wait());
-    }
-}
-
-/// After a session the freed buffers would stay with the process: hand them back to
-/// the system, so Prostir waiting in the background stays small.
-fn give_memory_back() {
-    // SAFETY: plain glibc call; only releases memory that is already free.
-    unsafe { libc::malloc_trim(0) };
-}
-
-/// Set by SIGTERM, SIGINT and SIGHUP; the main loop then quits normally, so monitors,
-/// the sound output and the microphone are put back by the usual clean-up.
-static QUIT: AtomicBool = AtomicBool::new(false);
-
-/// Lets signals end the program cleanly on every desktop. If the normal path does not
-/// finish within a few seconds (stuck in a dialog, say), removes Hyprland's monitors
-/// directly: KWin drops its outputs when the program ends, Hyprland keeps them.
-fn quit_on_signals() {
-    extern "C" fn on_signal(_: libc::c_int) {
-        // Only an atomic store: safe inside a signal handler.
-        QUIT.store(true, Ordering::Relaxed);
-    }
-    for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
-        // SAFETY: installs a handler that only stores an atomic. A handler (unlike a
-        // blocked signal mask) is not inherited by child processes such as pw-loopback.
-        unsafe { libc::signal(sig, on_signal as *const () as libc::sighandler_t) };
-    }
-    let spawned = std::thread::Builder::new()
-        .name("signals".into())
-        .spawn(|| {
-            while !QUIT.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            std::thread::sleep(Duration::from_secs(5));
-            warn!("did not quit within 5 s: removing monitors and leaving");
-            if hyprland::running() {
-                hyprland::remove_leftovers();
-            }
-            audio::restore_after_crash();
-            std::process::exit(1);
-        });
-    if let Err(e) = spawned {
-        warn!("cannot watch for signals: {e}");
-    }
-}
-
-/// One Prostir per desktop session: a second one would fight over the monitors (and
-/// on Hyprland, its start-up clean-up would remove the first one's). The lock file is
-/// held for the life of the process.
-/// A directory only this user can use: `$XDG_RUNTIME_DIR`, or `~/.cache/prostir`
-/// without it (never the shared `/tmp`, where another user could plant files).
-pub(crate) fn runtime_dir() -> std::path::PathBuf {
-    if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) {
-        return dir.into();
-    }
-    let dir = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_default()
-        .join(".cache/prostir");
-    let _ = std::fs::create_dir_all(&dir);
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
-    dir
-}
-
-fn single_instance() -> Result<std::fs::File> {
-    let dir = runtime_dir();
-    let display = std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-0".into());
-    let path = dir.join(format!("prostir-{display}.lock"));
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&path)
-        .with_context(|| format!("cannot open {}", path.display()))?;
-    use std::os::fd::AsRawFd;
-    // SAFETY: flock on a file descriptor this function owns.
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        anyhow::bail!("Prostir is already running on this desktop");
-    }
-    Ok(file)
+    platform::dialogs::notify(
+        i18n::t("Шолом скоро розрядиться", "The headset battery is low"),
+        &body,
+    );
 }
 
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse();
-    let _instance = single_instance()?;
+    let _instance = platform::single_instance()?;
     // The first start says that this build counts its users and how to turn it off,
     // a day before the first count.
     usage::announce_once();
-    quit_on_signals();
+    platform::quit_on_signals();
     // Monitors from a run that crashed: without the headset nobody sees their windows.
-    if hyprland::running() {
-        hyprland::remove_leftovers();
-    }
-    audio::restore_after_crash();
+    platform::clean_up_after_crash();
     gstreamer::init().context("GStreamer init")?;
 
     let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, args.port))
@@ -823,7 +666,7 @@ fn main() -> Result<()> {
                         }
                     }
                 }
-                set_keepalive(&stream);
+                platform::set_keepalive(&stream);
                 if let Some(d) = displays.as_mut() {
                     d.set_worn(true);
                 }
@@ -849,7 +692,7 @@ fn main() -> Result<()> {
                 {
                     info!("removing virtual monitors until the headset is worn again");
                     displays = None;
-                    give_memory_back();
+                    platform::give_memory_back();
                 }
                 control.show(None, displays.as_ref());
                 if args.linger > 0 && displays.as_ref().is_some_and(|d| d.healthy()) {
@@ -861,7 +704,7 @@ fn main() -> Result<()> {
                 if displays.is_some() && idle_since.elapsed() >= Duration::from_secs(args.linger) {
                     displays = None;
                     control.show(None, None);
-                    give_memory_back();
+                    platform::give_memory_back();
                 }
                 std::thread::sleep(Duration::from_millis(200));
             }

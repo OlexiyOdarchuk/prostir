@@ -279,7 +279,7 @@ static STASH: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// Loads and runs a KWin script; `once`: unloaded right after it ran.
 fn kwin_run(name: &str, source: &str, once: bool) -> Result<()> {
-    let path = crate::runtime_dir().join(format!("{name}.js"));
+    let path = crate::platform::linux::system::runtime_dir().join(format!("{name}.js"));
     std::fs::write(&path, source)?;
     let bus = zbus::blocking::Connection::session()?;
     kwin_unload(name);

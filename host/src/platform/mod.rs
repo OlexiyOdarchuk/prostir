@@ -61,6 +61,13 @@ pub struct ActiveWindow {
     pub output: String,
 }
 
+/// Why there is no pairing code typed on the PC (see `dialogs::ask_code`).
+pub enum NoCode {
+    Cancelled,
+    /// The PC has no program to ask with.
+    NoDialog,
+}
+
 /// Where an output is on the desktop: logical position and size, and its priority
 /// (1 = primary; only KDE has priorities).
 #[derive(Debug, Clone, Copy, PartialEq)]

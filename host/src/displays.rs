@@ -353,9 +353,7 @@ pub struct SavedMonitors {
 }
 
 fn config_path() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    let base = crate::platform::config_home()?;
     let dir = base.join("prostir");
     // Settings from before the rename.
     let old = base.join("questmon");

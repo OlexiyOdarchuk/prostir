@@ -10,6 +10,8 @@ use ksni::menu::{CheckmarkItem, RadioGroup, RadioItem, StandardItem, SubMenu};
 use ksni::{MenuItem, ToolTip};
 use log::warn;
 
+use crate::platform::linux::autostart;
+
 /// What the tray asks the main loop to do.
 pub enum Command {
     SetBitrate(u32),
@@ -58,8 +60,8 @@ pub type Handle = ksni::blocking::Handle<Tray>;
 pub fn spawn(commands: Sender<Command>, bitrate: u32, sharp: bool) -> Option<Handle> {
     // Rewritten on each start, so it names this install's program even after an
     // upgrade moved it (a Nix store path, say).
-    if autostart_enabled() {
-        set_autostart(true);
+    if autostart::enabled() {
+        autostart::set(true);
     }
     let tray = Tray {
         status: Status::default(),
@@ -115,46 +117,6 @@ fn with_state(label: &str, on: bool) -> String {
         format!("{label}: {}", t("увімкнено", "on"))
     } else {
         format!("{label}: {}", t("вимкнено", "off"))
-    }
-}
-
-fn autostart_file() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-    Some(base.join("autostart").join("prostir.desktop"))
-}
-
-fn autostart_enabled() -> bool {
-    autostart_file().is_some_and(|p| p.exists())
-}
-
-fn set_autostart(enabled: bool) {
-    let Some(path) = autostart_file() else { return };
-    let result = if enabled {
-        // A wrapper (Nix) names the program to start; else this very file.
-        let exe = std::env::var("PROSTIR_EXE")
-            .ok()
-            .filter(|e| !e.is_empty())
-            .or_else(|| {
-                std::env::current_exe()
-                    .ok()
-                    .map(|p| p.display().to_string())
-            })
-            .unwrap_or_else(|| "prostir".into());
-        let entry = format!(
-            "[Desktop Entry]\nType=Application\nName=Prostir\n\
-             Comment=Virtual monitors for Meta Quest\nExec={exe}\nIcon=prostir\n\
-             Terminal=false\nX-KDE-autostart-phase=2\n"
-        );
-        path.parent()
-            .map_or(Ok(()), std::fs::create_dir_all)
-            .and_then(|()| std::fs::write(&path, entry))
-    } else {
-        std::fs::remove_file(&path)
-    };
-    if let Err(e) = result {
-        warn!("cannot change autostart ({}): {e}", path.display());
     }
 }
 
@@ -363,10 +325,10 @@ impl ksni::Tray for Tray {
             .into(),
             CheckmarkItem {
                 label: t("Запускати разом із системою", "Start with the system").into(),
-                checked: autostart_enabled(),
+                checked: autostart::enabled(),
                 // Hyprland (without uwsm) ignores XDG autostart: its own config starts it.
-                visible: !crate::platform::hyprland::running(),
-                activate: Box::new(|_: &mut Self| set_autostart(!autostart_enabled())),
+                visible: !crate::platform::linux::hyprland::running(),
+                activate: Box::new(|_: &mut Self| autostart::set(!autostart::enabled())),
                 ..Default::default()
             }
             .into(),

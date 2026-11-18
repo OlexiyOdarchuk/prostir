@@ -6,10 +6,10 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use crate::encoder::{Encoder, Input};
-use crate::platform::hyprland;
-use crate::platform::hyprland::screencopy::{self, Capture};
-use crate::platform::kde::virtual_output::{Screencast, VirtualOutput};
-use crate::platform::kde::{Kde, kscreen, plasma};
+use crate::platform::linux::hyprland;
+use crate::platform::linux::hyprland::screencopy::{self, Capture};
+use crate::platform::linux::kde::virtual_output::{Screencast, VirtualOutput};
+use crate::platform::linux::kde::{Kde, kscreen, plasma};
 use crate::platform::{DesktopBackend, Geometry, MonitorSpec, OutputBackend};
 
 pub enum Desktop {

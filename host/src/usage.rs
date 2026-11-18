@@ -171,18 +171,13 @@ fn send(paths: &[String]) -> bool {
 
 /// Shows the notice; `true` when the notification was shown.
 fn notify_first_time() -> bool {
-    Command::new("notify-send")
-        .args([
-            "--app-name=Prostir",
-            "--icon=prostir",
-            t("Prostir рахує користувачів", "Prostir counts its users"),
-            t(
-                "Починаючи із завтра, раз на день ПК надсилатиме анонімний запит без даних про вас, щоб було видно, скільки людей користується Prostir. Вимкнути: пункт трею «Рахувати цей ПК серед користувачів» або PROSTIR_NO_COUNT=1.",
-                "From tomorrow, once a day the PC sends an anonymous request with nothing about you, to show how many people use Prostir. To turn it off: the tray item \"Count this PC among users\" or PROSTIR_NO_COUNT=1.",
-            ),
-        ])
-        .status()
-        .is_ok_and(|s| s.success())
+    crate::platform::dialogs::notify_and_wait(
+        t("Prostir рахує користувачів", "Prostir counts its users"),
+        t(
+            "Починаючи із завтра, раз на день ПК надсилатиме анонімний запит без даних про вас, щоб було видно, скільки людей користується Prostir. Вимкнути: пункт трею «Рахувати цей ПК серед користувачів» або PROSTIR_NO_COUNT=1.",
+            "From tomorrow, once a day the PC sends an anonymous request with nothing about you, to show how many people use Prostir. To turn it off: the tray item \"Count this PC among users\" or PROSTIR_NO_COUNT=1.",
+        ),
+    )
 }
 
 #[cfg(test)]

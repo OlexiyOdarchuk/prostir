@@ -4,7 +4,6 @@ use crate::i18n::t;
 use std::io::{BufReader, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -16,7 +15,8 @@ use prostir_proto::secure::{
 };
 use prostir_proto::{ClientMsg, HostMsg, PROTOCOL_VERSION};
 
-use crate::platform::tray;
+use crate::platform::dialogs::{ask_code, notify};
+use crate::platform::{NoCode, tray};
 
 /// Wrong codes allowed per connection before giving up.
 const MAX_ATTEMPTS: u32 = 3;
@@ -138,9 +138,7 @@ impl Drop for Deadline {
 }
 
 pub fn config_dir() -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+    crate::platform::config_home()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("prostir")
 }
@@ -312,13 +310,6 @@ pub fn accept(
 
 /// The code for this attempt: typed on the PC (the headset shows it), or generated
 /// here and shown in the tray and a notification (the headset asks for it).
-/// Why there is no code to pair with.
-enum NoCode {
-    Cancelled,
-    /// None of kdialog, zenity, fuzzel, wofi, rofi is installed.
-    NoDialog,
-}
-
 fn obtain_code(headset_shows: bool, tray: Option<&tray::Handle>) -> Result<String, NoCode> {
     if headset_shows {
         return ask_code();
@@ -471,83 +462,6 @@ fn pair(
     .write(writer)?;
     writer.flush()?;
     Ok(ok)
-}
-
-/// Asks for the code the headset shows, in a small dialog on the PC.
-fn ask_code() -> Result<String, NoCode> {
-    let text = t(
-        "Шолом хоче підключитися.\nВведіть код, який він показує:",
-        "A headset wants to connect.\nType the code it shows:",
-    );
-    // Launchers in dmenu mode (common on Hyprland and Sway) print what was typed; they
-    // show one line, so the prompt is shorter.
-    let prompt = t("Код із шолома: ", "Code from the headset: ");
-    let attempts: [(&str, Vec<&str>); 5] = [
-        ("kdialog", vec!["--title", "Prostir", "--inputbox", text]),
-        ("zenity", vec!["--entry", "--title=Prostir", "--text", text]),
-        ("fuzzel", vec!["--dmenu", "--lines=0", "--prompt", prompt]),
-        ("wofi", vec!["--dmenu", "--lines=1", "--prompt", prompt]),
-        ("rofi", vec!["-dmenu", "-l", "0", "-p", prompt]),
-    ];
-    for (program, args) in attempts {
-        let child = Command::new(program)
-            .args(&args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .spawn();
-        let Ok(mut child) = child else {
-            continue; // not installed
-        };
-        // Nobody at the PC: the dialog goes away rather than holding the PC.
-        let until = Instant::now() + Duration::from_secs(120);
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break Some(status),
-                Ok(None) if Instant::now() < until => {
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-                _ => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    break None;
-                }
-            }
-        };
-        if !status.is_some_and(|s| s.success()) {
-            return Err(NoCode::Cancelled); // or timed out
-        }
-        let mut out = String::new();
-        if let Some(mut stdout) = child.stdout.take() {
-            use std::io::Read;
-            let _ = stdout.read_to_string(&mut out);
-        }
-        let code: String = out.chars().filter(char::is_ascii_digit).collect();
-        return if code.is_empty() {
-            Err(NoCode::Cancelled)
-        } else {
-            Ok(code)
-        };
-    }
-    warn!(
-        "no dialog program (kdialog, zenity, fuzzel, wofi, rofi): cannot ask for the pairing code"
-    );
-    Err(NoCode::NoDialog)
-}
-
-/// Desktop notification, best effort.
-fn notify(title: &str, body: &str) {
-    if cfg!(test) {
-        return;
-    }
-    let child = Command::new("notify-send")
-        .args(["--app-name=Prostir", "--icon=prostir", title, body])
-        .spawn();
-    // Reaped in the background, so finished notify-send processes do not pile up.
-    if let Ok(mut child) = child {
-        let _ = std::thread::Builder::new()
-            .name("notify".into())
-            .spawn(move || child.wait());
-    }
 }
 
 #[cfg(test)]

@@ -10,8 +10,8 @@ use anyhow::{Context, Result, bail};
 use log::info;
 
 use crate::platform::ActiveWindow;
-use crate::platform::hyprland;
-use crate::platform::kde;
+use crate::platform::linux::hyprland;
+use crate::platform::linux::kde;
 
 pub fn active() -> Option<ActiveWindow> {
     if hyprland::running() {
