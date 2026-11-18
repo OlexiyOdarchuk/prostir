@@ -157,6 +157,10 @@ pub fn rows_by_position(
                     .iter()
                     .map(|m| ((m.yaw * px_per_rad) / 8.0).round() as i32 * 8)
                     .collect(),
+                middles: r
+                    .iter()
+                    .map(|m| ((-m.elevation * px_per_rad) / 8.0).round() as i32 * 8)
+                    .collect(),
             }
         })
         .collect()

@@ -40,6 +40,10 @@ pub struct LayoutRow {
     /// monitors of other rows up with these, so one hung above another is above it on
     /// the desktop too.
     pub centers: Vec<i32>,
+    /// Where each monitor's centre is seen vertically, in the same pixels, downwards
+    /// ([`NEXT`]: not known, centred in the row). A portrait monitor whose top lines up
+    /// with a landscape one's stands that way on the desktop too.
+    pub middles: Vec<i32>,
 }
 
 /// How the PC encodes, changed from the headset menu ([`HostMsg::PcSettings`],
@@ -666,6 +670,8 @@ impl ClientMsg {
                         body.push(*id);
                         let c = row.centers.get(i).copied().unwrap_or(NEXT);
                         body.extend_from_slice(&c.to_le_bytes());
+                        let m = row.middles.get(i).copied().unwrap_or(NEXT);
+                        body.extend_from_slice(&m.to_le_bytes());
                     }
                 }
                 write_frame(w, tag::SET_LAYOUT, &[&body])
@@ -781,10 +787,12 @@ impl ClientMsg {
                     let mut row = LayoutRow {
                         ids: Vec::new(),
                         centers: Vec::new(),
+                        middles: Vec::new(),
                     };
                     for _ in 0..n {
                         row.ids.push(c.u8()?);
                         row.centers.push(c.u32()? as i32);
+                        row.middles.push(c.u32()? as i32);
                     }
                     rows.push(row);
                 }
@@ -980,10 +988,12 @@ mod tests {
                     LayoutRow {
                         ids: vec![3],
                         centers: vec![-1280],
+                        middles: vec![-1500],
                     },
                     LayoutRow {
                         ids: vec![0, 1, 2],
                         centers: vec![-2560, 0, NEXT],
+                        middles: vec![0, -400, NEXT],
                     },
                 ],
             },

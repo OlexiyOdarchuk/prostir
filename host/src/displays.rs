@@ -305,6 +305,8 @@ impl Router {
 struct Seat {
     id: u8,
     center: i32,
+    /// Vertical centre as seen, downwards ([`NEXT`]: unknown).
+    middle: i32,
     w: i32,
     h: i32,
 }
@@ -342,9 +344,25 @@ fn arrange(rows: &[Vec<Seat>], main: u8) -> Vec<(u8, i32, i32)> {
     // Placed so far: (seat, x, y).
     let mut placed: Vec<(Seat, i32, i32)> = Vec::new();
     let tallest = rows[main_row].iter().map(|m| m.h).max().unwrap_or(0);
+    // Heights as seen when known (a portrait monitor's top lined up with its
+    // neighbour's stays so), else centred in the row; every monitor still overlaps the
+    // one before it enough for the mouse to cross.
+    let seen = rows[main_row].iter().all(|m| m.middle != NEXT);
     let mut x = 0;
+    let mut previous: Option<(i32, i32)> = None; // (y, h)
     for m in &rows[main_row] {
-        placed.push((*m, x, (tallest - m.h) / 2));
+        let mut y = if seen {
+            m.middle - m.h / 2
+        } else {
+            (tallest - m.h) / 2
+        };
+        if let Some((py, ph)) = previous {
+            const REACH: i32 = 200;
+            let reach = REACH.min(m.h).min(ph);
+            y = y.clamp(py - m.h + reach, py + ph - reach);
+        }
+        placed.push((*m, x, y));
+        previous = Some((y, m.h));
         x += m.w;
     }
     let order: Vec<(usize, usize)> = (0..main_row)
@@ -654,6 +672,7 @@ impl Displays {
                 displays.rows.push(LayoutRow {
                     ids: row.to_vec(),
                     centers: centers[..row.len()].to_vec(),
+                    middles: vec![NEXT; row.len()],
                 });
             }
         }
@@ -1187,12 +1206,14 @@ impl Displays {
                 r.ids
                     .iter()
                     .zip(&r.centers)
-                    .filter_map(|(id, center)| {
+                    .zip(&r.middles)
+                    .filter_map(|((id, center), middle)| {
                         let spec = self.monitors.get(id).map(|m| &m.spec);
                         let (w, h) = size(names.get(id)?, spec)?;
                         Some(Seat {
                             id: *id,
                             center: *center,
+                            middle: *middle,
                             w,
                             h,
                         })
@@ -1341,18 +1362,23 @@ impl Displays {
             .rows
             .iter()
             .map(|r| {
-                let (ids, centers) = r
-                    .ids
-                    .iter()
-                    .zip(r.centers.iter().chain(std::iter::repeat(&NEXT)))
+                let mut row = LayoutRow {
+                    ids: Vec::new(),
+                    centers: Vec::new(),
+                    middles: Vec::new(),
+                };
+                let centers = r.centers.iter().chain(std::iter::repeat(&NEXT));
+                let middles = r.middles.iter().chain(std::iter::repeat(&NEXT));
+                for ((id, c), m) in r.ids.iter().zip(centers).zip(middles) {
                     // The laptop screen too, where the headset put it (while it shows).
-                    .filter(|(id, _)| {
-                        self.monitors.contains_key(id)
-                            || (**id == MIRROR_ID && self.mirror.is_some())
-                    })
-                    .map(|(id, c)| (*id, *c))
-                    .unzip();
-                LayoutRow { ids, centers }
+                    if self.monitors.contains_key(id) || (*id == MIRROR_ID && self.mirror.is_some())
+                    {
+                        row.ids.push(*id);
+                        row.centers.push(*c);
+                        row.middles.push(*m);
+                    }
+                }
+                row
             })
             .filter(|r| !r.ids.is_empty())
             .collect();
@@ -1368,9 +1394,11 @@ impl Displays {
             match rows.last_mut() {
                 Some(last) => {
                     last.ids.extend(missing);
+                    last.middles.extend(centers.iter().map(|_| NEXT));
                     last.centers.extend(centers);
                 }
                 None => rows.push(LayoutRow {
+                    middles: vec![NEXT; missing.len()],
                     ids: missing,
                     centers,
                 }),
@@ -1422,6 +1450,7 @@ impl Displays {
         self.rows = vec![LayoutRow {
             ids: ids.to_vec(),
             centers: vec![NEXT; ids.len()],
+            middles: vec![NEXT; ids.len()],
         }];
         self.apply_kde_layout();
         self.router.send(HostMsg::Order {
@@ -1723,8 +1752,33 @@ pub fn sync_wallpapers() {
 mod arrange_tests {
     use super::*;
 
+    #[test]
+    fn a_row_keeps_how_monitors_line_up_vertically() {
+        // A landscape left of a portrait, tops lined up as seen.
+        let mut a = seat(0, -1280, 2560, 1440);
+        let mut b = seat(1, 720, 1440, 2560);
+        a.middle = -560;
+        b.middle = 0;
+        let placed = arrange(&[vec![a, b]], 1);
+        let y = |id: u8| placed.iter().find(|p| p.0 == id).unwrap().2;
+        assert_eq!(y(0), y(1));
+        // Unknown heights: centred, as before.
+        let placed = arrange(
+            &[vec![seat(0, -1280, 2560, 1440), seat(1, 720, 1440, 2560)]],
+            1,
+        );
+        let y = |id: u8| placed.iter().find(|p| p.0 == id).unwrap().2;
+        assert_eq!(y(0) - y(1), (2560 - 1440) / 2);
+    }
+
     fn seat(id: u8, center: i32, w: i32, h: i32) -> Seat {
-        Seat { id, center, w, h }
+        Seat {
+            id,
+            center,
+            middle: NEXT,
+            w,
+            h,
+        }
     }
 
     fn at(placed: &[(u8, i32, i32)], id: u8) -> (i32, i32) {
