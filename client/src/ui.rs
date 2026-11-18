@@ -228,6 +228,8 @@ pub enum Action {
     GazeMouse(bool),
     LargeMenu(bool),
     LeftHanded(bool),
+    /// 72 Hz display to save battery.
+    BatterySaver(bool),
     Close,
 }
 
@@ -2327,6 +2329,38 @@ fn build_controls(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32
             ),
         ],
     );
+    segmented(
+        items,
+        lx,
+        lw,
+        &mut y,
+        l.t("Частота екрана шолома", "Headset display rate"),
+        vec![
+            (
+                "90 Hz",
+                Action::BatterySaver(false),
+                !st.battery_saver,
+                true,
+            ),
+            (
+                l.t("72 Hz, довше від заряду", "72 Hz, lasts longer"),
+                Action::BatterySaver(true),
+                st.battery_saver,
+                true,
+            ),
+        ],
+    );
+    items.push(text(
+        lx,
+        y - 18.0,
+        18.0,
+        false,
+        MUTED,
+        l.t(
+            "Відео йде 60 кадрів на секунду, тож 72 Hz його не обрізає.",
+            "The video runs at 60 frames a second, so 72 Hz keeps all of it.",
+        ),
+    ));
 }
 
 /// How the PC encodes: quality, codec, graphics card or CPU, text preset.

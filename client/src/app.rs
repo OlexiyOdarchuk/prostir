@@ -109,6 +109,19 @@ pub fn android_main(app: AndroidApp) {
     }
 }
 
+/// 90 Hz (or the nearest below), or 72 Hz to save battery.
+fn set_refresh_rate(session: &xr::Session<Gfx>, saver: bool) {
+    let limit = if saver { 72.0 } else { 90.0 };
+    let best = session
+        .enumerate_display_refresh_rates()
+        .ok()
+        .and_then(|r| r.into_iter().filter(|&r| r <= limit).reduce(f32::max));
+    if let Some(rate) = best {
+        info!("display at {rate} Hz");
+        let _ = session.request_display_refresh_rate(rate);
+    }
+}
+
 /// The menu's size factor (the "Large" menu setting), as `f32` bits.
 static MENU_SCALE: std::sync::atomic::AtomicU32 =
     std::sync::atomic::AtomicU32::new(1.0f32.to_bits());
@@ -284,6 +297,8 @@ struct Scene {
     wrist: Option<Placement>,
     /// The PC can move the mouse.
     can_move_mouse: bool,
+    /// The display rate setting changed: apply it.
+    refresh_due: bool,
     /// Mouse follows the gaze: the monitor looked at and since when.
     gaze_on: Option<(u8, Instant)>,
     /// When the mouse was last sent somewhere by the gaze.
@@ -1255,6 +1270,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         bar_for: [None, None],
         wrist: None,
         can_move_mouse: false,
+        refresh_due: false,
         gaze_on: None,
         gaze_moved: None,
         finder: None,
@@ -1371,16 +1387,7 @@ fn run(app: &AndroidApp) -> Result<()> {
                             session.begin(xr::ViewConfigurationType::PRIMARY_STEREO)?;
                             session_running = true;
                             if exts.fb_display_refresh_rate {
-                                let best =
-                                    session
-                                        .enumerate_display_refresh_rates()
-                                        .ok()
-                                        .and_then(|r| {
-                                            r.into_iter().filter(|&r| r <= 90.0).reduce(f32::max)
-                                        });
-                                if let Some(rate) = best {
-                                    let _ = session.request_display_refresh_rate(rate);
-                                }
+                                set_refresh_rate(&session, scene.settings.battery_saver);
                             }
                         }
                         xr::SessionState::STOPPING => {
@@ -1454,6 +1461,9 @@ fn run(app: &AndroidApp) -> Result<()> {
 
         scene.head = (head, forward);
         scene.follow_head(dt);
+        if std::mem::take(&mut scene.refresh_due) && exts.fb_display_refresh_rate {
+            set_refresh_rate(&session, scene.settings.battery_saver);
+        }
         scene.follow_gaze();
 
         // Tracked hands: joints for drawing, fingertips for touching the menu.
@@ -2611,6 +2621,11 @@ fn handle_action(
             scene.settings.save(settings_path);
             set_menu_scale(on);
             scene.panel_place.width = panel_width();
+        }
+        Action::BatterySaver(on) => {
+            scene.settings.battery_saver = on;
+            scene.settings.save(settings_path);
+            scene.refresh_due = true;
         }
         Action::LeftHanded(on) => {
             scene.settings.left_handed = on;
