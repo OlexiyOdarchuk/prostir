@@ -30,6 +30,7 @@ fn main() {
         mic_denied: std::env::var("MIC_DENIED").is_ok(),
         confirm_save: None,
         unreachable: std::env::var("BLOCKED").ok(),
+        can_move_mouse: std::env::var("NO_MOUSE").is_err(),
         windows: if std::env::var("WINDOWS").is_ok() {
             vec![MonitorEntry {
                 id: 10,
@@ -107,6 +108,7 @@ fn main() {
             Ok("language") => Tab::Settings(Section::Language),
             Ok("pc") => Tab::Settings(Section::Pc),
             Ok("help") => Tab::Settings(Section::Help),
+            Ok("controls") => Tab::Settings(Section::Controls),
             _ => Tab::Quick,
         },
         profiles: (0..prostir::profiles::SLOTS)
@@ -130,11 +132,8 @@ fn main() {
     panel.set_state(&state);
     panel.hover(hover);
     let rgba = panel.render_if_dirty().unwrap().to_vec();
-    let pixmap = tiny_skia::Pixmap::from_vec(
-        rgba,
-        tiny_skia::IntSize::from_wh(w, h).unwrap(),
-    )
-    .unwrap();
+    let pixmap =
+        tiny_skia::Pixmap::from_vec(rgba, tiny_skia::IntSize::from_wh(w, h).unwrap()).unwrap();
     // Composite over a dark grey so translucent parts are visible in the preview.
     let mut bg = tiny_skia::Pixmap::new(w, h).unwrap();
     bg.fill(tiny_skia::Color::from_rgba8(40, 44, 52, 255));

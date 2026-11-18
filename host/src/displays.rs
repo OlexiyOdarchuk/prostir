@@ -861,6 +861,46 @@ impl Displays {
             settings: self.pc_settings(),
             encoders: crate::encoder::available(),
         });
+        let mut bits = 0;
+        if windows::can_move_cursor() {
+            bits |= prostir_proto::abilities::MOVE_MOUSE;
+        }
+        self.router.send(HostMsg::Abilities { bits });
+    }
+
+    /// Our outputs (monitors, window panels, the mirror) with their desktop geometry.
+    fn output_geometries(&self) -> Vec<(u8, virtual_output::Geometry)> {
+        let geometries = self.desktop.geometries();
+        let mirror = self.mirror.iter().map(|m| (MIRROR_ID, &m.output));
+        self.monitors
+            .iter()
+            .chain(&self.windows)
+            .map(|(id, m)| (*id, &m.output))
+            .chain(mirror)
+            .filter_map(|(id, o)| Some((id, *geometries.get(o.output_name())?)))
+            .collect()
+    }
+
+    /// Where the mouse is: the monitor and the point across its image (0..=65535).
+    pub fn find_mouse(&self) -> Option<(u8, u16, u16)> {
+        let (x, y) = windows::cursor()?;
+        let frac = |v: i32, start: i32, len: i32| {
+            ((f64::from(v - start) / f64::from(len.max(1))).clamp(0.0, 1.0) * 65535.0) as u16
+        };
+        self.output_geometries()
+            .into_iter()
+            .find(|(_, g)| x >= g.x && x < g.x + g.w && y >= g.y && y < g.y + g.h)
+            .map(|(id, g)| (id, frac(x, g.x, g.w), frac(y, g.y, g.h)))
+    }
+
+    /// Puts the mouse on monitor `id` at `x`/`y` across its image (0..=65535).
+    pub fn mouse_to(&self, id: u8, x: u16, y: u16) {
+        let Some((_, g)) = self.output_geometries().into_iter().find(|(i, _)| *i == id) else {
+            return;
+        };
+        let at =
+            |start: i32, len: i32, f: u16| start + (f64::from(len) * f64::from(f) / 65535.0) as i32;
+        windows::move_cursor(at(g.x, g.w - 1, x), at(g.y, g.h - 1, y));
     }
 
     /// Settings changed in the headset menu. Quality and the text preset apply on the

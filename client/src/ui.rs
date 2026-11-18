@@ -14,7 +14,7 @@ use crate::settings::{Background, Curve, HandMode, Preset, Settings, Sky};
 pub const WIDTH: u32 = 1280;
 pub const HEIGHT: u32 = 960;
 /// The small menu by the left wrist, in pixels.
-pub const WRIST_WIDTH: u32 = 520;
+pub const WRIST_WIDTH: u32 = 600;
 pub const WRIST_HEIGHT: u32 = 320;
 /// Same limit as the host's.
 pub const MAX_MONITORS: usize = 6;
@@ -93,6 +93,8 @@ pub struct UiState {
     pub pc: Option<(PcSettings, u8)>,
     /// Window panels shown (detached PC windows).
     pub windows: Vec<MonitorEntry>,
+    /// The PC can move the mouse (for following the gaze).
+    pub can_move_mouse: bool,
     /// The physical display is being shown (its lid is open).
     pub mirror_active: bool,
     pub settings: Settings,
@@ -134,6 +136,8 @@ pub enum Tab {
 pub enum Section {
     #[default]
     Look,
+    /// Hands, the mouse, menu size and handedness.
+    Controls,
     Sound,
     Language,
     Pc,
@@ -218,6 +222,12 @@ pub enum Action {
     CloseWindow(u8),
     /// Open the main menu (from the wrist menu).
     OpenMenu,
+    /// Show where the mouse is.
+    FindMouse,
+    /// The mouse follows the gaze.
+    GazeMouse(bool),
+    LargeMenu(bool),
+    LeftHanded(bool),
     Close,
 }
 
@@ -431,7 +441,7 @@ impl Panel {
         let (w, h) = (WRIST_WIDTH as f32, WRIST_HEIGHT as f32);
         let mut items = vec![Item::Panel(rect(0.0, 0.0, w, h))];
         let gap = 14.0;
-        let (bw, bh) = ((w - 3.0 * gap) / 2.0, (h - 3.0 * gap) / 2.0);
+        let (bw, bh) = ((w - 4.0 * gap) / 3.0, (h - 3.0 * gap) / 2.0);
         let buttons = [
             (l.t("Перед собою", "In front"), false, Action::Recenter),
             (l.t("Фокус", "Focus"), st.focus, Action::Focus(!st.focus)),
@@ -440,19 +450,25 @@ impl Panel {
                 st.cinema,
                 Action::Cinema(!st.cinema),
             ),
+            (l.t("Де миша?", "Mouse?"), false, Action::FindMouse),
+            (l.t("Знімок", "Screenshot"), false, Action::Screenshot),
             (l.t("Меню", "Menu"), false, Action::OpenMenu),
         ];
-        let size = 30.0;
         for (i, (label, on, action)) in buttons.into_iter().enumerate() {
             let r = rect(
-                gap + (i % 2) as f32 * (bw + gap),
-                gap + (i / 2) as f32 * (bh + gap),
+                gap + (i % 3) as f32 * (bw + gap),
+                gap + (i / 3) as f32 * (bh + gap),
                 bw,
                 bh,
             );
             let style = if on { Style::Selected } else { Style::Normal };
             // An empty label: the bigger text goes on top.
             items.push(button(r, "", style, Some(action)));
+            // As big as fits.
+            let mut size = 28.0;
+            while size > 16.0 && self.text_width(label, size, true) > r.width() - 28.0 {
+                size -= 1.0;
+            }
             let tw = self.text_width(label, size, true);
             items.push(text(
                 r.left() + (r.width() - tw) / 2.0,
@@ -1511,14 +1527,14 @@ fn build_look(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, rx: f32, rw:
         {
             items.push(text(
                 lx,
-                y - 22.0 + 24.0 * k as f32,
+                y - 10.0 + 24.0 * k as f32,
                 17.0,
                 false,
                 MUTED,
                 line,
             ));
         }
-        y += 38.0;
+        y += 68.0;
     }
     let skies = [
         (l.t("Ніч", "Night"), Sky::Night),
@@ -1539,33 +1555,6 @@ fn build_look(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, rx: f32, rw:
                 (*label, a, sel, s.panorama_available)
             })
             .collect(),
-    );
-    segmented(
-        items,
-        lx,
-        lw,
-        &mut y,
-        l.t("Руки", "Hands"),
-        vec![
-            (
-                l.t("Сховати", "Hide"),
-                Action::Hands(HandMode::Hidden),
-                st.hands == HandMode::Hidden,
-                true,
-            ),
-            (
-                l.t("Показувати", "Show"),
-                Action::Hands(HandMode::Visible),
-                st.hands == HandMode::Visible,
-                true,
-            ),
-            (
-                l.t("І керувати", "Show and use"),
-                Action::Hands(HandMode::Control),
-                st.hands == HandMode::Control,
-                true,
-            ),
-        ],
     );
 
     // Side by side, or (one column) under the background and hands.
@@ -2144,6 +2133,7 @@ fn build_settings(s: &UiState, section: Section, items: &mut Vec<Item>, top: f32
     let (nx, nw) = (44.0, 230.0);
     let sections = [
         (Section::Look, l.t("Вигляд", "Look")),
+        (Section::Controls, l.t("Керування", "Controls")),
         (Section::Sound, l.t("Звук", "Sound")),
         (Section::Language, l.t("Мова", "Language")),
         (Section::Pc, l.t("ПК", "PC")),
@@ -2206,6 +2196,7 @@ fn build_settings(s: &UiState, section: Section, items: &mut Vec<Item>, top: f32
             );
         }
         Section::Pc => build_pc(s, items, cx, cw.min(700.0), ctop),
+        Section::Controls => build_controls(s, items, cx, cw.min(640.0), ctop),
         Section::Help => {
             hints(l, items, cx, ctop + 10.0);
             items.push(button(
@@ -2227,6 +2218,115 @@ fn build_settings(s: &UiState, section: Section, items: &mut Vec<Item>, top: f32
             ));
         }
     }
+}
+
+/// Hands, the mouse, the menu's size and which hand does what.
+fn build_controls(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
+    let l = s.lang;
+    let st = s.settings;
+    let (lx, lw) = (x, w);
+    segmented(
+        items,
+        lx,
+        lw,
+        &mut y,
+        l.t("Руки", "Hands"),
+        vec![
+            (
+                l.t("Сховати", "Hide"),
+                Action::Hands(HandMode::Hidden),
+                st.hands == HandMode::Hidden,
+                true,
+            ),
+            (
+                l.t("Показувати", "Show"),
+                Action::Hands(HandMode::Visible),
+                st.hands == HandMode::Visible,
+                true,
+            ),
+            (
+                l.t("І керувати", "Show and use"),
+                Action::Hands(HandMode::Control),
+                st.hands == HandMode::Control,
+                true,
+            ),
+        ],
+    );
+    let on_off = |on: bool, act: fn(bool) -> Action, enabled: bool| {
+        vec![
+            (l.t("Вимкнено", "Off"), act(false), !on, enabled),
+            (l.t("Увімкнено", "On"), act(true), on, enabled),
+        ]
+    };
+    segmented(
+        items,
+        lx,
+        lw,
+        &mut y,
+        l.t("Миша за поглядом", "Mouse follows the gaze"),
+        on_off(st.gaze_mouse, Action::GazeMouse, s.can_move_mouse),
+    );
+    items.push(text(
+        lx,
+        y - 18.0,
+        18.0,
+        false,
+        MUTED,
+        if s.can_move_mouse || s.host.is_none() {
+            l.t(
+                "Подивились на інший монітор: миша переходить туди.",
+                "Look at another monitor and the mouse moves there.",
+            )
+        } else {
+            l.t(
+                "Цей робочий стіл не дозволяє переміщати мишу (є на Hyprland).",
+                "This desktop does not let the mouse be moved (Hyprland does).",
+            )
+        },
+    ));
+    y += 22.0;
+    segmented(
+        items,
+        lx,
+        lw,
+        &mut y,
+        l.t("Розмір меню", "Menu size"),
+        vec![
+            (
+                l.t("Звичайний", "Normal"),
+                Action::LargeMenu(false),
+                !st.large_menu,
+                true,
+            ),
+            (
+                l.t("Великий", "Large"),
+                Action::LargeMenu(true),
+                st.large_menu,
+                true,
+            ),
+        ],
+    );
+    segmented(
+        items,
+        lx,
+        lw,
+        &mut y,
+        l.t("Меню на зап'ясті", "Wrist menu"),
+        vec![
+            (
+                l.t("На лівій руці", "Left wrist"),
+                Action::LeftHanded(false),
+                !st.left_handed,
+                true,
+            ),
+            (
+                l.t("На правій руці", "Right wrist"),
+                Action::LeftHanded(true),
+                st.left_handed,
+                true,
+            ),
+        ],
+    );
 }
 
 /// How the PC encodes: quality, codec, graphics card or CPU, text preset.
@@ -2544,6 +2644,7 @@ mod tests {
                 },
                 7,
             )),
+            can_move_mouse: false,
             windows: vec![MonitorEntry {
                 id: 10,
                 width: 1200,
@@ -2621,6 +2722,7 @@ mod tests {
                 Tab::Quick,
                 Tab::Monitors,
                 Tab::Settings(Section::Look),
+                Tab::Settings(Section::Controls),
                 Tab::Settings(Section::Sound),
                 Tab::Settings(Section::Language),
                 Tab::Settings(Section::Pc),

@@ -395,6 +395,12 @@ fn serve_client(
                 }),
                 Err(e) => report(displays, format!("{e:#}")),
             },
+            Ok(Ok(ClientMsg::FindMouse)) => {
+                if let Some((id, x, y)) = displays.find_mouse() {
+                    displays.router.send(HostMsg::MouseAt { id, x, y });
+                }
+            }
+            Ok(Ok(ClientMsg::MouseTo { id, x, y })) => displays.mouse_to(id, x, y),
             Ok(Ok(ClientMsg::Battery { percent, charging })) => {
                 tray::set_battery(control.tray.as_ref(), Some((percent, charging)));
                 // Once per session, when it gets low.

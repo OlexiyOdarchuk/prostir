@@ -80,6 +80,12 @@ pub struct Settings {
     pub last_tab: u8,
     /// The monitors come along when the user turns or moves away.
     pub follow: bool,
+    /// The mouse goes to the monitor the user looks at (where the PC allows it).
+    pub gaze_mouse: bool,
+    /// A bigger menu, easier to read and hit.
+    pub large_menu: bool,
+    /// Left-handed: the wrist menu on the right wrist, touched with the left hand.
+    pub left_handed: bool,
     pub language: Language,
     /// The language of the PC last connected to (for "like the PC" before connecting).
     pub pc_language: Option<Lang>,
@@ -100,6 +106,9 @@ impl Default for Settings {
             mic: true,
             last_tab: 0,
             follow: false,
+            gaze_mouse: false,
+            large_menu: false,
+            left_handed: false,
             language: Language::LikePc,
             pc_language: None,
         }
@@ -140,6 +149,9 @@ impl Settings {
                 Some(("mic", v)) => s.mic = v != "off",
                 Some(("tab", v)) => s.last_tab = v.trim().parse().unwrap_or(0),
                 Some(("follow", v)) => s.follow = v == "on",
+                Some(("gaze-mouse", v)) => s.gaze_mouse = v == "on",
+                Some(("large-menu", v)) => s.large_menu = v == "on",
+                Some(("left-handed", v)) => s.left_handed = v == "on",
                 Some(("language", v)) => {
                     s.language = match v {
                         "uk" => Language::Fixed(Lang::Uk),
@@ -206,7 +218,8 @@ impl Settings {
         let on = |b: bool| if b { "on" } else { "off" };
         format!(
             "preset {preset}\ncurve {curve}\nbackground {background}\nhands {hands}\n\
-             focus {}\ncinema {}\ncinema-screen {}\nlanguage {}\npc-language {}\nintro {}\nkeyboard-window {}\nmic {}\ntab {}\nfollow {}\n",
+             focus {}\ncinema {}\ncinema-screen {}\nlanguage {}\npc-language {}\nintro {}\nkeyboard-window {}\nmic {}\ntab {}\nfollow {}\n\
+             gaze-mouse {}\nlarge-menu {}\nleft-handed {}\n",
             on(self.focus),
             on(self.cinema),
             self.cinema_screen
@@ -220,7 +233,10 @@ impl Settings {
             on(self.keyboard_window),
             on(self.mic),
             self.last_tab,
-            on(self.follow)
+            on(self.follow),
+            on(self.gaze_mouse),
+            on(self.large_menu),
+            on(self.left_handed)
         )
     }
 }
@@ -247,6 +263,9 @@ mod tests {
             mic: false,
             last_tab: 2,
             follow: true,
+            gaze_mouse: true,
+            large_menu: true,
+            left_handed: true,
             language: Language::Fixed(Lang::En),
             pc_language: Some(Lang::Uk),
         };

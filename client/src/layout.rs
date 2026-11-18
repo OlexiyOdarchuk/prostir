@@ -633,6 +633,45 @@ pub fn hit_surface(ray: Ray, p: &Placement, height: f32, curve_radius: Option<f3
     })
 }
 
+/// Where `local` (a hit's flat-equivalent point) lies across the image: 0..=1 from
+/// the top left. On a curve the image is laid out along the arc.
+pub fn image_uv(p: &Placement, height: f32, curve_radius: Option<f32>, local: Vec2) -> Vec2 {
+    let v = 0.5 - local.y / height;
+    let u = match curve_radius {
+        None => local.x / p.width + 0.5,
+        Some(radius) => {
+            let c = Cylinder::new(p, radius);
+            (local.x / c.radius).clamp(-1.0, 1.0).asin() / c.central_angle + 0.5
+        }
+    };
+    Vec2::new(u.clamp(0.0, 1.0), v.clamp(0.0, 1.0))
+}
+
+/// The world point at `uv` (0..=1 from the top left) of a monitor's image, just in
+/// front of it, and the surface normal there.
+pub fn image_point(
+    p: &Placement,
+    height: f32,
+    curve_radius: Option<f32>,
+    uv: Vec2,
+) -> (Vec3, Vec3) {
+    let y = (0.5 - uv.y) * height;
+    match curve_radius {
+        None => {
+            let normal = p.rotation * Vec3::Z;
+            let point = p.position + p.rotation * Vec3::new((uv.x - 0.5) * p.width, y, 0.0);
+            (point + normal * 0.004, normal)
+        }
+        Some(radius) => {
+            let c = Cylinder::new(p, radius);
+            let angle = (uv.x - 0.5) * c.central_angle;
+            let q = Vec3::new(c.radius * angle.sin(), y, -c.radius * angle.cos());
+            let normal = p.rotation * Vec3::new(-q.x, 0.0, -q.z).normalize();
+            (c.center + p.rotation * q + normal * 0.004, normal)
+        }
+    }
+}
+
 /// A monitor held by one controller.
 #[derive(Debug, Clone, Copy)]
 pub struct Grab {

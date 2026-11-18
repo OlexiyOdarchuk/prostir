@@ -122,6 +122,10 @@ pub enum NetEvent {
     Recenter,
     /// Something done on the PC, to show briefly.
     Notice(String),
+    /// Where the mouse is: monitor, across its image (0..=1 from the top left).
+    MouseAt(u8, f32, f32),
+    /// What the PC can do (bits of `prostir_proto::abilities`).
+    Abilities(u8),
     /// A PC announces itself on the network but does not accept the connection
     /// (a firewall on the PC); `None` once connecting works again.
     Unreachable(Option<String>),
@@ -910,6 +914,13 @@ fn run_session(
             }
             HostMsg::Notice { text } => {
                 let _ = events.send(NetEvent::Notice(text));
+            }
+            HostMsg::MouseAt { id, x, y } => {
+                let f = |v: u16| f32::from(v) / 65535.0;
+                let _ = events.send(NetEvent::MouseAt(id, f(x), f(y)));
+            }
+            HostMsg::Abilities { bits } => {
+                let _ = events.send(NetEvent::Abilities(bits));
             }
             // The PC asks; the headset's own switch decides (checked below too).
             HostMsg::MicActive { active } => mic_asked = active,

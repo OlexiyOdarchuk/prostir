@@ -134,6 +134,12 @@ fn main() -> Result<()> {
                 Some("here") => Some(ClientMsg::WindowHere { id: num(&what) }),
                 Some("shot") => Some(ClientMsg::Screenshot { id: num(&what) }),
                 Some("close") => Some(ClientMsg::RemoveMonitor { id: num(&what) }),
+                Some("find") => Some(ClientMsg::FindMouse),
+                Some("mouse") => Some(ClientMsg::MouseTo {
+                    id: num(&what),
+                    x: 32768,
+                    y: 32768,
+                }),
                 _ => None,
             };
             if let Some(msg) = msg {
@@ -193,6 +199,8 @@ fn main() -> Result<()> {
             HostMsg::Unknown { tag } => println!("skipped message {tag} from a newer PC"),
             HostMsg::Recenter => println!("PC asks to bring the monitors in front"),
             HostMsg::Notice { text } => println!("PC says: {text}"),
+            HostMsg::MouseAt { id, x, y } => println!("mouse on {id} at {x},{y}"),
+            HostMsg::Abilities { bits } => println!("PC abilities: {bits:#b}"),
             HostMsg::PcSettings { settings, encoders } => {
                 println!("PC encodes: {settings:?}, can use {encoders:#05b}")
             }

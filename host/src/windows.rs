@@ -30,6 +30,8 @@ pub struct ActiveWindow {
 /// What the KWin scripts report.
 enum Report {
     Window(Option<ActiveWindow>),
+    /// The mouse position, logical desktop pixels.
+    Cursor(i32, i32),
     /// A window on a panel output closed or left it: the output name.
     Left(String),
 }
@@ -55,6 +57,37 @@ pub fn active() -> Option<ActiveWindow> {
         });
     }
     kde_active()
+}
+
+/// Where the mouse is on the desktop (logical pixels).
+pub fn cursor() -> Option<(i32, i32)> {
+    if hyprland::running() {
+        let json = hyprland::request("j/cursorpos").ok()?;
+        let v: Value = serde_json::from_str(&json).ok()?;
+        return Some((v.get("x")?.as_i64()? as i32, v.get("y")?.as_i64()? as i32));
+    }
+    let script = format!(
+        "callDBus('{BUS}', '{PATH}', '{BUS}', 'Cursor',
+                  Math.round(workspace.cursorPos.x), Math.round(workspace.cursorPos.y));"
+    );
+    ask_kwin(&script, |r| match r {
+        Report::Cursor(x, y) => Some((*x, *y)),
+        _ => None,
+    })
+}
+
+/// Whether the mouse can be moved from here (Hyprland; KWin scripts cannot).
+pub fn can_move_cursor() -> bool {
+    hyprland::running()
+}
+
+/// Puts the mouse at `x`,`y` (logical desktop pixels).
+pub fn move_cursor(x: i32, y: i32) -> bool {
+    hyprland::running()
+        && dispatch(
+            &format!("hl.dsp.cursor.move({{x = {x}, y = {y}}})"),
+            &format!("movecursor {x} {y}"),
+        )
 }
 
 /// Output pixel size for a panel showing `w`: even numbers, at least [`MIN_SIZE`].
@@ -287,6 +320,11 @@ impl Host {
         let _ = self.0.try_send(Report::Window(w));
     }
 
+    /// The mouse position.
+    fn cursor(&self, x: i32, y: i32) {
+        let _ = self.0.try_send(Report::Cursor(x, y));
+    }
+
     /// The window of panel `output` closed or moved away.
     fn left(&self, output: String) {
         let _ = self.0.try_send(Report::Left(output));
@@ -313,13 +351,6 @@ fn reports() -> Option<&'static Mutex<Receiver<Report>>> {
 }
 
 fn kde_active() -> Option<ActiveWindow> {
-    let rx = reports()?;
-    // Drop anything stale before asking.
-    let rx = rx.lock().unwrap();
-    let mut keep = Vec::new();
-    while let Ok(r) = rx.try_recv() {
-        keep.push(r);
-    }
     let script = format!(
         "const w = workspace.activeWindow;
          if (w && w.normalWindow) {{
@@ -331,7 +362,25 @@ fn kde_active() -> Option<ActiveWindow> {
            callDBus('{BUS}', '{PATH}', '{BUS}', 'Window', '', 0, 0, 1.0);
          }}"
     );
-    if let Err(e) = kwin_run("prostir-active", &script, true) {
+    ask_kwin(&script, |r| match r {
+        Report::Window(w) => Some(w.clone()),
+        _ => None,
+    })
+    .flatten()
+}
+
+/// Runs a KWin script that reports back, and waits (up to 2 s) for the report
+/// `pick` accepts. Panel reports that arrive meanwhile are kept for [`vacated`].
+fn ask_kwin<T>(script: &str, pick: impl Fn(&Report) -> Option<T>) -> Option<T> {
+    let rx = reports()?;
+    let rx = rx.lock().unwrap();
+    let mut keep = Vec::new();
+    // Drop anything stale before asking.
+    while let Ok(r) = rx.try_recv() {
+        keep.push(r);
+    }
+    keep.retain(|r| matches!(r, Report::Left(_)));
+    if let Err(e) = kwin_run("prostir-ask", script, true) {
         warn!("KWin script: {e:#}");
         return None;
     }
@@ -339,16 +388,17 @@ fn kde_active() -> Option<ActiveWindow> {
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
         match rx.recv_timeout(left) {
-            Ok(Report::Window(w)) => {
-                found = w;
-                break;
-            }
-            Ok(other) => keep.push(other),
+            Ok(r) => match pick(&r) {
+                Some(v) => {
+                    found = Some(v);
+                    break;
+                }
+                None => keep.push(r),
+            },
             Err(_) => break,
         }
     }
     drop(rx);
-    // Panel reports that arrived meanwhile are not lost.
     for r in keep {
         if let Report::Left(name) = r {
             STASH.lock().unwrap().push(name);

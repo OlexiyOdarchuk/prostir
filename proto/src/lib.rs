@@ -91,6 +91,12 @@ pub const NEXT: i32 = i32::MIN;
 
 /// [`HostMsg::Focus`] when the mouse is on none of the streamed displays.
 pub const NO_FOCUS: u8 = 255;
+/// What the PC can do beyond the basics ([`HostMsg::Abilities`]).
+pub mod abilities {
+    /// Move the mouse (to where the user looks).
+    pub const MOVE_MOUSE: u8 = 1;
+}
+
 /// Stream ids of window panels: small outputs made for one window each, shown as
 /// floating panels (at most three: the headset has only so many video decoders).
 pub const WINDOW_IDS: std::ops::Range<u8> = 10..13;
@@ -200,6 +206,17 @@ pub enum HostMsg {
     /// Something done, to show briefly (not an error): "Saved to ~/Pictures/…".
     Notice {
         text: String,
+    },
+    /// Where the mouse is: monitor `id`, `x`/`y` across its image (0..=65535 from the
+    /// top left). The answer to [`ClientMsg::FindMouse`].
+    MouseAt {
+        id: u8,
+        x: u16,
+        y: u16,
+    },
+    /// What this PC can do (bits of [`abilities`]).
+    Abilities {
+        bits: u8,
     },
     /// The PC's encoding settings and what it can encode with (bits of [`encoders`]).
     PcSettings {
@@ -317,6 +334,14 @@ pub enum ClientMsg {
     Screenshot {
         id: u8,
     },
+    /// Where is the mouse? (answered with [`HostMsg::MouseAt`])
+    FindMouse,
+    /// Put the mouse on monitor `id`, at `x`/`y` across its image (0..=65535).
+    MouseTo {
+        id: u8,
+        x: u16,
+        y: u16,
+    },
     /// Start pairing. `headset_shows`: the headset displays the code and the PC asks
     /// for it; otherwise the PC displays it and the headset asks.
     PairBegin {
@@ -354,6 +379,8 @@ mod tag {
     pub const PC_SETTINGS: u8 = 18;
     pub const RECENTER: u8 = 19;
     pub const NOTICE: u8 = 20;
+    pub const MOUSE_AT: u8 = 21;
+    pub const ABILITIES: u8 = 22;
     pub const HELLO: u8 = 101;
     pub const REQUEST_KEYFRAME: u8 = 102;
     pub const FRAME_SHOWN: u8 = 103;
@@ -376,6 +403,8 @@ mod tag {
     pub const DETACH_WINDOW: u8 = 120;
     pub const WINDOW_HERE: u8 = 121;
     pub const SCREENSHOT: u8 = 122;
+    pub const FIND_MOUSE: u8 = 123;
+    pub const MOUSE_TO: u8 = 124;
 }
 
 fn invalid(msg: &str) -> io::Error {
@@ -420,6 +449,9 @@ impl<'a> Cursor<'a> {
     }
     fn u8(&mut self) -> io::Result<u8> {
         Ok(self.take(1)?[0])
+    }
+    fn u16(&mut self) -> io::Result<u16> {
+        Ok(u16::from_le_bytes(self.take(2)?.try_into().unwrap()))
     }
     fn u32(&mut self) -> io::Result<u32> {
         Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
@@ -480,6 +512,12 @@ impl HostMsg {
             }
             HostMsg::Recenter => write_frame(w, tag::RECENTER, &[]),
             HostMsg::Notice { text } => write_frame(w, tag::NOTICE, &[text.as_bytes()]),
+            HostMsg::MouseAt { id, x, y } => write_frame(
+                w,
+                tag::MOUSE_AT,
+                &[&[*id], &x.to_le_bytes(), &y.to_le_bytes()],
+            ),
+            HostMsg::Abilities { bits } => write_frame(w, tag::ABILITIES, &[&[*bits]]),
             HostMsg::Incompatible { protocol, app } => write_frame(
                 w,
                 tag::INCOMPATIBLE,
@@ -542,6 +580,12 @@ impl HostMsg {
             tag::PAIRING_REQUIRED => HostMsg::PairingRequired,
             tag::FOCUS => HostMsg::Focus { id: c.u8()? },
             tag::RECENTER => HostMsg::Recenter,
+            tag::MOUSE_AT => HostMsg::MouseAt {
+                id: c.u8()?,
+                x: c.u16()?,
+                y: c.u16()?,
+            },
+            tag::ABILITIES => HostMsg::Abilities { bits: c.u8()? },
             tag::NOTICE => HostMsg::Notice {
                 text: String::from_utf8_lossy(c.rest()).into_owned(),
             },
@@ -651,6 +695,12 @@ impl ClientMsg {
             ClientMsg::DetachWindow => write_frame(w, tag::DETACH_WINDOW, &[]),
             ClientMsg::WindowHere { id } => write_frame(w, tag::WINDOW_HERE, &[&[*id]]),
             ClientMsg::Screenshot { id } => write_frame(w, tag::SCREENSHOT, &[&[*id]]),
+            ClientMsg::FindMouse => write_frame(w, tag::FIND_MOUSE, &[]),
+            ClientMsg::MouseTo { id, x, y } => write_frame(
+                w,
+                tag::MOUSE_TO,
+                &[&[*id], &x.to_le_bytes(), &y.to_le_bytes()],
+            ),
             ClientMsg::PairConfirm { tag } => write_frame(w, tag::PAIR_CONFIRM, &[tag]),
             ClientMsg::SetMirror { enabled } => {
                 write_frame(w, tag::SET_MIRROR, &[&[*enabled as u8]])
@@ -692,6 +742,12 @@ impl ClientMsg {
             tag::DETACH_WINDOW => ClientMsg::DetachWindow,
             tag::WINDOW_HERE => ClientMsg::WindowHere { id: c.u8()? },
             tag::SCREENSHOT => ClientMsg::Screenshot { id: c.u8()? },
+            tag::FIND_MOUSE => ClientMsg::FindMouse,
+            tag::MOUSE_TO => ClientMsg::MouseTo {
+                id: c.u8()?,
+                x: c.u16()?,
+                y: c.u16()?,
+            },
             tag::BATTERY => ClientMsg::Battery {
                 percent: c.u8()?,
                 charging: c.u8()? != 0,
@@ -841,6 +897,12 @@ mod tests {
             HostMsg::Notice {
                 text: "Збережено".into(),
             },
+            HostMsg::MouseAt {
+                id: 1,
+                x: 65535,
+                y: 300,
+            },
+            HostMsg::Abilities { bits: 1 },
             HostMsg::PcSettings {
                 settings: PcSettings {
                     quality: 30,
@@ -933,6 +995,12 @@ mod tests {
             ClientMsg::DetachWindow,
             ClientMsg::WindowHere { id: 1 },
             ClientMsg::Screenshot { id: 0 },
+            ClientMsg::FindMouse,
+            ClientMsg::MouseTo {
+                id: 2,
+                x: 1,
+                y: 65535,
+            },
             ClientMsg::SetPcSettings {
                 settings: PcSettings {
                     quality: 50,

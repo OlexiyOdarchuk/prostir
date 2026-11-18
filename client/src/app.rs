@@ -109,8 +109,21 @@ pub fn android_main(app: AndroidApp) {
     }
 }
 
+/// The menu's size factor (the "Large" menu setting), as `f32` bits.
+static MENU_SCALE: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(1.0f32.to_bits());
+
+fn set_menu_scale(large: bool) {
+    let scale: f32 = if large { 1.3 } else { 1.0 };
+    MENU_SCALE.store(scale.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+fn panel_width() -> f32 {
+    PANEL_WIDTH * f32::from_bits(MENU_SCALE.load(std::sync::atomic::Ordering::Relaxed))
+}
+
 fn panel_height() -> f32 {
-    PANEL_WIDTH * ui::HEIGHT as f32 / ui::WIDTH as f32
+    panel_width() * ui::HEIGHT as f32 / ui::WIDTH as f32
 }
 
 /// One stream: the compositor surface it is decoded into and its decoder thread.
@@ -157,7 +170,11 @@ const BAR_GAP: f32 = 0.035;
 const BAR_HIT_HEIGHT: f32 = 0.05;
 const BAR_LINGER: Duration = Duration::from_millis(900);
 /// Width of the wrist menu in the room.
-const WRIST_MENU_WIDTH: f32 = 0.15;
+const WRIST_MENU_WIDTH: f32 = 0.17;
+/// How long the gaze rests on another monitor before the mouse goes there.
+const GAZE_DWELL: Duration = Duration::from_millis(600);
+/// How long the "where is the mouse" rings show.
+const FINDER_FOR: Duration = Duration::from_millis(1600);
 
 fn wrist_menu_height() -> f32 {
     WRIST_MENU_WIDTH * ui::WRIST_HEIGHT as f32 / ui::WRIST_WIDTH as f32
@@ -167,13 +184,18 @@ fn wrist_menu_height() -> f32 {
 /// turned to the face (`shown`: it is up already, which takes less to keep).
 fn wrist_menu_place(
     joints: Option<&[(Vec3, f32); 26]>,
+    right_hand: bool,
     head: Vec3,
     previous: Option<Placement>,
 ) -> Option<Placement> {
     let j = joints?;
     let (palm, wrist, index, middle, little) = (j[0].0, j[1].0, j[6].0, j[11].0, j[21].0);
-    // The left palm's normal (index × little, from the wrist).
-    let normal = (index - wrist).cross(little - wrist).normalize_or_zero();
+    // The palm's normal (index × little from the wrist for the left hand; the right
+    // hand is its mirror image).
+    let mut normal = (index - wrist).cross(little - wrist).normalize_or_zero();
+    if right_hand {
+        normal = -normal;
+    }
     let facing = normal.dot((head - palm).normalize_or_zero());
     let needed = if previous.is_some() { 0.45 } else { 0.7 };
     if facing < needed {
@@ -260,6 +282,14 @@ struct Scene {
     bar_for: [Option<(u8, Instant)>; 2],
     /// The wrist menu, while the left palm is turned to the face.
     wrist: Option<Placement>,
+    /// The PC can move the mouse.
+    can_move_mouse: bool,
+    /// Mouse follows the gaze: the monitor looked at and since when.
+    gaze_on: Option<(u8, Instant)>,
+    /// When the mouse was last sent somewhere by the gaze.
+    gaze_moved: Option<Instant>,
+    /// "Where is the mouse": monitor, point across its image, since when.
+    finder: Option<(u8, Vec2, Instant)>,
     /// A short message shown on its own: text, since when, where (`None` until placed).
     toast: Option<(String, Instant, Option<Placement>)>,
     /// The PC speaks another protocol: (the PC is newer, its app version).
@@ -537,6 +567,63 @@ impl Scene {
         }
     }
 
+    /// Mouse follows the gaze: after resting on another monitor for a moment, the
+    /// mouse goes to where the user looks on it.
+    fn follow_gaze(&mut self) {
+        let busy = self.panel_open
+            || self.wrist.is_some()
+            || self.grabs.iter().any(Option::is_some)
+            || self.settings.cinema;
+        if !self.settings.gaze_mouse || !self.can_move_mouse || self.feedback.is_none() || busy {
+            self.gaze_on = None;
+            return;
+        }
+        let (head, forward) = self.head;
+        let ray = Ray {
+            origin: head,
+            dir: forward.normalize_or(-Vec3::Z),
+        };
+        let curve = self.curve_radius();
+        let looked = self
+            .monitors
+            .keys()
+            .filter_map(|id| {
+                let p = self.placements.get(id)?;
+                let c = curve.filter(|_| !is_window_panel(*id));
+                let hit = layout::hit_surface(ray, p, self.height_of(*id), c)?;
+                Some((*id, hit, *p, c))
+            })
+            .min_by(|a, b| a.1.t.total_cmp(&b.1.t));
+        let Some((id, hit, p, c)) = looked else {
+            self.gaze_on = None;
+            return;
+        };
+        if self.focus == Some(id) {
+            self.gaze_on = None;
+            return;
+        }
+        match self.gaze_on {
+            Some((on, since)) if on == id => {
+                let recently = self
+                    .gaze_moved
+                    .is_some_and(|t| t.elapsed() < Duration::from_millis(1500));
+                if since.elapsed() >= GAZE_DWELL && !recently {
+                    let uv = layout::image_uv(&p, self.height_of(id), c, hit.local);
+                    let f = |v: f32| (v * 65535.0) as u16;
+                    self.send(ClientMsg::MouseTo {
+                        id,
+                        x: f(uv.x),
+                        y: f(uv.y),
+                    });
+                    self.focus = Some(id);
+                    self.gaze_moved = Some(Instant::now());
+                    self.gaze_on = None;
+                }
+            }
+            _ => self.gaze_on = Some((id, Instant::now())),
+        }
+    }
+
     /// Shows `text` for a few seconds, below the line of sight.
     fn show_toast(&mut self, text: String) {
         info!("toast: {text}");
@@ -791,7 +878,7 @@ impl Scene {
         self.panel_place = Placement {
             position,
             rotation: layout::facing(position, head),
-            width: PANEL_WIDTH,
+            width: panel_width(),
         };
         self.panel_open = true;
     }
@@ -852,6 +939,7 @@ impl Scene {
             pair_offer: self.pair_offer.clone(),
             unreachable: self.unreachable.clone(),
             pc: self.pc,
+            can_move_mouse: self.can_move_mouse,
             monitors: self
                 .quest_sizes()
                 .into_iter()
@@ -921,6 +1009,7 @@ fn tab_code(tab: Tab) -> u8 {
         Tab::Settings(Section::Language) => 4,
         Tab::Settings(Section::Pc) => 5,
         Tab::Settings(Section::Help) => 6,
+        Tab::Settings(Section::Controls) => 7,
     }
 }
 
@@ -933,6 +1022,7 @@ fn tab_from_code(code: u8) -> Tab {
         4 => Tab::Settings(Section::Language),
         5 => Tab::Settings(Section::Pc),
         6 => Tab::Settings(Section::Help),
+        7 => Tab::Settings(Section::Controls),
         _ => Tab::Quick,
     }
 }
@@ -1045,6 +1135,7 @@ fn run(app: &AndroidApp) -> Result<()> {
     let settings_path = data_dir.join("settings.txt");
     let profiles_path = data_dir.join("profiles.txt");
     let settings = Settings::load(&settings_path);
+    set_menu_scale(settings.large_menu);
     crate::mic::set_allowed(settings.mic);
 
     // Passthrough keeps the cameras busy and costs battery: only when "Room" is chosen.
@@ -1141,7 +1232,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         panel_place: Placement {
             position: Vec3::new(0.0, -0.12, -0.7),
             rotation: glam::Quat::IDENTITY,
-            width: PANEL_WIDTH,
+            width: panel_width(),
         },
         button_place: None,
         grabs: [None, None],
@@ -1163,6 +1254,10 @@ fn run(app: &AndroidApp) -> Result<()> {
         following: false,
         bar_for: [None, None],
         wrist: None,
+        can_move_mouse: false,
+        gaze_on: None,
+        gaze_moved: None,
+        finder: None,
         toast: None,
         center: (Vec3::ZERO, 0.0),
         sent_layout: None,
@@ -1359,6 +1454,7 @@ fn run(app: &AndroidApp) -> Result<()> {
 
         scene.head = (head, forward);
         scene.follow_head(dt);
+        scene.follow_gaze();
 
         // Tracked hands: joints for drawing, fingertips for touching the menu.
         let joints: [Option<[(Vec3, f32); 26]>; 2] = match &hand_trackers {
@@ -1377,7 +1473,13 @@ fn run(app: &AndroidApp) -> Result<()> {
         let hands_in_view = tips.iter().any(Option::is_some);
         scene.hands_in_view = hands_in_view;
         controls.hands_from_joints(&joints, head, forward);
-        scene.wrist = wrist_menu_place(joints[0].as_ref(), head, scene.wrist);
+        let menu_hand = usize::from(scene.settings.left_handed);
+        scene.wrist = wrist_menu_place(
+            joints[menu_hand].as_ref(),
+            menu_hand == 1,
+            head,
+            scene.wrist,
+        );
 
         // Pairing needs the menu, and so do the first-run tips: open it where the
         // user is looking.
@@ -1457,7 +1559,8 @@ fn run(app: &AndroidApp) -> Result<()> {
             .flatten()
             .find_map(|(t, hit)| matches!(t, Target::Wrist).then(|| wrist_point(hit.local)));
         let mut wrist_pressed = false;
-        if let (Some(w), Some(tip)) = (scene.wrist, tips[1]) {
+        let poking_hand = 1 - usize::from(scene.settings.left_handed);
+        if let (Some(w), Some(tip)) = (scene.wrist, tips[poking_hand]) {
             let local = w.rotation.inverse() * (tip - w.position);
             let inside =
                 local.x.abs() < WRIST_MENU_WIDTH / 2.0 && local.y.abs() < wrist_menu_height() / 2.0;
@@ -1485,12 +1588,12 @@ fn run(app: &AndroidApp) -> Result<()> {
             wrist_panel.set_state(&ui_state);
             wrist_panel.hover(wrist_hover);
             if wrist_pressed && let Some(action) = wrist_panel.hovered_action() {
-                controls.pulse(&session, 1);
+                controls.pulse(&session, poking_hand);
                 handle_action(&mut scene, action, &mut passthrough, &mut controls);
             }
         }
         let panel_point = |hit: &Hit| {
-            let x = (hit.local.x / PANEL_WIDTH + 0.5) * ui::WIDTH as f32;
+            let x = (hit.local.x / panel_width() + 0.5) * ui::WIDTH as f32;
             let y = (0.5 - hit.local.y / panel_height()) * ui::HEIGHT as f32;
             (x, y)
         };
@@ -1509,7 +1612,7 @@ fn run(app: &AndroidApp) -> Result<()> {
             };
             let place = scene.panel_place;
             let l = place.rotation.inverse() * (tip - place.position);
-            let (half_w, half_h) = (PANEL_WIDTH / 2.0, panel_height() / 2.0);
+            let (half_w, half_h) = (panel_width() / 2.0, panel_height() / 2.0);
             if let Some(anchor) = poke.drag {
                 if l.z > POKE_RELEASE {
                     *poke = Poke {
@@ -1537,7 +1640,7 @@ fn run(app: &AndroidApp) -> Result<()> {
             let at = Vec2::new(l.x, l.y);
             poke_hover[h] = Some((at, l.z));
             let px = (
-                (l.x / PANEL_WIDTH + 0.5) * ui::WIDTH as f32,
+                (l.x / panel_width() + 0.5) * ui::WIDTH as f32,
                 (0.5 - l.y / panel_height()) * ui::HEIGHT as f32,
             );
             if poke.pressed && l.z > POKE_RELEASE {
@@ -1568,7 +1671,7 @@ fn run(app: &AndroidApp) -> Result<()> {
 
         let poke_px = poke_hover.iter().flatten().next().map(|(at, _)| {
             (
-                (at.x / PANEL_WIDTH + 0.5) * ui::WIDTH as f32,
+                (at.x / panel_width() + 0.5) * ui::WIDTH as f32,
                 (0.5 - at.y / panel_height()) * ui::HEIGHT as f32,
             )
         });
@@ -1850,6 +1953,27 @@ fn run(app: &AndroidApp) -> Result<()> {
             };
             spheres.push(Sphere::glow(pick.1.point, radius, [0.72, 0.84, 1.0, alpha]));
         }
+        // Where the mouse is: rings closing in on it, three times.
+        if let Some((id, uv, at)) = scene.finder {
+            let age = at.elapsed();
+            match (scene.shown.get(&id), age < FINDER_FOR) {
+                (Some(p), true) => {
+                    let c = scene.curve_radius().filter(|_| !is_window_panel(id));
+                    let (point, _) = layout::image_point(p, scene.height_of(id), c, uv);
+                    let t = age.as_secs_f32() / FINDER_FOR.as_secs_f32();
+                    for k in 0..3 {
+                        let phase = (t * 3.0 - k as f32 * 0.33).rem_euclid(1.0);
+                        spheres.push(Sphere::ring(
+                            point,
+                            0.09 * (1.0 - phase) + 0.01,
+                            [1.0, 0.85, 0.35, 0.9 * phase * (1.0 - t * 0.5)],
+                        ));
+                    }
+                    spheres.push(Sphere::glow(point, 0.02, [1.0, 0.85, 0.35, 0.8]));
+                }
+                _ => scene.finder = None,
+            }
+        }
         // The bar under a pointed-at monitor: a row of small balls, lit while pointed
         // at or held.
         let mut bars: Vec<(u8, bool)> = Vec::new();
@@ -2128,7 +2252,7 @@ fn run(app: &AndroidApp) -> Result<()> {
             panel_layer.quad(
                 &local,
                 posef(&scene.panel_place),
-                PANEL_WIDTH,
+                panel_width(),
                 panel_height(),
             )
         });
@@ -2243,6 +2367,10 @@ fn handle_net_event(
         NetEvent::PcSettings(settings, encoders) => scene.pc = Some((settings, encoders)),
         NetEvent::Recenter => scene.recenter(),
         NetEvent::Notice(text) => scene.show_toast(text),
+        NetEvent::MouseAt(id, x, y) => scene.finder = Some((id, Vec2::new(x, y), Instant::now())),
+        NetEvent::Abilities(bits) => {
+            scene.can_move_mouse = bits & prostir_proto::abilities::MOVE_MOUSE != 0;
+        }
         NetEvent::Pairing { host, code } => {
             let failed = scene.pairing.as_ref().is_some_and(|p| p.failed);
             scene.pairing = Some(ui::PairingView {
@@ -2473,6 +2601,21 @@ fn handle_action(
             }
         }
         Action::CloseWindow(id) => scene.send(ClientMsg::RemoveMonitor { id }),
+        Action::FindMouse => scene.send(ClientMsg::FindMouse),
+        Action::GazeMouse(on) => {
+            scene.settings.gaze_mouse = on;
+            scene.settings.save(settings_path);
+        }
+        Action::LargeMenu(on) => {
+            scene.settings.large_menu = on;
+            scene.settings.save(settings_path);
+            set_menu_scale(on);
+            scene.panel_place.width = panel_width();
+        }
+        Action::LeftHanded(on) => {
+            scene.settings.left_handed = on;
+            scene.settings.save(settings_path);
+        }
         Action::OpenMenu => {
             let (head, forward) = scene.head;
             let touch = scene.hands_in_view;
