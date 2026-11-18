@@ -2641,10 +2641,13 @@ fn handle_action(
         }
         Action::Recenter => {
             scene.recenter();
-            // The menu comes along, in front again.
-            let (head, forward) = scene.head;
-            let touch = scene.hands_in_view;
-            scene.open_panel(head, forward, touch);
+            // An open menu comes along, in front again; a closed one stays closed (the
+            // palm menu has this button too).
+            if scene.panel_open {
+                let (head, forward) = scene.head;
+                let touch = scene.hands_in_view;
+                scene.open_panel(head, forward, touch);
+            }
         }
         Action::IntroDone => {
             scene.settings.intro_seen = true;

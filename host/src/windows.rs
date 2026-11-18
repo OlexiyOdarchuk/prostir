@@ -356,13 +356,15 @@ struct Host(SyncSender<Report>);
 
 #[zbus::interface(name = "dev.prostir.Host")]
 impl Host {
-    /// The active window: KWin id (empty: none), logical size, output scale.
-    fn window(&self, id: String, width: i32, height: i32, scale: f64, output: String) {
+    /// The active window: KWin id (empty: none), logical size, the output's scale in
+    /// thousandths (a whole number: KWin sends a scale of 1 as an integer, which
+    /// would not match a `double`), output name.
+    fn window(&self, id: String, width: i32, height: i32, scale_milli: i32, output: String) {
         let w = (!id.is_empty()).then_some(ActiveWindow {
             id,
             width,
             height,
-            scale,
+            scale: f64::from(scale_milli.max(250)) / 1000.0,
             output,
         });
         let _ = self.0.try_send(Report::Window(w));
@@ -405,10 +407,10 @@ fn kde_active() -> Option<ActiveWindow> {
            const g = w.frameGeometry;
            callDBus('{BUS}', '{PATH}', '{BUS}', 'Window', w.internalId.toString(),
                     Math.round(g.width), Math.round(g.height),
-                    w.output ? w.output.devicePixelRatio : 1.0,
+                    Math.round((w.output ? w.output.devicePixelRatio : 1) * 1000),
                     w.output ? w.output.name : '');
          }} else {{
-           callDBus('{BUS}', '{PATH}', '{BUS}', 'Window', '', 0, 0, 1.0, '');
+           callDBus('{BUS}', '{PATH}', '{BUS}', 'Window', '', 0, 0, 1000, '');
          }}"
     );
     ask_kwin(&script, |r| match r {
