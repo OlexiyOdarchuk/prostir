@@ -71,6 +71,8 @@ pub struct UiState {
     pub error: Option<String>,
     /// Monitor whose "×" was pressed once and now asks for confirmation.
     pub confirm_remove: Option<u8>,
+    /// A profile whose "Save current" was pressed once (press again to overwrite).
+    pub confirm_save: Option<usize>,
     pub tab: Tab,
     pub lang: Lang,
     /// First run: show the tips page instead of the tabs.
@@ -138,6 +140,8 @@ pub enum Action {
     PairOtherWay,
     /// Answer to "Pair with this PC?".
     PairAnswer(bool),
+    /// Ask for microphone access again after it was refused.
+    AskMic,
     Close,
 }
 
@@ -474,7 +478,7 @@ impl Panel {
                     l.t("Мова · Language", "Language · Мова"),
                     vec![
                         (
-                            l.t("Як на ПК", "Like the PC"),
+                            l.t("Як на ПК", "Same as PC"),
                             Action::Language(Language::LikePc),
                             s.settings.language == Language::LikePc,
                             true,
@@ -1320,6 +1324,29 @@ fn build_look(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, rx: f32, rw:
             ),
         ],
     );
+    // Where an own photo comes from, while there is none yet.
+    if s.panorama_available && !s.custom_available {
+        for (k, line) in [
+            l.t(
+                "Своє фото: панорама 360° у файлі",
+                "Own photo: a 360° picture saved as",
+            ),
+            "Android/data/dev.prostir.client/files/background.jpg",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            items.push(text(
+                lx,
+                y - 22.0 + 24.0 * k as f32,
+                17.0,
+                false,
+                MUTED,
+                line,
+            ));
+        }
+        y += 38.0;
+    }
     let skies = [
         (l.t("Ніч", "Night"), Sky::Night),
         (l.t("Захід", "Sunset"), Sky::Sunset),
@@ -1818,17 +1845,19 @@ fn build_profiles(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32
             };
             items.push(button(apply, l.t("Увімкнути", "Switch to"), style, action));
         }
-        let (style, action) = if s.host.is_some() {
-            (Style::Normal, Some(Action::SaveProfile(i)))
-        } else {
-            (Style::Disabled, None)
+        // Overwriting a profile asks for a second press, like removing a monitor.
+        let armed = s.confirm_save == Some(i);
+        let (style, action) = match (s.host.is_some(), armed) {
+            (false, _) => (Style::Disabled, None),
+            (true, true) => (Style::Armed, Some(Action::SaveProfile(i))),
+            (true, false) => (Style::Normal, Some(Action::SaveProfile(i))),
         };
-        items.push(button(
-            save,
-            l.t("Зберегти поточне", "Save current"),
-            style,
-            action,
-        ));
+        let label = if armed {
+            l.t("Замінити? Ще раз", "Replace? Press again")
+        } else {
+            l.t("Зберегти поточне", "Save current")
+        };
+        items.push(button(save, label, style, action));
         y += 116.0;
     }
     y += 24.0;
@@ -1913,6 +1942,13 @@ fn build_sound(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32)
             items.push(text(lx, y, 19.0, false, DANGER, line));
             y += 30.0;
         }
+        items.push(button(
+            rect(lx, y - 8.0, 260.0, 48.0),
+            l.t("Спитати ще раз", "Ask again"),
+            Style::Normal,
+            Some(Action::AskMic),
+        ));
+        y += 52.0;
     }
     y += 30.0;
     for line in [
@@ -2064,6 +2100,7 @@ mod tests {
             keyboard_available: true,
             error: None,
             confirm_remove: None,
+            confirm_save: None,
             tab: Tab::Monitors,
             lang: Lang::Uk,
             intro: false,

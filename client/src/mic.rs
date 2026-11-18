@@ -37,6 +37,14 @@ pub fn denied() -> bool {
     DENIED.load(Ordering::Relaxed)
 }
 
+/// The user pressed "Ask again": show the system prompt now.
+pub fn ask_again() {
+    DENIED.store(false, Ordering::Relaxed);
+    if !has_permission() {
+        request_permission();
+    }
+}
+
 pub fn allowed() -> bool {
     ALLOWED.load(Ordering::Relaxed)
 }

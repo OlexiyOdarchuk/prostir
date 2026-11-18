@@ -196,6 +196,8 @@ struct Scene {
     error: Option<(String, Instant)>,
     /// "×" pressed once on this monitor; a second press within a few seconds removes it.
     confirm_remove: Option<(u8, Instant)>,
+    /// "Save current" pressed once for this profile.
+    confirm_save: Option<(usize, Instant)>,
     /// Menu page shown.
     tab: Tab,
     /// The PC speaks another protocol: (the PC is newer, its app version).
@@ -631,6 +633,10 @@ impl Scene {
                 .confirm_remove
                 .filter(|(_, at)| at.elapsed() < CONFIRM_FOR)
                 .map(|(id, _)| id),
+            confirm_save: self
+                .confirm_save
+                .filter(|(_, at)| at.elapsed() < CONFIRM_FOR)
+                .map(|(i, _)| i),
             tab: self.tab,
             lang: self.lang(),
             intro: !self.settings.intro_seen,
@@ -643,6 +649,25 @@ impl Scene {
 
 /// The user's own panorama (`background.jpg`/`.png` next to `host.txt`), else the night sky.
 /// The user's own panorama (`background.jpg/.png` next to `host.txt`), if there is one.
+/// The menu tab as stored in the settings (the menu opens on the last one).
+fn tab_code(tab: Tab) -> u8 {
+    match tab {
+        Tab::Monitors => 0,
+        Tab::Profiles => 1,
+        Tab::Look => 2,
+        Tab::Sound => 3,
+    }
+}
+
+fn tab_from_code(code: u8) -> Tab {
+    match code {
+        1 => Tab::Profiles,
+        2 => Tab::Look,
+        3 => Tab::Sound,
+        _ => Tab::Monitors,
+    }
+}
+
 fn custom_panorama_path(dir: Option<&Path>) -> Option<PathBuf> {
     let d = dir?;
     ["background.jpg", "background.jpeg", "background.png"]
@@ -854,7 +879,8 @@ fn run(app: &AndroidApp) -> Result<()> {
         feedback: None,
         error: None,
         confirm_remove: None,
-        tab: Tab::Monitors,
+        confirm_save: None,
+        tab: tab_from_code(settings.last_tab),
         update_needed: None,
         center: (Vec3::ZERO, 0.0),
         sent_layout: None,
@@ -1903,7 +1929,11 @@ fn handle_action(
                 scene.confirm_remove = Some((id, Instant::now()));
             }
         }
-        Action::Tab(tab) => scene.tab = tab,
+        Action::Tab(tab) => {
+            scene.tab = tab;
+            scene.settings.last_tab = tab_code(tab);
+            scene.settings.save(settings_path);
+        }
         Action::Recenter => {
             let (head, forward) = scene.head;
             let flat = Vec3::new(forward.x, 0.0, forward.z).normalize_or(-Vec3::Z);
@@ -2028,12 +2058,23 @@ fn handle_action(
             scene.active_profile = Some(i);
             scene.relayout_until = Some(Instant::now() + Duration::from_secs(8));
             scene.arrange_all();
+            // The monitors changing is the answer: the menu gets out of the way.
+            scene.panel_open = false;
         }
         Action::SaveProfile(i) => {
-            scene.profiles[i] = scene.current_profile();
-            profiles::save(&scene.profiles_path, &scene.profiles);
-            scene.active_profile = Some(i);
+            let confirmed = scene
+                .confirm_save
+                .is_some_and(|(c, at)| c == i && at.elapsed() < CONFIRM_FOR);
+            if confirmed {
+                scene.confirm_save = None;
+                scene.profiles[i] = scene.current_profile();
+                profiles::save(&scene.profiles_path, &scene.profiles);
+                scene.active_profile = Some(i);
+            } else {
+                scene.confirm_save = Some((i, Instant::now()));
+            }
         }
+        Action::AskMic => crate::mic::ask_again(),
         Action::ConnectTo(i) => {
             if let Some(h) = scene.found.get(i) {
                 scene.steering.connect_to(h.addr);

@@ -28,6 +28,7 @@ fn main() {
     };
     let state = UiState {
         mic_denied: std::env::var("MIC_DENIED").is_ok(),
+        confirm_save: None,
         unreachable: std::env::var("BLOCKED").ok(),
         pair_offer: std::env::var("OFFER")
             .ok()

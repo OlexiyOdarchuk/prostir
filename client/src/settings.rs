@@ -76,6 +76,8 @@ pub struct Settings {
     /// The headset microphone may be used by the PC. Decided here, on the headset:
     /// the PC can only ask.
     pub mic: bool,
+    /// The menu tab shown last (see `app::tab_code`).
+    pub last_tab: u8,
     pub language: Language,
     /// The language of the PC last connected to (for "like the PC" before connecting).
     pub pc_language: Option<Lang>,
@@ -94,6 +96,7 @@ impl Default for Settings {
             intro_seen: false,
             keyboard_window: false,
             mic: true,
+            last_tab: 0,
             language: Language::LikePc,
             pc_language: None,
         }
@@ -132,6 +135,7 @@ impl Settings {
                 Some(("intro", v)) => s.intro_seen = v == "seen",
                 Some(("keyboard-window", v)) => s.keyboard_window = v == "on",
                 Some(("mic", v)) => s.mic = v != "off",
+                Some(("tab", v)) => s.last_tab = v.trim().parse().unwrap_or(0),
                 Some(("language", v)) => {
                     s.language = match v {
                         "uk" => Language::Fixed(Lang::Uk),
@@ -198,7 +202,7 @@ impl Settings {
         let on = |b: bool| if b { "on" } else { "off" };
         format!(
             "preset {preset}\ncurve {curve}\nbackground {background}\nhands {hands}\n\
-             focus {}\ncinema {}\ncinema-screen {}\nlanguage {}\npc-language {}\nintro {}\nkeyboard-window {}\nmic {}\n",
+             focus {}\ncinema {}\ncinema-screen {}\nlanguage {}\npc-language {}\nintro {}\nkeyboard-window {}\nmic {}\ntab {}\n",
             on(self.focus),
             on(self.cinema),
             self.cinema_screen
@@ -210,7 +214,8 @@ impl Settings {
             self.pc_language.map_or("", Lang::code),
             if self.intro_seen { "seen" } else { "new" },
             on(self.keyboard_window),
-            on(self.mic)
+            on(self.mic),
+            self.last_tab
         )
     }
 }
@@ -235,6 +240,7 @@ mod tests {
             intro_seen: true,
             keyboard_window: true,
             mic: false,
+            last_tab: 2,
             language: Language::Fixed(Lang::En),
             pc_language: Some(Lang::Uk),
         };

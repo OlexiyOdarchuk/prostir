@@ -43,10 +43,9 @@ struct Args {
     #[arg(long)]
     keep_primary: bool,
     /// Video codec.
-    /// H.264 by default: on Intel the HEVC encoder keeps ~70 MB of driver memory per
-    /// monitor against ~9 MB, and at the offered bitrates (15–50 Mbit/s) H.264 stays above
-    /// 50 dB PSNR even on fast-scrolling small text, i.e. no visible difference.
-    #[arg(long, value_enum, default_value_t = CodecArg::H264)]
+    /// HEVC by default: sharpest small text. H.264 needs far less memory on Intel (~9 MB
+    /// against ~70 MB of driver memory per monitor) at a slightly softer picture.
+    #[arg(long, value_enum, default_value_t = CodecArg::H265)]
     codec: CodecArg,
     /// Bitrate per monitor, Mbit/s (default: the quality chosen in the tray, or 30).
     #[arg(long)]
