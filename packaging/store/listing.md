@@ -228,7 +228,7 @@ If you cannot set up such a PC, the trailer attached to this submission shows Pr
 in use with a real PC: monitors around the user, windows moving between them, the menu
 and hands. A short clip is also at https://prostir.ishawyha.dev/demo.mp4.
 
-## End-user license (decision for the developer, to do)
+## End-user license
 
 Without a custom EULA, the store applies Meta's default end-user license, which grants
 personal, non-commercial use and forbids modification unless the developer allows it.
