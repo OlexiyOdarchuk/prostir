@@ -413,6 +413,28 @@ impl Scene {
         self.send_layout();
     }
 
+    /// Turns the whole arrangement around the user so its middle is straight ahead,
+    /// keeping how the monitors stand to each other.
+    fn recenter(&mut self) {
+        let (head, forward) = self.head;
+        let flat = Vec3::new(forward.x, 0.0, forward.z).normalize_or(-Vec3::Z);
+        let yaw = (-flat.x).atan2(-flat.z);
+        if self.settings.cinema || self.placements.is_empty() {
+            self.center = (head, yaw);
+            self.arrange_all();
+            return;
+        }
+        let (old_pos, old_yaw) = self.center;
+        let turn = glam::Quat::from_rotation_y(yaw - old_yaw);
+        for p in self.placements.values_mut() {
+            p.position = head + turn * (p.position - old_pos);
+            p.rotation = turn * p.rotation;
+        }
+        self.center = (head, yaw);
+        layout::save(&self.layout_path, &self.placements);
+        self.send_layout();
+    }
+
     /// The A button: lines up what the user arranged by hand (see `layout::tidy`)
     /// instead of replacing it with the preset. Cinema and lying down (monitors over
     /// the head) still rebuild their own arrangement.
@@ -812,6 +834,8 @@ fn run(app: &AndroidApp) -> Result<()> {
     let mut button_hovered = false;
     // The left hand's menu gesture as last seen, to act once per gesture.
     let mut menu_gesture_held = false;
+    // When the battery was last reported to the PC.
+    let mut last_battery: Option<Instant> = None;
     button_layer.upload(&gl, &ui::menu_button_image(BUTTON_PX, false))?;
     let mut panel = Panel::new();
     // Tracked hands and pointer rays, drawn on top of everything.
@@ -1142,6 +1166,15 @@ fn run(app: &AndroidApp) -> Result<()> {
             scene.tidy_up();
         }
         scene.place_button();
+        // The headset's battery for the PC's tray, once a minute.
+        if scene.feedback.is_some()
+            && last_battery.is_none_or(|t: Instant| t.elapsed() >= Duration::from_secs(60))
+        {
+            last_battery = Some(Instant::now());
+            if let Some((percent, charging)) = crate::mic::battery() {
+                scene.send(ClientMsg::Battery { percent, charging });
+            }
+        }
 
         // Pointing, clicking and dragging.
         let mut picks: [Option<(Target, Hit)>; 2] =
@@ -1787,6 +1820,7 @@ fn handle_net_event(
         NetEvent::Hosts(hosts) => scene.found = hosts,
         NetEvent::Unreachable(name) => scene.unreachable = name,
         NetEvent::PcSettings(settings, encoders) => scene.pc = Some((settings, encoders)),
+        NetEvent::Recenter => scene.recenter(),
         NetEvent::Pairing { host, code } => {
             let failed = scene.pairing.as_ref().is_some_and(|p| p.failed);
             scene.pairing = Some(ui::PairingView {
@@ -1949,11 +1983,9 @@ fn handle_action(
             scene.settings.save(settings_path);
         }
         Action::Recenter => {
-            let (head, forward) = scene.head;
-            let flat = Vec3::new(forward.x, 0.0, forward.z).normalize_or(-Vec3::Z);
-            scene.center = (head, (-flat.x).atan2(-flat.z));
-            scene.arrange_all();
+            scene.recenter();
             // The menu comes along, in front again.
+            let (head, forward) = scene.head;
             let touch = scene.hands_in_view;
             scene.open_panel(head, forward, touch);
         }

@@ -168,6 +168,7 @@ fn main() -> Result<()> {
             HostMsg::MicActive { active } => println!("PC is recording: {active}"),
             HostMsg::Focus { id } => println!("mouse on: {id}"),
             HostMsg::Unknown { tag } => println!("skipped message {tag} from a newer PC"),
+            HostMsg::Recenter => println!("PC asks to bring the monitors in front"),
             HostMsg::PcSettings { settings, encoders } => {
                 println!("PC encodes: {settings:?}, can use {encoders:#05b}")
             }

@@ -141,7 +141,7 @@ fn ensure_permission(stop: &AtomicBool) -> bool {
     false
 }
 
-fn with_activity<T>(
+pub(crate) fn with_activity<T>(
     f: impl FnOnce(&mut jni::JNIEnv, &JObject) -> jni::errors::Result<T>,
 ) -> Option<T> {
     let ctx = ndk_context::android_context();
@@ -244,4 +244,25 @@ impl Drop for Input {
 
 fn check(result: i32) -> Result<(), i32> {
     if result < 0 { Err(result) } else { Ok(()) }
+}
+
+/// The headset's battery: percent and whether it is charging (`BatteryManager`).
+pub fn battery() -> Option<(u8, bool)> {
+    with_activity(|env, activity| {
+        let name = env.new_string("batterymanager")?;
+        let manager = env
+            .call_method(
+                activity,
+                "getSystemService",
+                "(Ljava/lang/String;)Ljava/lang/Object;",
+                &[JValue::Object(&name)],
+            )?
+            .l()?;
+        // BatteryManager.BATTERY_PROPERTY_CAPACITY
+        let percent = env
+            .call_method(&manager, "getIntProperty", "(I)I", &[JValue::Int(4)])?
+            .i()?;
+        let charging = env.call_method(&manager, "isCharging", "()Z", &[])?.z()?;
+        Ok((percent.clamp(0, 100) as u8, charging))
+    })
 }

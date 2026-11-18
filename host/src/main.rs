@@ -130,6 +130,11 @@ impl Control {
                     }
                 }
                 tray::Command::SetCounting(on) => usage::set_enabled(on),
+                tray::Command::Recenter => {
+                    if let Some(d) = displays.as_deref_mut() {
+                        d.router.send(HostMsg::Recenter);
+                    }
+                }
                 tray::Command::ForgetHeadsets => {
                     info!(
                         "forgetting {} paired headset(s)",
@@ -268,6 +273,7 @@ fn serve_client(
     let mut next_tick = Instant::now();
     // The display under the mouse, for dimming the others in the headset.
     let active_output = focus::ActiveOutput::new();
+    let mut battery_warned = false;
     let mut focus = None;
     let mut next_focus = Instant::now();
     let result = loop {
@@ -365,6 +371,14 @@ fn serve_client(
                 displays.save();
                 displays::sync_wallpapers();
             }
+            Ok(Ok(ClientMsg::Battery { percent, charging })) => {
+                tray::set_battery(control.tray.as_ref(), Some((percent, charging)));
+                // Once per session, when it gets low.
+                if percent <= 15 && !charging && !battery_warned {
+                    battery_warned = true;
+                    notify_battery(percent);
+                }
+            }
             Ok(Ok(ClientMsg::SetPcSettings { settings })) => {
                 match displays.set_pc_settings(settings) {
                     Ok(()) => {
@@ -386,6 +400,7 @@ fn serve_client(
         }
     };
     displays.set_streaming(false);
+    tray::set_battery(control.tray.as_ref(), None);
     displays.router.detach();
     outbox.close();
     let _ = stream.shutdown(Shutdown::Both);
@@ -539,6 +554,27 @@ fn create_displays(args: &Args, bitrate: u32, sharp: bool) -> Result<Displays> {
     let displays = Displays::create(&saved, cfg, !args.keep_primary)?;
     displays.save();
     Ok(displays)
+}
+
+/// The headset's battery is low: say so on the PC, where the user is looking.
+fn notify_battery(percent: u8) {
+    let body = format!(
+        "{} {percent}%.",
+        i18n::t("Заряд шолома:", "Headset battery:")
+    );
+    if let Ok(mut child) = std::process::Command::new("notify-send")
+        .args([
+            "--app-name=Prostir",
+            "--icon=prostir",
+            i18n::t("Шолом скоро розрядиться", "The headset battery is low"),
+            &body,
+        ])
+        .spawn()
+    {
+        let _ = std::thread::Builder::new()
+            .name("notify".into())
+            .spawn(move || child.wait());
+    }
 }
 
 /// After a session the freed buffers would stay with the process: hand them back to

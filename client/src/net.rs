@@ -118,6 +118,8 @@ pub enum NetEvent {
     PairingFailed,
     /// How the PC encodes and what it can encode with.
     PcSettings(prostir_proto::PcSettings, u8),
+    /// The PC's tray asks to bring the monitors in front.
+    Recenter,
     /// A PC announces itself on the network but does not accept the connection
     /// (a firewall on the PC); `None` once connecting works again.
     Unreachable(Option<String>),
@@ -900,6 +902,9 @@ fn run_session(
             HostMsg::MicWanted { .. } => {}
             HostMsg::PcSettings { settings, encoders } => {
                 let _ = events.send(NetEvent::PcSettings(settings, encoders));
+            }
+            HostMsg::Recenter => {
+                let _ = events.send(NetEvent::Recenter);
             }
             // The PC asks; the headset's own switch decides (checked below too).
             HostMsg::MicActive { active } => mic_asked = active,

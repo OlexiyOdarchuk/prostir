@@ -186,6 +186,8 @@ pub enum HostMsg {
         /// The PC app's version, e.g. `0.2.0`.
         app: String,
     },
+    /// Turn the monitors to face the user (asked for from the PC's tray).
+    Recenter,
     /// The PC's encoding settings and what it can encode with (bits of [`encoders`]).
     PcSettings {
         settings: PcSettings,
@@ -287,6 +289,11 @@ pub enum ClientMsg {
     SetPcSettings {
         settings: PcSettings,
     },
+    /// The headset's battery, for the PC's tray.
+    Battery {
+        percent: u8,
+        charging: bool,
+    },
     /// Start pairing. `headset_shows`: the headset displays the code and the PC asks
     /// for it; otherwise the PC displays it and the headset asks.
     PairBegin {
@@ -322,6 +329,7 @@ mod tag {
     pub const FOCUS: u8 = 16;
     pub const INCOMPATIBLE: u8 = 17;
     pub const PC_SETTINGS: u8 = 18;
+    pub const RECENTER: u8 = 19;
     pub const HELLO: u8 = 101;
     pub const REQUEST_KEYFRAME: u8 = 102;
     pub const FRAME_SHOWN: u8 = 103;
@@ -340,6 +348,7 @@ mod tag {
     pub const SET_MONITORS: u8 = 116;
     pub const SET_LAYOUT: u8 = 117;
     pub const SET_PC_SETTINGS: u8 = 118;
+    pub const BATTERY: u8 = 119;
 }
 
 fn invalid(msg: &str) -> io::Error {
@@ -442,6 +451,7 @@ impl HostMsg {
             HostMsg::PcSettings { settings, encoders } => {
                 write_frame(w, tag::PC_SETTINGS, &[&settings.bytes(), &[*encoders]])
             }
+            HostMsg::Recenter => write_frame(w, tag::RECENTER, &[]),
             HostMsg::Incompatible { protocol, app } => write_frame(
                 w,
                 tag::INCOMPATIBLE,
@@ -503,6 +513,7 @@ impl HostMsg {
             tag::PRIMARY_CHANGED => HostMsg::PrimaryChanged { id: c.u8()? },
             tag::PAIRING_REQUIRED => HostMsg::PairingRequired,
             tag::FOCUS => HostMsg::Focus { id: c.u8()? },
+            tag::RECENTER => HostMsg::Recenter,
             tag::PC_SETTINGS => HostMsg::PcSettings {
                 settings: PcSettings::read(&mut c)?,
                 encoders: c.u8()?,
@@ -603,6 +614,9 @@ impl ClientMsg {
             ClientMsg::SetPcSettings { settings } => {
                 write_frame(w, tag::SET_PC_SETTINGS, &[&settings.bytes()])
             }
+            ClientMsg::Battery { percent, charging } => {
+                write_frame(w, tag::BATTERY, &[&[*percent, *charging as u8]])
+            }
             ClientMsg::PairConfirm { tag } => write_frame(w, tag::PAIR_CONFIRM, &[tag]),
             ClientMsg::SetMirror { enabled } => {
                 write_frame(w, tag::SET_MIRROR, &[&[*enabled as u8]])
@@ -641,6 +655,10 @@ impl ClientMsg {
                 pcm: c.rest().to_vec(),
             },
             tag::PRESENCE => ClientMsg::Presence { worn: c.u8()? != 0 },
+            tag::BATTERY => ClientMsg::Battery {
+                percent: c.u8()?,
+                charging: c.u8()? != 0,
+            },
             tag::SET_PC_SETTINGS => ClientMsg::SetPcSettings {
                 settings: PcSettings::read(&mut c)?,
             },
@@ -782,6 +800,7 @@ mod tests {
             HostMsg::MicWanted { enabled: true },
             HostMsg::MicActive { active: true },
             HostMsg::Focus { id: 2 },
+            HostMsg::Recenter,
             HostMsg::PcSettings {
                 settings: PcSettings {
                     quality: 30,
@@ -867,6 +886,10 @@ mod tests {
                 pcm: vec![1, 0, 2, 0],
             },
             ClientMsg::Presence { worn: true },
+            ClientMsg::Battery {
+                percent: 72,
+                charging: true,
+            },
             ClientMsg::SetPcSettings {
                 settings: PcSettings {
                     quality: 50,

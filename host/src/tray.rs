@@ -19,6 +19,8 @@ pub enum Command {
     SetCounting(bool),
     /// Drop all paired headsets: each must pair again.
     ForgetHeadsets,
+    /// Turn the monitors in the headset to face the user.
+    Recenter,
     Quit,
 }
 
@@ -45,6 +47,8 @@ pub struct Tray {
     pairing_code: Option<String>,
     bitrate: u32,
     sharp: bool,
+    /// The headset's battery: percent, charging.
+    battery: Option<(u8, bool)>,
     commands: Sender<Command>,
 }
 
@@ -57,6 +61,7 @@ pub fn spawn(commands: Sender<Command>, bitrate: u32, sharp: bool) -> Option<Han
         pairing_code: None,
         bitrate,
         sharp,
+        battery: None,
         commands,
     };
     tray.spawn()
@@ -73,6 +78,13 @@ pub fn set_status(handle: Option<&Handle>, status: Status) {
 
 /// Shows (or hides) the pairing code in the tray.
 /// Quality and the text preset changed elsewhere (the headset menu).
+/// The headset's battery as it last reported it (`None`: no headset).
+pub fn set_battery(handle: Option<&Handle>, battery: Option<(u8, bool)>) {
+    if let Some(h) = handle {
+        h.update(|t| t.battery = battery);
+    }
+}
+
 pub fn set_encoding(handle: Option<&Handle>, bitrate: u32, sharp: bool) {
     if let Some(h) = handle {
         h.update(|t| {
@@ -246,6 +258,38 @@ impl ksni::Tray for Tray {
                 ..Default::default()
             }
             .into(),
+        ]);
+        if let Some((percent, charging)) = self.battery {
+            items.push(
+                StandardItem {
+                    label: format!(
+                        "{} {percent}%{}",
+                        t("Заряд шолома:", "Headset battery:"),
+                        if charging {
+                            t(", заряджається", ", charging")
+                        } else {
+                            ""
+                        }
+                    ),
+                    enabled: false,
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
+        if self.status.connected.is_some() {
+            items.push(
+                StandardItem {
+                    label: t("Монітори перед собою", "Bring the monitors in front").into(),
+                    activate: Box::new(|tray: &mut Self| {
+                        let _ = tray.commands.send(Command::Recenter);
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
+        items.extend([
             MenuItem::Separator,
             SubMenu {
                 label: t("Якість відео", "Video quality").into(),
