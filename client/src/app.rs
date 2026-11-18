@@ -859,6 +859,20 @@ impl Scene {
         }
     }
 
+    /// The magnet: where monitor `id`, let go now, would stick (not on a wall, where
+    /// monitors stay in its plane, nor for the laptop screen or window panels).
+    fn stick_of(&self, id: u8) -> Option<layout::Stick> {
+        if self.settings.cinema
+            || self.settings.preset == crate::settings::Preset::Wall
+            || id == MIRROR_ID
+            || is_window_panel(id)
+            || !self.monitors.contains_key(&id)
+        {
+            return None;
+        }
+        layout::stick(&self.placements, &self.quest_sizes(), self.head.0, id)
+    }
+
     /// Where the "Attach" button under detached window `id` is (as drawn, while it
     /// glides).
     fn attach_place(&self, id: u8) -> Option<Placement> {
@@ -1902,6 +1916,11 @@ fn run(app: &AndroidApp) -> Result<()> {
                         layout::save(&scene.keyboard_path, &HashMap::from([(0, k)]));
                     }
                 } else if !scene.settings.cinema {
+                    // Let go next to another monitor: it sticks to it, edge to edge.
+                    if let Some(s) = scene.stick_of(released.id) {
+                        scene.placements.insert(released.id, s.placement);
+                        controls.pulse(&session, hand);
+                    }
                     layout::save(&scene.layout_path, &scene.placements);
                     // Dropped somewhere else: KDE's arrangement follows what the eyes see.
                     if released.id != PANEL_ID && released.id != MIRROR_ID {
@@ -2095,6 +2114,30 @@ fn run(app: &AndroidApp) -> Result<()> {
                     spheres.push(Sphere::glow(point, 0.02, [1.0, 0.85, 0.35, 0.8]));
                 }
                 _ => scene.finder = None,
+            }
+        }
+        // The magnet while dragging: the edge the monitor would stick to lights up.
+        for g in scene.grabs.iter().flatten() {
+            let Some(s) = scene.stick_of(g.id) else {
+                continue;
+            };
+            let Some(n) = scene.shown.get(&s.neighbour).copied() else {
+                continue;
+            };
+            let (half_w, half_h) = (n.width / 2.0, scene.height_of(s.neighbour) / 2.0);
+            let steps = 28;
+            for i in 0..=steps {
+                let k = i as f32 / steps as f32 * 2.0 - 1.0;
+                let local = if s.across {
+                    Vec3::new(s.side * half_w, k * half_h, 0.01)
+                } else {
+                    Vec3::new(k * half_w, s.side * half_h, 0.01)
+                };
+                spheres.push(Sphere::glow(
+                    n.position + n.rotation * local,
+                    0.03,
+                    [0.55, 0.75, 1.0, 0.55],
+                ));
             }
         }
         // Hands are drawn over everything (the compositor has no depth for them), so
