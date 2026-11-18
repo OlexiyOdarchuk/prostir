@@ -25,27 +25,49 @@ pub struct Frame {
 /// Messages to the PC. Sending only queues them: a writer thread puts them on the
 /// network, so the frame loop, the microphone and the decoders never wait on Wi-Fi.
 #[derive(Clone)]
-pub struct Feedback(SyncSender<ClientMsg>);
+pub struct Feedback {
+    tx: Sender<ClientMsg>,
+    /// Queued messages that may be dropped (see [`droppable`]).
+    lossy: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// About 2.5 s of microphone sound: more than that waiting means the network is stuck.
+const MAX_LOSSY: usize = 256;
+
+/// Messages it costs little to lose when the network is stuck: microphone sound (it
+/// would be late anyway) and the "frame shown" acknowledgements (latency figures only).
+/// Everything else (settings, layout, pairing) is always sent.
+fn droppable(msg: &ClientMsg) -> bool {
+    matches!(msg, ClientMsg::Mic { .. } | ClientMsg::FrameShown { .. })
+}
 
 impl Feedback {
     /// Starts the writer thread for one session. It ends (and shuts the socket down,
     /// which ends the session) when a write fails or times out.
     fn start(mut writer: SecureWriter, stream: TcpStream) -> std::io::Result<Self> {
-        // About 2.5 s of microphone sound, plus room for everything else.
-        let (tx, rx) = mpsc::sync_channel::<ClientMsg>(256);
+        use std::sync::atomic::Ordering;
+        let (tx, rx) = mpsc::channel::<ClientMsg>();
+        let lossy = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = lossy.clone();
         stream.set_write_timeout(Some(Duration::from_secs(3)))?;
         std::thread::Builder::new()
             .name("net-writer".into())
             .spawn(move || {
                 let mut buf = Vec::with_capacity(4096);
+                let put = |msg: ClientMsg, buf: &mut Vec<u8>| {
+                    if droppable(&msg) {
+                        counted.fetch_sub(1, Ordering::Relaxed);
+                    }
+                    let _ = msg.write(buf);
+                };
                 while let Ok(msg) = rx.recv() {
                     // Everything already waiting goes out as one encrypted chunk.
                     buf.clear();
-                    let _ = msg.write(&mut buf);
+                    put(msg, &mut buf);
                     while buf.len() < 64 * 1024
                         && let Ok(more) = rx.try_recv()
                     {
-                        let _ = more.write(&mut buf);
+                        put(more, &mut buf);
                     }
                     if let Err(e) = writer.write_all(&buf) {
                         warn!("sending to the PC failed: {e}");
@@ -54,16 +76,21 @@ impl Feedback {
                     }
                 }
             })?;
-        Ok(Self(tx))
+        Ok(Self { tx, lossy })
     }
 
-    /// Queues a message. When the queue is full (the network is stuck) the message is
-    /// dropped; an error means the session is over.
+    /// Queues a message. While the network is stuck, microphone sound and frame
+    /// acknowledgements beyond a couple of seconds are dropped; nothing else is. An
+    /// error means the session is over.
     pub fn send(&self, msg: &ClientMsg) -> std::io::Result<()> {
-        match self.0.try_send(msg.clone()) {
-            Ok(()) | Err(TrySendError::Full(_)) => Ok(()),
-            Err(TrySendError::Disconnected(_)) => Err(std::io::ErrorKind::BrokenPipe.into()),
+        use std::sync::atomic::Ordering;
+        if droppable(msg) && self.lossy.fetch_add(1, Ordering::Relaxed) >= MAX_LOSSY {
+            self.lossy.fetch_sub(1, Ordering::Relaxed);
+            return Ok(());
         }
+        self.tx
+            .send(msg.clone())
+            .map_err(|_| std::io::ErrorKind::BrokenPipe.into())
     }
 }
 
