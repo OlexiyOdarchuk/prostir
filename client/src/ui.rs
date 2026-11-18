@@ -174,6 +174,8 @@ pub enum Action {
     SetPc(PcSettings),
     /// Show the first-run tips again.
     ShowTips,
+    /// The monitors follow the head.
+    Follow(bool),
     Close,
 }
 
@@ -1250,6 +1252,17 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
                 st.cinema,
                 true,
             ),
+        ],
+    );
+    segmented(
+        items,
+        rx,
+        rw,
+        &mut y,
+        l.t("Слідом за головою", "Follow my head"),
+        vec![
+            (l.t("Ні", "Off"), Action::Follow(false), !st.follow, true),
+            (l.t("Так", "On"), Action::Follow(true), st.follow, true),
         ],
     );
     // The cinema screen can be picked before switching to cinema.

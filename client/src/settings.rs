@@ -78,6 +78,8 @@ pub struct Settings {
     pub mic: bool,
     /// The menu tab shown last (see `app::tab_code`).
     pub last_tab: u8,
+    /// The monitors come along when the user turns or moves away.
+    pub follow: bool,
     pub language: Language,
     /// The language of the PC last connected to (for "like the PC" before connecting).
     pub pc_language: Option<Lang>,
@@ -97,6 +99,7 @@ impl Default for Settings {
             keyboard_window: false,
             mic: true,
             last_tab: 0,
+            follow: false,
             language: Language::LikePc,
             pc_language: None,
         }
@@ -136,6 +139,7 @@ impl Settings {
                 Some(("keyboard-window", v)) => s.keyboard_window = v == "on",
                 Some(("mic", v)) => s.mic = v != "off",
                 Some(("tab", v)) => s.last_tab = v.trim().parse().unwrap_or(0),
+                Some(("follow", v)) => s.follow = v == "on",
                 Some(("language", v)) => {
                     s.language = match v {
                         "uk" => Language::Fixed(Lang::Uk),
@@ -202,7 +206,7 @@ impl Settings {
         let on = |b: bool| if b { "on" } else { "off" };
         format!(
             "preset {preset}\ncurve {curve}\nbackground {background}\nhands {hands}\n\
-             focus {}\ncinema {}\ncinema-screen {}\nlanguage {}\npc-language {}\nintro {}\nkeyboard-window {}\nmic {}\ntab {}\n",
+             focus {}\ncinema {}\ncinema-screen {}\nlanguage {}\npc-language {}\nintro {}\nkeyboard-window {}\nmic {}\ntab {}\nfollow {}\n",
             on(self.focus),
             on(self.cinema),
             self.cinema_screen
@@ -215,7 +219,8 @@ impl Settings {
             if self.intro_seen { "seen" } else { "new" },
             on(self.keyboard_window),
             on(self.mic),
-            self.last_tab
+            self.last_tab,
+            on(self.follow)
         )
     }
 }
@@ -241,6 +246,7 @@ mod tests {
             keyboard_window: true,
             mic: false,
             last_tab: 2,
+            follow: true,
             language: Language::Fixed(Lang::En),
             pc_language: Some(Lang::Uk),
         };

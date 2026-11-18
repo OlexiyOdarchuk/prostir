@@ -202,6 +202,8 @@ struct Scene {
     confirm_save: Option<(usize, Instant)>,
     /// Menu page shown.
     tab: Tab,
+    /// Follow mode is moving the monitors right now.
+    following: bool,
     /// The PC speaks another protocol: (the PC is newer, its app version).
     update_needed: Option<(bool, String)>,
     /// Where layouts are centred and which way they face (head position, yaw).
@@ -411,6 +413,53 @@ impl Scene {
         self.grabs = [None, None];
         layout::save(&self.layout_path, &self.placements);
         self.send_layout();
+    }
+
+    /// Follow mode: once the head has turned (or moved) well away from where the
+    /// monitors face, the whole arrangement glides after it until it is in front again.
+    /// Small head movements leave it still, so reading is not disturbed.
+    fn follow_head(&mut self, dt: f32) {
+        const START_TURN: f32 = 0.35; // about 20°
+        const START_MOVE: f32 = 0.25; // metres
+        if !self.settings.follow
+            || self.placements.is_empty()
+            || self.grabs.iter().any(Option::is_some)
+        {
+            self.following = false;
+            return;
+        }
+        let (head, forward) = self.head;
+        let flat = Vec3::new(forward.x, 0.0, forward.z).normalize_or(-Vec3::Z);
+        let yaw = (-flat.x).atan2(-flat.z);
+        let (pos, center_yaw) = self.center;
+        let mut turn = yaw - center_yaw;
+        turn =
+            (turn + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+        let shift = Vec3::new(head.x - pos.x, 0.0, head.z - pos.z);
+        if !self.following && (turn.abs() > START_TURN || shift.length() > START_MOVE) {
+            self.following = true;
+        }
+        if !self.following {
+            return;
+        }
+        // Ease towards the head: about a third of a second to catch up.
+        let k = (dt * 3.0).min(1.0);
+        let step_turn = turn * k;
+        let step_shift = shift * k;
+        let rot = glam::Quat::from_rotation_y(step_turn);
+        let new_pos = pos + step_shift;
+        for (id, p) in self.placements.iter_mut() {
+            if *id == PANEL_ID {
+                continue;
+            }
+            p.position = new_pos + rot * (p.position - pos);
+            p.rotation = rot * p.rotation;
+        }
+        self.center = (new_pos, center_yaw + step_turn);
+        if turn.abs() < 0.02 && shift.length() < 0.02 {
+            self.following = false;
+            layout::save(&self.layout_path, &self.placements);
+        }
     }
 
     /// Turns the whole arrangement around the user so its middle is straight ahead,
@@ -918,6 +967,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         confirm_save: None,
         tab: tab_from_code(settings.last_tab),
         update_needed: None,
+        following: false,
         center: (Vec3::ZERO, 0.0),
         sent_layout: None,
         pending_layout: None,
@@ -1110,6 +1160,7 @@ fn run(app: &AndroidApp) -> Result<()> {
             });
 
         scene.head = (head, forward);
+        scene.follow_head(dt);
 
         // Tracked hands: joints for drawing, fingertips for touching the menu.
         let joints: [Option<[(Vec3, f32); 26]>; 2] = match &hand_trackers {
@@ -2028,6 +2079,13 @@ fn handle_action(
         Action::Focus(on) => {
             scene.settings.focus = on;
             scene.settings.save(settings_path);
+        }
+        Action::Follow(on) => {
+            scene.settings.follow = on;
+            scene.settings.save(settings_path);
+            if !on {
+                layout::save(&scene.layout_path, &scene.placements);
+            }
         }
         Action::Hands(mode) => {
             scene.settings.hands = mode;
