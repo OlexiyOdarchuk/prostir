@@ -896,11 +896,17 @@ impl Displays {
     /// Puts the mouse on monitor `id` at `x`/`y` across its image (0..=65535).
     pub fn mouse_to(&self, id: u8, x: u16, y: u16) {
         let Some((_, g)) = self.output_geometries().into_iter().find(|(i, _)| *i == id) else {
+            warn!("mouse: no monitor {id} on the desktop");
             return;
         };
         let at =
             |start: i32, len: i32, f: u16| start + (f64::from(len) * f64::from(f) / 65535.0) as i32;
-        windows::move_cursor(at(g.x, g.w - 1, x), at(g.y, g.h - 1, y));
+        let (cx, cy) = (at(g.x, g.w - 1, x), at(g.y, g.h - 1, y));
+        if windows::move_cursor(cx, cy) {
+            info!("mouse moved to monitor {id} at {cx},{cy}");
+        } else {
+            warn!("could not move the mouse to {cx},{cy}");
+        }
     }
 
     /// Settings changed in the headset menu. Quality and the text preset apply on the

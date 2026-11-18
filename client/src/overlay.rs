@@ -67,8 +67,15 @@ const FINGERS: [&[usize]; 5] = [
 /// Across the palm, so it reads as a hand rather than five sticks.
 const PALM: [&[usize]; 2] = [&[6, 11, 16, 21], &[7, 12, 17, 22]];
 
-/// Spheres along the bones of one tracked hand: `(position, radius)` per joint.
-pub fn hand_spheres(joints: &[(Vec3, f32); 26], out: &mut Vec<Sphere>) {
+/// Spheres along the bones of one tracked hand: `(position, radius)` per joint;
+/// `alpha` below 1 makes it see-through.
+pub fn hand_spheres(joints: &[(Vec3, f32); 26], alpha: f32, out: &mut Vec<Sphere>) {
+    let color = [
+        HAND_COLOR[0],
+        HAND_COLOR[1],
+        HAND_COLOR[2],
+        HAND_COLOR[3] * alpha,
+    ];
     let mut segment = |a: usize, b: usize, scale: f32| {
         let (pa, ra) = joints[a];
         let (pb, rb) = joints[b];
@@ -78,7 +85,7 @@ pub fn hand_spheres(joints: &[(Vec3, f32); 26], out: &mut Vec<Sphere>) {
             out.push(Sphere {
                 center: pa.lerp(pb, t),
                 radius: (ra + (rb - ra) * t) * scale,
-                color: HAND_COLOR,
+                color,
                 kind: Kind::Ball,
             });
         }

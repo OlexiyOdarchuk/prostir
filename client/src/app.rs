@@ -112,10 +112,11 @@ pub fn android_main(app: AndroidApp) {
 /// 90 Hz (or the nearest below), or 72 Hz to save battery.
 fn set_refresh_rate(session: &xr::Session<Gfx>, saver: bool) {
     let limit = if saver { 72.0 } else { 90.0 };
-    let best = session
+    let rates = session
         .enumerate_display_refresh_rates()
-        .ok()
-        .and_then(|r| r.into_iter().filter(|&r| r <= limit).reduce(f32::max));
+        .unwrap_or_default();
+    info!("display rates offered: {rates:?}");
+    let best = rates.into_iter().filter(|&r| r <= limit).reduce(f32::max);
     if let Some(rate) = best {
         info!("display at {rate} Hz");
         let _ = session.request_display_refresh_rate(rate);
@@ -183,7 +184,9 @@ const BAR_GAP: f32 = 0.035;
 const BAR_HIT_HEIGHT: f32 = 0.05;
 const BAR_LINGER: Duration = Duration::from_millis(900);
 /// Width of the wrist menu in the room.
-const WRIST_MENU_WIDTH: f32 = 0.17;
+const WRIST_MENU_WIDTH: f32 = 0.13;
+/// How long an open palm faces the face before its menu appears.
+const PALM_DWELL: Duration = Duration::from_millis(250);
 /// How long the gaze rests on another monitor before the mouse goes there.
 const GAZE_DWELL: Duration = Duration::from_millis(600);
 /// How long the "where is the mouse" rings show.
@@ -193,37 +196,53 @@ fn wrist_menu_height() -> f32 {
     WRIST_MENU_WIDTH * ui::WRIST_HEIGHT as f32 / ui::WRIST_WIDTH as f32
 }
 
-/// Where the wrist menu goes: beside the left hand, thumb side, while its palm is
-/// turned to the face (`shown`: it is up already, which takes less to keep).
-fn wrist_menu_place(
+/// Where the palm menu goes: lying on the palm (a little above it, its top towards the
+/// fingers), while an open palm is turned to the face. It takes a quarter of a second
+/// of that to appear, so hands passing by (typing, reaching) do not bring it up.
+/// `since`: when the palm started facing the face.
+fn palm_menu_place(
     joints: Option<&[(Vec3, f32); 26]>,
     right_hand: bool,
     head: Vec3,
     previous: Option<Placement>,
+    since: &mut Option<Instant>,
 ) -> Option<Placement> {
-    let j = joints?;
-    let (palm, wrist, index, middle, little) = (j[0].0, j[1].0, j[6].0, j[11].0, j[21].0);
-    // The palm's normal (index × little from the wrist for the left hand; the right
-    // hand is its mirror image).
+    let Some(j) = joints else {
+        *since = None;
+        return None;
+    };
+    let (palm, wrist) = (j[0].0, j[1].0);
+    // Knuckles, a hand's width apart: a steady palm normal (index × little from the
+    // wrist for the left hand; the right hand is its mirror image).
+    let (index, middle, little, middle_tip) = (j[7].0, j[12].0, j[22].0, j[15].0);
     let mut normal = (index - wrist).cross(little - wrist).normalize_or_zero();
     if right_hand {
         normal = -normal;
     }
     let facing = normal.dot((head - palm).normalize_or_zero());
-    let needed = if previous.is_some() { 0.45 } else { 0.7 };
-    if facing < needed {
+    let open = middle_tip.distance(palm) > 0.07;
+    let needed = if previous.is_some() { 0.55 } else { 0.8 };
+    if facing < needed || !open {
+        *since = None;
         return None;
     }
-    let side = (index - little).normalize_or_zero();
-    let up = (middle - wrist).normalize_or_zero();
-    let mut at = palm + side * 0.095 + normal * 0.025 + up * 0.01;
+    if previous.is_none() && since.get_or_insert_with(Instant::now).elapsed() < PALM_DWELL {
+        return None;
+    }
+    let up = (middle - wrist)
+        .reject_from_normalized(normal)
+        .normalize_or(Vec3::Y);
+    let rotation = glam::Quat::from_mat3(&glam::Mat3::from_cols(up.cross(normal), up, normal));
+    let mut at = palm + normal * 0.03;
+    let mut rotation = rotation.normalize();
     // Hands shake a little: the menu follows smoothly.
     if let Some(p) = previous {
         at = p.position.lerp(at, 0.35);
+        rotation = p.rotation.slerp(rotation, 0.35);
     }
     Some(Placement {
         position: at,
-        rotation: layout::facing(at, head),
+        rotation,
         width: WRIST_MENU_WIDTH,
     })
 }
@@ -593,10 +612,8 @@ impl Scene {
     /// Mouse follows the gaze: after resting on another monitor for a moment, the
     /// mouse goes to where the user looks on it.
     fn follow_gaze(&mut self) {
-        let busy = self.panel_open
-            || self.wrist.is_some()
-            || self.grabs.iter().any(Option::is_some)
-            || self.settings.cinema;
+        let busy =
+            self.wrist.is_some() || self.grabs.iter().any(Option::is_some) || self.settings.cinema;
         if !self.settings.gaze_mouse || !self.can_move_mouse || self.feedback.is_none() || busy {
             self.gaze_on = None;
             return;
@@ -617,7 +634,11 @@ impl Scene {
                 Some((*id, hit, *p, c))
             })
             .min_by(|a, b| a.1.t.total_cmp(&b.1.t));
-        let Some((id, hit, p, c)) = looked else {
+        // Looking at the menu, not past it.
+        let at_menu = self.panel_open
+            && layout::hit_surface(ray, &self.panel_place, panel_height(), None)
+                .is_some_and(|m| looked.as_ref().is_none_or(|l| m.t < l.1.t));
+        let Some((id, hit, p, c)) = looked.filter(|_| !at_menu) else {
             self.gaze_on = None;
             return;
         };
@@ -633,6 +654,7 @@ impl Scene {
                 if since.elapsed() >= GAZE_DWELL && !recently {
                     let uv = layout::image_uv(&p, self.height_of(id), c, hit.local);
                     let f = |v: f32| (v * 65535.0) as u16;
+                    info!("gaze: mouse to monitor {id} at {:.2},{:.2}", uv.x, uv.y);
                     self.send(ClientMsg::MouseTo {
                         id,
                         x: f(uv.x),
@@ -1238,6 +1260,8 @@ fn run(app: &AndroidApp) -> Result<()> {
         ImageLayer::new(&session, format, ui::WRIST_WIDTH, ui::WRIST_HEIGHT, false)?;
     // The right fingertip left the wrist menu since its last press.
     let mut wrist_poke_armed = true;
+    // Since when an open palm faces the face (its menu shows after a moment).
+    let mut palm_since: Option<Instant> = None;
     // Tracked hands and pointer rays, drawn on top of everything.
     let hand_trackers = if exts.ext_hand_tracking {
         let make = |h| session.create_hand_tracker(h);
@@ -1546,11 +1570,12 @@ fn run(app: &AndroidApp) -> Result<()> {
         scene.hands_in_view = hands_in_view;
         controls.hands_from_joints(&joints, head, forward);
         let menu_hand = usize::from(scene.settings.left_handed);
-        scene.wrist = wrist_menu_place(
+        scene.wrist = palm_menu_place(
             joints[menu_hand].as_ref(),
             menu_hand == 1,
             head,
             scene.wrist,
+            &mut palm_since,
         );
 
         // Pairing needs the menu, and so do the first-run tips: open it where the
@@ -2088,8 +2113,19 @@ fn run(app: &AndroidApp) -> Result<()> {
                 });
             }
         }
-        for j in joints.iter().flatten() {
-            overlay::hand_spheres(j, &mut spheres);
+        // Hands are drawn over everything (the compositor has no depth for them), so
+        // near a menu they would cover its text: the hand holding the palm menu is not
+        // drawn, and a hand about to touch a menu is see-through.
+        for (h, j) in joints.iter().enumerate() {
+            let Some(j) = j else { continue };
+            if h == menu_hand && scene.wrist.is_some() {
+                continue;
+            }
+            let tip = j[INDEX_TIP].0;
+            let near_palm = scene.wrist.is_some_and(|w| w.position.distance(tip) < 0.15);
+            let near_panel = poke_hover[h].is_some();
+            let alpha = if near_palm || near_panel { 0.3 } else { 1.0 };
+            overlay::hand_spheres(j, alpha, &mut spheres);
         }
         for (input, pick) in controls.state.iter().zip(&picks) {
             if let Some(ray) = input.ray {
@@ -2448,6 +2484,7 @@ fn handle_net_event(
         NetEvent::Notice(text) => scene.show_toast(text),
         NetEvent::MouseAt(id, x, y) => scene.finder = Some((id, Vec2::new(x, y), Instant::now())),
         NetEvent::Abilities(bits) => {
+            info!("PC abilities {bits:#b}");
             scene.can_move_mouse = bits & prostir_proto::abilities::MOVE_MOUSE != 0;
         }
         NetEvent::Pairing { host, code } => {

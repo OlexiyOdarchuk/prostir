@@ -14,8 +14,8 @@ use crate::settings::{Background, Curve, HandMode, Preset, Settings, Sky};
 pub const WIDTH: u32 = 1280;
 pub const HEIGHT: u32 = 960;
 /// The small menu by the left wrist, in pixels.
-pub const WRIST_WIDTH: u32 = 600;
-pub const WRIST_HEIGHT: u32 = 320;
+pub const WRIST_WIDTH: u32 = 512;
+pub const WRIST_HEIGHT: u32 = 512;
 /// Same limit as the host's.
 pub const MAX_MONITORS: usize = 6;
 
@@ -280,6 +280,76 @@ enum Item {
         style: Style,
         action: Option<Action>,
     },
+    /// A ring sector around (`cx`, `cy`) from radius `r0` to `r1` and angle `a0` to
+    /// `a1` (radians, clockwise from straight up), pressed like a button: the round
+    /// palm menu. `r0` 0 and a full turn make a round button.
+    Wedge {
+        cx: f32,
+        cy: f32,
+        r0: f32,
+        r1: f32,
+        a0: f32,
+        a1: f32,
+        label: String,
+        size: f32,
+        style: Style,
+        action: Option<Action>,
+    },
+}
+
+impl Item {
+    /// Whether (`x`, `y`) is on this wedge.
+    fn wedge_contains(&self, x: f32, y: f32) -> bool {
+        let Item::Wedge {
+            cx,
+            cy,
+            r0,
+            r1,
+            a0,
+            a1,
+            ..
+        } = self
+        else {
+            return false;
+        };
+        let (dx, dy) = (x - cx, y - cy);
+        let r = (dx * dx + dy * dy).sqrt();
+        let a = dx.atan2(-dy).rem_euclid(std::f32::consts::TAU);
+        // A sector may run past a full turn (the one straight up).
+        let within = |a: f32| a >= *a0 && a <= *a1;
+        r >= *r0 && r <= *r1 && (within(a) || within(a + std::f32::consts::TAU))
+    }
+}
+
+/// Where a wedge's label goes: the middle of the sector.
+fn wedge_center(cx: f32, cy: f32, r0: f32, r1: f32, a0: f32, a1: f32) -> (f32, f32) {
+    if r0 <= 0.0 {
+        return (cx, cy);
+    }
+    let (r, a) = ((r0 + r1) / 2.0, (a0 + a1) / 2.0);
+    (cx + r * a.sin(), cy - r * a.cos())
+}
+
+/// A ring sector as a path (see [`Item::Wedge`]).
+fn sector(cx: f32, cy: f32, r0: f32, r1: f32, a0: f32, a1: f32) -> Path {
+    if r0 <= 0.0 && a1 - a0 >= std::f32::consts::TAU - 1e-3 {
+        return circle(cx, cy, r1);
+    }
+    let at = |r: f32, a: f32| (cx + r * a.sin(), cy - r * a.cos());
+    let steps = 32;
+    let mut pb = PathBuilder::new();
+    let (x, y) = at(r1, a0);
+    pb.move_to(x, y);
+    for i in 1..=steps {
+        let (x, y) = at(r1, a0 + (a1 - a0) * i as f32 / steps as f32);
+        pb.line_to(x, y);
+    }
+    for i in (0..=steps).rev() {
+        let (x, y) = at(r0, a0 + (a1 - a0) * i as f32 / steps as f32);
+        pb.line_to(x, y);
+    }
+    pb.close();
+    pb.finish().expect("valid sector")
 }
 
 const TEXT: [u8; 4] = [232, 234, 240, 255];
@@ -367,6 +437,11 @@ impl Panel {
                         && y >= rect.top()
                         && y <= rect.bottom()
                 }
+                Item::Wedge {
+                    action: Some(_),
+                    style,
+                    ..
+                } => *style != Style::Disabled && item.wedge_contains(x, y),
                 _ => false,
             })
         });
@@ -378,7 +453,7 @@ impl Panel {
 
     pub fn hovered_action(&self) -> Option<Action> {
         match self.items.get(self.hovered?)? {
-            Item::Button { action, .. } => *action,
+            Item::Button { action, .. } | Item::Wedge { action, .. } => *action,
             _ => None,
         }
     }
@@ -392,6 +467,27 @@ impl Panel {
         let mut found = Vec::new();
         for item in &items {
             match item {
+                Item::Wedge {
+                    r0,
+                    r1,
+                    a0,
+                    a1,
+                    label,
+                    size,
+                    ..
+                } => {
+                    found.extend(self.missing_glyphs(label));
+                    let tw = self.text_width(label, *size, true);
+                    // Room for the label: the arc through the middle, or the circle.
+                    let room = if *r0 <= 0.0 {
+                        2.0 * r1 * 0.8
+                    } else {
+                        (r0 + r1) / 2.0 * (a1 - a0) * 0.85
+                    };
+                    if tw > room {
+                        found.push(format!("wedge too narrow: {label:?} ({tw:.0} > {room:.0})"));
+                    }
+                }
                 Item::Button { rect: r, label, .. } => {
                     found.extend(self.missing_glyphs(label));
                     let size = button_font_size(label);
@@ -446,15 +542,22 @@ impl Panel {
         (!missing.is_empty()).then(|| format!("no glyph for {missing:?} in {text:?}"))
     }
 
-    /// The wrist menu: what is needed without opening the main menu, in big buttons.
+    /// The palm menu: a round menu of what is needed without opening the main one.
+    /// Five sectors around a round "Menu" button in the middle.
     fn build_wrist(&mut self, s: &UiState) -> Vec<Item> {
+        use std::f32::consts::TAU;
         let l = s.lang;
         let st = s.settings;
         let (w, h) = (WRIST_WIDTH as f32, WRIST_HEIGHT as f32);
-        let mut items = vec![Item::Panel(rect(0.0, 0.0, w, h))];
-        let gap = 14.0;
-        let (bw, bh) = ((w - 4.0 * gap) / 3.0, (h - 3.0 * gap) / 2.0);
-        let buttons = [
+        let (cx, cy) = (w / 2.0, h / 2.0);
+        let outer = w / 2.0 - 4.0;
+        let mut items = vec![Item::Dot {
+            x: cx,
+            y: cy,
+            r: outer,
+            color: [16, 18, 24, 235],
+        }];
+        let sectors = [
             (l.t("Перед собою", "In front"), false, Action::Recenter),
             (l.t("Фокус", "Focus"), st.focus, Action::Focus(!st.focus)),
             (
@@ -464,33 +567,50 @@ impl Panel {
             ),
             (l.t("Де миша?", "Mouse?"), false, Action::FindMouse),
             (l.t("Знімок", "Screenshot"), false, Action::Screenshot),
-            (l.t("Меню", "Menu"), false, Action::OpenMenu),
         ];
-        for (i, (label, on, action)) in buttons.into_iter().enumerate() {
-            let r = rect(
-                gap + (i % 3) as f32 * (bw + gap),
-                gap + (i / 3) as f32 * (bh + gap),
-                bw,
-                bh,
-            );
-            let style = if on { Style::Selected } else { Style::Normal };
-            // An empty label: the bigger text goes on top.
-            items.push(button(r, "", style, Some(action)));
+        let (r0, r1) = (outer * 0.4, outer - 10.0);
+        let step = TAU / sectors.len() as f32;
+        let gap = 0.035;
+        for (i, (label, on, action)) in sectors.into_iter().enumerate() {
+            // The first sector straight up.
+            let mid = i as f32 * step;
+            let (a0, a1) = (mid - step / 2.0 + gap, mid + step / 2.0 - gap);
+            let (a0, a1) = if a0 < 0.0 {
+                (a0 + TAU, a1 + TAU)
+            } else {
+                (a0, a1)
+            };
             // As big as fits.
+            let room = (r0 + r1) / 2.0 * (a1 - a0) * 0.85;
             let mut size = 28.0;
-            while size > 16.0 && self.text_width(label, size, true) > r.width() - 28.0 {
+            while size > 16.0 && self.text_width(label, size, true) > room {
                 size -= 1.0;
             }
-            let tw = self.text_width(label, size, true);
-            items.push(text(
-                r.left() + (r.width() - tw) / 2.0,
-                r.top() + r.height() / 2.0 + size * 0.36,
+            items.push(Item::Wedge {
+                cx,
+                cy,
+                r0,
+                r1,
+                a0,
+                a1,
+                label: label.to_owned(),
                 size,
-                true,
-                [255, 255, 255, 255],
-                label,
-            ));
+                style: if on { Style::Selected } else { Style::Normal },
+                action: Some(action),
+            });
         }
+        items.push(Item::Wedge {
+            cx,
+            cy,
+            r0: 0.0,
+            r1: r0 - 12.0,
+            a0: 0.0,
+            a1: TAU,
+            label: l.t("Меню", "Menu").to_owned(),
+            size: 28.0,
+            style: Style::Normal,
+            action: Some(Action::OpenMenu),
+        });
         items
     }
 
@@ -931,6 +1051,37 @@ impl Panel {
                     color,
                     text,
                 } => self.draw_text(&mut pixmap, *x, *baseline, *size, *medium, *color, text),
+                Item::Wedge {
+                    cx,
+                    cy,
+                    r0,
+                    r1,
+                    a0,
+                    a1,
+                    label,
+                    size,
+                    style,
+                    ..
+                } => {
+                    let hovered = self.hovered == Some(i);
+                    let bg = match (style, hovered) {
+                        (Style::Selected, _) => ACCENT,
+                        (_, true) => [255, 255, 255, 52],
+                        _ => [255, 255, 255, 20],
+                    };
+                    fill(&mut pixmap, sector(*cx, *cy, *r0, *r1, *a0, *a1), bg);
+                    let (mx, my) = wedge_center(*cx, *cy, *r0, *r1, *a0, *a1);
+                    let tw = self.text_width(label, *size, true);
+                    self.draw_text(
+                        &mut pixmap,
+                        mx - tw / 2.0,
+                        my + size * 0.36,
+                        *size,
+                        true,
+                        [255, 255, 255, 255],
+                        label,
+                    );
+                }
                 Item::Button {
                     rect: r,
                     label,
@@ -2888,6 +3039,28 @@ mod tests {
     }
 
     /// Every page and state, in both languages, without text that does not fit.
+    #[test]
+    fn wedges_are_hit_where_drawn() {
+        let w = Item::Wedge {
+            cx: 0.0,
+            cy: 0.0,
+            r0: 10.0,
+            r1: 20.0,
+            a0: std::f32::consts::TAU - 0.5,
+            a1: std::f32::consts::TAU + 0.5,
+            label: String::new(),
+            size: 10.0,
+            style: Style::Normal,
+            action: None,
+        };
+        // Straight up, a little left and right of it; not in the middle or below.
+        assert!(w.wedge_contains(0.0, -15.0));
+        assert!(w.wedge_contains(3.0, -15.0));
+        assert!(w.wedge_contains(-3.0, -15.0));
+        assert!(!w.wedge_contains(0.0, -5.0));
+        assert!(!w.wedge_contains(0.0, 15.0));
+    }
+
     #[test]
     fn nothing_overflows() {
         let mut states = Vec::new();
