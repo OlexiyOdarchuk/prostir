@@ -104,6 +104,9 @@ pub struct UiState {
     pub can_move_mouse: bool,
     /// Names of the PCs this headset is paired with.
     pub paired: Vec<String>,
+    /// Local time, `14:05`, and the date, `Ср, 18 лист.`, for the palm menu.
+    pub clock: String,
+    pub date: String,
     /// The paired PC waiting for a second press to be forgotten.
     pub confirm_forget: Option<usize>,
     /// The physical display is being shown (its lid is open).
@@ -624,6 +627,8 @@ impl Panel {
                 action: Some(action),
             });
         }
+        // The middle: the time, and the main menu under it (the whole circle is the
+        // button).
         items.push(Item::Wedge {
             cx,
             cy,
@@ -631,11 +636,29 @@ impl Panel {
             r1: r0 - 12.0,
             a0: 0.0,
             a1: TAU,
-            label: l.t("Меню", "Menu").to_owned(),
+            label: String::new(),
             size: 28.0,
             style: Style::Normal,
             action: Some(Action::OpenMenu),
         });
+        let (date, time, menu) = (18.0, 42.0, 18.0);
+        let centred = |this: &mut Self, s: &str, size: f32, medium: bool| {
+            cx - this.text_width(s, size, medium) / 2.0
+        };
+        let x = centred(self, &s.date, date, false);
+        items.push(text(x, cy - 26.0, date, false, MUTED, &s.date));
+        let x = centred(self, &s.clock, time, true);
+        items.push(text(
+            x,
+            cy + 16.0,
+            time,
+            true,
+            [255, 255, 255, 255],
+            &s.clock,
+        ));
+        let label = l.t("Меню", "Menu");
+        let x = centred(self, label, menu, false);
+        items.push(text(x, cy + 46.0, menu, false, MUTED, label));
         items
     }
 
@@ -3102,6 +3125,8 @@ mod tests {
             )),
             can_move_mouse: false,
             paired: vec!["workstation".into(), "a-much-longer-laptop-name".into()],
+            clock: "23:59".into(),
+            date: "Ср, 18 лист.".into(),
             confirm_forget: Some(1),
             windows: vec![MonitorEntry {
                 id: 10,

@@ -143,7 +143,7 @@ rings.
 
 With your hands shown, hold your left palm open towards your face for a quarter of a
 second and a round menu appears on it: In front, Focus, Cinema, Mouse?, Screenshot and
-Line up around Menu in the middle. Press a sector with the other hand's index finger,
+Line up around Menu in the middle, which also shows the time and date. Press a sector with the other hand's index finger,
 or point at it. The hand holding the menu is not drawn over it, and a hand reaching
 for a menu turns see-through, so it does not hide the buttons. "In front" turns the
 whole arrangement so the primary monitor is straight ahead.

@@ -123,6 +123,57 @@ fn set_refresh_rate(session: &xr::Session<Gfx>, saver: bool) {
     }
 }
 
+/// The headset's local time as `14:05`, with the broken-down time.
+fn local_clock() -> (String, Option<libc::tm>) {
+    // SAFETY: plain libc time calls on a zeroed `tm`.
+    unsafe {
+        let now = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&now, &mut tm).is_null() {
+            return (String::new(), None);
+        }
+        (format!("{:02}:{:02}", tm.tm_hour, tm.tm_min), Some(tm))
+    }
+}
+
+/// Today, short: `Ср, 18 лист.` or `Wed 18 Nov`.
+fn local_date(lang: Lang) -> String {
+    let Some(tm) = local_clock().1 else {
+        return String::new();
+    };
+    let (day, month) = (
+        tm.tm_wday.clamp(0, 6) as usize,
+        tm.tm_mon.clamp(0, 11) as usize,
+    );
+    match lang {
+        Lang::Uk => {
+            const DAYS: [&str; 7] = ["Нд", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"];
+            const MONTHS: [&str; 12] = [
+                "січ.",
+                "лют.",
+                "бер.",
+                "квіт.",
+                "трав.",
+                "черв.",
+                "лип.",
+                "серп.",
+                "вер.",
+                "жовт.",
+                "лист.",
+                "груд.",
+            ];
+            format!("{}, {} {}", DAYS[day], tm.tm_mday, MONTHS[month])
+        }
+        Lang::En => {
+            const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+            const MONTHS: [&str; 12] = [
+                "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+            ];
+            format!("{} {} {}", DAYS[day], tm.tm_mday, MONTHS[month])
+        }
+    }
+}
+
 /// The menu's size factor (the "Large" menu setting), as `f32` bits.
 static MENU_SCALE: std::sync::atomic::AtomicU32 =
     std::sync::atomic::AtomicU32::new(1.0f32.to_bits());
@@ -1233,6 +1284,8 @@ impl Scene {
                 .filter(|(_, at)| at.elapsed() < CONFIRM_FOR)
                 .map(|(i, _)| i),
             paired: self.paired.iter().map(|(_, n)| n.clone()).collect(),
+            clock: local_clock().0,
+            date: local_date(self.lang()),
             confirm_forget: self
                 .confirm_forget
                 .filter(|(_, at)| at.elapsed() < CONFIRM_FOR)
