@@ -8,7 +8,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 use std::time::Instant;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use log::{debug, error, info, warn};
 use ndk::media::media_codec::{
     DequeuedInputBufferResult, DequeuedOutputBufferInfoResult, MediaCodec, MediaCodecDirection,
@@ -53,6 +53,56 @@ fn run(
     feedback: &Feedback,
     stop: &AtomicBool,
 ) -> Result<()> {
+    let mut timing = Timing {
+        id,
+        feedback: Some(feedback.clone()),
+        ..Default::default()
+    };
+    let mut gate = KeyframeGate::new(id, feedback.clone());
+    // A decoder error (a lost surface, a bad frame) recreates the decoder instead of
+    // freezing the monitor; only repeated failures in a row give up.
+    let mut failures = 0;
+    loop {
+        let decoder = start_decoder(codec, width, height, window)?;
+        gate.wait();
+        let result = (|| -> Result<()> {
+            while !stop.load(Ordering::Relaxed) {
+                match frames.recv_timeout(Duration::from_millis(4)) {
+                    Ok(frame) if gate.passes(&frame) => {
+                        if !queue(&decoder, &frame, &mut timing)? {
+                            gate.wait();
+                        } else {
+                            failures = 0;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => return Ok(()),
+                }
+                drain(&decoder, &mut timing)?;
+                timing.report();
+            }
+            Ok(())
+        })();
+        let _ = decoder.stop();
+        match result {
+            Ok(()) => return Ok(()),
+            Err(e) if failures < 5 => {
+                failures += 1;
+                warn!("decoder {id}: {e:#}; starting it again");
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+fn start_decoder(
+    codec: Codec,
+    width: u32,
+    height: u32,
+    window: &NativeWindow,
+) -> Result<MediaCodec> {
     let mime = codec.mime();
     let decoder =
         MediaCodec::from_decoder_type(mime).with_context(|| format!("no decoder for {mime}"))?;
@@ -74,46 +124,76 @@ fn run(
         "decoder {} started for {width}x{height}",
         decoder.name().unwrap_or_default()
     );
-
-    let mut timing = Timing {
-        id,
-        feedback: Some(feedback.clone()),
-        ..Default::default()
-    };
-    let result = (|| -> Result<()> {
-        while !stop.load(Ordering::Relaxed) {
-            match frames.recv_timeout(Duration::from_millis(4)) {
-                Ok(frame) => queue(&decoder, &frame, &mut timing)?,
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => return Ok(()),
-            }
-            drain(&decoder, &mut timing)?;
-            timing.report();
-        }
-        Ok(())
-    })();
-    let _ = decoder.stop();
-    result
+    Ok(decoder)
 }
 
-fn queue(decoder: &MediaCodec, frame: &Frame, timing: &mut Timing) -> Result<()> {
+/// After a frame is lost, the frames that follow it until the next keyframe would
+/// decode into garbage: skip them and ask the PC for a keyframe (not on every frame).
+struct KeyframeGate {
+    id: u8,
+    feedback: Feedback,
+    waiting: bool,
+    asked: Option<Instant>,
+}
+
+impl KeyframeGate {
+    fn new(id: u8, feedback: Feedback) -> Self {
+        Self {
+            id,
+            feedback,
+            waiting: false,
+            asked: None,
+        }
+    }
+
+    fn wait(&mut self) {
+        self.waiting = true;
+        self.ask();
+    }
+
+    fn ask(&mut self) {
+        if self
+            .asked
+            .is_none_or(|t| t.elapsed() >= Duration::from_millis(300))
+        {
+            self.asked = Some(Instant::now());
+            let _ = self
+                .feedback
+                .send(&ClientMsg::RequestKeyframe { id: self.id });
+        }
+    }
+
+    fn passes(&mut self, frame: &Frame) -> bool {
+        if frame.keyframe {
+            self.waiting = false;
+        } else if self.waiting {
+            self.ask();
+        }
+        !self.waiting
+    }
+}
+
+/// Hands a frame to the decoder; `false` when it had to be dropped.
+fn queue(decoder: &MediaCodec, frame: &Frame, timing: &mut Timing) -> Result<bool> {
     for _ in 0..200 {
         match decoder.dequeue_input_buffer(Duration::from_millis(5))? {
             DequeuedInputBufferResult::Buffer(mut buffer) => {
                 let dst = buffer.buffer_mut();
                 if frame.data.len() > dst.len() {
-                    bail!(
+                    warn!(
                         "frame of {} bytes does not fit the {} byte input buffer",
                         frame.data.len(),
                         dst.len()
                     );
+                    decoder.queue_input_buffer(buffer, 0, 0, frame.pts_us, 0)?;
+                    return Ok(false);
                 }
                 for (d, s) in dst.iter_mut().zip(&frame.data) {
                     d.write(*s);
                 }
                 decoder.queue_input_buffer(buffer, 0, frame.data.len(), frame.pts_us, 0)?;
                 timing.queued(frame);
-                return Ok(());
+                return Ok(true);
             }
             // All input buffers busy: hand finished frames to the compositor to free one.
             DequeuedInputBufferResult::TryAgainLater => drain(decoder, timing)?,
@@ -123,7 +203,7 @@ fn queue(decoder: &MediaCodec, frame: &Frame, timing: &mut Timing) -> Result<()>
         "decoder stalled, dropping a frame (keyframe: {})",
         frame.keyframe
     );
-    Ok(())
+    Ok(false)
 }
 
 fn drain(decoder: &MediaCodec, timing: &mut Timing) -> Result<()> {

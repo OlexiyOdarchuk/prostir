@@ -878,7 +878,12 @@ fn run(app: &AndroidApp) -> Result<()> {
                 );
                 if scene.error.as_ref().is_none_or(|(t, _)| t != what) {
                     scene.show_error(what.into());
-                    scene.panel_open = true;
+                    // In front of the user, wherever the menu was last.
+                    let (head, forward) = scene.head;
+                    let hands = scene.hands_in_view;
+                    scene.open_panel(head, forward, hands);
+                    // The 6 s count from when the message is up, not from the failure.
+                    not_entitled_since = Some(Instant::now());
                 }
                 // Long enough to read, then close as the store expects.
                 if since.elapsed() > Duration::from_secs(6) {

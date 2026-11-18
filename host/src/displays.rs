@@ -1168,7 +1168,7 @@ impl Displays {
         let result = path
             .parent()
             .map_or(Ok(()), std::fs::create_dir_all)
-            .and_then(|()| std::fs::write(&path, text));
+            .and_then(|()| prostir_proto::secure::write_atomic(&path, text.as_bytes()));
         if let Err(e) = result {
             warn!("cannot save {}: {e}", path.display());
         }

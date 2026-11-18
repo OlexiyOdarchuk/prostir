@@ -58,21 +58,29 @@ impl Identity {
     }
 }
 
-#[cfg(unix)]
 fn write_private(path: &Path, text: &str) -> io::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
-    f.write_all(text.as_bytes())
+    write_atomic(path, text.as_bytes())
 }
 
-#[cfg(not(unix))]
-fn write_private(path: &Path, text: &str) -> io::Result<()> {
-    std::fs::write(path, text)
+/// Replaces a file in one step: written next to it, synced, then renamed over it. A
+/// crash or a full disk mid-write leaves the old file, never a cut-off one. The file
+/// is readable by its owner only (keys, trusted devices, settings).
+pub fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = std::path::PathBuf::from(tmp);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut f = options.open(&tmp)?;
+    f.write_all(data)?;
+    f.sync_all()?;
+    drop(f);
+    std::fs::rename(&tmp, path)
 }
 
 pub fn to_hex(bytes: &[u8]) -> String {
@@ -157,7 +165,7 @@ impl TrustStore {
             .iter()
             .map(|(k, l)| format!("{} {l}\n", to_hex(k)))
             .collect();
-        std::fs::write(&self.path, text)
+        write_atomic(&self.path, text.as_bytes())
     }
 }
 

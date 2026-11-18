@@ -168,7 +168,7 @@ impl Settings {
     }
 
     pub fn save(&self, path: &Path) {
-        if let Err(e) = std::fs::write(path, self.to_text()) {
+        if let Err(e) = prostir_proto::secure::write_atomic(path, self.to_text().as_bytes()) {
             log::warn!("cannot save settings to {}: {e}", path.display());
         }
     }

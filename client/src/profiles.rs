@@ -124,7 +124,7 @@ pub fn save(path: &Path, profiles: &[Profile; SLOTS]) {
         .map(|(i, p)| format!("[{i}]\n{}", p.to_text()))
         .collect::<Vec<_>>()
         .join("\n");
-    if let Err(e) = std::fs::write(path, text) {
+    if let Err(e) = prostir_proto::secure::write_atomic(path, text.as_bytes()) {
         log::warn!("cannot save profiles to {}: {e}", path.display());
     }
 }

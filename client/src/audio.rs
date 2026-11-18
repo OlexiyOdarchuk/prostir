@@ -23,9 +23,23 @@ impl Player {
         let (tx, rx) = mpsc::sync_channel(32);
         std::thread::Builder::new()
             .name("audio".into())
-            .spawn(move || match Stream::open() {
-                Ok(stream) => play(&stream, &rx),
-                Err(e) => warn!("no sound: AAudio error {e}"),
+            .spawn(move || {
+                // An AAudio stream dies when the audio route changes (headphones in or
+                // out): open a new one and keep playing.
+                let mut failures = 0;
+                while failures < 5 {
+                    match Stream::open() {
+                        Ok(stream) => match play(&stream, &rx) {
+                            Ended::Closed => return,
+                            Ended::Failed => failures = 0,
+                        },
+                        Err(e) => {
+                            warn!("no sound: AAudio error {e}");
+                            failures += 1;
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(300));
+                }
             })
             .expect("spawn audio thread");
         Self { tx }
@@ -104,13 +118,21 @@ fn check(result: i32) -> Result<(), i32> {
     if result < 0 { Err(result) } else { Ok(()) }
 }
 
-fn play(stream: &Stream, rx: &Receiver<Vec<u8>>) {
+/// Why playing stopped.
+enum Ended {
+    /// The session is over.
+    Closed,
+    /// The stream broke; another one may work.
+    Failed,
+}
+
+fn play(stream: &Stream, rx: &Receiver<Vec<u8>>) -> Ended {
     let mut queue: VecDeque<Vec<u8>> = VecDeque::new();
     loop {
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(pcm) => queue.push_back(pcm),
             Err(RecvTimeoutError::Timeout) => continue,
-            Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Disconnected) => return Ended::Closed,
         }
         while let Ok(pcm) = rx.try_recv() {
             queue.push_back(pcm);
@@ -121,7 +143,7 @@ fn play(stream: &Stream, rx: &Receiver<Vec<u8>>) {
         while let Some(pcm) = queue.pop_front() {
             if let Err(e) = stream.write(&pcm) {
                 warn!("sound output: AAudio error {e}");
-                return;
+                return Ended::Failed;
             }
         }
     }

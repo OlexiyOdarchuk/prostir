@@ -55,9 +55,22 @@ impl Recorder {
                 if !ensure_permission(&flag) {
                     return;
                 }
-                match Input::open() {
-                    Ok(input) => record(&input, &feedback, &flag),
-                    Err(e) => warn!("no microphone: AAudio error {e}"),
+                // A broken input stream (an audio route change) is opened again.
+                let mut failures = 0;
+                while failures < 5 && !flag.load(Ordering::Relaxed) {
+                    match Input::open() {
+                        Ok(input) => {
+                            if record(&input, &feedback, &flag) {
+                                return;
+                            }
+                            failures = 0;
+                        }
+                        Err(e) => {
+                            warn!("no microphone: AAudio error {e}");
+                            failures += 1;
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(300));
                 }
             })
             .expect("spawn mic thread");
@@ -71,7 +84,8 @@ impl Drop for Recorder {
     }
 }
 
-fn record(input: &Input, feedback: &Feedback, stop: &AtomicBool) {
+/// Records until stopped (`true`) or the stream breaks (`false`).
+fn record(input: &Input, feedback: &Feedback, stop: &AtomicBool) -> bool {
     let mut buf = vec![0i16; FRAMES * MIC_CHANNELS as usize];
     info!("headset microphone on");
     while !stop.load(Ordering::Relaxed) {
@@ -88,11 +102,12 @@ fn record(input: &Input, feedback: &Feedback, stop: &AtomicBool) {
             }
             Err(e) => {
                 warn!("microphone: AAudio error {e}");
-                break;
+                return false;
             }
         }
     }
     info!("headset microphone off");
+    true
 }
 
 /// Asks for the microphone permission once (the headset shows a system dialog) and
