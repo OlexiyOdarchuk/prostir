@@ -46,7 +46,8 @@ cp "$ROOT/target/aarch64-linux-android/$PROFILE/libprostir.so" "$STAGE/lib/arm64
 AAR="$OUT/openxr_loader_for_android-$LOADER_VERSION.aar"
 if [[ ! -f "$AAR" ]]; then
     echo ">> downloading Khronos OpenXR loader $LOADER_VERSION"
-    curl -sfL -o "$AAR" "https://repo1.maven.org/maven2/org/khronos/openxr/openxr_loader_for_android/$LOADER_VERSION/openxr_loader_for_android-$LOADER_VERSION.aar"
+    # Maven Central now and then refuses CI runners for a moment: try again.
+    curl -sSfL --retry 5 --retry-all-errors --retry-delay 5 -o "$AAR" "https://repo1.maven.org/maven2/org/khronos/openxr/openxr_loader_for_android/$LOADER_VERSION/openxr_loader_for_android-$LOADER_VERSION.aar"
 fi
 if ! echo "$LOADER_SHA256  $AAR" | sha256sum -c --quiet -; then
     echo "!! $AAR does not match the expected SHA-256; delete it and try again" >&2
