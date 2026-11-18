@@ -4,58 +4,98 @@ on:
   push:
     tags: ["v*"]
 
+# Third-party actions are pinned to commit SHAs (the tag is in the comment). Only the
+# last job can write to the repository, and it runs nothing but the release upload.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
+  build:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Tag matches the version in Cargo.toml
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match version ${version} in Cargo.toml"
+            exit 1
+          fi
       - name: System libraries
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch
         with:
+          toolchain: stable
           targets: aarch64-linux-android
-      - uses: Swatinem/rust-cache@v2
-      # Optional release key: repository secrets ANDROID_KEYSTORE (base64),
-      # ANDROID_KEYSTORE_PASS and ANDROID_KEY_ALIAS. Without them the APK is
-      # signed with a throwaway debug key.
-      - name: Signing key
-        env:
-          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE }}
-        run: |
-          if [ -n "$KEYSTORE_B64" ]; then
-            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.keystore"
-            echo "KEYSTORE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
-          fi
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # Release key: repository secrets ANDROID_KEYSTORE (base64), ANDROID_KEYSTORE_PASS
+      # and ANDROID_KEY_ALIAS. The job fails without them, because an APK signed with
+      # another key cannot update an installed Prostir. The keystore lives only for this
+      # step.
       - name: Build
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE }}
           KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASS }}
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          # GoatCounter key for counting users (see host/src/usage.rs). Without it
-          # the build never counts.
+          REQUIRE_RELEASE_KEY: "1"
+          # GoatCounter key for counting users (see host/src/usage.rs). Anyone can read
+          # it out of the released binary, so it must only be allowed to record
+          # pageviews, and only for the Prostir site. Without it the build never counts.
           PROSTIR_COUNT_TOKEN: ${{ secrets.GOATCOUNTER_TOKEN }}
         run: |
-          [ -n "$KEYSTORE_PASS" ] || unset KEYSTORE_PASS
-          [ -n "$KEY_ALIAS" ] || unset KEY_ALIAS
+          if [ -z "$KEYSTORE_B64" ] || [ -z "$KEYSTORE_PASS" ] || [ -z "$KEY_ALIAS" ]; then
+            echo "::error::ANDROID_KEYSTORE, ANDROID_KEYSTORE_PASS and ANDROID_KEY_ALIAS must be set"
+            exit 1
+          fi
+          export KEYSTORE="$RUNNER_TEMP/release.keystore"
+          trap 'rm -f "$KEYSTORE"' EXIT
+          (umask 077 && printf '%s' "$KEYSTORE_B64" | base64 -d > "$KEYSTORE")
+          unset KEYSTORE_B64
           ./scripts/package-release.sh
       - name: Debian and RPM packages
         run: |
-          cargo install --locked cargo-deb cargo-generate-rpm
+          cargo install --locked cargo-deb@3.8.0 cargo-generate-rpm@0.21.1
+          # The development profile keeps debug info; the packages do not need it.
+          strip --strip-debug target/release/prostir
           cargo deb -p prostir-host --no-build -o dist/
           cargo generate-rpm -p host -o dist/
-          (cd dist && sha256sum *.tar.gz *.apk *.deb *.rpm > SHA256SUMS)
-      - uses: softprops/action-gh-release@v2
+          (cd dist && sha256sum *.tar.gz *.apk *.deb *.rpm THIRD-PARTY-LICENSES.txt > SHA256SUMS)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dist
+          if-no-files-found: error
+          path: |
+            dist/*.tar.gz
+            dist/*.apk
+            dist/*.deb
+            dist/*.rpm
+            dist/THIRD-PARTY-LICENSES.txt
+            dist/SHA256SUMS
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: dist
+          path: dist
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           draft: true
+          fail_on_unmatched_files: true
           files: |
             dist/*.tar.gz
             dist/*.apk
             dist/*.deb
             dist/*.rpm
+            dist/THIRD-PARTY-LICENSES.txt
             dist/SHA256SUMS
