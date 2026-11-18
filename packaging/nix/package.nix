@@ -2,6 +2,7 @@
 # package in a NixOS or Home Manager configuration.
 {
   lib,
+  stdenv,
   rustPlatform,
   pkg-config,
   makeWrapper,
@@ -52,9 +53,10 @@ let
   # comes from the system driver (NixOS: hardware.nvidia).
   vaDrivers = [
     "/run/opengl-driver/lib/dri"
-    "${intel-media-driver}/lib/dri"
-    "${mesa}/lib/dri"
-  ];
+  ]
+  # Intel graphics only come with x86 machines.
+  ++ lib.optional stdenv.hostPlatform.isx86_64 "${intel-media-driver}/lib/dri"
+  ++ [ "${mesa}/lib/dri" ];
 in
 rustPlatform.buildRustPackage {
   pname = "prostir";

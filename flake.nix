@@ -22,6 +22,7 @@
         default = {
           type = "app";
           program = nixpkgs.lib.getExe self.packages.${pkgs.stdenv.hostPlatform.system}.prostir;
+          meta.description = "Start Prostir on the PC";
         };
       });
 
