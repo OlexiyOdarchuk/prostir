@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use log::{debug, error, info, warn};
-use prostir_proto::{Codec, HostMsg, LayoutRow, MIRROR_ID};
+use prostir_proto::{Codec, HostMsg, LayoutRow, MIRROR_ID, NEXT};
 
 use crate::audio::{AudioOut, MicIn};
 use crate::desktop::{Desktop, Output};
@@ -292,6 +292,133 @@ impl Router {
     }
 }
 
+/// A monitor to arrange: id, where its centre is seen (in the headset's shared pixel
+/// scale, [`NEXT`] when unknown), width and height on the desktop.
+#[derive(Debug, Clone, Copy)]
+struct Seat {
+    id: u8,
+    center: i32,
+    w: i32,
+    h: i32,
+}
+
+/// Desktop positions (top-left, logical pixels) for monitors in rows, top to bottom,
+/// as the headset sees them. The row with `main` is laid out touching, left to right;
+/// every monitor of another row keeps its offset from the monitor of the row next to
+/// it that it overlaps most, and touches the monitors under (or over) it, so the mouse
+/// leaves one monitor where the eyes see the next. Nothing overlaps.
+fn arrange(rows: &[Vec<Seat>], main: u8) -> Vec<(u8, i32, i32)> {
+    // Unknown centres: right after the previous monitor of the row.
+    let rows: Vec<Vec<Seat>> = rows
+        .iter()
+        .filter(|r| !r.is_empty())
+        .map(|r| {
+            let mut out: Vec<Seat> = Vec::with_capacity(r.len());
+            for m in r {
+                let mut m = *m;
+                if m.center == NEXT {
+                    m.center = out.last().map_or(0, |p| p.center + p.w / 2 + m.w / 2);
+                }
+                out.push(m);
+            }
+            out.sort_by_key(|m| m.center);
+            out
+        })
+        .collect();
+    let Some(main_row) = rows
+        .iter()
+        .position(|r| r.iter().any(|m| m.id == main))
+        .or_else(|| (!rows.is_empty()).then_some(0))
+    else {
+        return Vec::new();
+    };
+    // Placed so far: (seat, x, y).
+    let mut placed: Vec<(Seat, i32, i32)> = Vec::new();
+    let tallest = rows[main_row].iter().map(|m| m.h).max().unwrap_or(0);
+    let mut x = 0;
+    for m in &rows[main_row] {
+        placed.push((*m, x, (tallest - m.h) / 2));
+        x += m.w;
+    }
+    let order: Vec<(usize, usize)> = (0..main_row)
+        .rev()
+        .map(|r| (r, r + 1))
+        .chain((main_row + 1..rows.len()).map(|r| (r, r - 1)))
+        .collect();
+    for (r, next_to) in order {
+        let above = r < next_to;
+        let neighbours: Vec<(Seat, i32, i32)> = placed
+            .iter()
+            .copied()
+            .filter(|(m, _, _)| rows[next_to].iter().any(|n| n.id == m.id))
+            .collect();
+        let mut row: Vec<(Seat, i32)> = Vec::new();
+        for m in &rows[r] {
+            let overlap = |a: &Seat| {
+                (m.center + m.w / 2).min(a.center + a.w / 2)
+                    - (m.center - m.w / 2).max(a.center - a.w / 2)
+            };
+            let anchor = neighbours.iter().max_by_key(|(a, _, _)| {
+                let o = overlap(a);
+                if o > 0 {
+                    (1, o)
+                } else {
+                    (0, -(m.center - a.center).abs())
+                }
+            });
+            let x = match anchor {
+                Some((a, ax, _)) => ax + a.w / 2 + (m.center - a.center) - m.w / 2,
+                None => 0,
+            };
+            row.push((*m, x));
+        }
+        // Left to right, side by side: no overlaps, and near-touching ones touch.
+        row.sort_by_key(|(_, x)| *x);
+        for i in 1..row.len() {
+            let right = row[i - 1].1 + row[i - 1].0.w;
+            let gap = row[i].1 - right;
+            if gap < row[i].0.w.min(row[i - 1].0.w) / 10 {
+                row[i].1 = right;
+            }
+        }
+        // Reachable: each overlaps the row next to it by at least a bit.
+        if let (Some(lo), Some(hi)) = (
+            neighbours.iter().map(|(_, x, _)| *x).min(),
+            neighbours.iter().map(|(n, x, _)| x + n.w).max(),
+        ) {
+            const REACH: i32 = 200;
+            for (m, x) in &mut row {
+                *x = (*x).clamp(lo - m.w + REACH.min(m.w), hi - REACH.min(m.w));
+            }
+            for i in 1..row.len() {
+                let right = row[i - 1].1 + row[i - 1].0.w;
+                if row[i].1 < right {
+                    row[i].1 = right;
+                }
+            }
+        }
+        for (m, x) in row {
+            // Touch the nearest monitors under (or over) it, overlapping none.
+            let below: Vec<&(Seat, i32, i32)> = placed
+                .iter()
+                .filter(|(n, nx, _)| x < nx + n.w && *nx < x + m.w)
+                .collect();
+            let y = if above {
+                below.iter().map(|(_, _, ny)| *ny).min().unwrap_or(0) - m.h
+            } else {
+                below.iter().map(|(n, _, ny)| ny + n.h).max().unwrap_or(0)
+            };
+            placed.push((m, x, y));
+        }
+    }
+    let min_x = placed.iter().map(|p| p.1).min().unwrap_or(0);
+    let min_y = placed.iter().map(|p| p.2).min().unwrap_or(0);
+    placed
+        .into_iter()
+        .map(|(m, x, y)| (m.id, x - min_x, y - min_y))
+        .collect()
+}
+
 struct Monitor {
     // Field order matters: the encoder must stop before the output goes away.
     encoder: Encoder,
@@ -323,7 +450,8 @@ pub struct SavedMonitors {
     pub sharp: bool,
     /// Rows from top to bottom: (left edge in pixels, number of monitors), covering
     /// `specs` in order. Empty: one row.
-    pub rows: Vec<(i32, usize)>,
+    /// Rows: the seen centre of each monitor in it ([`NEXT`] if unknown).
+    pub rows: Vec<Vec<i32>>,
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -348,10 +476,10 @@ pub fn load_saved(parse: impl Fn(&str) -> Result<MonitorSpec, String>) -> Option
     let mut mic = true;
     let mut bitrate = None;
     let mut sharp = false;
-    let mut rows: Vec<(i32, usize)> = Vec::new();
+    let mut rows: Vec<Vec<i32>> = Vec::new();
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        if let Some(v) = line.strip_prefix("row ") {
-            rows.push((v.trim().parse().unwrap_or(0), 0));
+        if line == "row" || line.starts_with("row ") {
+            rows.push(Vec::new());
             continue;
         }
         if let Some(v) = line.strip_prefix("sharp ") {
@@ -374,16 +502,21 @@ pub fn load_saved(parse: impl Fn(&str) -> Result<MonitorSpec, String>) -> Option
             mirror = v.trim() != "off";
             continue;
         }
-        let (spec, star) = match line.strip_suffix('*') {
+        let (line, star) = match line.strip_suffix('*') {
             Some(s) => (s.trim(), true),
             None => (line, false),
+        };
+        // `2560x1440 at -1300`: where the headset showed it.
+        let (spec, center) = match line.split_once(" at ") {
+            Some((spec, c)) => (spec.trim(), c.trim().parse().unwrap_or(NEXT)),
+            None => (line, NEXT),
         };
         if let Ok(spec) = parse(spec) {
             if star {
                 primary = Some(specs.len());
             }
             if let Some(r) = rows.last_mut() {
-                r.1 += 1;
+                r.push(center);
             }
             specs.push(spec);
         }
@@ -475,13 +608,13 @@ impl Displays {
         let ids = displays.order.clone();
         // Rebuild the saved rows over the new ids (same order as the saved specs).
         let mut rest = ids.as_slice();
-        for &(offset, len) in &saved.rows {
-            let (row, tail) = rest.split_at(len.min(rest.len()));
+        for centers in &saved.rows {
+            let (row, tail) = rest.split_at(centers.len().min(rest.len()));
             rest = tail;
             if !row.is_empty() {
                 displays.rows.push(LayoutRow {
-                    offset,
                     ids: row.to_vec(),
+                    centers: centers[..row.len()].to_vec(),
                 });
             }
         }
@@ -862,8 +995,6 @@ impl Displays {
     /// by side in `order`, vertically centred, and the mirrored display under the
     /// primary monitor. The mouse then crosses screens where the eyes expect it to.
     fn apply_kde_layout(&self) {
-        /// A monitor in a row: id, KDE output name, (width, height) in pixels.
-        type Member = (u8, String, (i32, i32));
         let geometries = self.desktop.geometries();
         let size = |name: &str, spec: Option<&MonitorSpec>| {
             geometries.get(name).map(|g| (g.w, g.h)).or_else(|| {
@@ -875,35 +1006,43 @@ impl Displays {
                 })
             })
         };
-        // Rows stacked top to bottom with no gap, so the mouse crosses up and down where
-        // they meet; within a row monitors touch and share a vertical centre.
-        let rows: Vec<(i32, Vec<Member>)> = self
+        // As the headset shows them (see `arrange`).
+        let names: HashMap<u8, String> = self
+            .monitors
+            .iter()
+            .map(|(id, m)| (*id, m.output.output_name().to_owned()))
+            .collect();
+        let rows: Vec<Vec<Seat>> = self
             .effective_rows()
             .into_iter()
             .map(|r| {
-                let members = r
-                    .ids
+                r.ids
                     .iter()
-                    .filter_map(|id| {
+                    .zip(&r.centers)
+                    .filter_map(|(id, center)| {
                         let m = self.monitors.get(id)?;
-                        let name = m.output.output_name().to_owned();
-                        let wh = size(&name, Some(&m.spec))?;
-                        Some((*id, name, wh))
+                        let (w, h) = size(&names[id], Some(&m.spec))?;
+                        Some(Seat {
+                            id: *id,
+                            center: *center,
+                            w,
+                            h,
+                        })
                     })
-                    .collect();
-                (r.offset, members)
+                    .collect()
             })
             .collect();
+        let main = self
+            .primary
+            .or_else(|| self.order.first().copied())
+            .unwrap_or(0);
         let mut planned: Vec<(u8, String, i32, i32, i32, i32)> = Vec::new();
         let mut top = 0;
-        for (offset, members) in &rows {
-            let tallest = members.iter().map(|m| m.2.1).max().unwrap_or(0);
-            let mut x = *offset;
-            for (id, name, (w, h)) in members {
-                planned.push((*id, name.clone(), x, top + (tallest - h) / 2, *w, *h));
-                x += w;
+        for (id, x, y) in arrange(&rows, main) {
+            if let Some(seat) = rows.iter().flatten().find(|m| m.id == id) {
+                planned.push((id, names[&id].clone(), x, y, seat.w, seat.h));
+                top = top.max(y + seat.h);
             }
-            top += tallest;
         }
         // KDE wants the desktop to start at 0,0.
         let left = planned.iter().map(|p| p.2).min().unwrap_or(0);
@@ -1020,14 +1159,15 @@ impl Displays {
         let mut rows: Vec<LayoutRow> = self
             .rows
             .iter()
-            .map(|r| LayoutRow {
-                offset: r.offset,
-                ids: r
+            .map(|r| {
+                let (ids, centers) = r
                     .ids
                     .iter()
-                    .copied()
-                    .filter(|id| self.monitors.contains_key(id))
-                    .collect(),
+                    .zip(r.centers.iter().chain(std::iter::repeat(&NEXT)))
+                    .filter(|(id, _)| self.monitors.contains_key(id))
+                    .map(|(id, c)| (*id, *c))
+                    .unzip();
+                LayoutRow { ids, centers }
             })
             .filter(|r| !r.ids.is_empty())
             .collect();
@@ -1039,11 +1179,15 @@ impl Displays {
             .filter(|id| !placed.contains(id) && self.monitors.contains_key(id))
             .collect();
         if !missing.is_empty() {
+            let centers = vec![NEXT; missing.len()];
             match rows.last_mut() {
-                Some(last) => last.ids.extend(missing),
+                Some(last) => {
+                    last.ids.extend(missing);
+                    last.centers.extend(centers);
+                }
                 None => rows.push(LayoutRow {
-                    offset: 0,
                     ids: missing,
+                    centers,
                 }),
             }
         }
@@ -1055,7 +1199,11 @@ impl Displays {
         // Offsets are desktop pixels; anything this far out is nonsense (and would
         // overflow the arithmetic below).
         for r in &mut rows {
-            r.offset = r.offset.clamp(-100_000, 100_000);
+            for c in &mut r.centers {
+                if *c != NEXT {
+                    *c = (*c).clamp(-100_000, 100_000);
+                }
+            }
         }
         self.rows = rows;
         let rows = self.effective_rows();
@@ -1083,8 +1231,8 @@ impl Displays {
         self.order = ids.to_vec();
         // One row, in this order.
         self.rows = vec![LayoutRow {
-            offset: 0,
             ids: ids.to_vec(),
+            centers: vec![NEXT; ids.len()],
         }];
         self.apply_kde_layout();
         self.router.send(HostMsg::Order {
@@ -1146,13 +1294,19 @@ impl Displays {
             .effective_rows()
             .iter()
             .flat_map(|row| {
-                std::iter::once(format!("row {}\n", row.offset)).chain(
+                std::iter::once("row\n".to_owned()).chain(
                     row.ids
                         .iter()
-                        .filter_map(|id| Some((id, self.monitors.get(id)?)))
-                        .map(|(id, m)| {
+                        .zip(&row.centers)
+                        .filter_map(|(id, c)| Some((id, c, self.monitors.get(id)?)))
+                        .map(|(id, c, m)| {
                             let star = if self.primary == Some(*id) { " *" } else { "" };
-                            format!("{}{star}\n", m.spec)
+                            let at = if *c == NEXT {
+                                String::new()
+                            } else {
+                                format!(" at {c}")
+                            };
+                            format!("{}{at}{star}\n", m.spec)
                         }),
                 )
             })
@@ -1222,4 +1376,108 @@ pub fn sync_wallpapers() {
             }
             warn!("qdbus not found, wallpapers stay per screen");
         });
+}
+
+#[cfg(test)]
+mod arrange_tests {
+    use super::*;
+
+    fn seat(id: u8, center: i32, w: i32, h: i32) -> Seat {
+        Seat { id, center, w, h }
+    }
+
+    fn at(placed: &[(u8, i32, i32)], id: u8) -> (i32, i32) {
+        let p = placed.iter().find(|p| p.0 == id).expect("placed");
+        (p.1, p.2)
+    }
+
+    fn no_overlaps(placed: &[(u8, i32, i32)], sizes: &[(u8, i32, i32)]) {
+        let size = |id: u8| {
+            let s = sizes.iter().find(|s| s.0 == id).unwrap();
+            (s.1, s.2)
+        };
+        for a in placed {
+            for b in placed {
+                if a.0 < b.0 {
+                    let (aw, ah) = size(a.0);
+                    let (bw, bh) = size(b.0);
+                    let overlap =
+                        a.1 < b.1 + bw && b.1 < a.1 + aw && a.2 < b.2 + bh && b.2 < a.2 + ah;
+                    assert!(!overlap, "{a:?} overlaps {b:?}");
+                }
+            }
+        }
+    }
+
+    /// A gap between two monitors in the main row closes, and the monitor seen above
+    /// the right one stays above the right one (it drifted right of it before).
+    #[test]
+    fn above_the_right_monitor_stays_above_it() {
+        let rows = vec![
+            vec![seat(2, 1500, 2560, 1440)],
+            vec![seat(0, -1600, 2560, 1440), seat(1, 1500, 2560, 1440)],
+        ];
+        let placed = arrange(&rows, 0);
+        let (x0, y0) = at(&placed, 0);
+        let (x1, y1) = at(&placed, 1);
+        let (x2, y2) = at(&placed, 2);
+        assert_eq!((x1, y1), (x0 + 2560, y0), "the main row touches");
+        assert_eq!(x2, x1, "straight above the right one");
+        assert_eq!(y2 + 1440, y1, "touching it");
+    }
+
+    /// Side monitors around a tall portrait one, and a monitor above the portrait one:
+    /// it touches the portrait top, and overlaps nothing.
+    #[test]
+    fn above_a_portrait_monitor() {
+        let sizes = [
+            (0, 2560, 1440),
+            (1, 1440, 2560),
+            (2, 2560, 1440),
+            (3, 1920, 1080),
+        ];
+        let rows = vec![
+            vec![seat(3, 0, 1920, 1080)],
+            vec![
+                seat(0, -2000, 2560, 1440),
+                seat(1, 0, 1440, 2560),
+                seat(2, 2000, 2560, 1440),
+            ],
+        ];
+        let placed = arrange(&rows, 1);
+        no_overlaps(&placed, &sizes);
+        let (x1, y1) = at(&placed, 1);
+        let (x3, y3) = at(&placed, 3);
+        assert_eq!(y3 + 1080, y1, "touches the portrait one");
+        assert_eq!(x3 + 960, x1 + 720, "centred over it");
+    }
+
+    /// A monitor far off to the side of the row below still overlaps it a little, so
+    /// the mouse can reach it.
+    #[test]
+    fn far_off_monitor_stays_reachable() {
+        let rows = vec![
+            vec![seat(1, 9000, 1920, 1080)],
+            vec![seat(0, 0, 2560, 1440)],
+        ];
+        let placed = arrange(&rows, 0);
+        let (x0, _) = at(&placed, 0);
+        let (x1, _) = at(&placed, 1);
+        assert!(x1 < x0 + 2560, "overlaps the monitor below");
+    }
+
+    /// Without seen positions (a fresh start): one row, side by side.
+    #[test]
+    fn unknown_positions_line_up() {
+        let rows = vec![vec![
+            seat(0, NEXT, 2560, 1440),
+            seat(1, NEXT, 1440, 2560),
+            seat(2, NEXT, 2560, 1440),
+        ]];
+        let placed = arrange(&rows, 1);
+        assert_eq!(at(&placed, 0).0, 0);
+        assert_eq!(at(&placed, 1).0, 2560);
+        assert_eq!(at(&placed, 2).0, 4000);
+        assert_eq!(at(&placed, 0).1, 560, "vertically centred on the tall one");
+    }
 }

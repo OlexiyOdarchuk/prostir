@@ -81,11 +81,12 @@ pub fn order_by_direction(placements: &HashMap<u8, Placement>, ids: &[u8]) -> Ve
     v.into_iter().map(|(_, id)| id).collect()
 }
 
-/// Rows of monitors as the user sees them, for KDE's arrangement: monitors whose
-/// centres are at about the same height form a row; rows go top to bottom, monitors
-/// left to right. Each row's left edge is given in desktop pixels, worked out from the
-/// angles the monitors take up, so a monitor above the left one ends up above it in
-/// KDE too. `center` is where the layout faces from (position, yaw).
+/// Rows of monitors as the user sees them, for the desktop's arrangement: monitors
+/// whose centres are at about the same height form a row; rows go top to bottom,
+/// monitors left to right. With each monitor goes where its centre is seen, in pixels
+/// of one scale for all of them (from the angles they take up), so the PC can put a
+/// monitor hung above another above that one. `center` is where the layout faces from
+/// (position, yaw).
 pub fn rows_by_position(
     placements: &HashMap<u8, Placement>,
     monitors: &[(u8, u32, u32)],
@@ -142,8 +143,12 @@ pub fn rows_by_position(
         .map(|mut r| {
             r.sort_by(|a, b| a.yaw.total_cmp(&b.yaw));
             LayoutRow {
-                offset: ((r[0].yaw - r[0].half_width) * px_per_rad).round() as i32,
                 ids: r.iter().map(|m| m.id).collect(),
+                // Rounded to 8 px: a hand's tremor must not rearrange the desktop.
+                centers: r
+                    .iter()
+                    .map(|m| ((m.yaw * px_per_rad) / 8.0).round() as i32 * 8)
+                    .collect(),
             }
         })
         .collect()
@@ -792,8 +797,10 @@ mod tests {
             rows.iter().map(|r| r.ids.clone()).collect::<Vec<_>>(),
             vec![vec![2], vec![0, 1]]
         );
-        // It sits over the middle monitor: its left edge is right of the bottom row's.
-        assert!(rows[0].offset > rows[1].offset + 1500, "{rows:?}");
+        // It is seen right over the middle monitor, not over the right edge.
+        let middle = rows[1].centers[1];
+        assert!((rows[0].centers[0] - middle).abs() < 100, "{rows:?}");
+        assert!(rows[1].centers[0] < middle - 1500, "{rows:?}");
 
         // A grid of four: two rows of two.
         let four = [

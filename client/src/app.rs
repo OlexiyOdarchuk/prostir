@@ -291,7 +291,7 @@ impl Scene {
         info!(
             "KDE arrangement: {}",
             rows.iter()
-                .map(|r| format!("{:?}@{}", r.ids, r.offset))
+                .map(|r| format!("{:?}@{:?}", r.ids, r.centers))
                 .collect::<Vec<_>>()
                 .join(" / ")
         );

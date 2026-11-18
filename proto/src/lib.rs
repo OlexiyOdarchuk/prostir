@@ -33,11 +33,17 @@ pub const MIC_CHANNELS: u32 = 1;
 /// One row of monitors in [`ClientMsg::SetLayout`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayoutRow {
-    /// Left edge of the row in desktop pixels.
-    pub offset: i32,
     /// Monitor ids, left to right.
     pub ids: Vec<u8>,
+    /// Where each monitor's centre is seen, left to right, in pixels of one scale
+    /// shared by all monitors ([`NEXT`]: just right of the previous one). The PC lines
+    /// monitors of other rows up with these, so one hung above another is above it on
+    /// the desktop too.
+    pub centers: Vec<i32>,
 }
+
+/// In [`LayoutRow::centers`]: no position, right after the previous monitor.
+pub const NEXT: i32 = i32::MIN;
 
 /// [`HostMsg::Focus`] when the mouse is on none of the streamed displays.
 pub const NO_FOCUS: u8 = 255;
@@ -502,9 +508,12 @@ impl ClientMsg {
             ClientMsg::SetLayout { rows } => {
                 let mut body = Vec::new();
                 for row in rows {
-                    body.extend_from_slice(&row.offset.to_le_bytes());
                     body.push(row.ids.len() as u8);
-                    body.extend_from_slice(&row.ids);
+                    for (i, id) in row.ids.iter().enumerate() {
+                        body.push(*id);
+                        let c = row.centers.get(i).copied().unwrap_or(NEXT);
+                        body.extend_from_slice(&c.to_le_bytes());
+                    }
                 }
                 write_frame(w, tag::SET_LAYOUT, &[&body])
             }
@@ -578,13 +587,16 @@ impl ClientMsg {
             },
             tag::SET_LAYOUT => {
                 let mut rows = Vec::new();
-                while let Ok(offset) = c.u32() {
-                    let n = c.u8()?;
-                    let ids = (0..n).map(|_| c.u8()).collect::<io::Result<Vec<u8>>>()?;
-                    rows.push(LayoutRow {
-                        offset: offset as i32,
-                        ids,
-                    });
+                while let Ok(n) = c.u8() {
+                    let mut row = LayoutRow {
+                        ids: Vec::new(),
+                        centers: Vec::new(),
+                    };
+                    for _ in 0..n {
+                        row.ids.push(c.u8()?);
+                        row.centers.push(c.u32()? as i32);
+                    }
+                    rows.push(row);
                 }
                 ClientMsg::SetLayout { rows }
             }
@@ -757,12 +769,12 @@ mod tests {
             ClientMsg::SetLayout {
                 rows: vec![
                     LayoutRow {
-                        offset: 1280,
                         ids: vec![3],
+                        centers: vec![-1280],
                     },
                     LayoutRow {
-                        offset: -40,
                         ids: vec![0, 1, 2],
+                        centers: vec![-2560, 0, NEXT],
                     },
                 ],
             },
