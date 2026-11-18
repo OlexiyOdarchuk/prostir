@@ -21,6 +21,7 @@
   <a href="#what-it-does">What it does</a> ·
   <a href="#install">Install</a> ·
   <a href="#use">Use</a> ·
+  <a href="#troubleshooting-and-faq">FAQ</a> ·
   <a href="#security">Security</a>
 </p>
 
@@ -71,8 +72,10 @@ the monitor in the middle is the primary one and gets the Plasma panel.
 Text stays sharp because the video goes straight into the Quest compositor's own
 layers (`XR_KHR_android_surface_swapchain`) instead of a flat window inside an app.
 The PC encodes with the GPU's video engine (VA-API HEVC on Intel or AMD) and the Quest
-decodes in hardware. Over Wi-Fi an encoded frame reaches the display in about 14 ms
-on my setup; capturing and encoding the screen add a few milliseconds before that.
+decodes in hardware. On my setup, an encoded frame takes about 14 ms over Wi-Fi to
+reach the headset display (network, decoding and showing it). That is not the whole
+delay from screen to eye: capturing and encoding the screen add a few milliseconds
+before it.
 
 Monitors can sit on an arc, in a grid, in a column, or above your head for lying down.
 They can be flat or curved, and on an arc they touch edge to edge, so three of them
@@ -89,7 +92,9 @@ In cinema mode you pick which monitor becomes the big screen.
 Focus mode dims every monitor except the one with the mouse.
 
 PC sound plays in the headset, and the headset microphone becomes the PC's microphone.
-The headset only records while some app on the PC is actually listening.
+The headset only records while some app on the PC is actually listening, and only
+while the microphone switch in the headset menu (Sound and language) is on. The PC can
+ask for the microphone, but the switch in the headset decides.
 
 When you take the headset off, the PC stops encoding right away. After 10 seconds it
 removes the virtual monitors, so windows, the panel, sound and microphone go back to
@@ -105,9 +110,9 @@ over the keyboard, on any background.
 The headset and the PC speak Ukrainian or English. The headset follows the PC's
 language unless you pick one in the menu.
 
-Connection works over Wi-Fi (the headset finds the PC by itself) or a USB cable.
-Everything is encrypted, and a PC streams nothing to a headset it has not been paired
-with.
+Connection works over Wi-Fi (the headset finds the PC by itself) or, in developer
+mode, a USB cable. Everything is encrypted, and a PC streams nothing to a headset it
+has not been paired with.
 
 <p align="center">
   <img src="docs/backgrounds.jpg" width="720" alt="The four built-in panoramas: night, sunset, space and aurora">
@@ -121,19 +126,37 @@ with.
   configs both work). KWin streams its virtual outputs itself; on Hyprland Prostir
   creates headless outputs and captures them with `wlr-screencopy` straight into GPU
   buffers.
-- PipeWire with `pw-cli` and `pw-loopback`, and GStreamer 1.22 or newer with the `va`
-  plugin (gst-plugins-bad) plus the PipeWire and PulseAudio plugins.
-- A GPU with a VA-API HEVC or H.264 encoder (Intel, AMD). Without one, start with
-  `--software` to encode with x264 on the CPU.
+- PipeWire with its PulseAudio server (`pipewire-pulse`), `pw-cli`, `pw-loopback` and
+  `pactl`.
+- GStreamer 1.22 or newer with the `va` plugin (hardware encoding), `h264parse` and
+  `h265parse`, and the PipeWire and PulseAudio plugins.
+- For hardware encoding, a GPU with a VA-API H.265 or H.264 encoder (Intel, AMD) and
+  its VA driver. Without one, Prostir encodes on the CPU with x264, which needs the
+  `x264enc` plugin from gst-plugins-ugly. See [NVIDIA and CPU encoding](#nvidia-and-cpu-encoding).
 - On KDE, `kscreen-doctor`, which comes with Plasma. Optional: `qdbus6` for matching
   wallpapers, `adb` for USB, and one of `kdialog`, `zenity`, `fuzzel`, `wofi` or `rofi`
-  for the pairing dialog. On Hyprland, a bar with a tray (Waybar) shows the tray menu.
+  for the pairing dialog.
+- On Hyprland, a bar with a tray (Waybar with the `tray` module) for the menu, and a
+  notification daemon (mako, dunst, swaync) for messages. See [Hyprland](#hyprland).
+
+Prostir's own packages (see [Install](#install)) pull all of this in. For the tarball,
+install these first:
 
 | Distribution | Packages |
 |---|---|
-| Arch | `gstreamer gst-plugins-good gst-plugins-bad gst-plugin-pipewire` + `intel-media-driver` (Intel) or `libva-mesa-driver` (AMD) |
-| Fedora | `gstreamer1 gstreamer1-plugins-good gstreamer1-plugins-bad-free pipewire-gstreamer` + VA driver |
-| Debian/Ubuntu | `gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-pipewire` + VA driver |
+| Arch | `gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad-libs gst-plugin-va gst-plugin-pipewire pipewire-audio pipewire-pulse libpulse`, plus `intel-media-driver` on Intel (the AMD driver comes with `mesa`). CPU encoding: `gst-plugins-ugly` |
+| Fedora | `gstreamer1-plugins-base gstreamer1-plugins-good gstreamer1-plugins-bad-free pipewire-gstreamer pipewire-utils pipewire-pulseaudio pulseaudio-utils`, plus a VA driver with H.264/H.265 encoding (see below). CPU encoding: `gstreamer1-plugins-ugly` from RPM Fusion |
+| Debian 13, Ubuntu 25.04 or newer | `gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-pipewire pipewire-bin pipewire-pulse pulseaudio-utils`, plus `mesa-va-drivers` (AMD) or `intel-media-va-driver-non-free` (Intel). CPU encoding: `gstreamer1.0-plugins-ugly` |
+
+Debian 12 and Ubuntu 24.04 ship Plasma 5, which Prostir does not support.
+
+**Fedora and openSUSE.** Their Mesa is built without H.264 and H.265 encoding, so AMD
+graphics have no hardware encoder out of the box. On Fedora, enable
+[RPM Fusion](https://rpmfusion.org/Configuration) and run
+`sudo dnf swap mesa-va-drivers mesa-va-drivers-freeworld`. On Intel, `intel-media-driver`
+from RPM Fusion nonfree supports more encoders than Fedora's `libva-intel-media-driver`. On openSUSE, the Packman build of Mesa
+(`Mesa-libva`) has the encoders. `vainfo` lists `VAEntrypointEncSlice` for H.264 or
+HEVC when encoding works. Without it, Prostir falls back to the CPU.
 
 **Headset**
 
@@ -141,26 +164,85 @@ with.
 - Developer mode, to install the app with `adb`. Turn it on in the Meta Horizon phone
   app: Devices → Headset settings → Developer mode.
 
+### NVIDIA and CPU encoding
+
+When no VA-API encoder works (NVIDIA cards, a missing `gst-plugin-va` or VA driver,
+Fedora or openSUSE Mesa without the codecs), Prostir switches to CPU encoding with x264
+by itself. That needs `x264enc` (gst-plugins-ugly) and costs CPU time and some latency,
+so fewer or smaller monitors help. If neither works, the headset says what is missing
+instead of retrying. `--software` forces CPU encoding even when a GPU encoder exists.
+
 ## Install
 
-### From a release
+### With a package manager
 
-1. Download `prostir-<version>-x86_64-linux.tar.gz` and `prostir-<version>.apk` from
-   [Releases](../../releases).
+Each [release](../../releases) has packages for the PC part. They install
+`/usr/bin/prostir` and pull in the dependencies above.
+
+```sh
+yay -S prostir-bin                                  # Arch (AUR)
+sudo apt install ./prostir_<version>-1_amd64.deb    # Debian, Ubuntu
+sudo dnf install ./prostir-<version>-1.x86_64.rpm   # Fedora
+```
+
+The `.rpm` is built for Fedora. On openSUSE and other distributions, use the tarball.
+
+### From a release tarball
+
+1. Download `prostir-<version>-x86_64-linux.tar.gz`, `prostir-<version>.apk` and
+   `SHA256SUMS` from [Releases](../../releases), and check them with
+   `sha256sum -c --ignore-missing SHA256SUMS`.
 2. On the PC:
    ```sh
    tar xf prostir-*-x86_64-linux.tar.gz && cd prostir-*/
-   ./install.sh             # installs into ~/.local without root; --autostart starts it with Plasma
+   ./install.sh             # installs into ~/.local without root
+   ./install.sh --autostart # the same, and starts Prostir when you log in (KDE)
    ```
-   On Hyprland without uwsm, add it to the config to start it with the session:
-   `hl.on("hyprland.start", function () hl.exec_cmd("prostir") end)` in `hyprland.lua`, or
-   `exec-once = prostir` in `hyprland.conf`. With `ecosystem:enforce_permissions` on,
-   also allow it to capture the screen:
-   `hl.permission("/usr/(local/)?bin/prostir|.*/\\.local/bin/prostir", "screencopy", "allow")`.
-3. On the headset, connected with a USB cable:
-   ```sh
-   adb install prostir-*.apk
-   ```
+   The script warns when `~/.local/bin` is not on your `PATH` and, on Hyprland, prints
+   the lines to add to your config.
+
+### On the headset
+
+With developer mode on and the headset connected with a USB cable:
+
+```sh
+adb install prostir-*.apk
+```
+
+### Firewall
+
+The PC listens on TCP port 47830 and announces itself with UDP broadcasts on port
+47831. If a firewall runs on the PC, allow both:
+
+```sh
+sudo ufw allow 47830/tcp && sudo ufw allow 47831/udp            # ufw (Ubuntu)
+sudo firewall-cmd --add-port=47830/tcp --add-port=47831/udp --permanent \
+  && sudo firewall-cmd --reload                                 # firewalld (Fedora, openSUSE)
+```
+
+### Hyprland
+
+- **Tray and messages.** Prostir's menu lives in the tray, so you need a bar with a
+  tray, such as Waybar with the `tray` module. Messages (pairing, updates, the usage
+  counter) need a notification daemon such as mako, dunst or swaync.
+- **Autostart.** Hyprland without uwsm ignores the XDG autostart folder, so add Prostir
+  to your config. Use the full path for a tarball install, because `~/.local/bin` is
+  often not on Hyprland's `PATH`:
+  ```lua
+  -- hyprland.lua
+  hl.on("hyprland.start", function () hl.exec_cmd("~/.local/bin/prostir") end)
+  ```
+  ```ini
+  # hyprland.conf
+  exec-once = ~/.local/bin/prostir   # or just "prostir" for a package install
+  ```
+- **Permissions.** With `ecosystem:enforce_permissions` on, allow Prostir to capture
+  the screen:
+  `hl.permission("/usr/(local/)?bin/prostir|.*/\\.local/bin/prostir", "screencopy", "allow")`
+  in `hyprland.lua`, or `permission = /usr/(local/)?bin/prostir|.*/\.local/bin/prostir, screencopy, allow`
+  in `hyprland.conf`.
+- **Pairing dialog.** Prostir asks for the pairing code with `kdialog` or `zenity`, or
+  with `fuzzel`, `wofi` or `rofi` in dmenu mode. Install one of them.
 
 ### From source
 
@@ -177,17 +259,28 @@ rustup target add aarch64-linux-android
 ## Use
 
 1. Start Prostir on the PC from the application menu, or run `prostir`. Its icon
-   appears in the system tray.
+   appears in the system tray. The first time, a notification explains the usage
+   counter and how to turn it off (see [Security](#security)).
 2. On the headset, open Prostir from Library → Unknown sources.
-3. The headset looks for the PC on the USB cable first, then on Wi-Fi. If it finds
-   several PCs, pick one in the menu, or type the IP address on the keypad.
-4. The first time, pair them. The headset shows a 6-digit code; type it into the dialog
-   that opens on the PC. The button under the code swaps the sides, if you would rather
-   type the PC's code in the headset.
+3. The headset tries the USB cable first (developer mode only), then Wi-Fi. If it
+   finds several PCs, pick yours, or type the PC's IP address on the keypad.
+4. The first time, the headset asks "Pair with <PC name>?". Confirm, and the headset
+   shows a 6-digit code; type it into the small dialog that opens on the PC. If you
+   would rather do it the other way round, the button under the code shows the code
+   on the PC (in the tray and a notification), and you type it in the headset.
 5. The monitors appear in front of you. Press A to line them up.
 
 If the connection drops, the monitors wait 30 seconds in KDE (`--linger`) for the
 headset to come back before the windows move back to the laptop.
+
+### Wi-Fi or USB
+
+Wi-Fi works for everyone: the PC and the headset only need to be on the same network,
+and the network must let devices talk to each other. USB needs developer mode on the
+headset and `adb` on the PC. Prostir then runs `adb reverse` by itself when the
+headset is plugged in (`--no-adb` turns that off). A cable helps on networks that
+isolate clients and keeps the Wi-Fi free. Installs from the Meta Horizon Store, once
+Prostir is there, will use Wi-Fi only.
 
 ### Controls
 
@@ -226,8 +319,8 @@ interface language.
 The tray shows whether the headset is connected and how many monitors there are. From
 it you can set the video quality (15, 30 or 50 Mbit/s per monitor, applied right away),
 turn on sharper text (a slower encoder preset: clearer small text at the same bitrate
-for about 2 ms more per frame), start Prostir with the session, forget paired headsets,
-and quit.
+for about 2 ms more per frame), start Prostir with the session (KDE), turn the usage
+counter on or off, forget paired headsets, and quit.
 
 ### Command line
 
@@ -239,6 +332,29 @@ prostir [--monitor WxH[@scale]]... [--codec h265|h264] [--bitrate MBPS] [--softw
 Without `--monitor`, Prostir brings back the monitors from the last session. They are
 stored in `~/.config/prostir/monitors.txt`.
 
+## Update and uninstall
+
+**Update.** Install the new version the same way as the old one: your package manager
+(`yay -Syu`, `sudo apt install ./prostir_<version>-1_amd64.deb`,
+`sudo dnf upgrade ./prostir-<version>-1.x86_64.rpm`), or `./install.sh` from the new
+tarball. On the headset, `adb install -r prostir-<version>.apk` keeps the settings and
+the pairing. Settings and paired headsets on the PC stay in `~/.config/prostir`.
+
+Update both sides when you can. Small differences in version do not break the
+connection; when the two are too far apart, the headset says which side to update.
+
+**Uninstall.**
+
+- Tarball install: `./install.sh --uninstall` removes the program, its menu entry,
+  icon and autostart entry. `./install.sh --uninstall --purge` also removes the
+  settings and paired headsets in `~/.config/prostir`.
+- Packages: `sudo pacman -R prostir-bin`, `sudo apt remove prostir` or
+  `sudo dnf remove prostir`. Packages do not touch your home folder; remove
+  `~/.config/prostir` and `~/.config/autostart/prostir.desktop` yourself if you want.
+- Hyprland: remove the lines you added to your config.
+- Headset: `adb uninstall dev.prostir.client`, or uninstall it from the Library. This
+  also deletes its settings and pairing keys.
+
 ## Limitations
 
 - KDE Plasma 6 and Hyprland on Wayland. GNOME is not supported yet: if you want it,
@@ -246,10 +362,11 @@ stored in `~/.config/prostir/monitors.txt`.
 - Hyprland has no primary monitor, so "Make primary" there only picks the monitor the
   headset puts in front of you.
 - Hardware encoding needs VA-API, which means Intel or AMD graphics. NVIDIA cards do not
-  offer VA-API encoding; `--software` works there, but encodes on the CPU.
+  offer VA-API encoding, so Prostir encodes on the CPU there, which costs CPU time and
+  some latency.
 - Tested on Quest 3. Quest 3S should behave the same; Quest 2 and Pro are untested.
-- Not in the Meta Horizon Store: you install it in developer mode with `adb`, and the
-  Quest lists it under Unknown sources by its package name, `dev.prostir.client`.
+- Not in the Meta Horizon Store yet: you install it in developer mode with `adb`, and
+  the Quest lists it under Unknown sources by its package name, `dev.prostir.client`.
 - One headset per PC at a time.
 
 ## Performance and battery
@@ -258,7 +375,7 @@ Numbers from my laptop with three 2560×1440 monitors and the laptop screen in t
 headset:
 
 - The PC uses about 2 % of one CPU core and 250 MB of RAM. The GPU's video engine does
-  the encoding, and only when a screen changes.
+  the encoding, and only when a screen changes. CPU encoding (x264) uses much more.
 - On the network, each monitor uses up to the chosen bitrate while its picture changes
   and almost nothing while it is still. Sound adds 1.5 Mbit/s.
 - On the headset, every monitor needs one hardware decoder (idle while the picture is
@@ -272,32 +389,84 @@ Every connection starts with a Noise `XX` handshake (Curve25519, ChaCha20-Poly13
 BLAKE2s). After it, the picture, sound and microphone are encrypted and authenticated.
 
 A headset and a PC pair once. Until then, the PC creates no monitors and sends
-nothing. The 6-digit code goes through SPAKE2, so someone who records the traffic
-cannot guess it offline, and the confirmation is tied to that connection's handshake,
-which stops a man in the middle.
+nothing, and the headset does not pair with a PC on its own: it asks first. The
+6-digit code goes through SPAKE2, so someone who records the traffic cannot guess it
+offline, and the confirmation is tied to that connection's handshake, which stops a
+man in the middle. After failed attempts the PC waits longer and longer before it
+accepts the next one, so the code cannot be guessed by trying.
 
 The PC keeps the keys of paired headsets in `~/.config/prostir/paired_headsets`; the
 tray item "Forget paired headsets" clears it. The headset keeps its keys inside the app.
 
+The headset sends microphone sound only while its own microphone switch is on (menu,
+Sound and language). The PC can ask for the microphone, but cannot turn the switch on.
+
 Official builds count how many PCs use Prostir: once a day, when a headset connects,
 the PC sends one request to GoatCounter with only the date in it (and `/install` the
-first time). No identifier, host name or settings go with it. Turn it off in the tray
-("Count this PC among users") or with `PROSTIR_NO_COUNT=1`; builds from source never
-count. See the [privacy policy](https://prostir.ishawyha.dev/privacy.html).
+first time). No identifier, host name or settings go with it. On the first start a
+notification says so and how to turn it off, and the first count is sent no earlier
+than the next day (UTC), so there is time to do that. Turn it off in the tray ("Count
+this PC among users") or with `PROSTIR_NO_COUNT=1`; builds from source never count.
+The key that official builds use for counting can be read out of the program. It can
+only add counts, so the worst anyone can do with it is inflate the numbers. See the
+[privacy policy](https://prostir.ishawyha.dev/privacy.html).
 
-Ports: TCP 47830 for the stream and UDP 47831 for discovery. The discovery broadcast
-contains only the PC's host name.
+The discovery broadcast contains only the PC's host name. Ports are listed under
+[Firewall](#firewall).
 
-## Troubleshooting
+To report a security problem privately, use
+[GitHub's private vulnerability reporting](https://github.com/OlexiyOdarchuk/prostir/security/advisories/new).
 
-- Headset log: `adb logcat -s prostir`.
-- PC log: run `prostir` in a terminal. `RUST_LOG=debug prostir` adds the GStreamer
-  pipeline and encoder timings.
-- The headset does not find the PC over Wi-Fi: both must be on the same network, and
-  the network must not isolate clients (guest networks often do). Type the PC's IP on
-  the keypad or use a cable.
-- A capture on the Quest comes out black: some capture modes leave out the compositor
-  layers Prostir draws with. Switch the capture format in the Quest camera settings.
+## Troubleshooting and FAQ
+
+**Logs.** Headset: `adb logcat -s prostir`. PC: run `prostir` in a terminal;
+`RUST_LOG=debug prostir` adds the GStreamer pipeline and encoder timings.
+
+**The headset lists my PC, but connecting does nothing.** A firewall on the PC blocks
+TCP port 47830. Allow it, see [Firewall](#firewall).
+
+**The headset does not find the PC.** Both must be on the same network, and the
+network must not isolate clients (guest networks often do). A firewall can also block
+the UDP broadcast on port 47831. Type the PC's IP on the keypad, or use a cable
+(developer mode).
+
+**No picture, or the headset says an encoder is missing.** Check what GStreamer has:
+`gst-inspect-1.0 vah265enc vah264enc x264enc`. Install the VA plugin and driver for your
+distribution (on Arch, `gst-plugin-va`), or `gst-plugins-ugly` for CPU encoding. On
+Fedora and openSUSE with AMD graphics, see the codec note under
+[Requirements](#requirements).
+
+**I have an NVIDIA card.** Prostir encodes on the CPU with x264 there, by itself. Install
+gst-plugins-ugly. See [NVIDIA and CPU encoding](#nvidia-and-cpu-encoding).
+
+**No pairing dialog opens on the PC.** Install `zenity` or `kdialog`, or have `fuzzel`,
+`wofi` or `rofi` installed. Or press the button under the code in the headset to do it
+the other way round: the PC shows the code in the tray and a notification, and you
+type it in the headset.
+
+**Hyprland: no tray icon, no notifications, no autostart.** See [Hyprland](#hyprland).
+
+**`prostir: command not found` after `install.sh`.** `~/.local/bin` is not on your
+`PATH`. Run `~/.local/bin/prostir`, or add the folder to `PATH` in your shell profile.
+
+**PC sound stays on the laptop, or apps do not see the headset microphone.** Prostir
+switches the default output and input with `pactl`. Install it (`libpulse` on Arch,
+`pulseaudio-utils` on Debian, Ubuntu and Fedora), or pick "Prostir" in your sound
+settings by hand.
+
+**The headset says to update the PC or the headset.** The two versions are too far
+apart. Install the newest release on the side it names.
+
+**`adb install` fails with `INSTALL_FAILED_UPDATE_INCOMPATIBLE`.** The installed app was
+signed with another key (for example, you built it yourself). Uninstall it first with
+`adb uninstall dev.prostir.client`; this removes the headset's settings and pairing.
+
+**Is the 14 ms the whole latency?** No. It is the time from an encoded frame to the
+headset display over Wi-Fi. Capturing and encoding the screen come before that and add
+a few milliseconds.
+
+**A capture on the Quest comes out black.** Some capture modes leave out the compositor
+layers Prostir draws with. Switch the capture format in the Quest camera settings.
 
 ## How it works
 
@@ -322,7 +491,7 @@ The code is split into three Rust crates:
 proto/    the wire protocol and encryption, a library used by the other two
 host/     the PC program: virtual outputs, encoders, sound, tray, discovery
 client/   the Quest app: OpenXR loop (app.rs), menu (ui.rs), layouts (layout.rs), …
-scripts/  build-apk.sh, install.sh, package-release.sh
+scripts/  build-apk.sh, install.sh, package-release.sh, third-party-licenses.py
 docs/     pictures for this README
 ```
 
@@ -349,18 +518,37 @@ menu to a PNG (`TAB=profiles|look|sound`, `LANG_UI=en`), and
 
 - [qwayland](https://github.com/jboero/qwayland): the same idea with 2D Horizon OS
   panels and NVIDIA encoding.
-- [WiVRn](https://github.com/WiVRn/WiVRn) with [wlx-overlay-s](https://github.com/galister/wlx-overlay-s):
-  general OpenXR streaming with desktop overlays.
-- [Breezy Desktop](https://github.com/wheaney/breezy-desktop): virtual displays for AR
-  glasses on KDE and GNOME.
-- Immersed: proprietary, runs on several platforms.
+- `krfb-virtualmonitor` (part of KDE's Krfb): adds a virtual monitor to KWin and shares
+  it over VNC, so any VNC client on the Quest can show it in a flat window.
+- [WiVRn](https://github.com/WiVRn/WiVRn) or [ALVR](https://github.com/alvr-org/ALVR)
+  with [WayVR](https://github.com/galister/wlx-overlay-s) (formerly wlx-overlay-s):
+  stream a whole OpenXR or SteamVR session from the PC, with your existing screens and
+  apps as overlays in it. The right choice for VR games.
+- [Breezy Desktop](https://github.com/wheaney/breezy-desktop): virtual monitors on KDE
+  Plasma 6 and GNOME for XR glasses such as XREAL and VITURE, not for Quest. Open
+  source; the productivity features need a license after a free trial.
+- [Immersed](https://immersed.com): proprietary, on several platforms. On Linux, its
+  built-in virtual monitors work on GNOME on Wayland.
+- [Virtual Desktop](https://www.vrdesktop.net): proprietary; its PC streamer runs on
+  Windows and macOS, not Linux.
+
+Why another one? Prostir does one thing on Linux: new monitors that are real outputs
+of KWin or Hyprland, so windows, panels and the mouse treat them like plugged-in
+screens. The PC needs no VR runtime (no SteamVR or Monado), the Quest compositor draws
+the monitors directly, and PC sound and the headset microphone come along. It also does
+less than the projects above: no VR games, no Windows, macOS or GNOME, and one headset
+per PC.
 
 ## License
 
 [GPL-3.0-or-later](LICENSE), with an [additional permission](LICENSE-EXCEPTION.md) to
 link with the Meta Platform SDK (needed only for a Horizon Store build). The bundled
 Noto Sans font is under the
-[SIL Open Font License 1.1](client/assets/OFL-NotoSans.txt).
+[SIL Open Font License 1.1](client/assets/OFL-NotoSans.txt). Every release includes
+`THIRD-PARTY-LICENSES.txt` with the licenses of the Rust crates, the font and the
+Khronos OpenXR loader that the release files contain. The tarball and the packages
+install it next to the GPL text, and the APK carries it under `assets/licenses/`.
+`scripts/third-party-licenses.py` writes it.
 
 Meta and Meta Quest are trademarks of Meta Platforms, Inc. KDE and Plasma are
 trademarks of KDE e.V. Prostir is an independent project and is not affiliated with
