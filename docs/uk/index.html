@@ -54,22 +54,22 @@
   ]
 }
   </script>
+  <link rel="preload" href="../fonts/noto-sans-cyrillic-400-normal.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="../site.css">
-  <script>document.documentElement.classList.add("js")</script>
 </head>
 <body>
 <header class="top">
   <div class="wrap">
     <a class="brand" href="./"><img src="../icon.svg" alt="" width="32" height="32">Prostir</a>
-    <nav aria-label="Розділи">
+    <nav class="sections" aria-label="Розділи">
       <a href="#install">Встановлення</a>
       <a href="#requirements">Вимоги</a>
       <a href="https://github.com/OlexiyOdarchuk/prostir">GitHub</a>
     </nav>
-    <div class="lang" aria-label="Мова">
+    <nav class="lang" aria-label="Мова">
       <a href="../" hreflang="en" lang="en">EN</a>
-      <a href="./" aria-current="true" lang="uk">UK</a>
-    </div>
+      <a href="./" aria-current="page" hreflang="uk" lang="uk">УКР</a>
+    </nav>
   </div>
 </header>
 
@@ -85,15 +85,18 @@
         </div>
         <p class="downloads" id="downloads" aria-live="polite"></p>
       </div>
-      <div>
-        <video src="../demo.mp4" poster="../demo.jpg" autoplay muted loop playsinline aria-label="У шоломі: дотик пальцем до меню, зміна розміру монітора двома руками, режим фокусу і вікно на справжню клавіатуру"></video>
-        <img class="poster" src="../demo.jpg" alt="Prostir у шоломі: монітори навколо й меню">
+      <div class="demo">
+        <video poster="../demo.jpg" width="1280" height="720" muted loop playsinline preload="none" controls aria-label="У шоломі: дотик пальцем до меню, зміна розміру монітора двома руками, режим фокусу і вікно на справжню клавіатуру">
+          <source src="../demo.mp4" type="video/mp4">
+        </video>
+        <button class="demo-toggle" type="button" hidden data-play="Відтворити відео" data-pause="Зупинити відео"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 1.5v13l11-6.5z"/></svg><span>Відтворити відео</span></button>
       </div>
     </div>
   </div>
 
-  <section>
+  <section aria-labelledby="features">
     <div class="wrap">
+      <h2 class="sr-only" id="features">Що вміє Prostir</h2>
       <div class="band reveal">
         <div class="copy">
           <h3>Справжні монітори, а не картинки вікон</h3>
@@ -111,19 +114,26 @@
         <img src="menu-monitors.png" width="1280" height="960" loading="lazy" alt="Меню в шоломі, вкладка «Монітори»: список моніторів, розміри, розкладка, вигин і режим">
       </div>
 
+      <div class="band stat reveal">
+        <h3><span class="figure-number">14<small>мс</small></span><span class="figure-label">від закодованого кадру на ПК до екрана шолома, по Wi-Fi</span></h3>
+        <div class="copy">
+          <p>Ця частина охоплює мережу, декодування й показ. Заміряно на ноутбуці автора (Intel Arc) із Quest 3. Це не вся затримка від вашого екрана до очей: захоплення й кодування екрана на ПК додають ще кілька мілісекунд.</p>
+          <p>ПК кодує відеокартою, Quest декодує апаратно просто в компоновник, тож текст лишається чітким.</p>
+        </div>
+      </div>
+
       <div class="band reveal">
         <div class="copy">
-          <div class="figure-number">14<small>мс</small></div>
-          <p>Від закодованого кадру до екрана шолома по Wi-Fi, заміряно на ноутбуці автора (Intel Arc, Quest 3). Захоплення й кодування екрана додають ще кілька мілісекунд.</p>
-          <p>ПК кодує відеокартою, Quest декодує апаратно просто в компоновник, тож текст лишається чітким.</p>
+          <h3>Робота, кіно, лежачи</h3>
+          <p>Профілі одним натиском перемикають монітори, екран ноутбука, розкладку й фон. Монітори того самого розміру лишаються, тож вікна на них не стрибають.</p>
         </div>
         <img src="menu-profiles.png" width="1280" height="960" loading="lazy" alt="Меню в шоломі, вкладка «Профілі»: Робота, Кіно, Лежачи">
       </div>
 
       <div class="band flip reveal">
         <div class="copy">
-          <h3>Робота, кіно, лежачи</h3>
-          <p>Профілі одним натиском перемикають монітори, екран ноутбука, розкладку й фон. Монітори того самого розміру лишаються, тож вікна на них не стрибають.</p>
+          <h3>Кімната або панорама</h3>
+          <p>Позаду моніторів: чорний фон, ваша кімната через камери шолома або одна з чотирьох вбудованих панорам: ніч, захід, космос і сяйво.</p>
         </div>
         <img src="../backgrounds.jpg" width="1932" height="972" loading="lazy" alt="Чотири вбудовані панорами: ніч, захід, космос, сяйво">
       </div>

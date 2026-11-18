@@ -54,22 +54,22 @@
   ]
 }
   </script>
+  <link rel="preload" href="fonts/noto-sans-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="site.css">
-  <script>document.documentElement.classList.add("js")</script>
 </head>
 <body>
 <header class="top">
   <div class="wrap">
     <a class="brand" href="./"><img src="icon.svg" alt="" width="32" height="32">Prostir</a>
-    <nav aria-label="Sections">
+    <nav class="sections" aria-label="Sections">
       <a href="#install">Install</a>
       <a href="#requirements">Requirements</a>
       <a href="https://github.com/OlexiyOdarchuk/prostir">GitHub</a>
     </nav>
-    <div class="lang" aria-label="Language">
-      <a href="./" aria-current="true" lang="en">EN</a>
-      <a href="uk/" hreflang="uk" lang="uk">UK</a>
-    </div>
+    <nav class="lang" aria-label="Language">
+      <a href="./" aria-current="page" hreflang="en" lang="en">EN</a>
+      <a href="uk/" hreflang="uk" lang="uk">УКР</a>
+    </nav>
   </div>
 </header>
 
@@ -85,15 +85,18 @@
         </div>
         <p class="downloads" id="downloads" aria-live="polite"></p>
       </div>
-      <div>
-        <video src="demo.mp4" poster="demo.jpg" autoplay muted loop playsinline aria-label="In the headset: touching the menu with a finger, resizing a monitor with both hands, focus mode dimming the other monitors, and a window onto the real keyboard"></video>
-        <img class="poster" src="demo.jpg" alt="Prostir in the headset: monitors around the user and the menu">
+      <div class="demo">
+        <video poster="demo.jpg" width="1280" height="720" muted loop playsinline preload="none" controls aria-label="In the headset: touching the menu with a finger, resizing a monitor with both hands, focus mode dimming the other monitors, and a window onto the real keyboard">
+          <source src="demo.mp4" type="video/mp4">
+        </video>
+        <button class="demo-toggle" type="button" hidden data-play="Play video" data-pause="Pause video"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 1.5v13l11-6.5z"/></svg><span>Play video</span></button>
       </div>
     </div>
   </div>
 
-  <section>
+  <section aria-labelledby="features">
     <div class="wrap">
+      <h2 class="sr-only" id="features">What Prostir does</h2>
       <div class="band reveal">
         <div class="copy">
           <h3>Real monitors, not pictures of windows</h3>
@@ -111,19 +114,26 @@
         <img src="menu-monitors.png" width="1280" height="960" loading="lazy" alt="The headset menu, Monitors tab: the monitor list, sizes to add, layout, curve and mode">
       </div>
 
+      <div class="band stat reveal">
+        <h3><span class="figure-number">14<small>ms</small></span><span class="figure-label">from an encoded frame on the PC to the headset display, over Wi-Fi</span></h3>
+        <div class="copy">
+          <p>This part covers the network, decoding and display. It was measured on the author's laptop (Intel Arc) with a Quest 3. It is not the whole delay from your screen to your eyes: capturing and encoding the screen on the PC add a few milliseconds more.</p>
+          <p>The PC encodes on the GPU and the Quest decodes in hardware, straight into its compositor, so text stays sharp.</p>
+        </div>
+      </div>
+
       <div class="band reveal">
         <div class="copy">
-          <div class="figure-number">14<small>ms</small></div>
-          <p>From an encoded frame to the headset display, over Wi-Fi, measured on the author's laptop (Intel Arc, Quest 3). Capturing and encoding the screen adds a few milliseconds more.</p>
-          <p>The PC encodes on the GPU and the Quest decodes in hardware, straight into its compositor, so text stays sharp.</p>
+          <h3>Work, cinema, lying down</h3>
+          <p>Profiles switch the monitors, the laptop screen, the layout and the background in one press. Monitors of the same size stay, so their windows do not move.</p>
         </div>
         <img src="menu-profiles.png" width="1280" height="960" loading="lazy" alt="The headset menu, Profiles tab: Work, Cinema and Lying down">
       </div>
 
       <div class="band flip reveal">
         <div class="copy">
-          <h3>Work, cinema, lying down</h3>
-          <p>Profiles switch the monitors, the laptop screen, the layout and the background in one press. Monitors of the same size stay, so their windows do not move.</p>
+          <h3>Your room or a panorama</h3>
+          <p>Behind the monitors: black, your room through the headset cameras, or one of four built-in panoramas: night, sunset, space and aurora.</p>
         </div>
         <img src="backgrounds.jpg" width="1932" height="972" loading="lazy" alt="The four built-in panoramas: night, sunset, space and aurora">
       </div>

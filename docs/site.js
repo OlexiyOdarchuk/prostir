@@ -20,6 +20,51 @@ document.documentElement.classList.add("js");
   items.forEach((el) => io.observe(el));
 })();
 
+// Demo video: one pause/play button instead of the browser controls. It plays on its
+// own only when the visitor has not asked for reduced motion, and only while it is on
+// screen. With reduced motion nothing loads until the button is pressed.
+(function () {
+  const video = document.querySelector(".demo video");
+  const button = document.querySelector(".demo-toggle");
+  if (!video || !button) return;
+  const label = button.querySelector("span");
+  const icon = button.querySelector("path");
+  const PLAY = "M3 1.5v13l11-6.5z";
+  const PAUSE = "M3 1.5h3.5v13H3zM9.5 1.5H13v13H9.5z";
+  const calm = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  let wanted = !calm; // the visitor's choice; starts as "play" unless motion is unwelcome
+  let visible = true;
+
+  const show = () => {
+    const playing = !video.paused;
+    label.textContent = playing ? button.dataset.pause : button.dataset.play;
+    icon.setAttribute("d", playing ? PAUSE : PLAY);
+  };
+  const sync = () => {
+    if (wanted && visible) video.play().catch(() => { wanted = false; show(); });
+    else video.pause();
+  };
+
+  video.removeAttribute("controls");
+  video.addEventListener("play", show);
+  video.addEventListener("pause", show);
+  button.addEventListener("click", () => {
+    wanted = video.paused;
+    sync();
+  });
+  button.hidden = false;
+  show();
+
+  if ("IntersectionObserver" in window) {
+    new IntersectionObserver((entries) => {
+      visible = entries[entries.length - 1].isIntersecting;
+      sync();
+    }).observe(video);
+  } else {
+    sync();
+  }
+})();
+
 // How many PCs use Prostir, from GoatCounter's public counter. Prostir counts each PC
 // once a day (no id, nothing about the user); this page only reads the totals.
 // Hidden when there is nothing to show or the counter cannot be reached.
