@@ -1,4 +1,5 @@
-//! PipeWire → VA-API hardware encoder → encoded access units, via GStreamer.
+//! Frames from the platform (a PipeWire node, a capture) → hardware encoder → encoded
+//! access units, via GStreamer.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -6,12 +7,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use gstreamer_video as gst_video;
-use log::{debug, error, warn};
+use log::{debug, error, info, warn};
 use prostir_proto::Codec;
 
 /// Which hardware (or the CPU) encodes.
@@ -146,33 +147,18 @@ pub struct Encoder {
     bus_thread: Option<JoinHandle<()>>,
 }
 
-/// Where the frames come from.
-pub enum Input {
-    /// A PipeWire node (KWin streams its outputs this way).
-    PipeWire(u32),
-    /// Frames pushed into the pipeline's `appsrc` (Hyprland, see `screencopy.rs`).
-    Pushed(String),
-}
-
-impl Input {
-    fn label(&self) -> String {
-        match self {
-            Self::PipeWire(node) => format!("node {node}"),
-            Self::Pushed(name) => name.clone(),
-        }
-    }
+/// Where the frames come from: the start of the pipeline, made by the platform (a
+/// PipeWire node on KDE, frames pushed by a capture on Hyprland).
+pub struct Input {
+    /// GStreamer source elements. Frames the platform pushes itself go into an `appsrc`
+    /// named `src` (see [`Encoder::appsrc`]).
+    pub source: String,
+    /// What it is, for logs: `node 42`, `Prostir-1`.
+    pub label: String,
 }
 
 fn pipeline_description(input: &Input, cfg: &EncoderConfig) -> String {
-    let source = match input {
-        Input::PipeWire(node) => format!(
-            "pipewiresrc path={node} do-timestamp=true keepalive-time=500 always-copy=false"
-        ),
-        // Caps are set by the capture once it knows the frame size and format.
-        Input::Pushed(_) => "appsrc name=src is-live=true format=time do-timestamp=true \
-             max-buffers=2 leaky-type=downstream"
-            .to_owned(),
-    };
+    let source = &input.source;
     let (encoder, parser, caps) = match (cfg.codec, cfg.backend) {
         (_, Backend::X264) => (
             format!(
@@ -235,7 +221,7 @@ impl Encoder {
         on_event: impl Fn(EncoderEvent) -> bool + Send + Sync + 'static,
     ) -> Result<Self> {
         let desc = pipeline_description(input, cfg);
-        let node = input.label();
+        let node = input.label.clone();
         debug!("pipeline: {desc}");
         let pipeline = gst::parse::launch(&desc)
             .context("failed to build GStreamer pipeline (are gst-plugins-bad with VA and gst-plugin-pipewire installed?)")?
@@ -355,7 +341,7 @@ impl Encoder {
         Ok(encoder)
     }
 
-    /// The `appsrc` to push frames into, for [`Input::Pushed`].
+    /// The `appsrc` to push frames into, when the input has one.
     pub fn appsrc(&self) -> Option<gst_app::AppSrc> {
         self.pipeline
             .by_name("src")
@@ -478,5 +464,83 @@ impl Probe {
                 ..Self::default()
             };
         }
+    }
+}
+
+/// Decodes one keyframe of a monitor's stream into a PNG in the Pictures folder (a
+/// screenshot of just that monitor where the desktop's tool cannot take one output).
+pub fn keyframe_to_png(data: &[u8], codec: Codec) -> Result<std::path::PathBuf> {
+    let path = crate::platform::windows::screenshot_path()?;
+    let (caps, parse) = match codec {
+        Codec::H264 => ("video/x-h264", "h264parse"),
+        Codec::H265 => ("video/x-h265", "h265parse"),
+    };
+    let pipeline = gst::parse::launch(&format!(
+        "appsrc name=src caps={caps},stream-format=byte-stream,alignment=au ! {parse} ! \
+         decodebin ! videoconvert ! pngenc snapshot=true ! filesink name=sink"
+    ))?
+    .downcast::<gst::Pipeline>()
+    .map_err(|_| anyhow::anyhow!("not a pipeline"))?;
+    let sink = pipeline.by_name("sink").context("no filesink")?;
+    sink.set_property("location", path.to_string_lossy().as_ref());
+    let src = pipeline
+        .by_name("src")
+        .context("no appsrc")?
+        .downcast::<gst_app::AppSrc>()
+        .map_err(|_| anyhow::anyhow!("not an appsrc"))?;
+    pipeline.set_state(gst::State::Playing)?;
+    let pushed = src
+        .push_buffer(gst::Buffer::from_slice(data.to_vec()))
+        .map_err(|e| anyhow::anyhow!("{e:?}"))
+        .and_then(|_| src.end_of_stream().map_err(|e| anyhow::anyhow!("{e:?}")));
+    let bus = pipeline.bus().context("no bus")?;
+    let ended = bus.timed_pop_filtered(
+        gst::ClockTime::from_seconds(5),
+        &[gst::MessageType::Eos, gst::MessageType::Error],
+    );
+    let _ = pipeline.set_state(gst::State::Null);
+    pushed?;
+    match ended.as_ref().map(|m| m.view()) {
+        Some(gst::MessageView::Eos(_)) if path.exists() => {
+            info!("screenshot saved to {path:?}");
+            Ok(path)
+        }
+        Some(gst::MessageView::Error(e)) => bail!("{}", e.error()),
+        _ => bail!("the frame was not decoded in time"),
+    }
+}
+
+#[cfg(test)]
+mod live {
+    /// A keyframe from the graphics card's encoder becomes a PNG (run by hand:
+    /// `cargo test -- --ignored keyframe`; needs the VA plugin and a GPU).
+    #[test]
+    #[ignore]
+    fn keyframe_becomes_png() {
+        use gstreamer as gst;
+        use gstreamer::prelude::*;
+        gst::init().unwrap();
+        let pipeline = gst::parse::launch(
+            "videotestsrc num-buffers=1 ! video/x-raw,width=640,height=360 ! vapostproc ! \
+             vah265enc ! h265parse config-interval=-1 ! \
+             video/x-h265,stream-format=byte-stream,alignment=au ! appsink name=out",
+        )
+        .unwrap()
+        .downcast::<gst::Pipeline>()
+        .unwrap();
+        let out = pipeline
+            .by_name("out")
+            .unwrap()
+            .downcast::<gstreamer_app::AppSink>()
+            .unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let sample = out.pull_sample().unwrap();
+        let data = sample.buffer().unwrap().map_readable().unwrap().to_vec();
+        pipeline.set_state(gst::State::Null).unwrap();
+        let path = super::keyframe_to_png(&data, prostir_proto::Codec::H265).unwrap();
+        let png = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(&png[1..4], b"PNG");
+        eprintln!("decoded {} bytes into a {} byte PNG", data.len(), png.len());
     }
 }

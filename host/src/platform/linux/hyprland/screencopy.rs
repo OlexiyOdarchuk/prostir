@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use crate::encoder::Input;
 use anyhow::{Context, Result, anyhow, bail};
 use gstreamer as gst;
 use gstreamer_allocators::prelude::*;
@@ -42,6 +43,17 @@ const SLOTS: usize = 4;
 /// With nothing changing on screen, the last frame is sent again this often (the
 /// headset treats 10 s of silence as a dead link, PipeWire in KDE does the same).
 const KEEPALIVE: Duration = Duration::from_millis(500);
+
+/// The encoder input for output `name`: an `appsrc` the capture pushes frames into.
+pub fn input(name: &str) -> Input {
+    Input {
+        // Caps are set by the capture once it knows the frame size and format.
+        source: "appsrc name=src is-live=true format=time do-timestamp=true \
+                 max-buffers=2 leaky-type=downstream"
+            .to_owned(),
+        label: name.to_owned(),
+    }
+}
 
 /// A running capture of one output.
 pub struct Capture {

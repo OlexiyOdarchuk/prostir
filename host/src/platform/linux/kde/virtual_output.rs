@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
+use crate::encoder::Input;
 use crate::platform::{Geometry, MonitorSpec};
 use log::{info, warn};
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
@@ -402,6 +403,17 @@ impl VirtualOutput {
             .unwrap()
             .get(&self.number)
             .is_none_or(|s| s.closed)
+    }
+
+    /// The encoder reads the stream from KWin's PipeWire node.
+    pub fn input(&self) -> Input {
+        let node = self.node;
+        Input {
+            source: format!(
+                "pipewiresrc path={node} do-timestamp=true keepalive-time=500 always-copy=false"
+            ),
+            label: format!("node {node}"),
+        }
     }
 
     /// Makes this the primary output, so the Plasma panel and new windows go there.

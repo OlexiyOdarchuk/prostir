@@ -7,7 +7,7 @@ use anyhow::Result;
 
 use crate::encoder::{Encoder, Input};
 use crate::platform::hyprland;
-use crate::platform::hyprland::screencopy::Capture;
+use crate::platform::hyprland::screencopy::{self, Capture};
 use crate::platform::kde::virtual_output::{self, Screencast, VirtualOutput};
 use crate::platform::{Geometry, MonitorSpec};
 
@@ -165,8 +165,8 @@ impl Output {
     /// What to build the encoder on.
     pub fn input(&self) -> Input {
         match self {
-            Self::Kde(o) => Input::PipeWire(o.node),
-            Self::Hyprland(o) => Input::Pushed(o.name.clone()),
+            Self::Kde(o) => o.input(),
+            Self::Hyprland(o) => screencopy::input(&o.name),
         }
     }
 

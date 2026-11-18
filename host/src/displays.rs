@@ -1548,7 +1548,7 @@ impl Displays {
             };
             match frame
                 .map_err(anyhow::Error::from)
-                .and_then(|data| windows::keyframe_to_png(&data, codec))
+                .and_then(|data| crate::encoder::keyframe_to_png(&data, codec))
             {
                 Ok(path) => return Ok(path),
                 Err(e) => warn!("screenshot from the stream: {e:#}; taking the whole desktop"),
