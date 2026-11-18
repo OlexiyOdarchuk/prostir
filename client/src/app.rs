@@ -412,7 +412,8 @@ impl Scene {
         if !complete {
             return;
         }
-        let rows = layout::rows_by_position(&self.placements, &self.quest_sizes(), self.center);
+        // The laptop screen too: the PC puts it where it stands here.
+        let rows = layout::rows_by_position(&self.placements, &self.layout_sizes(), self.center);
         if rows.is_empty() || self.sent_layout.as_ref() == Some(&rows) {
             self.pending_layout = None;
             return;
@@ -438,7 +439,11 @@ impl Scene {
                 .collect::<Vec<_>>()
                 .join(" / ")
         );
-        self.order = rows.iter().flat_map(|r| r.ids.clone()).collect();
+        self.order = rows
+            .iter()
+            .flat_map(|r| r.ids.clone())
+            .filter(|id| *id != MIRROR_ID)
+            .collect();
         self.sent_layout = Some(rows.clone());
         self.send(ClientMsg::SetLayout { rows });
     }
@@ -829,29 +834,32 @@ impl Scene {
             self.arrange_all();
             return;
         }
-        let mirror = self.placements.get(&MIRROR_ID).copied();
         let wall = self.settings.preset == crate::settings::Preset::Wall;
-        // On a wall everything goes into one plane; otherwise the seams are taken out
-        // of the user's own arrangement, seen from where they sit now.
-        let sizes = self.quest_sizes();
         let mut tidy = if wall {
-            layout::tidy_wall(&self.placements, &sizes, self.center)
-        } else {
-            layout::snap(&self.placements, &sizes, self.head.0, self.primary)
-        };
-        // Window panels stay as they are.
-        for (id, p) in &self.placements {
-            if is_window_panel(*id) {
-                tidy.insert(*id, *p);
+            // On a wall everything goes into one plane, the laptop screen under the
+            // primary monitor as before.
+            let mut t = layout::tidy_wall(&self.placements, &self.quest_sizes(), self.center);
+            let mirror = self.placements.get(&MIRROR_ID).copied();
+            if let (Some(m), Some(p)) = (mirror, self.primary.and_then(|id| t.get(&id).copied())) {
+                let primary = self.primary.unwrap_or_default();
+                let under =
+                    layout::under(&p, self.height_of(primary), &m, self.height_of(MIRROR_ID));
+                t.insert(MIRROR_ID, under);
             }
-        }
-        // The laptop screen follows the primary monitor.
-        if let (Some(m), Some(p)) = (mirror, self.primary.and_then(|id| tidy.get(&id).copied())) {
-            let primary = self.primary.unwrap_or_default();
-            let under = layout::under(&p, self.height_of(primary), &m, self.height_of(MIRROR_ID));
-            tidy.insert(MIRROR_ID, under);
-        } else if let Some(m) = mirror {
-            tidy.insert(MIRROR_ID, m);
+            t
+        } else {
+            // One surface out of the user's own arrangement, the laptop screen part of
+            // it like any monitor.
+            layout::snap(
+                &self.placements,
+                &self.layout_sizes(),
+                self.center,
+                self.primary,
+            )
+        };
+        // Window panels (and anything not laid out) stay as they are.
+        for (id, p) in &self.placements {
+            tidy.entry(*id).or_insert(*p);
         }
         self.placements = tidy;
         self.grabs = [None, None];
@@ -881,13 +889,20 @@ impl Scene {
     fn stick_of(&self, id: u8) -> Option<layout::Stick> {
         if self.settings.cinema
             || self.settings.preset == crate::settings::Preset::Wall
-            || id == MIRROR_ID
             || is_window_panel(id)
             || !self.monitors.contains_key(&id)
         {
             return None;
         }
-        layout::stick(&self.placements, &self.quest_sizes(), self.head.0, id)
+        layout::stick(&self.placements, &self.layout_sizes(), self.center, id)
+    }
+
+    /// The monitors that make up the arrangement: the Quest monitors and the laptop
+    /// screen, if it shows.
+    fn layout_sizes(&self) -> Vec<(u8, u32, u32)> {
+        let mut sizes = self.quest_sizes();
+        sizes.extend(self.mirror_size());
+        sizes
     }
 
     /// Where the "Attach" button under detached window `id` is (as drawn, while it
@@ -1949,7 +1964,7 @@ fn run(app: &AndroidApp) -> Result<()> {
                     }
                     layout::save(&scene.layout_path, &scene.placements);
                     // Dropped somewhere else: KDE's arrangement follows what the eyes see.
-                    if released.id != PANEL_ID && released.id != MIRROR_ID {
+                    if released.id != PANEL_ID {
                         scene.send_layout();
                     }
                 }

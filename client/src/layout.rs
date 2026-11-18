@@ -154,83 +154,81 @@ pub fn rows_by_position(
         .collect()
 }
 
-/// A monitor as seen from the eye: its centre's direction (yaw to the right of the
-/// anchor monitor, pitch up), its distance, and its size in metres.
+/// A monitor on the cylinder around the user, like the presets put them: upright,
+/// facing the axis, its edges on the cylinder. `yaw` of its centre (right of the
+/// layout's forward), `y` the height of its centre, `radius` of its cylinder.
 #[derive(Debug, Clone, Copy)]
-struct Seen {
+struct OnCylinder {
     id: u8,
     yaw: f32,
-    pitch: f32,
-    distance: f32,
+    y: f32,
+    radius: f32,
     width: f32,
     height: f32,
     /// Width in pixels.
     pixels: f32,
 }
 
-impl Seen {
-    fn of(id: u8, p: &Placement, w: u32, h: u32, eye: Vec3) -> Self {
-        let d = p.position - eye;
-        Seen {
+impl OnCylinder {
+    /// Where `p` stands around `center` (position, yaw of the layout).
+    fn of(id: u8, p: &Placement, w: u32, h: u32, center: (Vec3, f32)) -> Self {
+        let local = Quat::from_rotation_y(-center.1) * (p.position - center.0);
+        let chord = Vec2::new(local.x, local.z).length().max(0.2);
+        Self {
             id,
-            yaw: d.x.atan2(-d.z),
-            pitch: d.y.atan2(Vec2::new(d.x, d.z).length()),
-            distance: d.length().max(0.3),
+            yaw: local.x.atan2(-local.z),
+            y: local.y,
+            // The centre of a flat monitor is inside the cylinder its edges are on.
+            radius: (chord * chord + p.width * p.width / 4.0).sqrt(),
             width: p.width,
             height: p.width * h as f32 / w.max(1) as f32,
             pixels: w.max(1) as f32,
         }
     }
 
+    /// Half its width as an angle around the axis.
+    fn half(&self) -> f32 {
+        (self.width / 2.0 / self.radius).min(0.95).asin()
+    }
+
+    /// Gaps to `other` in metres, across (along the cylinder) and up (negative: they
+    /// overlap that way).
+    fn gaps(&self, other: &OnCylinder) -> (f32, f32) {
+        let r = self.radius.min(other.radius);
+        (
+            ((self.yaw - other.yaw).abs() - (self.half() + other.half())) * r,
+            (self.y - other.y).abs() - (self.height + other.height) / 2.0,
+        )
+    }
+
+    /// How far apart the two are: the larger gap, or nothing when they overlap.
+    fn separation(&self, other: &OnCylinder) -> f32 {
+        let (gx, gy) = self.gaps(other);
+        gx.max(gy).max(0.0)
+    }
+
+    fn overlaps(&self, other: &OnCylinder) -> bool {
+        let (gx, gy) = self.gaps(other);
+        gx < -1e-3 && gy < -1e-3
+    }
+
     /// The same size per pixel as `other`: text the same size on both.
-    fn match_density(&mut self, other: &Seen) {
+    fn match_density(&mut self, other: &OnCylinder) {
         let aspect = self.height / self.width;
         self.width = other.width / other.pixels * self.pixels;
         self.height = self.width * aspect;
     }
 
-    /// Back to a placement facing the eye (`base`: the yaw that was taken off).
-    fn placement(&self, base: f32, eye: Vec3) -> Placement {
-        let yaw = self.yaw + base;
-        let dir = Vec3::new(
-            self.pitch.cos() * yaw.sin(),
-            self.pitch.sin(),
-            -self.pitch.cos() * yaw.cos(),
-        );
-        let position = eye + dir * self.distance;
+    fn placement(&self, center: (Vec3, f32)) -> Placement {
+        let half = self.half();
+        let r = self.radius * half.cos();
+        let local = Vec3::new(r * self.yaw.sin(), self.y, -r * self.yaw.cos());
+        let turn = Quat::from_rotation_y(center.1);
         Placement {
-            position,
-            rotation: facing(position, eye),
+            position: center.0 + turn * local,
+            rotation: turn * facing(local, Vec3::new(0.0, self.y, 0.0)),
             width: self.width,
         }
-    }
-
-    /// Half its width and height as angles.
-    fn half(&self) -> (f32, f32) {
-        (
-            (self.width / 2.0 / self.distance).atan(),
-            (self.height / 2.0 / self.distance).atan(),
-        )
-    }
-
-    /// Angular gaps to `other` across and up (negative: the ranges overlap).
-    fn gaps(&self, other: &Seen) -> (f32, f32) {
-        let ((aw, ah), (bw, bh)) = (self.half(), other.half());
-        (
-            (self.yaw - other.yaw).abs() - (aw + bw),
-            (self.pitch - other.pitch).abs() - (ah + bh),
-        )
-    }
-
-    /// How far apart the two are: the larger gap, or nothing when they overlap.
-    fn separation(&self, other: &Seen) -> f32 {
-        let (gx, gy) = self.gaps(other);
-        gx.max(gy).max(0.0)
-    }
-
-    fn overlaps(&self, other: &Seen) -> bool {
-        let (gx, gy) = self.gaps(other);
-        gx < -1e-3 && gy < -1e-3
     }
 }
 
@@ -250,35 +248,75 @@ fn align(value: f32, half: f32, other: f32, other_half: f32) -> f32 {
     }
 }
 
-/// The A button: the user's own arrangement, with the seams taken out. Seen from
-/// `eye`, monitors that overlap or almost touch (a gap under half a monitor) are moved
-/// to meet edge to edge, at the same distance as the neighbour they join and lined up
-/// with it when nearly so; monitors put clearly apart stay where they are. Every
-/// monitor turns to face the eye. `anchor` (the primary monitor) does not move.
+/// Puts `m` on the cylinder of `n`, edge to edge with it (beside it, or above or
+/// below), clear of everything `placed`. Returns whether it went beside `n` (else
+/// above or below) and on which side (1: right or above, -1: left or below).
+fn attach(m: &mut OnCylinder, n: &OnCylinder, placed: &[OnCylinder]) -> (bool, f32) {
+    let (gx, gy) = m.gaps(n);
+    let across = gx > gy;
+    m.radius = n.radius;
+    let side = |a: f32, b: f32| if a >= b { 1.0 } else { -1.0 };
+    let dir = if across {
+        side(m.yaw, n.yaw)
+    } else {
+        side(m.y, n.y)
+    };
+    if across {
+        m.yaw = n.yaw + dir * (n.half() + m.half());
+        m.y = align(m.y, m.height / 2.0, n.y, n.height / 2.0);
+    } else {
+        m.y = n.y + dir * (n.height + m.height) / 2.0;
+        m.yaw = align(m.yaw, m.half(), n.yaw, n.half());
+    }
+    // Still on top of another one: past it, the same way.
+    for _ in 0..placed.len() {
+        let Some(o) = placed
+            .iter()
+            .find(|o| o.id != m.id && m.overlaps(o))
+            .copied()
+        else {
+            break;
+        };
+        if across {
+            m.yaw = o.yaw + dir * (o.half() + m.half());
+        } else {
+            m.y = o.y + dir * (o.height + m.height) / 2.0;
+        }
+    }
+    (across, dir)
+}
+
+fn on_cylinders(
+    placements: &HashMap<u8, Placement>,
+    monitors: &[(u8, u32, u32)],
+    center: (Vec3, f32),
+) -> Vec<OnCylinder> {
+    monitors
+        .iter()
+        .filter_map(|&(id, w, h)| Some(OnCylinder::of(id, placements.get(&id)?, w, h, center)))
+        .collect()
+}
+
+/// The A button: the user's own arrangement made into one surface, the way the
+/// presets lay monitors out. Starting from `anchor` (the primary monitor, which keeps
+/// its place), each monitor that is within a monitor's width of one already done
+/// joins it on its cylinder, edge to edge, at the same size per pixel, lined up with
+/// it when nearly so: rows become continuous arcs and rows stack without a gap, so
+/// windows cross from one to the next as on one screen. Monitors put clearly apart
+/// keep their place (but stand upright, facing the user). `monitors` may include the
+/// laptop screen.
 pub fn snap(
     placements: &HashMap<u8, Placement>,
     monitors: &[(u8, u32, u32)],
-    eye: Vec3,
+    center: (Vec3, f32),
     anchor: Option<u8>,
 ) -> HashMap<u8, Placement> {
-    let mut rest: Vec<Seen> = monitors
-        .iter()
-        .filter_map(|&(id, w, h)| Some(Seen::of(id, placements.get(&id)?, w, h, eye)))
-        .collect();
+    let mut rest = on_cylinders(placements, monitors, center);
     if rest.is_empty() {
         return HashMap::new();
     }
     let first = rest.iter().position(|m| Some(m.id) == anchor).unwrap_or(0);
     let mut placed = vec![rest.remove(first)];
-    // Yaw around the anchor, so nothing wraps around behind the user.
-    let base = placed[0].yaw;
-    let wrap = |a: f32| {
-        (a + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
-    };
-    placed[0].yaw = 0.0;
-    for m in &mut rest {
-        m.yaw = wrap(m.yaw - base);
-    }
     // Outwards from the anchor: always the monitor closest to one already placed.
     while !rest.is_empty() {
         let (ri, pi, sep) = rest
@@ -294,9 +332,7 @@ pub fn snap(
             .expect("both lists are non-empty");
         let mut m = rest.remove(ri);
         let n = placed[pi];
-        let (mw, _) = m.half();
-        let (nw, _) = n.half();
-        if sep < mw.min(nw) {
+        if sep < m.width.min(n.width) {
             m.match_density(&n);
             attach(&mut m, &n, &placed);
         }
@@ -304,49 +340,8 @@ pub fn snap(
     }
     placed
         .into_iter()
-        .map(|m| (m.id, m.placement(base, eye)))
+        .map(|m| (m.id, m.placement(center)))
         .collect()
-}
-
-/// Moves `m` to meet `n` edge to edge (see [`snap`]), clear of everything `placed`.
-/// Returns whether they are side by side (else one above the other) and on which side
-/// of `n` it went (1: right or above, -1: left or below).
-fn attach(m: &mut Seen, n: &Seen, placed: &[Seen]) -> (bool, f32) {
-    let (gx, gy) = m.gaps(n);
-    // Side by side when the gap across is the larger one, else above or below.
-    let across = gx > gy;
-    m.distance = n.distance;
-    let ((mw, mh), (nw, nh)) = (m.half(), n.half());
-    let side = |a: f32, b: f32| if a >= b { 1.0 } else { -1.0 };
-    let dir = if across {
-        side(m.yaw, n.yaw)
-    } else {
-        side(m.pitch, n.pitch)
-    };
-    if across {
-        m.yaw = n.yaw + dir * (nw + mw);
-        m.pitch = align(m.pitch, mh, n.pitch, nh);
-    } else {
-        m.pitch = n.pitch + dir * (nh + mh);
-        m.yaw = align(m.yaw, mw, n.yaw, nw);
-    }
-    // Still on top of another one: past it, the same way.
-    for _ in 0..placed.len() {
-        let Some(o) = placed
-            .iter()
-            .find(|o| o.id != m.id && m.overlaps(o))
-            .copied()
-        else {
-            break;
-        };
-        let ((mw, mh), (ow, oh)) = (m.half(), o.half());
-        if across {
-            m.yaw = o.yaw + dir * (ow + mw);
-        } else {
-            m.pitch = o.pitch + dir * (oh + mh);
-        }
-    }
-    (across, dir)
 }
 
 /// Where a monitor being let go of would stick: the monitor it joins and the edge.
@@ -360,40 +355,27 @@ pub struct Stick {
     pub side: f32,
 }
 
-/// The magnet for one monitor: if `id`, seen from `eye`, overlaps another monitor or
-/// is within half a monitor of one, where it would stick to the nearest (see
-/// [`snap`]); `None` when it is clearly apart.
+/// The magnet for one monitor: if `id` overlaps another monitor or is within half a
+/// monitor of one, where it would stick to the nearest (on its cylinder, edge to
+/// edge, see [`snap`]); `None` when it is clearly apart.
 pub fn stick(
     placements: &HashMap<u8, Placement>,
     monitors: &[(u8, u32, u32)],
-    eye: Vec3,
+    center: (Vec3, f32),
     id: u8,
 ) -> Option<Stick> {
-    let &(_, w, h) = monitors.iter().find(|m| m.0 == id)?;
-    let mut m = Seen::of(id, placements.get(&id)?, w, h, eye);
-    let base = m.yaw;
-    m.yaw = 0.0;
-    let wrap = |a: f32| {
-        (a + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
-    };
-    let others: Vec<Seen> = monitors
-        .iter()
-        .filter(|o| o.0 != id)
-        .filter_map(|&(oid, w, h)| {
-            let mut o = Seen::of(oid, placements.get(&oid)?, w, h, eye);
-            o.yaw = wrap(o.yaw - base);
-            Some(o)
-        })
-        .collect();
+    let all = on_cylinders(placements, monitors, center);
+    let mut m = *all.iter().find(|m| m.id == id)?;
+    let others: Vec<OnCylinder> = all.into_iter().filter(|o| o.id != id).collect();
     let n = *others
         .iter()
         .min_by(|a, b| m.separation(a).total_cmp(&m.separation(b)))?;
-    if m.separation(&n) >= m.half().0.min(n.half().0) {
+    if m.separation(&n) >= m.width.min(n.width) / 2.0 {
         return None;
     }
     let (across, side) = attach(&mut m, &n, &others);
     Some(Stick {
-        placement: m.placement(base, eye),
+        placement: m.placement(center),
         neighbour: n.id,
         across,
         side,
@@ -1197,7 +1179,7 @@ mod tests {
                 width: rough[&1].width,
             },
         );
-        let tidy = snap(&rough, &three, center.0, Some(1));
+        let tidy = snap(&rough, &three, center, Some(1));
         assert_eq!(tidy.len(), 3);
         // Still two rows: monitor 2 above the others.
         assert!(tidy[&2].position.y > tidy[&1].position.y + 0.5);
@@ -1225,31 +1207,31 @@ mod tests {
                     id,
                     Placement {
                         position: at,
-                        rotation: facing(at, Vec3::ZERO),
+                        rotation: facing(at, Vec3::new(0.0, at.y, 0.0)),
                         width,
                     },
                 )
             })
             .collect();
-        let after = snap(&before, &sizes, Vec3::ZERO, Some(positions[0].0));
+        let after = snap(&before, &sizes, (Vec3::ZERO, 0.0), Some(positions[0].0));
         (before, after, sizes)
     }
 
-    fn seen_of(p: &Placement, w: f32) -> Seen {
-        let d = p.position;
-        Seen {
-            id: 0,
-            yaw: d.x.atan2(-d.z),
-            pitch: d.y.atan2(Vec2::new(d.x, d.z).length()),
-            distance: d.length(),
-            width: w,
-            height: w * 1440.0 / 2560.0,
-            pixels: 2560.0,
-        }
+    fn cyl(p: &Placement) -> OnCylinder {
+        OnCylinder::of(0, p, 2560, 1440, (Vec3::ZERO, 0.0))
+    }
+
+    /// Two placements meet edge to edge in the room (the shared edge is one line).
+    fn edges_meet(a: &Placement, b: &Placement) -> f32 {
+        let edge =
+            |p: &Placement, side: f32| p.position + p.rotation * Vec3::X * (side * p.width / 2.0);
+        edge(a, 1.0)
+            .distance(edge(b, -1.0))
+            .min(edge(a, -1.0).distance(edge(b, 1.0)))
     }
 
     #[test]
-    fn snap_closes_seams_and_overlaps() {
+    fn snap_makes_one_surface() {
         // The anchor straight ahead; one overlapping it on the right, a little lower
         // and nearer; one leaving a small gap on the left.
         let (before, after, _) = snap_case(&[
@@ -1259,20 +1241,18 @@ mod tests {
         ]);
         // The anchor stays.
         assert!(after[&0].position.distance(before[&0].position) < 1e-4);
-        let a = seen_of(&after[&0], 1.2);
         for id in [1, 2] {
-            let m = seen_of(&after[&id], 1.2);
-            let (gx, _) = m.gaps(&a);
-            assert!(gx.abs() < 1e-3, "monitor {id}: gap {gx}");
-            // Same distance and lined up.
-            assert!((m.distance - a.distance).abs() < 1e-3);
-            assert!((m.pitch - a.pitch).abs() < 1e-3);
+            // Edges meet in the room, not just as seen: one surface.
+            let d = edges_meet(&after[&0], &after[&id]);
+            assert!(d < 1e-3, "monitor {id}: edges {d} m apart");
+            assert!((after[&id].position.y - after[&0].position.y).abs() < 1e-4);
+            // Upright, like the presets.
+            assert!((after[&id].rotation * Vec3::Y).y > 0.9999);
         }
     }
 
     #[test]
-    fn snap_makes_joined_monitors_the_same_density() {
-        // Same pixels, the right one made bigger by hand.
+    fn snap_matches_density() {
         let (_, after, _) = snap_case(&[
             (0, Vec3::new(0.0, 0.0, -1.1), 1.2),
             (1, Vec3::new(1.3, 0.0, -0.9), 1.6),
@@ -1285,9 +1265,24 @@ mod tests {
         // Far to the right, on purpose.
         let (before, after, _) = snap_case(&[
             (0, Vec3::new(0.0, 0.0, -1.1), 1.2),
-            (1, Vec3::new(1.1, 0.0, 0.0), 1.2),
+            (1, Vec3::new(2.5, 0.0, 0.5), 1.2),
         ]);
         assert!(after[&1].position.distance(before[&1].position) < 1e-3);
+    }
+
+    #[test]
+    fn snap_stacks_rows_without_a_gap() {
+        // One above the anchor, sunk into it.
+        let (_, after, _) = snap_case(&[
+            (0, Vec3::new(0.0, 0.0, -1.1), 1.2),
+            (1, Vec3::new(0.05, 0.5, -1.0), 1.2),
+        ]);
+        let (a, m) = (cyl(&after[&0]), cyl(&after[&1]));
+        let (_, gy) = m.gaps(&a);
+        assert!(gy.abs() < 1e-3, "vertical gap {gy}");
+        // Straight above it, on the same cylinder.
+        assert!(m.yaw.abs() < 1e-3);
+        assert!((m.radius - a.radius).abs() < 1e-3);
     }
 
     #[test]
@@ -1296,35 +1291,16 @@ mod tests {
             (0, Vec3::new(0.0, 0.0, -1.1), 1.2),
             (1, Vec3::new(1.15, 0.03, -0.9), 1.2),
         ]);
-        let s = stick(&before, &sizes, Vec3::ZERO, 1).expect("sticks");
+        let s = stick(&before, &sizes, (Vec3::ZERO, 0.0), 1).expect("sticks");
         assert_eq!(s.neighbour, 0);
         assert!(s.across && s.side > 0.0);
-        let mut after = before.clone();
-        after.insert(1, s.placement);
-        let (gx, _) = seen_of(&after[&1], 1.2).gaps(&seen_of(&after[&0], 1.2));
-        assert!(gx.abs() < 1e-3);
+        assert!(edges_meet(&before[&0], &s.placement) < 1e-3);
         // Far away: no magnet.
         let (before, _, sizes) = snap_case(&[
             (0, Vec3::new(0.0, 0.0, -1.1), 1.2),
             (1, Vec3::new(1.1, 0.0, 0.0), 1.2),
         ]);
-        assert!(stick(&before, &sizes, Vec3::ZERO, 1).is_none());
-    }
-
-    #[test]
-    fn snap_stacks_rows_without_overlap() {
-        // One above the anchor, sunk into it.
-        let (_, after, _) = snap_case(&[
-            (0, Vec3::new(0.0, 0.0, -1.1), 1.2),
-            (1, Vec3::new(0.05, 0.5, -1.0), 1.2),
-        ]);
-        let a = seen_of(&after[&0], 1.2);
-        let m = seen_of(&after[&1], 1.2);
-        let (gx, gy) = m.gaps(&a);
-        assert!(gy.abs() < 1e-3, "vertical gap {gy}");
-        assert!(gx < 0.0);
-        // Lined up above it.
-        assert!(m.yaw.abs() < 1e-3);
+        assert!(stick(&before, &sizes, (Vec3::ZERO, 0.0), 1).is_none());
     }
 
     /// A wall: A brings everything into one plane, facing one way, rows touching.

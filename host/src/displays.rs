@@ -1172,11 +1172,14 @@ impl Displays {
             })
         };
         // As the headset shows them (see `arrange`).
-        let names: HashMap<u8, String> = self
+        let mut names: HashMap<u8, String> = self
             .monitors
             .iter()
             .map(|(id, m)| (*id, m.output.output_name().to_owned()))
             .collect();
+        if let Some(m) = &self.mirror {
+            names.insert(MIRROR_ID, m.output.output_name().to_owned());
+        }
         let rows: Vec<Vec<Seat>> = self
             .effective_rows()
             .into_iter()
@@ -1185,8 +1188,8 @@ impl Displays {
                     .iter()
                     .zip(&r.centers)
                     .filter_map(|(id, center)| {
-                        let m = self.monitors.get(id)?;
-                        let (w, h) = size(&names[id], Some(&m.spec))?;
+                        let spec = self.monitors.get(id).map(|m| &m.spec);
+                        let (w, h) = size(names.get(id)?, spec)?;
                         Some(Seat {
                             id: *id,
                             center: *center,
@@ -1226,7 +1229,9 @@ impl Displays {
             .mirror
             .as_ref()
             .map(|m| m.output.output_name().to_owned());
-        if let (Some(name), Some((px, pw))) = (&mirror_name, primary_at)
+        // Unless the headset put it somewhere itself (it is then in a row).
+        let mirror_placed = planned.iter().any(|p| p.0 == MIRROR_ID);
+        if let (Some(name), Some((px, pw)), false) = (&mirror_name, primary_at, mirror_placed)
             && let Some((w, _)) = size(name, None)
         {
             let x = (px + (pw - w) / 2).max(0);
@@ -1340,7 +1345,11 @@ impl Displays {
                     .ids
                     .iter()
                     .zip(r.centers.iter().chain(std::iter::repeat(&NEXT)))
-                    .filter(|(id, _)| self.monitors.contains_key(id))
+                    // The laptop screen too, where the headset put it (while it shows).
+                    .filter(|(id, _)| {
+                        self.monitors.contains_key(id)
+                            || (**id == MIRROR_ID && self.mirror.is_some())
+                    })
                     .map(|(id, c)| (*id, *c))
                     .unzip();
                 LayoutRow { ids, centers }
@@ -1383,7 +1392,11 @@ impl Displays {
         }
         self.rows = rows;
         let rows = self.effective_rows();
-        self.order = rows.iter().flat_map(|r| r.ids.clone()).collect();
+        self.order = rows
+            .iter()
+            .flat_map(|r| r.ids.clone())
+            .filter(|id| *id != MIRROR_ID)
+            .collect();
         self.apply_kde_layout();
         self.router.send(HostMsg::Order {
             ids: self.order.clone(),
