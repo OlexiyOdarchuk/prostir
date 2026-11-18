@@ -227,7 +227,7 @@ cd prostir-*/
           <h3>Видалення</h3>
           <ul>
             <li>AUR: <code>sudo pacman -R prostir-bin</code>. Debian, Ubuntu: <code>sudo apt remove prostir</code>. Fedora: <code>sudo dnf remove prostir</code>. openSUSE: <code>sudo zypper remove prostir</code>.</li>
-            <li>Архів: запустіть <code>./install.sh --uninstall</code> у розпакованій папці.</li>
+            <li>Архів: запустіть <code class="nw">./install.sh --uninstall</code> у розпакованій папці.</li>
             <li>Налаштування й сполучення лишаються в <code>~/.config/prostir</code>. Щоб прибрати їх, видаліть цю папку, а якщо вмикали автозапуск, то й <code>~/.config/autostart/prostir.desktop</code>.</li>
             <li>Шолом: <code>adb uninstall dev.prostir.client</code> або видаліть застосунок у бібліотеці, у «Невідомих джерелах».</li>
           </ul>
@@ -288,7 +288,7 @@ sudo firewall-cmd --reload</code></pre>
         <div>
           <h3>NVIDIA, або шолом каже, що бракує кодера</h3>
           <p>Prostir кодує відеокартою через VA-API. Коли це недоступно, він сам переходить на процесор і кодує через x264. Так буває на NVIDIA, без плагіна GStreamer <code>va</code> і з Mesa, яку постачають Fedora й openSUSE: у ній немає кодування H.264 і HEVC.</p>
-          <p>Для кодування процесором потрібен <code>x264enc</code>: <code>gst-plugins-ugly</code> в Arch, <code>gstreamer1.0-plugins-ugly</code> у Debian і Ubuntu, <code>gstreamer1-plugins-ugly</code> з RPM Fusion у Fedora, <code>gstreamer-plugins-ugly</code> з Packman в openSUSE. Якщо не працює жоден спосіб, шолом покаже, чого бракує. <code>prostir --software</code> завжди кодує процесором.</p>
+          <p>Для кодування процесором потрібен <code>x264enc</code>: <code>gst-plugins-ugly</code> в Arch, <code>gstreamer1.0-plugins-ugly</code> у Debian і Ubuntu, <code>gstreamer1-plugins-ugly</code> з RPM Fusion у Fedora, <code>gstreamer-plugins-ugly</code> з Packman в openSUSE. Якщо не працює жоден спосіб, шолом покаже, чого бракує. <code class="nw">prostir --software</code> завжди кодує процесором.</p>
         </div>
         <div>
           <h3>Після запуску в Hyprland нічого не видно</h3>

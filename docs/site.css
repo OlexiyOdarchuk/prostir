@@ -127,6 +127,7 @@ pre {
   line-height: 1.5;
 }
 :not(pre) > code { background: var(--code); padding: 1px 6px; border-radius: 5px; overflow-wrap: anywhere; }
+code.nw { white-space: nowrap; } /* short commands that must not break at a hyphen */
 
 .wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
 .sr-only {

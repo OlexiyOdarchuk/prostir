@@ -227,7 +227,7 @@ cd prostir-*/
           <h3>Uninstall</h3>
           <ul>
             <li>AUR: <code>sudo pacman -R prostir-bin</code>. Debian, Ubuntu: <code>sudo apt remove prostir</code>. Fedora: <code>sudo dnf remove prostir</code>. openSUSE: <code>sudo zypper remove prostir</code>.</li>
-            <li>Tarball: run <code>./install.sh --uninstall</code> in the unpacked folder.</li>
+            <li>Tarball: run <code class="nw">./install.sh --uninstall</code> in the unpacked folder.</li>
             <li>Settings and pairings stay in <code>~/.config/prostir</code>. Delete that folder to remove them, and <code>~/.config/autostart/prostir.desktop</code> if you turned on autostart.</li>
             <li>Headset: <code>adb uninstall dev.prostir.client</code>, or uninstall it from Unknown sources in the Library.</li>
           </ul>
@@ -288,7 +288,7 @@ sudo firewall-cmd --reload</code></pre>
         <div>
           <h3>NVIDIA, or the headset says an encoder is missing</h3>
           <p>Prostir encodes on the GPU through VA-API. When that is not available, it switches to the CPU and encodes with x264 by itself. This happens on NVIDIA, without the GStreamer <code>va</code> plugin, and with the Mesa that Fedora and openSUSE ship, which leaves out H.264 and HEVC encoding.</p>
-          <p>The CPU path needs <code>x264enc</code>: <code>gst-plugins-ugly</code> on Arch, <code>gstreamer1.0-plugins-ugly</code> on Debian and Ubuntu, <code>gstreamer1-plugins-ugly</code> from RPM Fusion on Fedora, <code>gstreamer-plugins-ugly</code> from Packman on openSUSE. If neither path works, the headset shows what is missing. <code>prostir --software</code> always encodes on the CPU.</p>
+          <p>The CPU path needs <code>x264enc</code>: <code>gst-plugins-ugly</code> on Arch, <code>gstreamer1.0-plugins-ugly</code> on Debian and Ubuntu, <code>gstreamer1-plugins-ugly</code> from RPM Fusion on Fedora, <code>gstreamer-plugins-ugly</code> from Packman on openSUSE. If neither path works, the headset shows what is missing. <code class="nw">prostir --software</code> always encodes on the CPU.</p>
         </div>
         <div>
           <h3>Nothing appears after starting Prostir on Hyprland</h3>
