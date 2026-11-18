@@ -1529,6 +1529,7 @@ fn build_look(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, rx: f32, rw:
     let (a1, s1) = bg(Background::Black);
     let (a2, s2) = bg(Background::Room);
     let (a3, s3) = bg(Background::Custom);
+    let (a4, s4) = bg(Background::RoomDim);
     segmented(
         items,
         lx,
@@ -1538,6 +1539,7 @@ fn build_look(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, rx: f32, rw:
         vec![
             (l.t("Чорний", "Black"), a1, s1, true),
             (l.t("Кімната", "Room"), a2, s2, s.room_available),
+            (l.t("Притемнена", "Dimmed"), a4, s4, s.room_available),
             (
                 l.t("Своє фото", "Own photo"),
                 a3,

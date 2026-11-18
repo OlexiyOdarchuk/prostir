@@ -38,10 +38,19 @@ pub enum Background {
     Black,
     /// Passthrough cameras.
     Room,
+    /// The room, darker: the monitors stand out more.
+    RoomDim,
     /// A built-in panorama.
     Sky(Sky),
     /// The user's own `background.jpg/png`.
     Custom,
+}
+
+impl Background {
+    /// Shows the room through the cameras.
+    pub fn is_room(self) -> bool {
+        matches!(self, Background::Room | Background::RoomDim)
+    }
 }
 
 /// What tracked hands do in the headset.
@@ -182,6 +191,7 @@ impl Settings {
                 Some(("background", v)) => {
                     s.background = match v {
                         "room" => Background::Room,
+                        "room-dim" => Background::RoomDim,
                         "custom" => Background::Custom,
                         "panorama" | "sky-night" => Background::Sky(Sky::Night),
                         "sky-sunset" => Background::Sky(Sky::Sunset),
@@ -216,6 +226,7 @@ impl Settings {
         let background = match self.background {
             Background::Black => "black",
             Background::Room => "room",
+            Background::RoomDim => "room-dim",
             Background::Custom => "custom",
             Background::Sky(Sky::Night) => "sky-night",
             Background::Sky(Sky::Sunset) => "sky-sunset",

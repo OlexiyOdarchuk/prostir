@@ -138,6 +138,26 @@ impl Passthrough {
         self.update_cameras()
     }
 
+    /// How much of the room shows through (1: all; less darkens it towards black).
+    pub fn set_room_opacity(&mut self, opacity: f32) -> Result<()> {
+        let style = xr::sys::PassthroughStyleFB {
+            ty: xr::sys::PassthroughStyleFB::TYPE,
+            next: ptr::null(),
+            texture_opacity_factor: opacity.clamp(0.0, 1.0),
+            edge_color: xr::Color4f {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.0,
+            },
+        };
+        // SAFETY: the layer is alive for the lifetime of `self`.
+        check(
+            unsafe { (self.fp.passthrough_layer_set_style)(self.room, &style) },
+            "xrPassthroughLayerSetStyleFB",
+        )
+    }
+
     /// Shows the keyboard window at `pose` (a rectangle `width` × `depth` metres, lying
     /// in the pose's XY plane), or hides it with `None`.
     pub fn set_window(

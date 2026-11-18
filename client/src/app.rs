@@ -1198,7 +1198,7 @@ fn run(app: &AndroidApp) -> Result<()> {
 
     // Passthrough keeps the cameras busy and costs battery: only when "Room" is chosen.
     let mut passthrough = if exts.fb_passthrough {
-        passthrough::Passthrough::new(&session, settings.background == Background::Room)
+        passthrough::Passthrough::new(&session, settings.background.is_room())
             .inspect_err(|e| warn!("passthrough unavailable: {e:#}"))
             .ok()
     } else {
@@ -2548,8 +2548,16 @@ fn handle_net_event(
 
 /// Passthrough cameras on only for the "room" background.
 fn set_passthrough(scene: &mut Scene, passthrough: &mut Option<passthrough::Passthrough>) {
+    let background = scene.settings.background;
+    let opacity = if background == Background::RoomDim {
+        0.4
+    } else {
+        1.0
+    };
     if let Some(pt) = passthrough
-        && let Err(e) = pt.set_room(scene.settings.background == Background::Room)
+        && let Err(e) = pt
+            .set_room(background.is_room())
+            .and_then(|()| pt.set_room_opacity(opacity))
     {
         let what = scene.lang().t("Камери недоступні", "Cameras unavailable");
         scene.show_error(format!("{what}: {e:#}"));
