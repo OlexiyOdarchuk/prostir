@@ -13,6 +13,7 @@ mod screencopy;
 mod tray;
 mod usage;
 mod virtual_output;
+mod windows;
 
 use std::io::{BufReader, BufWriter, ErrorKind, Write};
 use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream, UdpSocket};
@@ -325,6 +326,9 @@ fn serve_client(
                     Err(e) => report(displays, format!("{e:#}")),
                 }
             }
+            Ok(Ok(ClientMsg::RemoveMonitor { id })) if prostir_proto::is_window_panel(id) => {
+                displays.close_window_panel(id);
+            }
             Ok(Ok(ClientMsg::RemoveMonitor { id })) => match displays.remove(id) {
                 Ok(()) => {
                     info!("headset removed Prostir-{}", id + 1);
@@ -371,6 +375,26 @@ fn serve_client(
                 displays.save();
                 displays::sync_wallpapers();
             }
+            Ok(Ok(ClientMsg::DetachWindow)) => {
+                if let Err(e) = displays.detach_window() {
+                    report(displays, format!("{e:#}"));
+                }
+            }
+            Ok(Ok(ClientMsg::WindowHere { id })) => {
+                if let Err(e) = displays.window_here(id) {
+                    report(displays, format!("{e:#}"));
+                }
+            }
+            Ok(Ok(ClientMsg::Screenshot { id })) => match displays.screenshot(id) {
+                Ok(path) => displays.router.send(HostMsg::Notice {
+                    text: format!(
+                        "{} {}",
+                        i18n::t("Знімок збережено:", "Screenshot saved:"),
+                        home_relative(&path)
+                    ),
+                }),
+                Err(e) => report(displays, format!("{e:#}")),
+            },
             Ok(Ok(ClientMsg::Battery { percent, charging })) => {
                 tray::set_battery(control.tray.as_ref(), Some((percent, charging)));
                 // Once per session, when it gets low.
@@ -554,6 +578,17 @@ fn create_displays(args: &Args, bitrate: u32, sharp: bool) -> Result<Displays> {
     let displays = Displays::create(&saved, cfg, !args.keep_primary)?;
     displays.save();
     Ok(displays)
+}
+
+/// `~/Pictures/…` rather than the full path, for showing.
+fn home_relative(path: &std::path::Path) -> String {
+    let shown = path.to_string_lossy().into_owned();
+    match std::env::var("HOME") {
+        Ok(home) if !home.is_empty() && shown.starts_with(&home) => {
+            format!("~{}", &shown[home.len()..])
+        }
+        _ => shown,
+    }
 }
 
 /// The headset's battery is low: say so on the PC, where the user is looking.

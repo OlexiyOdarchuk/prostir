@@ -91,6 +91,15 @@ pub const NEXT: i32 = i32::MIN;
 
 /// [`HostMsg::Focus`] when the mouse is on none of the streamed displays.
 pub const NO_FOCUS: u8 = 255;
+/// Stream ids of window panels: small outputs made for one window each, shown as
+/// floating panels (at most three: the headset has only so many video decoders).
+pub const WINDOW_IDS: std::ops::Range<u8> = 10..13;
+
+/// Whether `id` is a window panel (see [`WINDOW_IDS`]).
+pub fn is_window_panel(id: u8) -> bool {
+    WINDOW_IDS.contains(&id)
+}
+
 /// Stream id of the mirrored physical display (laptop panel); Quest monitors use 0..
 pub const MIRROR_ID: u8 = 100;
 /// Prefix of the UDP discovery beacon: `MAGIC ++ tcp_port (u16 LE) ++ hostname (utf-8)`.
@@ -188,6 +197,10 @@ pub enum HostMsg {
     },
     /// Turn the monitors to face the user (asked for from the PC's tray).
     Recenter,
+    /// Something done, to show briefly (not an error): "Saved to ~/Pictures/…".
+    Notice {
+        text: String,
+    },
     /// The PC's encoding settings and what it can encode with (bits of [`encoders`]).
     PcSettings {
         settings: PcSettings,
@@ -294,6 +307,16 @@ pub enum ClientMsg {
         percent: u8,
         charging: bool,
     },
+    /// Put the PC's active window on a panel of its own (a small output its size).
+    DetachWindow,
+    /// Move the PC's active window to monitor `id` (the one the user looks at).
+    WindowHere {
+        id: u8,
+    },
+    /// Save a picture of monitor `id` on the PC.
+    Screenshot {
+        id: u8,
+    },
     /// Start pairing. `headset_shows`: the headset displays the code and the PC asks
     /// for it; otherwise the PC displays it and the headset asks.
     PairBegin {
@@ -330,6 +353,7 @@ mod tag {
     pub const INCOMPATIBLE: u8 = 17;
     pub const PC_SETTINGS: u8 = 18;
     pub const RECENTER: u8 = 19;
+    pub const NOTICE: u8 = 20;
     pub const HELLO: u8 = 101;
     pub const REQUEST_KEYFRAME: u8 = 102;
     pub const FRAME_SHOWN: u8 = 103;
@@ -349,6 +373,9 @@ mod tag {
     pub const SET_LAYOUT: u8 = 117;
     pub const SET_PC_SETTINGS: u8 = 118;
     pub const BATTERY: u8 = 119;
+    pub const DETACH_WINDOW: u8 = 120;
+    pub const WINDOW_HERE: u8 = 121;
+    pub const SCREENSHOT: u8 = 122;
 }
 
 fn invalid(msg: &str) -> io::Error {
@@ -452,6 +479,7 @@ impl HostMsg {
                 write_frame(w, tag::PC_SETTINGS, &[&settings.bytes(), &[*encoders]])
             }
             HostMsg::Recenter => write_frame(w, tag::RECENTER, &[]),
+            HostMsg::Notice { text } => write_frame(w, tag::NOTICE, &[text.as_bytes()]),
             HostMsg::Incompatible { protocol, app } => write_frame(
                 w,
                 tag::INCOMPATIBLE,
@@ -514,6 +542,9 @@ impl HostMsg {
             tag::PAIRING_REQUIRED => HostMsg::PairingRequired,
             tag::FOCUS => HostMsg::Focus { id: c.u8()? },
             tag::RECENTER => HostMsg::Recenter,
+            tag::NOTICE => HostMsg::Notice {
+                text: String::from_utf8_lossy(c.rest()).into_owned(),
+            },
             tag::PC_SETTINGS => HostMsg::PcSettings {
                 settings: PcSettings::read(&mut c)?,
                 encoders: c.u8()?,
@@ -617,6 +648,9 @@ impl ClientMsg {
             ClientMsg::Battery { percent, charging } => {
                 write_frame(w, tag::BATTERY, &[&[*percent, *charging as u8]])
             }
+            ClientMsg::DetachWindow => write_frame(w, tag::DETACH_WINDOW, &[]),
+            ClientMsg::WindowHere { id } => write_frame(w, tag::WINDOW_HERE, &[&[*id]]),
+            ClientMsg::Screenshot { id } => write_frame(w, tag::SCREENSHOT, &[&[*id]]),
             ClientMsg::PairConfirm { tag } => write_frame(w, tag::PAIR_CONFIRM, &[tag]),
             ClientMsg::SetMirror { enabled } => {
                 write_frame(w, tag::SET_MIRROR, &[&[*enabled as u8]])
@@ -655,6 +689,9 @@ impl ClientMsg {
                 pcm: c.rest().to_vec(),
             },
             tag::PRESENCE => ClientMsg::Presence { worn: c.u8()? != 0 },
+            tag::DETACH_WINDOW => ClientMsg::DetachWindow,
+            tag::WINDOW_HERE => ClientMsg::WindowHere { id: c.u8()? },
+            tag::SCREENSHOT => ClientMsg::Screenshot { id: c.u8()? },
             tag::BATTERY => ClientMsg::Battery {
                 percent: c.u8()?,
                 charging: c.u8()? != 0,
@@ -801,6 +838,9 @@ mod tests {
             HostMsg::MicActive { active: true },
             HostMsg::Focus { id: 2 },
             HostMsg::Recenter,
+            HostMsg::Notice {
+                text: "Збережено".into(),
+            },
             HostMsg::PcSettings {
                 settings: PcSettings {
                     quality: 30,
@@ -890,6 +930,9 @@ mod tests {
                 percent: 72,
                 charging: true,
             },
+            ClientMsg::DetachWindow,
+            ClientMsg::WindowHere { id: 1 },
+            ClientMsg::Screenshot { id: 0 },
             ClientMsg::SetPcSettings {
                 settings: PcSettings {
                     quality: 50,

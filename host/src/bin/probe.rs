@@ -117,7 +117,30 @@ fn main() -> Result<()> {
     let mut audio = BufWriter::new(std::fs::File::create(dir.join("audio.raw"))?);
     let mut audio_bytes = 0u64;
     let start = Instant::now();
+    // PROBE_SEND=detach|here:N|shot:N, sent once after two seconds (testing).
+    let mut to_send = std::env::var("PROBE_SEND").ok();
     while start.elapsed() < Duration::from_secs(seconds) {
+        if start.elapsed() > Duration::from_secs(2)
+            && let Some(what) = to_send.take()
+        {
+            let num = |s: &str| {
+                s.split(':')
+                    .nth(1)
+                    .and_then(|n| n.parse().ok())
+                    .unwrap_or(0)
+            };
+            let msg = match what.split(':').next() {
+                Some("detach") => Some(ClientMsg::DetachWindow),
+                Some("here") => Some(ClientMsg::WindowHere { id: num(&what) }),
+                Some("shot") => Some(ClientMsg::Screenshot { id: num(&what) }),
+                Some("close") => Some(ClientMsg::RemoveMonitor { id: num(&what) }),
+                _ => None,
+            };
+            if let Some(msg) = msg {
+                println!("sending {msg:?}");
+                msg.write(&mut w)?;
+            }
+        }
         match HostMsg::read(&mut r)? {
             HostMsg::StreamStart {
                 id,
@@ -169,6 +192,7 @@ fn main() -> Result<()> {
             HostMsg::Focus { id } => println!("mouse on: {id}"),
             HostMsg::Unknown { tag } => println!("skipped message {tag} from a newer PC"),
             HostMsg::Recenter => println!("PC asks to bring the monitors in front"),
+            HostMsg::Notice { text } => println!("PC says: {text}"),
             HostMsg::PcSettings { settings, encoders } => {
                 println!("PC encodes: {settings:?}, can use {encoders:#05b}")
             }

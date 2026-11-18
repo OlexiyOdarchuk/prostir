@@ -7,9 +7,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use log::{debug, error, info, warn};
-use prostir_proto::{Codec, HostMsg, LayoutRow, MIRROR_ID, NEXT, PcSettings};
+use prostir_proto::{Codec, HostMsg, LayoutRow, MIRROR_ID, NEXT, PcSettings, WINDOW_IDS};
 use std::sync::atomic::AtomicU8;
 
 use crate::audio::{AudioOut, MicIn};
@@ -17,6 +17,7 @@ use crate::desktop::{Desktop, Output};
 use crate::encoder::{Encoder, EncoderConfig, EncoderEvent, Input};
 use crate::outbox::Outbox;
 use crate::virtual_output::{self, MonitorSpec, Screencast};
+use crate::windows;
 
 /// Retry timing after failures: 2 s, then doubling up to 2 min.
 #[derive(Default)]
@@ -562,6 +563,12 @@ pub fn load_saved(parse: impl Fn(&str) -> Result<MonitorSpec, String>) -> Option
 pub struct Displays {
     // Field order matters: streams close before the KWin connection.
     monitors: BTreeMap<u8, Monitor>,
+    /// Window panels: an output made for one window each (ids in `WINDOW_IDS`).
+    windows: BTreeMap<u8, Monitor>,
+    /// When the window panels are next checked for a closed window.
+    windows_checked: Instant,
+    /// A new panel output to place once the compositor lists it.
+    windows_unplaced: bool,
     /// Left-to-right order of the monitors, in the headset and in KDE.
     order: Vec<u8>,
     /// How the headset arranges the monitors in rows (see `effective_rows`).
@@ -605,6 +612,9 @@ impl Displays {
         let manage_primary = manage_primary && desktop.is_kde();
         let mut displays = Self {
             monitors: BTreeMap::new(),
+            windows: BTreeMap::new(),
+            windows_checked: Instant::now(),
+            windows_unplaced: false,
             order: Vec::new(),
             rows: Vec::new(),
             mirror: None,
@@ -698,6 +708,7 @@ impl Displays {
     pub fn tick(&mut self) {
         self.sync_audio();
         self.check_primary();
+        self.check_window_panels();
         let broken = self.router.mirror_failed.swap(false, Ordering::Relaxed);
         if self
             .mirror
@@ -905,7 +916,8 @@ impl Displays {
                 },
             );
         }
-        // The mirror starts again by itself, with the new settings.
+        // Window panels are made again when wanted; the mirror restarts by itself.
+        self.close_window_panels();
         self.stop_mirror();
         self.mirror_retry = Instant::now();
         Ok(())
@@ -1032,6 +1044,7 @@ impl Displays {
         if let Some((id, _)) = self
             .monitors
             .iter()
+            .chain(&self.windows)
             .find(|(_, m)| m.output.output_name() == name)
         {
             return Some(*id);
@@ -1193,6 +1206,17 @@ impl Displays {
         for (name, g) in others {
             positions.push((name.clone(), bottom_x, top));
             bottom_x += g.w;
+        }
+        // Window panels in a column right of everything: the mouse reaches them
+        // past the right edge.
+        let right = planned.iter().map(|p| p.2 - left + p.4).max().unwrap_or(0);
+        let mut panel_y = 0;
+        for m in self.windows.values() {
+            let name = m.output.output_name();
+            if let Some((_, h)) = size(name, Some(&m.spec)) {
+                positions.push((name.to_owned(), right, panel_y));
+                panel_y += h;
+            }
         }
         let primary = self
             .primary
@@ -1369,8 +1393,134 @@ impl Displays {
         let mirror = self.mirror.iter().map(|m| (MIRROR_ID, &m.encoder));
         self.monitors
             .iter()
+            .chain(&self.windows)
             .map(|(id, m)| (*id, &m.encoder))
             .chain(mirror)
+    }
+
+    /// Puts the PC's active window on a panel of its own: an output its size, which
+    /// the headset shows as a floating panel. Returns the panel's id.
+    pub fn detach_window(&mut self) -> Result<u8> {
+        let Some(id) = WINDOW_IDS.clone().find(|id| !self.windows.contains_key(id)) else {
+            bail!(
+                "{}",
+                t(
+                    "Відкріплених вікон уже три: закрийте одне",
+                    "Three windows are detached already: close one first"
+                )
+            );
+        };
+        let window = windows::active().context(t(
+            "Немає активного вікна на ПК",
+            "No active window on the PC",
+        ))?;
+        let (width, height) = windows::panel_size(&window);
+        let spec = MonitorSpec {
+            width,
+            height,
+            scale: window.scale,
+        };
+        let mut output = self.desktop.create(u32::from(id) + 1, &spec)?;
+        let encoder = self.start_encoder(id, &output.input())?;
+        if let Err(e) = output.attach(&encoder, self.cfg.backend.takes_dmabuf()) {
+            self.router.remove_stream(id);
+            return Err(e);
+        }
+        let name = output.output_name().to_owned();
+        self.windows.insert(
+            id,
+            Monitor {
+                encoder,
+                output,
+                spec,
+            },
+        );
+        self.apply_kde_layout();
+        if let Err(e) = windows::move_to(&window, &name, true) {
+            self.close_window_panel(id);
+            return Err(e);
+        }
+        if !self.streaming {
+            self.windows[&id].encoder.set_paused(true);
+        }
+        self.windows_checked = Instant::now() + Duration::from_secs(1);
+        // Hyprland lists a new output a moment later: placed again at the next check.
+        self.windows_unplaced = true;
+        info!("window panel {id} on {name} ({width}x{height})");
+        Ok(id)
+    }
+
+    /// Removes a window panel; its window goes back to the other monitors.
+    pub fn close_window_panel(&mut self, id: u8) {
+        if let Some(m) = self.windows.remove(&id) {
+            windows::forget_panel(m.output.output_name());
+            self.router.remove_stream(id);
+            drop(m);
+            self.apply_kde_layout();
+        }
+    }
+
+    fn close_window_panels(&mut self) {
+        let ids: Vec<u8> = self.windows.keys().copied().collect();
+        for id in ids {
+            self.close_window_panel(id);
+        }
+    }
+
+    /// A panel whose window was closed (or moved away) goes too.
+    fn check_window_panels(&mut self) {
+        if self.windows.is_empty() || self.windows_checked > Instant::now() {
+            return;
+        }
+        self.windows_checked = Instant::now() + Duration::from_secs(1);
+        if std::mem::take(&mut self.windows_unplaced) {
+            self.apply_kde_layout();
+        }
+        let names: Vec<String> = self
+            .windows
+            .values()
+            .map(|m| m.output.output_name().to_owned())
+            .collect();
+        for name in windows::vacated(&names) {
+            if let Some((&id, _)) = self
+                .windows
+                .iter()
+                .find(|(_, m)| m.output.output_name() == name)
+            {
+                info!("the window on panel {id} is gone: closing the panel");
+                self.close_window_panel(id);
+            }
+        }
+    }
+
+    /// Moves the PC's active window to monitor `id` (the one the user looks at).
+    pub fn window_here(&self, id: u8) -> Result<()> {
+        let output = self
+            .monitors
+            .get(&id)
+            .map(|m| m.output.output_name().to_owned())
+            .or_else(|| {
+                self.mirror
+                    .as_ref()
+                    .filter(|_| id == MIRROR_ID)
+                    .map(|m| m.output.output_name().to_owned())
+            })
+            .context(t("Немає такого монітора", "No such monitor"))?;
+        let window = windows::active().context(t(
+            "Немає активного вікна на ПК",
+            "No active window on the PC",
+        ))?;
+        windows::move_to(&window, &output, false)
+    }
+
+    /// Saves a picture of monitor `id` (all of them where only that is possible).
+    pub fn screenshot(&self, id: u8) -> Result<std::path::PathBuf> {
+        let output = self
+            .monitors
+            .get(&id)
+            .or_else(|| self.windows.get(&id))
+            .map(|m| m.output.output_name().to_owned());
+        windows::screenshot(output.as_deref())
     }
 
     pub fn force_keyframe(&self, id: u8) {
@@ -1387,7 +1537,11 @@ impl Displays {
 
     pub fn healthy(&self) -> bool {
         !self.router.failed.load(Ordering::Relaxed)
-            && !self.monitors.values().any(|m| m.output.closed())
+            && !self
+                .monitors
+                .values()
+                .chain(self.windows.values())
+                .any(|m| m.output.closed())
     }
 
     /// Remembers the set for the next session.
