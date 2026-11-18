@@ -435,6 +435,65 @@ pub fn place(positions: &[(String, i32, i32)]) {
             })
         })
         .collect();
+    apply_without_overlaps(&current, rules);
+}
+
+/// Logical rectangle `(x, y, w, h)` of a rule.
+fn rect(r: &Rule) -> (i32, i32, i32, i32) {
+    (
+        r.x,
+        r.y,
+        (f64::from(r.width) / r.scale).round() as i32,
+        (f64::from(r.height) / r.scale).round() as i32,
+    )
+}
+
+fn overlap(a: (i32, i32, i32, i32), b: (i32, i32, i32, i32)) -> bool {
+    a.0 < b.0 + b.2 && b.0 < a.0 + a.2 && a.1 < b.1 + b.3 && b.1 < a.1 + a.3
+}
+
+/// Whether applying `rules` one after another (as Hyprland does) passes through a
+/// moment where two outputs overlap.
+fn overlaps_on_the_way(current: &[Monitor], rules: &[Rule]) -> bool {
+    let mut at: Vec<(String, (i32, i32, i32, i32))> = current
+        .iter()
+        .filter(|m| !m.disabled)
+        .map(|m| {
+            let (w, h) = m.logical();
+            (m.name.clone(), (m.x, m.y, w, h))
+        })
+        .collect();
+    for r in rules {
+        let moved = rect(r);
+        if at
+            .iter()
+            .any(|(n, other)| n != &r.name && overlap(moved, *other))
+        {
+            return true;
+        }
+        match at.iter_mut().find(|(n, _)| n == &r.name) {
+            Some(entry) => entry.1 = moved,
+            None => at.push((r.name.clone(), moved)),
+        }
+    }
+    false
+}
+
+/// Applies the rules; if doing so one by one would overlap outputs for a moment
+/// (Hyprland warns about that), first moves the outputs involved out of the way.
+fn apply_without_overlaps(current: &[Monitor], rules: Vec<Rule>) {
+    if overlaps_on_the_way(current, &rules) {
+        let aside: Vec<Rule> = rules
+            .iter()
+            .enumerate()
+            .map(|(i, r)| Rule {
+                x: 200_000 + 10_000 * i as i32,
+                y: 0,
+                ..r.clone()
+            })
+            .collect();
+        send(&aside);
+    }
     apply(&rules);
 }
 
@@ -493,5 +552,45 @@ mod tests {
         m.pop();
         assert_eq!(pick_physical(&m, true).as_deref(), Some("eDP-1"));
         assert_eq!(pick_physical(&m, false), None);
+    }
+
+    #[test]
+    fn notices_overlaps_on_the_way() {
+        let hdmi = Monitor {
+            name: "HDMI-A-1".into(),
+            width: 1920,
+            height: 1080,
+            refresh: 60.0,
+            x: 0,
+            y: 0,
+            scale: 1.0,
+            focused: false,
+            disabled: false,
+        };
+        let rule = |name: &str, x, y| Rule {
+            name: name.into(),
+            width: 2560,
+            height: 1440,
+            refresh: 60.0,
+            x,
+            y,
+            scale: 1.0,
+        };
+        let hdmi_down = Rule {
+            name: "HDMI-A-1".into(),
+            width: 1920,
+            height: 1080,
+            ..rule("", 320, 2000)
+        };
+        // Prostir-3 lands on the HDMI display before the HDMI display moves away.
+        assert!(overlaps_on_the_way(
+            std::slice::from_ref(&hdmi),
+            &[rule("Prostir-3", 0, 560), hdmi_down.clone()]
+        ));
+        // The other way round there is no such moment.
+        assert!(!overlaps_on_the_way(
+            &[hdmi],
+            &[hdmi_down, rule("Prostir-3", 0, 560)]
+        ));
     }
 }
