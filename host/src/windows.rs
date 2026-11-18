@@ -122,7 +122,20 @@ pub fn move_to(w: &ActiveWindow, output: &str, fill: bool) -> Result<()> {
         }
         return Ok(());
     }
-    let id = js_string(&w.id);
+    let script = kde_move_script(&w.id, output, fill);
+    // A panel's script stays loaded to watch its window; others are done at once.
+    let name = if fill {
+        format!("prostir-panel-{output}")
+    } else {
+        "prostir-move".to_owned()
+    };
+    kwin_run(&name, &script, !fill)
+}
+
+/// The KWin script that moves window `id` to `output` (and, with `fill`, makes it
+/// full screen there and reports when it closes or leaves).
+fn kde_move_script(id: &str, output: &str, fill: bool) -> String {
+    let id = js_string(id);
     let output_js = js_string(output);
     let fill_js = if fill {
         // Report when the window closes or leaves, so the panel goes away with it.
@@ -139,23 +152,25 @@ pub fn move_to(w: &ActiveWindow, output: &str, fill: bool) -> Result<()> {
     } else {
         String::new()
     };
-    let script = format!(
-        "const out = workspace.screens.find(function (s) {{ return s.name === {output_js}; }});
-         const win = workspace.windowList().find(function (w) {{
+    format!(
+        "const win = workspace.windowList().find(function (w) {{
            return w.internalId.toString() === {id};
          }});
-         if (out && win) {{
+         function place() {{
+           const out = workspace.screens.find(function (s) {{ return s.name === {output_js}; }});
+           if (!out || !win) return false;
            workspace.sendClientToScreen(win, out);
            {fill_js}
+           return true;
+         }}
+         // A new output can appear a moment later: try again when it does.
+         if (!place()) {{
+           const retry = function () {{
+             if (place()) workspace.screensChanged.disconnect(retry);
+           }};
+           workspace.screensChanged.connect(retry);
          }}"
-    );
-    // A panel's script stays loaded to watch its window; others are done at once.
-    let name = if fill {
-        format!("prostir-panel-{output}")
-    } else {
-        "prostir-move".to_owned()
-    };
-    kwin_run(&name, &script, !fill)
+    )
 }
 
 /// Stops watching the window of panel `output` (KDE).
@@ -475,6 +490,28 @@ mod tests {
             scale: 1.5,
         };
         assert_eq!(panel_size(&w), (1202, 300));
+    }
+
+    /// The generated KWin scripts are valid JavaScript (checked with Node, if present).
+    #[test]
+    fn kwin_scripts_parse() {
+        let dir = std::env::temp_dir().join(format!("prostir-js-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (i, fill) in [false, true].into_iter().enumerate() {
+            let script = kde_move_script("{1234-abcd}", "Virtual-Prostir-11", fill);
+            // KWin's globals, for the syntax check only.
+            let path = dir.join(format!("move{i}.js"));
+            std::fs::write(&path, &script).unwrap();
+            match std::process::Command::new("node")
+                .arg("--check")
+                .arg(&path)
+                .status()
+            {
+                Ok(status) => assert!(status.success(), "invalid JavaScript:\n{script}"),
+                Err(_) => return, // no Node: nothing to check with
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
