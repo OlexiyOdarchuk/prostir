@@ -287,6 +287,10 @@ struct Scene {
     confirm_remove: Option<(u8, Instant)>,
     /// "Save current" pressed once for this profile.
     confirm_save: Option<(usize, Instant)>,
+    /// Paired PCs (key, name), read from the trust file when the menu opens.
+    paired: Vec<([u8; 32], String)>,
+    trust_file: PathBuf,
+    confirm_forget: Option<(usize, Instant)>,
     /// Menu page shown.
     tab: Tab,
     /// Follow mode is moving the monitors right now.
@@ -1044,6 +1048,11 @@ impl Scene {
                 .confirm_save
                 .filter(|(_, at)| at.elapsed() < CONFIRM_FOR)
                 .map(|(i, _)| i),
+            paired: self.paired.iter().map(|(_, n)| n.clone()).collect(),
+            confirm_forget: self
+                .confirm_forget
+                .filter(|(_, at)| at.elapsed() < CONFIRM_FOR)
+                .map(|(i, _)| i),
             tab: self.tab,
             lang: self.lang(),
             intro: !self.settings.intro_seen,
@@ -1307,6 +1316,9 @@ fn run(app: &AndroidApp) -> Result<()> {
         error: None,
         confirm_remove: None,
         confirm_save: None,
+        paired: Vec::new(),
+        trust_file: data_dir.join("paired_hosts"),
+        confirm_forget: None,
         tab: tab_from_code(settings.last_tab),
         update_needed: None,
         following: false,
@@ -1930,6 +1942,10 @@ fn run(app: &AndroidApp) -> Result<()> {
         if scene.panel_open && !panel_was_open {
             // The user may have copied a picture onto the headset meanwhile.
             custom_pano = custom_panorama_path(external_dir.as_deref()).is_some();
+            // And paired with another PC.
+            scene.paired = prostir_proto::secure::TrustStore::load(&scene.trust_file)
+                .entries()
+                .to_vec();
         }
         crate::i18n::set_current(scene.lang());
         panel_was_open = scene.panel_open;
@@ -2802,6 +2818,29 @@ fn handle_action(
             }
         }
         Action::AskMic => crate::mic::ask_again(),
+        Action::ForgetPc(i) => {
+            let confirmed = scene
+                .confirm_forget
+                .is_some_and(|(c, at)| c == i && at.elapsed() < CONFIRM_FOR);
+            if !confirmed {
+                scene.confirm_forget = Some((i, Instant::now()));
+            } else if let Some((key, name)) = scene.paired.get(i).cloned() {
+                scene.confirm_forget = None;
+                let mut store = prostir_proto::secure::TrustStore::load(&scene.trust_file);
+                match store.remove(&key) {
+                    Ok(()) => {
+                        info!("forgot PC {name:?}");
+                        scene.steering.trust_changed();
+                        // Connected to it: leave, and do not come back on our own.
+                        if scene.host.as_deref() == Some(name.as_str()) {
+                            scene.steering.change_host();
+                        }
+                    }
+                    Err(e) => scene.show_error(format!("{e}")),
+                }
+                scene.paired = store.entries().to_vec();
+            }
+        }
         Action::SetPc(settings) => {
             // Shown at once; the PC confirms (or corrects) with its own message.
             if let Some((pc, _)) = &mut scene.pc {

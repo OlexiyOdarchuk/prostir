@@ -31,6 +31,8 @@ fn main() {
         confirm_save: None,
         unreachable: std::env::var("BLOCKED").ok(),
         can_move_mouse: std::env::var("NO_MOUSE").is_err(),
+        paired: vec!["workstation".into(), "laptop".into()],
+        confirm_forget: None,
         windows: if std::env::var("WINDOWS").is_ok() {
             vec![MonitorEntry {
                 id: 10,

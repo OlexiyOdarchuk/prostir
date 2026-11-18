@@ -153,6 +153,16 @@ impl TrustStore {
         self.save()
     }
 
+    /// Every trusted key with its label, oldest first.
+    pub fn entries(&self) -> &[([u8; 32], String)] {
+        &self.entries
+    }
+
+    pub fn remove(&mut self, key: &[u8; 32]) -> io::Result<()> {
+        self.entries.retain(|(k, _)| k != key);
+        self.save()
+    }
+
     pub fn clear(&mut self) -> io::Result<()> {
         self.entries.clear();
         self.save()

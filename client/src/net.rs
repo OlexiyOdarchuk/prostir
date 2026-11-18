@@ -179,6 +179,8 @@ struct Steer {
     offer: Option<(PeerKey, SocketAddr)>,
     /// The user agreed to pair with this PC (until when).
     approved: Option<(PeerKey, Instant)>,
+    /// The trust file was changed by the menu (a PC forgotten): read it again.
+    trust_changed: bool,
 }
 
 type PeerKey = [u8; 32];
@@ -214,6 +216,11 @@ impl Steering {
             let _ = cur.shutdown(Shutdown::Both);
         }
         self.0.1.notify_all();
+    }
+
+    /// A PC was forgotten in the menu: the next connection reads the trust file again.
+    pub fn trust_changed(&self) {
+        self.lock().trust_changed = true;
     }
 
     /// Put on or taken off; connecting waits until the headset is worn.
@@ -341,6 +348,9 @@ pub fn spawn(events: Sender<NetEvent>, discovery: Discovery, steering: Steering)
             loop {
                 steering.wait_until_worn();
                 steering.wait_for_answer();
+                if std::mem::take(&mut steering.lock().trust_changed) {
+                    trusted = TrustStore::load(&discovery.trust_file);
+                }
                 round += 1;
                 if let Some(stream) = connect(
                     beacon.as_ref(),

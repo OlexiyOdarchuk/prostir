@@ -95,6 +95,10 @@ pub struct UiState {
     pub windows: Vec<MonitorEntry>,
     /// The PC can move the mouse (for following the gaze).
     pub can_move_mouse: bool,
+    /// Names of the PCs this headset is paired with.
+    pub paired: Vec<String>,
+    /// The paired PC waiting for a second press to be forgotten.
+    pub confirm_forget: Option<usize>,
     /// The physical display is being shown (its lid is open).
     pub mirror_active: bool,
     pub settings: Settings,
@@ -234,6 +238,8 @@ pub enum Action {
     Notifications(bool),
     /// Rest reminders every so many minutes of wearing (0: none).
     RestEvery(u16),
+    /// Forget paired PC number `n` (second press confirms).
+    ForgetPc(usize),
     Close,
 }
 
@@ -2272,6 +2278,7 @@ fn build_settings(s: &UiState, section: Section, items: &mut Vec<Item>, top: f32
                     ),
                 ],
             );
+            paired_pcs(s, items, cx, w, y + 10.0);
         }
         Section::Controls => build_controls(s, items, cx, cw.min(640.0), ctop),
         Section::Help => {
@@ -2436,6 +2443,61 @@ fn build_controls(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32
             "The video runs at 60 frames a second, so 72 Hz keeps all of it.",
         ),
     ));
+}
+
+/// The PCs this headset is paired with, each with "Forget" (pressed twice).
+fn paired_pcs(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
+    let l = s.lang;
+    items.push(text(
+        x,
+        y,
+        21.0,
+        true,
+        SECTION,
+        l.t("Сполучені ПК", "Paired PCs"),
+    ));
+    y += 14.0;
+    if s.paired.is_empty() {
+        items.push(text(x, y + 26.0, 19.0, false, MUTED, l.t("Немає", "None")));
+        return;
+    }
+    // Two fit; with more, one and how many others.
+    let shown = if s.paired.len() > 2 {
+        1
+    } else {
+        s.paired.len()
+    };
+    for (i, name) in s.paired.iter().take(shown).enumerate() {
+        items.push(Item::Box(rect(x, y, w, 56.0), [255, 255, 255, 10]));
+        // Long names are cut, not run under the button.
+        let mut label: String = name.chars().take(32).collect();
+        if name.chars().count() > 32 {
+            label.push('…');
+        }
+        items.push(text(x + 18.0, y + 36.0, 20.0, true, TEXT, &label));
+        let armed = s.confirm_forget == Some(i);
+        items.push(button(
+            rect(x + w - 200.0, y + 6.0, 192.0, 44.0),
+            if armed {
+                l.t("Забути? Ще раз", "Forget? Again")
+            } else {
+                l.t("Забути", "Forget")
+            },
+            if armed { Style::Armed } else { Style::Normal },
+            Some(Action::ForgetPc(i)),
+        ));
+        y += 62.0;
+    }
+    if s.paired.len() > shown {
+        items.push(text(
+            x,
+            y + 20.0,
+            18.0,
+            false,
+            MUTED,
+            &format!("{} {}", l.t("І ще", "And"), s.paired.len() - shown),
+        ));
+    }
 }
 
 /// How the PC encodes: quality, codec, graphics card or CPU, text preset.
@@ -2755,6 +2817,8 @@ mod tests {
                 7,
             )),
             can_move_mouse: false,
+            paired: vec!["workstation".into(), "a-much-longer-laptop-name".into()],
+            confirm_forget: Some(1),
             windows: vec![MonitorEntry {
                 id: 10,
                 width: 1200,
@@ -2854,6 +2918,10 @@ mod tests {
                     lang.t("Максимум моніторів:", "At most monitors:")
                 ));
                 states.push(st.clone());
+                // Many paired PCs.
+                let mut many = st.clone();
+                many.paired = (0..5).map(|i| format!("pc-{i}")).collect();
+                states.push(many);
                 // Six monitors.
                 st.monitors = (0..6)
                     .map(|id| MonitorEntry {
