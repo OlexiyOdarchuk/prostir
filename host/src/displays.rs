@@ -16,10 +16,8 @@ use crate::encoder::{Encoder, EncoderConfig, EncoderEvent, Input};
 use crate::layout::{Seat, arrange, arrange_free};
 use crate::outbox::Outbox;
 use crate::platform::audio::{AudioOut, MicIn};
-use crate::platform::desktop::{Desktop, Output};
-use crate::platform::kde::virtual_output::{self, Screencast};
 use crate::platform::windows;
-use crate::platform::{Geometry, MonitorSpec};
+use crate::platform::{Desktop, DesktopBackend, Geometry, MonitorSpec, Output, OutputBackend};
 
 /// Retry timing after failures: 2 s, then doubling up to 2 min.
 #[derive(Default)]
@@ -324,10 +322,9 @@ struct Monitor {
 
 /// The physical display (laptop panel) streamed as-is.
 struct Mirror {
-    // Field order matters: encoder, then stream, then its own KWin connection.
+    // Field order matters: the encoder stops before the stream.
     encoder: Encoder,
     output: Output,
-    _connection: Option<Screencast>,
 }
 
 /// Saved monitor set: one `WIDTHxHEIGHT[@scale]` per line, `*` marks the primary one;
@@ -449,7 +446,7 @@ pub fn load_saved(parse: impl Fn(&str) -> Result<MonitorSpec, String>) -> Option
 }
 
 pub struct Displays {
-    // Field order matters: streams close before the KWin connection.
+    // Field order matters: streams close before the desktop connection.
     monitors: BTreeMap<u8, Monitor>,
     /// Window panels: an output made for one window each (ids in `WINDOW_IDS`).
     windows: BTreeMap<u8, Monitor>,
@@ -481,12 +478,8 @@ pub struct Displays {
     streaming: bool,
     /// When the headset was taken off (as last reported by it).
     taken_off_at: Option<Instant>,
-    /// Last time the laptop panel was switched back on (to avoid fighting the user).
-    woke_display_at: Option<Instant>,
     /// When KDE's primary output was last compared with ours.
     primary_checked: Instant,
-    /// When Plasma was last nudged to follow the primary output.
-    primary_nudged: Option<Instant>,
     desktop: Desktop,
     pub router: Arc<Router>,
     cfg: EncoderConfig,
@@ -498,8 +491,8 @@ pub struct Displays {
 impl Displays {
     pub fn create(saved: &SavedMonitors, cfg: EncoderConfig, manage_primary: bool) -> Result<Self> {
         let desktop = Desktop::connect()?;
-        // Only KDE has a primary output.
-        let manage_primary = manage_primary && desktop.is_kde();
+        // Only some desktops (KDE) have a primary output.
+        let manage_primary = manage_primary && desktop.has_primary();
         let mut displays = Self {
             monitors: BTreeMap::new(),
             windows: BTreeMap::new(),
@@ -520,9 +513,7 @@ impl Displays {
             streaming: true,
             taken_off_at: None,
             mirror_retry: Instant::now(),
-            woke_display_at: None,
             primary_checked: Instant::now(),
-            primary_nudged: None,
             desktop,
             router: Arc::new(Router::new(cfg.codec)),
             cfg,
@@ -552,7 +543,7 @@ impl Displays {
             displays.ensure_primary();
         }
         displays.tick();
-        sync_wallpapers();
+        displays.sync_wallpapers();
         Ok(displays)
     }
 
@@ -581,7 +572,7 @@ impl Displays {
             },
         );
         self.order.push(id);
-        self.apply_kde_layout();
+        self.apply_layout();
         self.router.send(HostMsg::Order {
             ids: self.order.clone(),
         });
@@ -616,33 +607,29 @@ impl Displays {
         }
         self.mirror_retry = Instant::now() + Duration::from_secs(2);
         let Some(name) = self.desktop.physical_output() else {
-            self.wake_physical_display();
+            self.desktop.wake_physical_display();
             return;
         };
         let started = self
             .desktop
             .mirror(u32::from(MIRROR_ID) + 1, &name)
-            .and_then(|(mut output, connection)| {
+            .and_then(|mut output| {
                 let encoder = self.start_encoder(MIRROR_ID, &output.input())?;
                 output.attach(&encoder, self.cfg.backend.takes_dmabuf())?;
-                Ok(Mirror {
-                    encoder,
-                    output,
-                    _connection: connection,
-                })
+                Ok(Mirror { encoder, output })
             });
         match started {
             Ok(m) => {
                 m.encoder.force_keyframe();
                 self.mirror = Some(m);
-                self.apply_kde_layout();
+                self.apply_layout();
             }
             Err(e) => warn!("cannot mirror {name}: {e:#}"),
         }
     }
 
-    /// Makes sure KDE's primary output (where the Plasma panel lives) is ours. Right
-    /// after outputs come and go (a profile switch) KDE can end up with another one.
+    /// Makes sure the desktop's primary output (where the Plasma panel lives) is ours.
+    /// Right after outputs come and go (a profile switch) KDE can end up with another one.
     fn check_primary(&mut self) {
         if !self.manage_primary || self.primary_checked.elapsed() < Duration::from_secs(2) {
             return;
@@ -651,65 +638,7 @@ impl Displays {
         let Some(m) = self.primary.and_then(|id| self.monitors.get(&id)) else {
             return;
         };
-        let geometries = self.desktop.geometries();
-        let ours = m.output.output_name();
-        let kde_primary = geometries
-            .iter()
-            .filter(|(_, g)| g.enabled && g.w > 0)
-            .min_by_key(|(_, g)| g.priority.unwrap_or(u32::MAX))
-            .map(|(name, _)| name.clone());
-        let Some(g) = geometries.get(ours) else {
-            return;
-        };
-        if kde_primary.as_deref() != Some(ours) {
-            info!(
-                "KDE's primary output is {}, not {ours}: setting it again",
-                kde_primary.as_deref().unwrap_or("none")
-            );
-            m.output.make_primary();
-            return;
-        }
-        // KDE agrees; Plasma may still keep the panel on the former primary.
-        let Some(first) = virtual_output::plasma_first_screen() else {
-            return;
-        };
-        if first == (g.x, g.y, g.w, g.h)
-            || self
-                .primary_nudged
-                .is_some_and(|t| t.elapsed() < Duration::from_secs(10))
-        {
-            return;
-        }
-        let other = geometries
-            .iter()
-            .find(|(name, g)| g.enabled && g.w > 0 && name.as_str() != ours)
-            .map(|(name, _)| name.clone());
-        if let Some(other) = other {
-            info!("Plasma's first screen is not {ours}: nudging it to follow");
-            self.primary_nudged = Some(Instant::now());
-            virtual_output::nudge_primary(ours.to_owned(), other);
-        }
-    }
-
-    /// KDE sometimes leaves the laptop panel off after the lid is opened again while
-    /// virtual monitors exist. With the mirror wanted and the lid open, switch it on.
-    fn wake_physical_display(&mut self) {
-        if self
-            .woke_display_at
-            .is_some_and(|t| t.elapsed() < Duration::from_secs(30))
-            || !self.desktop.is_kde()
-            || !virtual_output::lid_open()
-        {
-            return;
-        }
-        let off = virtual_output::disabled_physical_outputs();
-        if off.is_empty() {
-            return;
-        }
-        self.woke_display_at = Some(Instant::now());
-        info!("lid is open but {off:?} is off: switching it on for the mirror");
-        let settings: Vec<String> = off.iter().map(|n| format!("output.{n}.enable")).collect();
-        virtual_output::kscreen_apply(&settings);
+        self.desktop.keep_primary(&m.output);
     }
 
     fn stop_mirror(&mut self) {
@@ -1033,7 +962,7 @@ impl Displays {
         }
         self.ensure_primary();
         // Close the gap the monitor leaves.
-        self.apply_kde_layout();
+        self.apply_layout();
         Ok(())
     }
 
@@ -1046,13 +975,14 @@ impl Displays {
         }
         self.primary = Some(id);
         self.router.send(HostMsg::PrimaryChanged { id });
-        self.apply_kde_layout();
+        self.apply_layout();
     }
 
-    /// Lays the outputs out in KDE like they stand in the headset: Quest monitors side
-    /// by side in `order`, vertically centred, and the mirrored display under the
-    /// primary monitor. The mouse then crosses screens where the eyes expect it to.
-    fn apply_kde_layout(&self) {
+    /// Lays the outputs out on the desktop like they stand in the headset: Quest
+    /// monitors side by side in `order`, vertically centred, and the mirrored display
+    /// under the primary monitor. The mouse then crosses screens where the eyes expect
+    /// it to.
+    fn apply_layout(&self) {
         let geometries = self.desktop.geometries();
         let size = |name: &str, spec: Option<&MonitorSpec>| {
             geometries.get(name).map(|g| (g.w, g.h)).or_else(|| {
@@ -1156,8 +1086,7 @@ impl Displays {
                     && g.w > 0
                     && !ours.contains(&name.as_str())
                     && Some(name.as_str()) != mirror_name.as_deref()
-                    && !name.starts_with("Virtual-")
-                    && !name.starts_with(crate::platform::hyprland::PREFIX)
+                    && !self.desktop.is_virtual(name)
             })
             .collect();
         others.sort_by_key(|(name, _)| name.as_str());
@@ -1335,7 +1264,7 @@ impl Displays {
             .flat_map(|r| r.ids.clone())
             .filter(|id| *id != MIRROR_ID)
             .collect();
-        self.apply_kde_layout();
+        self.apply_layout();
         self.router.send(HostMsg::Order {
             ids: self.order.clone(),
         });
@@ -1362,7 +1291,7 @@ impl Displays {
             centers: vec![NEXT; ids.len()],
             middles: vec![NEXT; ids.len()],
         }];
-        self.apply_kde_layout();
+        self.apply_layout();
         self.router.send(HostMsg::Order {
             ids: self.order.clone(),
         });
@@ -1382,12 +1311,18 @@ impl Displays {
         if let Some(&id) = ids.get(ids.len().saturating_sub(1) / 2) {
             self.set_primary(id);
         } else {
-            self.apply_kde_layout();
+            self.apply_layout();
         }
     }
 
     pub fn primary(&self) -> Option<u8> {
         self.primary
+    }
+
+    /// Gives every screen the wallpaper of the primary desktop (Plasma configures
+    /// wallpapers per screen, so new monitors would otherwise show the default one).
+    pub fn sync_wallpapers(&self) {
+        self.desktop.sync_wallpapers();
     }
 
     fn encoders(&self) -> impl Iterator<Item = (u8, &Encoder)> {
@@ -1436,7 +1371,7 @@ impl Displays {
                 spec,
             },
         );
-        self.apply_kde_layout();
+        self.apply_layout();
         if let Err(e) = windows::move_to(&window, &name, true) {
             self.close_window_panel(id);
             return Err(e);
@@ -1470,7 +1405,7 @@ impl Displays {
             }
             self.router.remove_stream(id);
             drop(m);
-            self.apply_kde_layout();
+            self.apply_layout();
         }
     }
 
@@ -1488,7 +1423,7 @@ impl Displays {
         }
         self.windows_checked = Instant::now() + Duration::from_secs(1);
         if std::mem::take(&mut self.windows_unplaced) {
-            self.apply_kde_layout();
+            self.apply_layout();
         }
         let names: Vec<String> = self
             .windows
@@ -1530,9 +1465,10 @@ impl Displays {
     /// Saves a picture of monitor `id` (all of them where only that is possible).
     pub fn screenshot(&self, id: u8) -> Result<std::path::PathBuf> {
         let monitor = self.monitors.get(&id).or_else(|| self.windows.get(&id));
-        // KDE's screenshot tool cannot take one output by name: the monitor's own
-        // stream can. A fresh keyframe, decoded into a PNG; the whole desktop if not.
-        if self.desktop.is_kde()
+        // Where the desktop's screenshot tool cannot take one output by name, the
+        // monitor's own stream can. A fresh keyframe, decoded into a PNG; the whole
+        // desktop if not.
+        if !self.desktop.screenshots_one_output()
             && let Some(m) = monitor
             && self.streaming
         {
@@ -1627,53 +1563,4 @@ impl Displays {
             warn!("cannot save {}: {e}", path.display());
         }
     }
-}
-
-/// Gives every screen the wallpaper of the primary desktop. Plasma configures
-/// wallpapers per screen, so new monitors would otherwise show the default one.
-/// Runs a little later because Plasma sets up desktops for new screens asynchronously.
-pub fn sync_wallpapers() {
-    if crate::platform::hyprland::running() {
-        return;
-    }
-    const SCRIPT: &str = r#"
-        var src = desktopForScreen(0);
-        if (src) {
-            src.currentConfigGroup = ["Wallpaper", src.wallpaperPlugin, "General"];
-            var image = src.readConfig("Image");
-            desktops().forEach(function (d) {
-                if (d.screen < 0 || d.screen == 0) return;
-                d.wallpaperPlugin = src.wallpaperPlugin;
-                d.currentConfigGroup = ["Wallpaper", src.wallpaperPlugin, "General"];
-                if (d.readConfig("Image") != image) d.writeConfig("Image", image);
-            });
-        }"#;
-    let _ = std::thread::Builder::new()
-        .name("wallpapers".into())
-        .spawn(|| {
-            std::thread::sleep(Duration::from_secs(2));
-            // Arch: qdbus6; Fedora: qdbus-qt6; older setups: qdbus.
-            for qdbus in ["qdbus6", "qdbus-qt6", "qdbus"] {
-                let ran = std::process::Command::new(qdbus)
-                    .args([
-                        "org.kde.plasmashell",
-                        "/PlasmaShell",
-                        "org.kde.PlasmaShell.evaluateScript",
-                        SCRIPT,
-                    ])
-                    .output();
-                match ran {
-                    Ok(out) if out.status.success() => return,
-                    Ok(out) => {
-                        warn!(
-                            "wallpaper sync failed: {}",
-                            String::from_utf8_lossy(&out.stderr).trim()
-                        );
-                        return;
-                    }
-                    Err(_) => continue, // try the next qdbus name
-                }
-            }
-            warn!("qdbus not found, wallpapers stay per screen");
-        });
 }

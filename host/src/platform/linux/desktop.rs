@@ -8,11 +8,12 @@ use anyhow::Result;
 use crate::encoder::{Encoder, Input};
 use crate::platform::hyprland;
 use crate::platform::hyprland::screencopy::{self, Capture};
-use crate::platform::kde::virtual_output::{self, Screencast, VirtualOutput};
-use crate::platform::{Geometry, MonitorSpec};
+use crate::platform::kde::virtual_output::{Screencast, VirtualOutput};
+use crate::platform::kde::{Kde, kscreen, plasma};
+use crate::platform::{DesktopBackend, Geometry, MonitorSpec, OutputBackend};
 
 pub enum Desktop {
-    Kde(Screencast),
+    Kde(Kde),
     Hyprland,
 }
 
@@ -25,99 +26,123 @@ impl Drop for Desktop {
     }
 }
 
-impl Desktop {
-    pub fn connect() -> Result<Self> {
+impl DesktopBackend for Desktop {
+    fn connect() -> Result<Self> {
         if hyprland::running() {
             log::info!("desktop: Hyprland");
             hyprland::remove_leftovers();
             hyprland::keep_rules_after_reloads();
             Ok(Self::Hyprland)
         } else {
-            Ok(Self::Kde(Screencast::connect()?))
+            Ok(Self::Kde(Kde::connect()?))
         }
     }
 
-    pub fn is_kde(&self) -> bool {
+    fn has_primary(&self) -> bool {
         matches!(self, Self::Kde(_))
     }
 
-    /// A new virtual monitor, number `number` (1-based).
-    pub fn create(&self, number: u32, spec: &MonitorSpec) -> Result<Output> {
-        match self {
-            Self::Kde(s) => Ok(Output::Kde(s.create(number, spec)?)),
-            Self::Hyprland => Ok(Output::Hyprland(HyprOutput {
+    fn create(&self, number: u32, spec: &MonitorSpec) -> Result<Output> {
+        let kind = match self {
+            Self::Kde(k) => Kind::Kde(k.screencast.create(number, spec)?),
+            Self::Hyprland => Kind::Hyprland(HyprOutput {
                 name: hyprland::create(number, spec)?,
                 capture: None,
                 owned: true,
-            })),
-        }
+            }),
+        };
+        Ok(Output {
+            kind,
+            _connection: None,
+        })
     }
 
-    /// The real display to mirror (the laptop panel), if one is on.
-    pub fn physical_output(&self) -> Option<String> {
+    fn physical_output(&self) -> Option<String> {
         match self {
-            Self::Kde(s) => s.physical_output(),
+            Self::Kde(k) => k.screencast.physical_output(),
             Self::Hyprland => hyprland::physical_output(),
         }
     }
 
-    /// Streams an existing display. KWin needs a connection of its own for that,
-    /// returned alongside to be kept as long as the output.
-    pub fn mirror(&self, number: u32, name: &str) -> Result<(Output, Option<Screencast>)> {
+    fn wake_physical_display(&mut self) {
+        if let Self::Kde(k) = self {
+            k.wake_physical_display();
+        }
+    }
+
+    fn mirror(&self, number: u32, name: &str) -> Result<Output> {
         match self {
+            // KWin streams a given display only once per connection: each mirror
+            // gets a connection of its own, kept as long as the output.
             Self::Kde(_) => {
                 let connection = Screencast::connect()?;
                 let output = connection.mirror(number, name)?;
-                Ok((Output::Kde(output), Some(connection)))
+                Ok(Output {
+                    kind: Kind::Kde(output),
+                    _connection: Some(connection),
+                })
             }
-            Self::Hyprland => Ok((
-                Output::Hyprland(HyprOutput {
+            Self::Hyprland => Ok(Output {
+                kind: Kind::Hyprland(HyprOutput {
                     name: name.to_owned(),
                     capture: None,
                     owned: false,
                 }),
-                None,
-            )),
+                _connection: None,
+            }),
         }
     }
 
-    /// Logical geometry of every output.
-    pub fn geometries(&self) -> HashMap<String, Geometry> {
+    fn geometries(&self) -> HashMap<String, Geometry> {
         match self {
-            Self::Kde(_) => virtual_output::output_geometries(),
+            Self::Kde(_) => kscreen::geometries(),
             Self::Hyprland => hyprland::geometries(),
         }
     }
 
-    /// Moves outputs to `positions` (logical, top-left); on KDE also makes `primary`
-    /// the primary output. Only what differs from `current` is sent.
-    pub fn place(
+    fn place(
         &self,
         positions: &[(String, i32, i32)],
         primary: Option<&str>,
         current: &HashMap<String, Geometry>,
     ) {
         match self {
-            Self::Kde(_) => {
-                let mut settings: Vec<String> = positions
-                    .iter()
-                    .filter(|(name, x, y)| current.get(name).is_none_or(|g| (g.x, g.y) != (*x, *y)))
-                    .map(|(name, x, y)| format!("output.{name}.position.{x},{y}"))
-                    .collect();
-                if let Some(p) = primary
-                    && current.get(p).is_none_or(|g| g.priority != Some(1))
-                {
-                    settings.push(format!("output.{p}.priority.1"));
-                }
-                virtual_output::kscreen_apply(&settings);
-            }
+            Self::Kde(k) => k.place(positions, primary, current),
             Self::Hyprland => hyprland::place(positions),
+        }
+    }
+
+    fn keep_primary(&mut self, primary: &Output) {
+        if let (Self::Kde(k), Kind::Kde(o)) = (self, &primary.kind) {
+            k.keep_primary(o);
+        }
+    }
+
+    fn is_virtual(&self, name: &str) -> bool {
+        name.starts_with("Virtual-") || name.starts_with(hyprland::PREFIX)
+    }
+
+    fn screenshots_one_output(&self) -> bool {
+        // KDE's screenshot tool cannot take one output by name.
+        !matches!(self, Self::Kde(_))
+    }
+
+    fn sync_wallpapers(&self) {
+        if let Self::Kde(_) = self {
+            plasma::sync_wallpapers();
         }
     }
 }
 
 /// A streamed output: one of ours, or a mirrored real display.
-pub enum Output {
+pub struct Output {
+    // Field order matters: the stream closes before its own KWin connection.
+    kind: Kind,
+    /// A KDE mirror's own connection (see [`Desktop::mirror`]).
+    _connection: Option<Screencast>,
+}
+
+enum Kind {
     Kde(VirtualOutput),
     Hyprland(HyprOutput),
 }
@@ -139,47 +164,44 @@ impl Drop for HyprOutput {
     }
 }
 
-impl Output {
-    /// The compositor's name for it, e.g. `Virtual-Prostir-1`, `Prostir-1` or `eDP-1`.
-    pub fn output_name(&self) -> &str {
-        match self {
-            Self::Kde(o) => o.output_name(),
-            Self::Hyprland(o) => &o.name,
+impl OutputBackend for Output {
+    fn output_name(&self) -> &str {
+        match &self.kind {
+            Kind::Kde(o) => o.output_name(),
+            Kind::Hyprland(o) => &o.name,
         }
     }
 
-    pub fn closed(&self) -> bool {
-        match self {
-            Self::Kde(o) => o.closed(),
-            Self::Hyprland(o) => o.capture.as_ref().is_some_and(Capture::closed),
+    fn closed(&self) -> bool {
+        match &self.kind {
+            Kind::Kde(o) => o.closed(),
+            Kind::Hyprland(o) => o.capture.as_ref().is_some_and(Capture::closed),
         }
     }
 
-    /// KDE's primary output (Hyprland has no such thing).
-    pub fn make_primary(&self) {
-        if let Self::Kde(o) = self {
+    fn make_primary(&self) {
+        // Hyprland has no such thing.
+        if let Kind::Kde(o) = &self.kind {
             o.make_primary();
         }
     }
 
-    /// What to build the encoder on.
-    pub fn input(&self) -> Input {
-        match self {
-            Self::Kde(o) => o.input(),
-            Self::Hyprland(o) => screencopy::input(&o.name),
+    fn input(&self) -> Input {
+        match &self.kind {
+            Kind::Kde(o) => o.input(),
+            Kind::Hyprland(o) => screencopy::input(&o.name),
         }
     }
 
-    /// Stops feeding the current encoder (before it is replaced).
-    pub fn detach(&mut self) {
-        if let Self::Hyprland(o) = self {
+    fn detach(&mut self) {
+        if let Kind::Hyprland(o) = &mut self.kind {
             o.capture = None;
         }
     }
 
-    /// Starts feeding `encoder` (Hyprland; KWin feeds it through PipeWire by itself).
-    pub fn attach(&mut self, encoder: &Encoder, dmabuf: bool) -> Result<()> {
-        if let Self::Hyprland(o) = self {
+    fn attach(&mut self, encoder: &Encoder, dmabuf: bool) -> Result<()> {
+        // KWin feeds the encoder through PipeWire by itself.
+        if let Kind::Hyprland(o) = &mut self.kind {
             let appsrc = encoder
                 .appsrc()
                 .ok_or_else(|| anyhow::anyhow!("the encoder takes no pushed frames"))?;

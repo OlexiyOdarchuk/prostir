@@ -331,7 +331,7 @@ fn serve_client(
                         info!("headset added Prostir-{}", u32::from(id) + 1);
                         displays.force_keyframe(id);
                         displays.save();
-                        displays::sync_wallpapers();
+                        displays.sync_wallpapers();
                     }
                     Err(e) => report(displays, format!("{e:#}")),
                 }
@@ -363,7 +363,7 @@ fn serve_client(
                     displays.force_keyframe(id);
                 }
                 displays.save();
-                displays::sync_wallpapers();
+                displays.sync_wallpapers();
             }
             Ok(Ok(ClientMsg::Mic { pcm })) => displays.push_mic(pcm),
             Ok(Ok(ClientMsg::Presence { worn })) => displays.set_worn(worn),
@@ -386,7 +386,7 @@ fn serve_client(
                 );
                 displays.set_primary(id);
                 displays.save();
-                displays::sync_wallpapers();
+                displays.sync_wallpapers();
             }
             Ok(Ok(ClientMsg::DetachWindow)) => {
                 if let Err(e) = displays.detach_window() {

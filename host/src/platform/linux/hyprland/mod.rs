@@ -146,10 +146,7 @@ pub fn geometries() -> HashMap<String, Geometry> {
 /// as in KDE where the laptop panel goes off with the lid), else the laptop panel, but
 /// never the panel of a closed laptop.
 pub fn physical_output() -> Option<String> {
-    pick_physical(
-        &monitors(),
-        crate::platform::kde::virtual_output::lid_open(),
-    )
+    pick_physical(&monitors(), crate::platform::linux::system::lid_open())
 }
 
 fn pick_physical(monitors: &[Monitor], lid_open: bool) -> Option<String> {

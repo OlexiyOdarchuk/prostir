@@ -16,8 +16,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
+use super::kscreen;
 use crate::encoder::Input;
-use crate::platform::{Geometry, MonitorSpec};
+use crate::platform::MonitorSpec;
 use log::{info, warn};
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
 use wayland_client::protocol::{wl_output, wl_registry};
@@ -362,7 +363,7 @@ impl Screencast {
         )?;
         info!("Prostir-{number}: {spec}, PipeWire node {}", output.node);
         if (spec.scale - 1.0).abs() > f64::EPSILON {
-            kscreen(output.output_name(), &format!("scale.{}", spec.scale));
+            kscreen::set(output.output_name(), &format!("scale.{}", spec.scale));
         }
         Ok(output)
     }
@@ -418,7 +419,7 @@ impl VirtualOutput {
 
     /// Makes this the primary output, so the Plasma panel and new windows go there.
     pub fn make_primary(&self) {
-        kscreen(self.output_name(), "priority.1");
+        kscreen::set(self.output_name(), "priority.1");
     }
 }
 
@@ -429,201 +430,4 @@ impl Drop for VirtualOutput {
         self.shared.streams.lock().unwrap().remove(&self.number);
         info!("{} stream closed", self.name);
     }
-}
-
-/// Logical geometry `(x, y, width, height)` of each enabled output, from KScreen.
-pub fn output_geometries() -> HashMap<String, Geometry> {
-    let Ok(out) = std::process::Command::new("kscreen-doctor")
-        .arg("-o")
-        .output()
-    else {
-        return HashMap::new();
-    };
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut name = None;
-    let mut map: HashMap<String, Geometry> = HashMap::new();
-    // kscreen-doctor prints "priority N" before "Geometry:".
-    let mut priorities: HashMap<String, Option<u32>> = HashMap::new();
-    let mut disabled: Vec<String> = Vec::new();
-    for raw in text.lines() {
-        let line = strip_ansi(raw);
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("Output:") {
-            name = rest.split_whitespace().nth(1).map(str::to_owned);
-        } else if let (Some(n), "disabled") = (&name, line) {
-            disabled.push(n.clone());
-        } else if let (Some(n), Some(rest)) = (&name, line.strip_prefix("priority ")) {
-            if let Some(g) = map.get_mut(n) {
-                g.priority = rest.trim().parse().ok();
-            } else {
-                priorities.insert(n.clone(), rest.trim().parse().ok());
-            }
-        } else if let (Some(n), Some(rest)) = (&name, line.strip_prefix("Geometry:")) {
-            let nums: Vec<i32> = rest
-                .split(|c: char| !c.is_ascii_digit() && c != '-')
-                .filter_map(|t| t.parse().ok())
-                .collect();
-            if let [x, y, w, h] = nums[..] {
-                let priority = priorities.get(n).copied().flatten();
-                map.insert(
-                    n.clone(),
-                    Geometry {
-                        x,
-                        y,
-                        w,
-                        h,
-                        priority,
-                        enabled: true,
-                    },
-                );
-            }
-        }
-    }
-    for n in disabled {
-        if let Some(g) = map.get_mut(&n) {
-            g.enabled = false;
-        }
-    }
-    map
-}
-
-/// Connected real displays that KDE has switched off (e.g. the laptop panel after
-/// the lid was closed and opened again while other monitors were on).
-pub fn disabled_physical_outputs() -> Vec<String> {
-    let Ok(out) = std::process::Command::new("kscreen-doctor")
-        .arg("-o")
-        .output()
-    else {
-        return Vec::new();
-    };
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut name: Option<String> = None;
-    let mut found = Vec::new();
-    for raw in text.lines() {
-        let line: String = strip_ansi(raw);
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("Output:") {
-            name = rest.split_whitespace().nth(1).map(str::to_owned);
-        } else if line == "disabled"
-            && let Some(n) = &name
-            && !n.starts_with("Virtual-")
-        {
-            found.push(n.clone());
-        }
-    }
-    found
-}
-
-/// Whether the laptop lid is open (true on machines without a lid).
-pub fn lid_open() -> bool {
-    let Ok(entries) = std::fs::read_dir("/proc/acpi/button/lid") else {
-        return true;
-    };
-    entries
-        .flatten()
-        .filter_map(|e| std::fs::read_to_string(e.path().join("state")).ok())
-        .all(|state| !state.contains("closed"))
-}
-
-fn strip_ansi(raw: &str) -> String {
-    let mut line = String::new();
-    let mut esc = false;
-    for c in raw.chars() {
-        match (esc, c) {
-            (false, '\x1b') => esc = true,
-            (true, 'm') => esc = false,
-            (false, c) => line.push(c),
-            _ => {}
-        }
-    }
-    line
-}
-
-/// Applies several `output.<name>.<setting>` changes in one kscreen-doctor call, so
-/// KDE never sees an in-between (overlapping) layout. Retries while KScreen has not
-/// caught up with just-created outputs.
-pub fn kscreen_apply(settings: &[String]) {
-    if settings.is_empty() {
-        return;
-    }
-    for _ in 0..10 {
-        match std::process::Command::new("kscreen-doctor")
-            .args(settings)
-            .output()
-        {
-            Ok(out) if out.status.success() => {
-                info!("KDE layout: {}", settings.join(" "));
-                return;
-            }
-            Ok(_) => std::thread::sleep(Duration::from_millis(300)),
-            Err(e) => {
-                warn!("cannot run kscreen-doctor: {e}");
-                return;
-            }
-        }
-    }
-    warn!("kscreen-doctor did not apply {}", settings.join(" "));
-}
-
-/// Applies `output.<name>.<setting>` through kscreen-doctor, retrying while KScreen
-/// has not caught up with a just-created output.
-/// The geometry Plasma gives its first screen (the one with the panel):
-/// `(x, y, width, height)`.
-pub fn plasma_first_screen() -> Option<(i32, i32, i32, i32)> {
-    const SCRIPT: &str =
-        "var g = screenGeometry(0); print(g.x + ' ' + g.y + ' ' + g.width + ' ' + g.height);";
-    let out = ["qdbus6", "qdbus-qt6", "qdbus"].iter().find_map(|q| {
-        std::process::Command::new(q)
-            .args([
-                "org.kde.plasmashell",
-                "/PlasmaShell",
-                "org.kde.PlasmaShell.evaluateScript",
-                SCRIPT,
-            ])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-    })?;
-    let nums: Vec<i32> = String::from_utf8_lossy(&out.stdout)
-        .split_whitespace()
-        .filter_map(|t| t.parse().ok())
-        .collect();
-    match nums[..] {
-        [x, y, w, h] => Some((x, y, w, h)),
-        _ => None,
-    }
-}
-
-/// Plasma sometimes keeps its old screen order after outputs come and go quickly,
-/// leaving the panel on a former primary. Making another output primary for a moment
-/// and then `output` again makes it re-read the order. Runs in the background.
-pub fn nudge_primary(output: String, other: String) {
-    let _ = std::thread::Builder::new()
-        .name("primary".into())
-        .spawn(move || {
-            kscreen(&other, "priority.1");
-            std::thread::sleep(Duration::from_millis(800));
-            kscreen(&output, "priority.1");
-        });
-}
-
-fn kscreen(output: &str, setting: &str) {
-    let arg = format!("output.{output}.{setting}");
-    for _ in 0..10 {
-        match std::process::Command::new("kscreen-doctor")
-            .arg(&arg)
-            .output()
-        {
-            Ok(out) if out.status.success() => {
-                info!("{output}: {setting}");
-                return;
-            }
-            Ok(_) => std::thread::sleep(Duration::from_millis(300)),
-            Err(e) => {
-                warn!("cannot run kscreen-doctor for {arg}: {e}");
-                return;
-            }
-        }
-    }
-    warn!("kscreen-doctor did not apply {arg}");
 }
