@@ -50,9 +50,11 @@ pub fn announce_once() {
     if notice.exists() {
         return;
     }
-    let _ = std::fs::create_dir_all(notice.parent().unwrap_or(&notice));
-    if std::fs::write(&notice, format!("{}\n", today())).is_ok() {
-        notify_first_time();
+    // Remembered only once the notification was really shown: without a notification
+    // daemon nothing is counted, since the user was never told.
+    if notify_first_time() {
+        let _ = std::fs::create_dir_all(notice.parent().unwrap_or(&notice));
+        let _ = std::fs::write(&notice, format!("{}\n", today()));
     }
 }
 
@@ -153,8 +155,9 @@ fn send(paths: &[String]) -> bool {
          silent\nfail\nmax-time = 15\noutput = \"/dev/null\"\n",
         body.replace('\\', "\\\\").replace('"', "\\\"")
     );
+    // -q first: the user's ~/.curlrc must not log the request or send it elsewhere.
     let child = Command::new("curl")
-        .args(["--config", "-"])
+        .args(["-q", "--config", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -166,8 +169,9 @@ fn send(paths: &[String]) -> bool {
     child.wait().is_ok_and(|s| s.success())
 }
 
-fn notify_first_time() {
-    let child = Command::new("notify-send")
+/// Shows the notice; `true` when the notification was shown.
+fn notify_first_time() -> bool {
+    Command::new("notify-send")
         .args([
             "--app-name=Prostir",
             "--icon=prostir",
@@ -177,12 +181,8 @@ fn notify_first_time() {
                 "From tomorrow, once a day the PC sends an anonymous request with nothing about you, to show how many people use Prostir. To turn it off: the tray item \"Count this PC among users\" or PROSTIR_NO_COUNT=1.",
             ),
         ])
-        .spawn();
-    if let Ok(mut child) = child {
-        let _ = std::thread::Builder::new()
-            .name("notify".into())
-            .spawn(move || child.wait());
-    }
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 #[cfg(test)]

@@ -579,7 +579,7 @@ impl Panel {
     }
 
     /// The palm menu: a round menu of what is needed without opening the main one.
-    /// Five sectors around a round "Menu" button in the middle.
+    /// Six sectors around a round button in the middle (clock, date, battery).
     fn build_wrist(&mut self, s: &UiState) -> Vec<Item> {
         use std::f32::consts::TAU;
         let l = s.lang;
@@ -851,8 +851,8 @@ impl Panel {
                 true,
                 DANGER,
                 l.t(
-                    "Код не підійшов — спробуйте ще раз",
-                    "The code did not match — try again",
+                    "Код не підійшов. Спробуйте ще раз",
+                    "The code did not match. Try again",
                 ),
             ));
             y += 34.0;
@@ -1426,6 +1426,26 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
             [255, 255, 255, 255],
             &label,
         ));
+    }
+    // Monitors not placed in view (all but the one shown in cinema mode, say): a row
+    // of small buttons along the bottom of the map, so they can still be picked.
+    let mut bx = lx + 8.0;
+    for m in s.monitors.iter().filter(|m| m.seen.is_none()) {
+        let style = if selected == Some(m.id) {
+            Style::Selected
+        } else if s.primary == Some(m.id) {
+            Style::TabOn
+        } else {
+            Style::Normal
+        };
+        let r = rect(bx, y + map_h - 44.0, 40.0, 36.0);
+        items.push(button(
+            r,
+            &(m.id + 1).to_string(),
+            style,
+            Some(Action::SelectMonitor(m.id)),
+        ));
+        bx += 46.0;
     }
     y += map_h + 12.0;
     // The picked monitor: what it is, and what can be done with it.

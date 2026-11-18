@@ -31,7 +31,7 @@ pub const AUDIO_CHANNELS: u32 = 2;
 /// Headset microphone sent to the PC: interleaved signed 16-bit little-endian mono.
 pub const MIC_CHANNELS: u32 = 1;
 /// One row of monitors in [`ClientMsg::SetLayout`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LayoutRow {
     /// Monitor ids, left to right.
     pub ids: Vec<u8>,
@@ -115,7 +115,15 @@ pub const MIRROR_ID: u8 = 100;
 /// Prefix of the UDP discovery beacon: `MAGIC ++ tcp_port (u16 LE) ++ hostname (utf-8)`.
 pub const BEACON_MAGIC: &[u8; 8] = b"PROSTIR1";
 
-const MAX_PAYLOAD: u32 = 64 * 1024 * 1024;
+/// Largest message from the PC (a video frame can be several megabytes).
+const MAX_HOST_PAYLOAD: u32 = 64 * 1024 * 1024;
+/// Largest message from the headset: the biggest real one is a slice of microphone
+/// sound (under 1 KiB). A peer is not trusted yet when its first messages arrive, so
+/// this keeps what it can make the PC allocate small.
+const MAX_CLIENT_PAYLOAD: u32 = 64 * 1024;
+/// Most rows, or monitors in all rows, a layout may list (there are at most six
+/// monitors, a laptop screen and three window panels).
+const MAX_LAYOUT_ENTRIES: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Codec {
@@ -443,11 +451,11 @@ fn write_frame(w: &mut impl Write, t: u8, parts: &[&[u8]]) -> io::Result<()> {
     Ok(())
 }
 
-fn read_frame(r: &mut impl Read) -> io::Result<(u8, Vec<u8>)> {
+fn read_frame(r: &mut impl Read, max: u32) -> io::Result<(u8, Vec<u8>)> {
     let mut header = [0u8; 5];
     r.read_exact(&mut header)?;
     let len = u32::from_le_bytes(header[1..].try_into().unwrap());
-    if len > MAX_PAYLOAD {
+    if len > max {
         return Err(invalid("payload too large"));
     }
     let mut payload = vec![0u8; len as usize];
@@ -559,7 +567,7 @@ impl HostMsg {
     }
 
     pub fn read(r: &mut impl Read) -> io::Result<Self> {
-        let (t, payload) = read_frame(r)?;
+        let (t, payload) = read_frame(r, MAX_HOST_PAYLOAD)?;
         let mut c = Cursor(&payload);
         Ok(match t {
             tag::WELCOME => HostMsg::Welcome {
@@ -738,7 +746,7 @@ impl ClientMsg {
     }
 
     pub fn read(r: &mut impl Read) -> io::Result<Self> {
-        let (t, payload) = read_frame(r)?;
+        let (t, payload) = read_frame(r, MAX_CLIENT_PAYLOAD)?;
         let mut c = Cursor(&payload);
         Ok(match t {
             tag::HELLO => ClientMsg::Hello {
@@ -801,7 +809,12 @@ impl ClientMsg {
             },
             tag::SET_LAYOUT => {
                 let mut rows = Vec::new();
+                let mut entries = 0;
                 while let Ok(n) = c.u8() {
+                    entries += usize::from(n);
+                    if rows.len() == MAX_LAYOUT_ENTRIES || entries > MAX_LAYOUT_ENTRIES {
+                        return Err(invalid("layout too large"));
+                    }
                     let mut row = LayoutRow {
                         ids: Vec::new(),
                         centers: Vec::new(),
@@ -820,6 +833,9 @@ impl ClientMsg {
                 let primary = c.u8()?;
                 let mut sizes = Vec::new();
                 while let (Ok(width), Ok(height)) = (c.u32(), c.u32()) {
+                    if sizes.len() == MAX_LAYOUT_ENTRIES {
+                        return Err(invalid("too many monitors"));
+                    }
                     sizes.push((width, height));
                 }
                 ClientMsg::SetMonitors { sizes, primary }
@@ -848,6 +864,28 @@ pub fn decode_beacon(buf: &[u8]) -> Option<(u16, String)> {
     let rest = buf.strip_prefix(BEACON_MAGIC.as_slice())?;
     let port = u16::from_le_bytes(rest.get(..2)?.try_into().ok()?);
     Some((port, String::from_utf8_lossy(&rest[2..]).into_owned()))
+}
+
+#[cfg(test)]
+mod limits {
+    use super::*;
+
+    #[test]
+    fn a_headset_message_cannot_be_huge() {
+        let mut big = vec![tag::SET_LAYOUT];
+        big.extend_from_slice(&(1u32 << 20).to_le_bytes());
+        big.extend(std::iter::repeat_n(0u8, 1 << 20));
+        assert!(ClientMsg::read(&mut big.as_slice()).is_err());
+    }
+
+    #[test]
+    fn a_layout_cannot_list_more_than_there_can_be() {
+        // 100 empty rows: small on the wire, but not a layout.
+        let mut msg = vec![tag::SET_LAYOUT];
+        msg.extend_from_slice(&100u32.to_le_bytes());
+        msg.extend(std::iter::repeat_n(0u8, 100));
+        assert!(ClientMsg::read(&mut msg.as_slice()).is_err());
+    }
 }
 
 #[cfg(test)]

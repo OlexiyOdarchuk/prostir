@@ -114,7 +114,7 @@ fn stream_name(id: u8) -> String {
     if id == MIRROR_ID {
         "mirror".into()
     } else {
-        format!("Prostir-{}", id + 1)
+        format!("Prostir-{}", u32::from(id) + 1)
     }
 }
 
@@ -205,7 +205,10 @@ impl Router {
         };
         match slot.sent.remove(&pts_us) {
             Some(sent) => slot.latency.add(id, sent.elapsed().as_secs_f64() * 1e3),
-            None => debug!("shown frame {pts_us} of Prostir-{} is unknown", id + 1),
+            None => debug!(
+                "shown frame {pts_us} of Prostir-{} is unknown",
+                u32::from(id) + 1
+            ),
         }
         // The headset reports only some frames: older ones are done too.
         slot.sent = slot.sent.split_off(&pts_us);
@@ -1253,7 +1256,11 @@ impl Displays {
 
     pub fn remove(&mut self, id: u8) -> Result<()> {
         if !self.monitors.contains_key(&id) {
-            bail!("{} {}", t("Немає монітора", "No monitor"), id + 1);
+            bail!(
+                "{} {}",
+                t("Немає монітора", "No monitor"),
+                u32::from(id) + 1
+            );
         }
         if self.monitors.len() == 1 {
             bail!(
@@ -1541,6 +1548,33 @@ impl Displays {
                 if *c != NEXT {
                     *c = (*c).clamp(-100_000, 100_000);
                 }
+            }
+        }
+        // The laptop screen's stream is cut for a moment whenever KDE rearranges its
+        // outputs, and a headset that sends a layout meanwhile leaves it out. Its spot
+        // is kept, or it would come back elsewhere, the headset would move it back, and
+        // that would cut it again, round and round.
+        let has_mirror = |rows: &[LayoutRow]| rows.iter().any(|r| r.ids.contains(&MIRROR_ID));
+        if self.mirror_wanted && self.mirror.is_none() && !has_mirror(&rows) {
+            for (i, old) in self.rows.iter().enumerate() {
+                let Some(k) = old.ids.iter().position(|id| *id == MIRROR_ID) else {
+                    continue;
+                };
+                let (center, middle) = (
+                    old.centers.get(k).copied().unwrap_or(NEXT),
+                    old.middles.get(k).copied().unwrap_or(NEXT),
+                );
+                let at = if i < rows.len() {
+                    i
+                } else {
+                    rows.push(LayoutRow::default());
+                    rows.len() - 1
+                };
+                let row = &mut rows[at];
+                row.ids.push(MIRROR_ID);
+                row.centers.push(center);
+                row.middles.push(middle);
+                break;
             }
         }
         self.rows = rows;

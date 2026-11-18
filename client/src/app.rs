@@ -428,6 +428,8 @@ struct Scene {
     pending_layout: Option<(Vec<prostir_proto::LayoutRow>, Instant)>,
     /// Head position and gaze this frame.
     head: (Vec3, Vec3),
+    /// The head's right, rolled and tilted with it (where the right ear is).
+    head_right: Vec3,
     /// Tracked hands are in view this frame (the menu then opens within reach).
     hands_in_view: bool,
     /// Where the keyboard window lies (set the first time it is shown).
@@ -686,11 +688,14 @@ impl Scene {
         let (eye, yaw) = self.center;
         let d = glam::Quat::from_rotation_y(-yaw) * (p.position - eye);
         let distance = d.length().max(0.3);
+        // Coarse (about a tenth of a degree): the menu redraws whenever its picture
+        // changes, and a monitor being moved changes this every frame.
+        let coarse = |a: f32| (a * 500.0).round() / 500.0;
         Some([
-            d.x.atan2(-d.z),
-            d.y.atan2(Vec2::new(d.x, d.z).length()),
-            (p.width / 2.0 / distance).atan(),
-            (self.height_of(id) / 2.0 / distance).atan(),
+            coarse(d.x.atan2(-d.z)),
+            coarse(d.y.atan2(Vec2::new(d.x, d.z).length())),
+            coarse((p.width / 2.0 / distance).atan()),
+            coarse((self.height_of(id) / 2.0 / distance).atan()),
         ])
     }
 
@@ -825,20 +830,20 @@ impl Scene {
             .filter(|_| self.settings.sound_from_screen)
             .and_then(|id| self.shown.get(&id))
             .map(|p| {
+                // In the head's own terms, so lying down or tilting the head keeps the
+                // ears right: how far towards the right ear, and how far in front.
                 let (head, forward) = self.head;
-                let to = p.position - head;
-                let look = (-forward.x).atan2(-forward.z);
-                let at = (-to.x).atan2(-to.z);
+                let to = (p.position - head).normalize_or_zero();
                 // Right of where the user looks is positive.
-                (look - at + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
-                    - std::f32::consts::PI
+                to.dot(self.head_right).atan2(to.dot(forward))
             });
         crate::audio::place(angle);
     }
 
     /// Shows `text` for a few seconds, below the line of sight.
     fn show_toast(&mut self, text: String) {
-        info!("toast: {text}");
+        // Not the text: it can be a PC notification (a message, a code).
+        info!("toast shown");
         self.toast = Some((text, Instant::now(), None));
     }
 
@@ -1619,6 +1624,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         sent_layout: None,
         pending_layout: None,
         head: (Vec3::ZERO, -Vec3::Z),
+        head_right: Vec3::X,
         hands_in_view: false,
         keyboard_place: layout::load(&data_dir.join("keyboard.txt")).remove(&0),
         keyboard_path: data_dir.join("keyboard.txt"),
@@ -1790,16 +1796,15 @@ fn run(app: &AndroidApp) -> Result<()> {
         last_time = Some(time);
 
         controls.sync(&session, &local, time)?;
-        let (head, forward) = view
-            .locate(&local, time)
-            .map_or((Vec3::ZERO, -Vec3::Z), |l| {
-                (
-                    vec3(l.pose.position),
-                    xrutil::quat(l.pose.orientation) * -Vec3::Z,
-                )
-            });
+        let (head, forward, right) =
+            view.locate(&local, time)
+                .map_or((Vec3::ZERO, -Vec3::Z, Vec3::X), |l| {
+                    let turn = xrutil::quat(l.pose.orientation);
+                    (vec3(l.pose.position), turn * -Vec3::Z, turn * Vec3::X)
+                });
 
         scene.head = (head, forward);
+        scene.head_right = right;
         scene.follow_head(dt);
         scene.place_sound();
         scene.remind_rest(dt);
@@ -2137,7 +2142,10 @@ fn run(app: &AndroidApp) -> Result<()> {
                 layout::save(&scene.layout_path, &scene.placements);
             }
             if end_grab && let Some(released) = scene.grabs[hand].take() {
-                scene.follow_hold = true;
+                // A monitor put somewhere new stays there until the head comes back
+                // near where it was (the menu and the keyboard do not count).
+                scene.follow_hold =
+                    scene.settings.follow && scene.placements.contains_key(&released.id);
                 // Letting go with the first hand ends resizing too.
                 scene.scaling = None;
                 if released.id == KEYBOARD_ID {
@@ -3085,6 +3093,7 @@ fn handle_action(
         }
         Action::Follow(on) => {
             scene.settings.follow = on;
+            scene.follow_hold = false;
             scene.settings.save(settings_path);
             if !on {
                 layout::save(&scene.layout_path, &scene.placements);
@@ -3270,7 +3279,7 @@ fn handle_action(
                 }
                 None => {
                     let what = scene.lang().t("не IP-адреса", "is not an IP address");
-                    scene.show_error(format!("«{typed}» — {what}"))
+                    scene.show_error(format!("«{typed}»: {what}"))
                 }
             }
         }

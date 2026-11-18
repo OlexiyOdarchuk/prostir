@@ -26,9 +26,9 @@ pub enum Command {
 
 /// Video quality presets offered in the menu, Mbit/s per monitor.
 const QUALITIES: [(u32, &str, &str); 3] = [
-    (15, "Економна — 15 Мбіт/с", "Economy — 15 Mbit/s"),
-    (30, "Звичайна — 30 Мбіт/с", "Normal — 30 Mbit/s"),
-    (50, "Висока — 50 Мбіт/с", "High — 50 Mbit/s"),
+    (15, "Економна: 15 Мбіт/с", "Economy: 15 Mbit/s"),
+    (30, "Звичайна: 30 Мбіт/с", "Normal: 30 Mbit/s"),
+    (50, "Висока: 50 Мбіт/с", "High: 50 Mbit/s"),
 ];
 
 #[derive(Clone, Default, PartialEq)]
@@ -56,6 +56,11 @@ pub type Handle = ksni::blocking::Handle<Tray>;
 
 /// Shows the tray icon; `None` when the desktop has no tray.
 pub fn spawn(commands: Sender<Command>, bitrate: u32, sharp: bool) -> Option<Handle> {
+    // Rewritten on each start, so it names this install's program even after an
+    // upgrade moved it (a Nix store path, say).
+    if autostart_enabled() {
+        set_autostart(true);
+    }
     let tray = Tray {
         status: Status::default(),
         pairing_code: None,
@@ -127,9 +132,16 @@ fn autostart_enabled() -> bool {
 fn set_autostart(enabled: bool) {
     let Some(path) = autostart_file() else { return };
     let result = if enabled {
-        let exe = std::env::current_exe()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| "prostir".into());
+        // A wrapper (Nix) names the program to start; else this very file.
+        let exe = std::env::var("PROSTIR_EXE")
+            .ok()
+            .filter(|e| !e.is_empty())
+            .or_else(|| {
+                std::env::current_exe()
+                    .ok()
+                    .map(|p| p.display().to_string())
+            })
+            .unwrap_or_else(|| "prostir".into());
         let entry = format!(
             "[Desktop Entry]\nType=Application\nName=Prostir\n\
              Comment=Virtual monitors for Meta Quest\nExec={exe}\nIcon=prostir\n\
@@ -166,8 +178,8 @@ impl Tray {
     fn status_line(&self) -> String {
         match self.status.connected {
             Some(_) if self.status.paused => t(
-                "Шолом знято — трансляція на паузі",
-                "Headset taken off — streaming paused",
+                "Шолом знято, трансляцію призупинено",
+                "Headset taken off, streaming paused",
             )
             .into(),
             Some(via) => format!("{} ({via})", t("Шолом підключено", "Headset connected")),

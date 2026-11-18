@@ -45,7 +45,6 @@ struct Args {
     /// Leave KDE's primary monitor alone (by default the middle Quest monitor becomes primary).
     #[arg(long)]
     keep_primary: bool,
-    /// Video codec.
     /// Video codec. Without it: the one chosen in the headset menu, else HEVC (sharpest
     /// small text). H.264 needs far less memory on Intel (~9 MB against ~70 MB of driver
     /// memory per monitor) at a slightly softer picture.
@@ -336,7 +335,7 @@ fn serve_client(
                 };
                 match displays.add(spec) {
                     Ok(id) => {
-                        info!("headset added Prostir-{}", id + 1);
+                        info!("headset added Prostir-{}", u32::from(id) + 1);
                         displays.force_keyframe(id);
                         displays.save();
                         displays::sync_wallpapers();
@@ -349,7 +348,7 @@ fn serve_client(
             }
             Ok(Ok(ClientMsg::RemoveMonitor { id })) => match displays.remove(id) {
                 Ok(()) => {
-                    info!("headset removed Prostir-{}", id + 1);
+                    info!("headset removed Prostir-{}", u32::from(id) + 1);
                     displays.save();
                 }
                 Err(e) => report(displays, format!("{e:#}")),
@@ -388,7 +387,10 @@ fn serve_client(
                 displays.save();
             }
             Ok(Ok(ClientMsg::SetPrimary { id })) => {
-                info!("headset made Prostir-{} the primary monitor", id + 1);
+                info!(
+                    "headset made Prostir-{} the primary monitor",
+                    u32::from(id) + 1
+                );
                 displays.set_primary(id);
                 displays.save();
                 displays::sync_wallpapers();
@@ -687,7 +689,6 @@ fn quit_on_signals() {
                 hyprland::remove_leftovers();
             }
             audio::restore_after_crash();
-            usage::announce_once();
             std::process::exit(1);
         });
     if let Err(e) = spawned {
@@ -698,10 +699,24 @@ fn quit_on_signals() {
 /// One Prostir per desktop session: a second one would fight over the monitors (and
 /// on Hyprland, its start-up clean-up would remove the first one's). The lock file is
 /// held for the life of the process.
-fn single_instance() -> Result<std::fs::File> {
-    let dir = std::env::var_os("XDG_RUNTIME_DIR")
+/// A directory only this user can use: `$XDG_RUNTIME_DIR`, or `~/.cache/prostir`
+/// without it (never the shared `/tmp`, where another user could plant files).
+pub(crate) fn runtime_dir() -> std::path::PathBuf {
+    if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) {
+        return dir.into();
+    }
+    let dir = std::env::var_os("HOME")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
+        .unwrap_or_default()
+        .join(".cache/prostir");
+    let _ = std::fs::create_dir_all(&dir);
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    dir
+}
+
+fn single_instance() -> Result<std::fs::File> {
+    let dir = runtime_dir();
     let display = std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-0".into());
     let path = dir.join(format!("prostir-{display}.lock"));
     let file = std::fs::OpenOptions::new()
@@ -722,6 +737,9 @@ fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse();
     let _instance = single_instance()?;
+    // The first start says that this build counts its users and how to turn it off,
+    // a day before the first count.
+    usage::announce_once();
     quit_on_signals();
     // Monitors from a run that crashed: without the headset nobody sees their windows.
     if hyprland::running() {

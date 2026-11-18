@@ -145,9 +145,11 @@ pub fn move_cursor(x: i32, y: i32) -> bool {
 
 /// Output pixel size for a panel showing `w`: even numbers, at least [`MIN_SIZE`].
 pub fn panel_size(w: &ActiveWindow) -> (u32, u32) {
+    // At most what an output may be (an odd report from the compositor or a spoofed
+    // one must not overflow).
     let px = |logical: i32, min: i32| {
-        let p = (f64::from(logical.max(min)) * w.scale).round() as u32;
-        (p + 1) & !1
+        let p = (f64::from(logical.clamp(min, 8192)) * w.scale.clamp(0.25, 4.0)).round() as u32;
+        (p.min(8192) + 1) & !1
     };
     (px(w.width, MIN_SIZE.0), px(w.height, MIN_SIZE.1))
 }
@@ -294,7 +296,11 @@ pub fn vacated(panels: &[String]) -> Vec<String> {
     let Some(rx) = reports() else {
         return Vec::new();
     };
-    let rx = rx.lock().unwrap();
+    // Busy asking KWin something (the sound watcher, say): next time. This runs on the
+    // session loop, which must not wait for it.
+    let Ok(rx) = rx.try_lock() else {
+        return Vec::new();
+    };
     let mut out = std::mem::take(&mut *STASH.lock().unwrap());
     while let Ok(r) = rx.try_recv() {
         if let Report::Left(name) = r
@@ -566,10 +572,7 @@ static STASH: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// Loads and runs a KWin script; `once`: unloaded right after it ran.
 fn kwin_run(name: &str, source: &str, once: bool) -> Result<()> {
-    let dir = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    let path = dir.join(format!("{name}.js"));
+    let path = crate::runtime_dir().join(format!("{name}.js"));
     std::fs::write(&path, source)?;
     let bus = zbus::blocking::Connection::session()?;
     kwin_unload(name);

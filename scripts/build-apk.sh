@@ -30,7 +30,7 @@ echo ">> cargo build ($PROFILE) with NDK $(basename "$NDK")"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TC/aarch64-linux-android$API-clang"
 export CC_aarch64_linux_android="$TC/aarch64-linux-android$API-clang"
 export AR_aarch64_linux_android="$TC/llvm-ar"
-cargo_flags=(-p prostir-client --target aarch64-linux-android)
+cargo_flags=(--locked -p prostir-client --target aarch64-linux-android)
 # PROSTIR_STORE=1: Meta Horizon Store build, with the entitlement check. Needs the Meta
 # Platform SDK unpacked at PROSTIR_PLATFORM_SDK (its libovrplatformloader.so goes into
 # the APK). Builds from this repository leave both out.
@@ -128,8 +128,9 @@ if (( debug_key )) && [[ ! -f "$KEYSTORE" ]]; then
     keytool -genkeypair -keystore "$KEYSTORE" -storepass "$KEYSTORE_PASS" -keypass "$KEY_PASS" -alias "$KEY_ALIAS" \
         -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
 fi
+export KEYSTORE_PASS KEY_PASS
 "$BUILD_TOOLS/apksigner" sign --ks "$KEYSTORE" --ks-key-alias "$KEY_ALIAS" \
-    --ks-pass "pass:$KEYSTORE_PASS" --key-pass "pass:$KEY_PASS" \
+    --ks-pass env:KEYSTORE_PASS --key-pass env:KEY_PASS \
     --out "$OUT/$APK" "$OUT/aligned.apk"
 rm -f "$OUT/unaligned.apk" "$OUT/aligned.apk" "$OUT/$APK.idsig"
 # The certificate digest tells whether two APKs (say, GitHub and Store) can update each other.

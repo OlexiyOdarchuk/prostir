@@ -5,8 +5,9 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
-description = "Wire protocol between the Prostir host (KDE Plasma) and the Meta Quest client"
+description = "Wire protocol between the Prostir host (KDE Plasma 6 or Hyprland) and the Meta Quest 3 or 3S client"
 
 [dependencies]
 getrandom = "0.3"

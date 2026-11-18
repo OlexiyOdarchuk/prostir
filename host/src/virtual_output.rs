@@ -601,7 +601,7 @@ pub fn kscreen_apply(settings: &[String]) {
 pub fn plasma_first_screen() -> Option<(i32, i32, i32, i32)> {
     const SCRIPT: &str =
         "var g = screenGeometry(0); print(g.x + ' ' + g.y + ' ' + g.width + ' ' + g.height);";
-    let out = ["qdbus6", "qdbus"].iter().find_map(|q| {
+    let out = ["qdbus6", "qdbus-qt6", "qdbus"].iter().find_map(|q| {
         std::process::Command::new(q)
             .args([
                 "org.kde.plasmashell",

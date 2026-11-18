@@ -263,8 +263,21 @@ pub fn accept(
                 if headset_shows && matches!(paired, Ok(None)) {
                     let _ = ClientMsg::read(&mut reader);
                 }
-                match paired? {
-                    None => info!("pairing not attempted: no code on the PC"),
+                // Every attempt that did not succeed counts towards the slowdown: a
+                // cancelled dialog or a broken exchange too, so a peer cannot keep
+                // the PC showing dialogs and codes for free.
+                let paired = match paired {
+                    Ok(p) => p,
+                    Err(e) => {
+                        LIMITER.lock().unwrap().failed();
+                        return Err(e);
+                    }
+                };
+                match paired {
+                    None => {
+                        info!("pairing not attempted: no code on the PC");
+                        LIMITER.lock().unwrap().failed();
+                    }
                     Some(true) => {
                         LIMITER.lock().unwrap().succeeded();
                         *PC_CODE.lock().unwrap() = None;
@@ -292,7 +305,7 @@ pub fn accept(
             }
             // Something a newer headset sends that this PC does not know yet.
             ClientMsg::Unknown { .. } => {}
-            other => bail!("unexpected message before pairing: {other:?}"),
+            other => bail!("unexpected message before pairing: {}", brief(&other)),
         }
     }
 }
@@ -311,25 +324,29 @@ fn obtain_code(headset_shows: bool, tray: Option<&tray::Handle>) -> Result<Strin
         return ask_code();
     }
     let mut current = PC_CODE.lock().unwrap();
-    let code = match &*current {
-        Some((code, made)) if made.elapsed() < CODE_LIFETIME => code.clone(),
+    let (code, new) = match &*current {
+        Some((code, made)) if made.elapsed() < CODE_LIFETIME => (code.clone(), false),
         _ => {
             let code = secure::pairing_code();
             *current = Some((code.clone(), Instant::now()));
-            code
+            (code, true)
         }
     };
     drop(current);
     let shown = format!("{} {}", &code[..3], &code[3..]);
-    info!("pairing code: {shown}");
+    // Never into the log: whoever can read the journal could pair with it.
+    info!("pairing code shown in the tray");
     tray::set_pairing(tray, Some(shown.clone()));
-    notify(
-        t("Сполучення шолома", "Pairing a headset"),
-        &format!(
-            "{} {shown}",
-            t("Введіть у шоломі код", "Type this code in the headset:")
-        ),
-    );
+    // Once per code: a peer asking again and again must not flood the desktop.
+    if new {
+        notify(
+            t("Сполучення шолома", "Pairing a headset"),
+            &format!(
+                "{} {shown}",
+                t("Введіть у шоломі код", "Type this code in the headset:")
+            ),
+        );
+    }
     Ok(code)
 }
 
@@ -380,11 +397,17 @@ fn incompatible(writer: &mut SecureWriter, pc_too_old: bool, headset_app: &str) 
     }
     .write(writer)?;
     writer.flush()?;
-    // Once per headset version, not on every reconnection attempt.
-    static TOLD: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    // Once per headset version, and at most once in ten minutes whatever versions a
+    // peer claims: not on every reconnection attempt.
+    static TOLD: std::sync::Mutex<(Vec<String>, Option<Instant>)> =
+        std::sync::Mutex::new((Vec::new(), None));
     let mut told = TOLD.lock().unwrap();
-    if !told.iter().any(|t| t == headset_app) {
-        told.push(headset_app.to_owned());
+    let quiet = told
+        .1
+        .is_some_and(|t| t.elapsed() < Duration::from_secs(600));
+    if !quiet && !told.0.iter().any(|t| t == headset_app) {
+        told.0.push(headset_app.to_owned());
+        told.1 = Some(Instant::now());
         notify(title, &body);
     }
     Ok(())
@@ -401,6 +424,17 @@ fn refuse(writer: &mut SecureWriter, why: &str) -> Result<bool> {
     Ok(false)
 }
 
+/// A short description of `msg` for the log (a message from a peer that is not
+/// trusted must not become a huge log line).
+fn brief(msg: &ClientMsg) -> String {
+    let full = format!("{msg:?}");
+    let mut short: String = full.chars().take(80).collect();
+    if full.chars().count() > 80 {
+        short.push('…');
+    }
+    short
+}
+
 /// One pairing attempt with `code`; `Ok(false)` when the codes did not match.
 fn pair(
     reader: &mut BufReader<SecureReader>,
@@ -414,12 +448,15 @@ fn pair(
     writer.flush()?;
     let theirs = match ClientMsg::read(reader)? {
         ClientMsg::PairMsg { msg } => msg,
-        other => bail!("expected the headset's pairing message, got {other:?}"),
+        other => bail!(
+            "expected the headset's pairing message, got {}",
+            brief(&other)
+        ),
     };
     let key = pairing.finish(&theirs)?;
     let tag = match ClientMsg::read(reader)? {
         ClientMsg::PairConfirm { tag } => tag,
-        other => bail!("expected a pairing confirmation, got {other:?}"),
+        other => bail!("expected a pairing confirmation, got {}", brief(&other)),
     };
     let own = &identity.public;
     let ok = tags_match(&tag, &confirmation(&key, "headset", peer, own));
