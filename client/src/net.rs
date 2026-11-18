@@ -116,6 +116,9 @@ pub enum NetEvent {
     },
     /// The codes did not match; a new attempt follows.
     PairingFailed,
+    /// A PC announces itself on the network but does not accept the connection
+    /// (a firewall on the PC); `None` once connecting works again.
+    Unreachable(Option<String>),
     /// An unknown PC: ask the user whether to pair with it (`failed`: after several
     /// wrong codes).
     PairOffer {
@@ -403,6 +406,13 @@ fn alive(stream: &TcpStream) -> bool {
     }
 }
 
+/// A PC that announced itself refused the connection: most likely a firewall.
+fn blocked(finder: &Finder, events: &Sender<NetEvent>, addr: SocketAddr) {
+    if let Some(name) = finder.name_of(addr) {
+        let _ = events.send(NetEvent::Unreachable(Some(name)));
+    }
+}
+
 fn try_connect(addr: SocketAddr) -> Option<TcpStream> {
     TcpStream::connect_timeout(&addr, Duration::from_millis(400)).ok()
 }
@@ -486,8 +496,11 @@ fn connect(
     {
         return Some(stream);
     }
-    if let Some(stream) = choice.and_then(try_connect) {
-        return Some(stream);
+    if let Some(addr) = choice {
+        if let Some(stream) = try_connect(addr) {
+            return Some(stream);
+        }
+        blocked(finder, events, addr);
     }
     if let Some(beacon) = beacon {
         finder.listen(beacon, events);
@@ -509,7 +522,14 @@ fn connect(
     }
     // Exactly one PC around: just use it. Several: wait for a pick in the menu.
     match finder.reported.as_slice() {
-        [only] => return try_connect(only.addr),
+        [only] => {
+            let addr = only.addr;
+            let stream = try_connect(addr);
+            if stream.is_none() {
+                blocked(finder, events, addr);
+            }
+            return stream;
+        }
         [] => {}
         _ => return None,
     }

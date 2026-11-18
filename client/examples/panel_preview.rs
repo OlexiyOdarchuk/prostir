@@ -28,6 +28,7 @@ fn main() {
     };
     let state = UiState {
         mic_denied: std::env::var("MIC_DENIED").is_ok(),
+        unreachable: std::env::var("BLOCKED").ok(),
         pair_offer: std::env::var("OFFER")
             .ok()
             .map(|v| ("workstation 192.168.1.10".into(), v == "failed")),

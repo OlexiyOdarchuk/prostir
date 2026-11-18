@@ -186,13 +186,12 @@ impl ksni::Tray for Tray {
     }
 
     fn status(&self) -> ksni::Status {
-        // Waiting quietly sits in the tray's overflow; a session is shown.
+        // Always visible (a passive icon hides in Plasma's overflow, and a fresh install
+        // would show no sign of running at all); a code to read asks for attention.
         if self.pairing_code.is_some() {
             ksni::Status::NeedsAttention
-        } else if self.status.connected.is_some() {
-            ksni::Status::Active
         } else {
-            ksni::Status::Passive
+            ksni::Status::Active
         }
     }
 

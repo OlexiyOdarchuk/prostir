@@ -39,6 +39,8 @@ pub struct PairingView {
 #[derive(Debug, Clone, PartialEq)]
 pub struct UiState {
     pub pairing: Option<PairingView>,
+    /// A PC that announces itself but does not accept the connection (a firewall).
+    pub unreachable: Option<String>,
     /// An unknown PC: (its name, the last pairing stopped after wrong codes).
     pub pair_offer: Option<(String, bool)>,
     /// Name of the connected PC, `None` while searching.
@@ -699,6 +701,27 @@ impl Panel {
                     Some(Action::ConnectTo(i)),
                 ));
                 y += 60.0;
+            }
+            if let Some(name) = &s.unreachable {
+                // Seen on the network, but the connection itself is blocked.
+                let name: String = name.chars().take(30).collect();
+                for line in [
+                    name,
+                    l.t(
+                        "видно в мережі, але з'єднання блокується.",
+                        "is on the network, but the connection is blocked.",
+                    )
+                    .to_owned(),
+                    l.t(
+                        "Дозвольте в брандмауері ПК порт TCP 47830.",
+                        "Allow TCP port 47830 in the PC's firewall.",
+                    )
+                    .to_owned(),
+                ] {
+                    items.push(text(lx, y + 16.0, 18.0, false, DANGER, &line));
+                    y += 28.0;
+                }
+                y += 6.0;
             }
         }
         items.push(button(
@@ -1541,13 +1564,24 @@ fn build_welcome(l: Lang, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
             "The Prostir icon appears in the tray.",
             false,
         ),
-        (
-            "Шолом знайде ПК сам",
-            "The headset finds the PC",
-            "У тій самій мережі Wi‑Fi або через кабель USB.",
-            "On the same Wi‑Fi network, or over a USB cable.",
-            false,
-        ),
+        // USB needs developer mode and adb: not something a store install has.
+        if cfg!(feature = "store") {
+            (
+                "Шолом знайде ПК сам",
+                "The headset finds the PC",
+                "У тій самій мережі Wi‑Fi.",
+                "On the same Wi‑Fi network.",
+                false,
+            )
+        } else {
+            (
+                "Шолом знайде ПК сам",
+                "The headset finds the PC",
+                "У тій самій мережі Wi‑Fi або через кабель USB.",
+                "On the same Wi‑Fi network, or over a USB cable.",
+                false,
+            )
+        },
     ];
     for (n, (uk_title, en_title, uk, en, link)) in steps.into_iter().enumerate() {
         y += 16.0;
@@ -1917,6 +1951,7 @@ mod tests {
     pub fn sample_state() -> UiState {
         UiState {
             pairing: None,
+            unreachable: Some("workstation-with-a-long-name".into()),
             pair_offer: None,
             mic_denied: true,
             host: Some("workstation".into()),

@@ -1198,7 +1198,8 @@ pub fn sync_wallpapers() {
         .name("wallpapers".into())
         .spawn(|| {
             std::thread::sleep(Duration::from_secs(2));
-            for qdbus in ["qdbus6", "qdbus"] {
+            // Arch: qdbus6; Fedora: qdbus-qt6; older setups: qdbus.
+            for qdbus in ["qdbus6", "qdbus-qt6", "qdbus"] {
                 let ran = std::process::Command::new(qdbus)
                     .args([
                         "org.kde.plasmashell",

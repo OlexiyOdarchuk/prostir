@@ -5,7 +5,9 @@
 //! that used Prostir on it. The first time ever it also sends `/install`. Nothing else
 //! goes along: no id, no host name, no settings. GoatCounter keeps no IP addresses.
 //!
-//! On by default, off with the tray item or `PROSTIR_NO_COUNT=1`. Only official builds
+//! On by default, off with the tray item or `PROSTIR_NO_COUNT=1`. The first start says
+//! so in a notification, and nothing is sent before the next day, so there is time to
+//! turn it off before anything leaves the PC. Only official builds
 //! count: the key is set at build time (`PROSTIR_COUNT_TOKEN`), so builds from source
 //! and forks never send anything.
 
@@ -31,6 +33,27 @@ fn switch_file() -> Option<PathBuf> {
 
 fn state_file() -> Option<PathBuf> {
     Some(config_dir().join("counted"))
+}
+
+/// The day the user was told about the counter (`YYYY-MM-DD`).
+fn notice_file() -> Option<PathBuf> {
+    Some(config_dir().join("count-notice"))
+}
+
+/// On the first start: says that Prostir counts its users and how to turn it off.
+/// Counting starts the day after this.
+pub fn announce_once() {
+    if !available() || !enabled() {
+        return;
+    }
+    let Some(notice) = notice_file() else { return };
+    if notice.exists() {
+        return;
+    }
+    let _ = std::fs::create_dir_all(notice.parent().unwrap_or(&notice));
+    if std::fs::write(&notice, format!("{}\n", today())).is_ok() {
+        notify_first_time();
+    }
 }
 
 /// Whether this build counts at all.
@@ -83,8 +106,18 @@ pub fn headset_connected() {
         return;
     }
     let Some(state) = state_file() else { return };
-    let last = std::fs::read_to_string(&state).ok();
     let date = today();
+    // Not before the day after the user was told (and could turn it off).
+    let told = notice_file().and_then(|p| std::fs::read_to_string(p).ok());
+    match told.as_deref().map(str::trim) {
+        None => {
+            announce_once();
+            return;
+        }
+        Some(day) if day >= date.as_str() => return,
+        Some(_) => {}
+    }
+    let last = std::fs::read_to_string(&state).ok();
     if last.as_deref().map(str::trim) == Some(date.as_str()) {
         return;
     }
@@ -98,9 +131,6 @@ pub fn headset_connected() {
             }
             if send(&paths) {
                 let _ = std::fs::write(&state, format!("{date}\n"));
-                if first {
-                    notify_first_time();
-                }
             }
         });
 }
@@ -137,17 +167,22 @@ fn send(paths: &[String]) -> bool {
 }
 
 fn notify_first_time() {
-    let _ = Command::new("notify-send")
+    let child = Command::new("notify-send")
         .args([
             "--app-name=Prostir",
             "--icon=prostir",
             t("Prostir рахує користувачів", "Prostir counts its users"),
             t(
-                "Раз на день ПК надсилає анонімний запит без даних про вас, щоб знати, скільки людей користується Prostir. Вимкнути можна в треї.",
-                "Once a day the PC sends an anonymous request, with nothing about you, so we know how many people use Prostir. Turn it off in the tray.",
+                "Починаючи із завтра, раз на день ПК надсилатиме анонімний запит без даних про вас, щоб було видно, скільки людей користується Prostir. Вимкнути: пункт трею «Рахувати цей ПК серед користувачів» або PROSTIR_NO_COUNT=1.",
+                "From tomorrow, once a day the PC sends an anonymous request with nothing about you, to show how many people use Prostir. To turn it off: the tray item \"Count this PC among users\" or PROSTIR_NO_COUNT=1.",
             ),
         ])
-        .status();
+        .spawn();
+    if let Ok(mut child) = child {
+        let _ = std::thread::Builder::new()
+            .name("notify".into())
+            .spawn(move || child.wait());
+    }
 }
 
 #[cfg(test)]

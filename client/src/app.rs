@@ -181,6 +181,8 @@ struct Scene {
     ip_input: Option<String>,
     /// Pairing with a new PC in progress.
     pairing: Option<ui::PairingView>,
+    /// A PC on the network that refuses the connection (a firewall).
+    unreachable: Option<String>,
     /// An unknown PC waiting for "Pair" or "Not now" (survives the disconnect that
     /// follows the question).
     pair_offer: Option<(String, bool)>,
@@ -571,6 +573,7 @@ impl Scene {
             ip_input: self.ip_input.clone(),
             pairing: self.pairing.clone(),
             pair_offer: self.pair_offer.clone(),
+            unreachable: self.unreachable.clone(),
             monitors: self
                 .quest_sizes()
                 .into_iter()
@@ -814,6 +817,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         ip_input: None,
         pairing: None,
         pair_offer: None,
+        unreachable: None,
         steering,
         offline_since: Some(Instant::now()),
         feedback: None,
@@ -1658,8 +1662,10 @@ fn handle_net_event(
             }
             scene.offline_since = None;
             scene.ip_input = None;
+            scene.unreachable = None;
         }
         NetEvent::Hosts(hosts) => scene.found = hosts,
+        NetEvent::Unreachable(name) => scene.unreachable = name,
         NetEvent::Pairing { host, code } => {
             let failed = scene.pairing.as_ref().is_some_and(|p| p.failed);
             scene.pairing = Some(ui::PairingView {

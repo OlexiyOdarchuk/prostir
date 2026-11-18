@@ -547,6 +547,7 @@ fn quit_on_signals() {
                 hyprland::remove_leftovers();
             }
             audio::restore_after_crash();
+            usage::announce_once();
             std::process::exit(1);
         });
     if let Err(e) = spawned {
