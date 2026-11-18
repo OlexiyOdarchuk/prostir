@@ -12,41 +12,77 @@ on:
         description: Release tag to publish, e.g. v0.1.0
         required: true
 
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
 jobs:
   aur:
     runs-on: ubuntu-24.04
     container: archlinux:base-devel
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          persist-credentials: false
       - name: PKGBUILD for this release
         env:
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: |
+          set -euo pipefail
           pacman -Syu --noconfirm --needed git openssh
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Tag '$TAG' is not vMAJOR.MINOR.PATCH"
+            exit 1
+          fi
           version="${TAG#v}"
-          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/prostir-${version}-x86_64-linux.tar.gz"
-          sum=$(curl -fsSL "$url" | sha256sum | cut -d' ' -f1)
-          mkdir -p /tmp/aur
+          cargo_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ "$version" != "$cargo_version" ]; then
+            echo "::error::Tag $TAG does not match version $cargo_version in Cargo.toml of this checkout"
+            exit 1
+          fi
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+          tarball="prostir-${version}-x86_64-linux.tar.gz"
+          mkdir -p /tmp/dl /tmp/aur
+          curl -fL --retry 3 -o "/tmp/dl/$tarball" "$base/$tarball"
+          curl -fL --retry 3 -o /tmp/dl/SHA256SUMS "$base/SHA256SUMS"
+          (cd /tmp/dl && awk -v f="$tarball" '$2 == f' SHA256SUMS | grep . | sha256sum -c -)
+          sum="$(sha256sum "/tmp/dl/$tarball" | cut -d' ' -f1)"
+          # SHA-256 of an empty file: the download produced nothing.
+          if [ "$sum" = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 ]; then
+            echo "::error::$tarball is empty"
+            exit 1
+          fi
+          tar -tzf "/tmp/dl/$tarball" "prostir-${version}-x86_64-linux/prostir" >/dev/null
           sed -e "s/@VERSION@/${version}/" -e "s/@SHA256@/${sum}/" \
             packaging/aur/PKGBUILD.in > /tmp/aur/PKGBUILD
+          cp "/tmp/dl/$tarball" /tmp/aur/
           useradd -m builder
           chown -R builder /tmp/aur
-          su builder -c "cd /tmp/aur && makepkg --printsrcinfo > .SRCINFO"
+          # Checks the checksum in the PKGBUILD against the downloaded file.
+          su builder -c "cd /tmp/aur && makepkg --verifysource && makepkg --printsrcinfo > .SRCINFO"
+          rm "/tmp/aur/$tarball"
           cat /tmp/aur/PKGBUILD /tmp/aur/.SRCINFO
       - name: Push to the AUR
         env:
           AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: |
+          set -euo pipefail
           if [ -z "$AUR_SSH_KEY" ]; then
             echo "AUR_SSH_KEY is not set; skipping the push."
             exit 0
           fi
           mkdir -p ~/.ssh
-          printf '%s\n' "$AUR_SSH_KEY" > ~/.ssh/aur
-          chmod 600 ~/.ssh/aur
-          ssh-keyscan -t ed25519 aur.archlinux.org >> ~/.ssh/known_hosts
-          export GIT_SSH_COMMAND="ssh -i ~/.ssh/aur -o IdentitiesOnly=yes"
+          trap 'rm -f ~/.ssh/aur' EXIT
+          (umask 077 && printf '%s\n' "$AUR_SSH_KEY" > ~/.ssh/aur)
+          # The AUR's published host key (https://aur.archlinux.org, SSH fingerprints:
+          # Ed25519 SHA256:RFzBCUItH9LZS0cKB5UE6ceAYhBD5C8GeOBip8Z11+4).
+          echo "aur.archlinux.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEuBKrPzbawxA/k2g6NcyV5jmqwJ2s+zpgZGZ7tpLIcN" > ~/.ssh/known_hosts
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/aur -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
           git clone ssh://aur@aur.archlinux.org/prostir-bin.git /tmp/repo
           cp /tmp/aur/PKGBUILD /tmp/aur/.SRCINFO /tmp/repo/
           cd /tmp/repo

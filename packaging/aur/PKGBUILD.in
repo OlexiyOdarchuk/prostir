@@ -6,15 +6,20 @@ pkgdesc="Extra KDE Plasma and Hyprland monitors in a Meta Quest 3 headset (PC pa
 arch=('x86_64')
 url="https://prostir.ishawyha.dev"
 license=('GPL-3.0-or-later')
+# gst-plugin-va: the VA-API encoders (vah264enc, vah265enc, vapostproc).
+# gst-plugins-bad-libs: h264parse and h265parse. gst-plugins-good: pulsesrc, pulsesink.
+# libpulse: pactl. pipewire-audio: pw-loopback. mesa: libgbm and the AMD VA driver.
 depends=('glibc' 'gcc-libs' 'gstreamer' 'gst-plugins-base-libs' 'gst-plugins-good'
-         'gst-plugins-bad' 'gst-plugin-pipewire' 'pipewire' 'mesa' 'curl')
-optdepends=('kscreen: arranging the monitors on KDE Plasma'
+         'gst-plugins-bad-libs' 'gst-plugin-va' 'gst-plugin-pipewire' 'pipewire'
+         'pipewire-audio' 'pulse-native-provider' 'libpulse' 'mesa' 'curl')
+optdepends=('gst-plugins-ugly: encoding on the CPU with x264 (NVIDIA, or no VA-API encoder)'
             'intel-media-driver: hardware encoding on Intel graphics'
-            'libva-mesa-driver: hardware encoding on AMD graphics'
-            'android-tools: connecting the headset over USB'
+            'libkscreen: arranging the monitors on KDE Plasma (kscreen-doctor)'
+            'qt6-tools: matching wallpapers on every monitor on KDE Plasma (qdbus6)'
             'kdialog: the pairing dialog (or zenity, fuzzel, wofi, rofi)'
+            'zenity: the pairing dialog (or kdialog, fuzzel, wofi, rofi)'
             'libnotify: notifications'
-            'qt6-tools: matching wallpapers on every monitor (qdbus6)')
+            'android-tools: connecting the headset over USB (developer mode)')
 provides=('prostir')
 conflicts=('prostir')
 source=("https://github.com/OlexiyOdarchuk/prostir/releases/download/v${pkgver}/prostir-${pkgver}-x86_64-linux.tar.gz")
@@ -26,5 +31,6 @@ package() {
   install -Dm644 packaging/prostir.desktop "${pkgdir}/usr/share/applications/prostir.desktop"
   install -Dm644 packaging/prostir.svg "${pkgdir}/usr/share/icons/hicolor/scalable/apps/prostir.svg"
   install -Dm644 LICENSE-EXCEPTION.md "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE-EXCEPTION.md"
+  install -Dm644 THIRD-PARTY-LICENSES.txt "${pkgdir}/usr/share/licenses/${pkgname}/THIRD-PARTY-LICENSES.txt"
   install -Dm644 README.md "${pkgdir}/usr/share/doc/${pkgname}/README.md"
 }
