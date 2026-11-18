@@ -35,6 +35,7 @@ fn main() {
                 id: 10,
                 width: 1200,
                 height: 800,
+                place: Default::default(),
             }]
         } else {
             Vec::new()
@@ -67,16 +68,19 @@ fn main() {
                 id: 0,
                 width: 2560,
                 height: 1440,
+                place: Default::default(),
             },
             MonitorEntry {
                 id: 1,
                 width: 2560,
                 height: 1440,
+                place: Default::default(),
             },
             MonitorEntry {
                 id: 2,
                 width: 1440,
                 height: 2560,
+                place: Default::default(),
             },
         ],
         primary: Some(1),

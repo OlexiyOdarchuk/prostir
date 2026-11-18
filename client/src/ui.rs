@@ -24,6 +24,33 @@ pub struct MonitorEntry {
     pub id: u8,
     pub width: u32,
     pub height: u32,
+    /// Where it stands around the user, to tell monitors apart.
+    pub place: Place,
+}
+
+/// Where a monitor stands, as seen by the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Place {
+    #[default]
+    Unknown,
+    Left,
+    Center,
+    Right,
+    Above,
+    Below,
+}
+
+impl Place {
+    fn name(self, l: Lang) -> Option<&'static str> {
+        Some(match self {
+            Place::Unknown => return None,
+            Place::Left => l.t("ліворуч", "left"),
+            Place::Center => l.t("по центру", "middle"),
+            Place::Right => l.t("праворуч", "right"),
+            Place::Above => l.t("згори", "above"),
+            Place::Below => l.t("знизу", "below"),
+        })
+    }
 }
 
 /// Pairing with a new PC: either show `code` (the PC asks for it) or let the user
@@ -1007,7 +1034,10 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
             16.0,
             false,
             MUTED,
-            &format!("{} × {}", m.width, m.height),
+            &match m.place.name(l) {
+                Some(place) => format!("{} × {} · {place}", m.width, m.height),
+                None => format!("{} × {}", m.width, m.height),
+            },
         ));
         let remove = rect(lx + lw - 58.0, y + 7.0, 48.0, 48.0);
         let primary = rect(lx + lw - 58.0 - 10.0 - 210.0, y + 7.0, 210.0, 48.0);
@@ -2455,6 +2485,7 @@ mod tests {
                 id: 10,
                 width: 1200,
                 height: 800,
+                place: Place::Unknown,
             }],
             host: Some("workstation".into()),
             found: Vec::new(),
@@ -2464,16 +2495,19 @@ mod tests {
                     id: 0,
                     width: 2560,
                     height: 1440,
+                    place: Place::Unknown,
                 },
                 MonitorEntry {
                     id: 1,
                     width: 2560,
                     height: 1440,
+                    place: Place::Unknown,
                 },
                 MonitorEntry {
                     id: 2,
                     width: 1440,
                     height: 2560,
+                    place: Place::Unknown,
                 },
             ],
             primary: Some(1),
@@ -2551,6 +2585,8 @@ mod tests {
                         id,
                         width: 3440,
                         height: 1440,
+                        // The longest name.
+                        place: Place::Right,
                     })
                     .collect();
                 states.push(st);

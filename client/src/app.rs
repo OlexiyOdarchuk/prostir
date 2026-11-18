@@ -462,6 +462,30 @@ impl Scene {
         );
     }
 
+    /// Where monitor `id` stands, seen from where the user sits: up or down first
+    /// (more than 20°), then left, middle or right (more than 15°).
+    fn place_of(&self, id: u8) -> ui::Place {
+        let Some(p) = self.placements.get(&id) else {
+            return ui::Place::Unknown;
+        };
+        let (center, yaw) = self.center;
+        let to = p.position - center;
+        let local = glam::Quat::from_rotation_y(-yaw) * to;
+        let side = local.x.atan2(-local.z);
+        let up = local.y.atan2(Vec2::new(local.x, local.z).length());
+        if up > 0.35 {
+            ui::Place::Above
+        } else if up < -0.35 {
+            ui::Place::Below
+        } else if side < -0.26 {
+            ui::Place::Left
+        } else if side > 0.26 {
+            ui::Place::Right
+        } else {
+            ui::Place::Center
+        }
+    }
+
     /// Shows `text` for a few seconds, below the line of sight.
     fn show_toast(&mut self, text: String) {
         info!("toast: {text}");
@@ -755,7 +779,12 @@ impl Scene {
             monitors: self
                 .quest_sizes()
                 .into_iter()
-                .map(|(id, width, height)| MonitorEntry { id, width, height })
+                .map(|(id, width, height)| MonitorEntry {
+                    id,
+                    width,
+                    height,
+                    place: self.place_of(id),
+                })
                 .collect(),
             windows: self
                 .monitors
@@ -765,6 +794,7 @@ impl Scene {
                     id: *id,
                     width: m.width_px,
                     height: m.height_px,
+                    place: ui::Place::Unknown,
                 })
                 .collect(),
             primary: self.primary,
