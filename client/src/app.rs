@@ -216,10 +216,11 @@ fn palm_menu_place(
         return None;
     };
     let (palm, wrist) = (j[0].0, j[1].0);
-    // Knuckles, a hand's width apart: a steady palm normal (index × little from the
-    // wrist for the left hand; the right hand is its mirror image).
+    // Knuckles, a hand's width apart: a steady palm normal. For the left hand it is
+    // little × index from the wrist (checked in the headset: the other order points
+    // out of the back of the hand); the right hand is its mirror image.
     let (index, middle, little, middle_tip) = (j[7].0, j[12].0, j[22].0, j[15].0);
-    let mut normal = (index - wrist).cross(little - wrist).normalize_or_zero();
+    let mut normal = (little - wrist).cross(index - wrist).normalize_or_zero();
     if right_hand {
         normal = -normal;
     }
