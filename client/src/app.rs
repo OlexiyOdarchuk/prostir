@@ -815,8 +815,8 @@ impl Scene {
         }
     }
 
-    /// Turns the whole arrangement around the user so its middle is straight ahead,
-    /// keeping how the monitors stand to each other.
+    /// Turns the whole arrangement around the user so the primary monitor is straight
+    /// ahead, keeping how the monitors stand to each other.
     fn recenter(&mut self) {
         let (head, forward) = self.head;
         let flat = Vec3::new(forward.x, 0.0, forward.z).normalize_or(-Vec3::Z);
@@ -826,8 +826,29 @@ impl Scene {
             self.arrange_all();
             return;
         }
-        let (old_pos, old_yaw) = self.center;
-        let turn = glam::Quat::from_rotation_y(yaw - old_yaw);
+        let (old_pos, _) = self.center;
+        // Straight ahead goes the primary monitor (else the middle of the monitors):
+        // what the user arranged around it, not the layout's old forward, which hand
+        // placement has long left behind.
+        let direction = |p: &Placement| {
+            let d = p.position - old_pos;
+            (-d.x).atan2(-d.z)
+        };
+        let ahead = self
+            .primary
+            .and_then(|id| self.placements.get(&id))
+            .map(direction)
+            .or_else(|| {
+                let (sin, cos) = self
+                    .quest_sizes()
+                    .iter()
+                    .filter_map(|(id, _, _)| self.placements.get(id))
+                    .map(direction)
+                    .fold((0.0f32, 0.0f32), |(s, c), a| (s + a.sin(), c + a.cos()));
+                (sin != 0.0 || cos != 0.0).then(|| sin.atan2(cos))
+            })
+            .unwrap_or(self.center.1);
+        let turn = glam::Quat::from_rotation_y(yaw - ahead);
         for p in self.placements.values_mut() {
             p.position = head + turn * (p.position - old_pos);
             p.rotation = turn * p.rotation;
