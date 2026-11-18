@@ -54,25 +54,23 @@
   ]
 }
   </script>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600&family=Noto+Sans+Mono&display=swap" rel="stylesheet">
+  <link rel="preload" href="../fonts/noto-sans-cyrillic-400-normal.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="../site.css">
-  <script>document.documentElement.classList.add("js")</script>
 </head>
 <body>
 <header class="top">
   <div class="wrap">
     <a class="brand" href="./"><img src="../icon.svg" alt="" width="32" height="32">Prostir</a>
-    <nav aria-label="Розділи">
+    <nav class="sections" aria-label="Розділи">
       <a href="#install">Встановлення</a>
       <a href="#requirements">Вимоги</a>
+      <a href="#help">Допомога</a>
       <a href="https://github.com/OlexiyOdarchuk/prostir">GitHub</a>
     </nav>
-    <div class="lang" aria-label="Мова">
+    <nav class="lang" aria-label="Мова">
       <a href="../" hreflang="en" lang="en">EN</a>
-      <a href="./" aria-current="true" lang="uk">UK</a>
-    </div>
+      <a href="./" aria-current="page" hreflang="uk" lang="uk">УКР</a>
+    </nav>
   </div>
 </header>
 
@@ -88,15 +86,18 @@
         </div>
         <p class="downloads" id="downloads" aria-live="polite"></p>
       </div>
-      <div>
-        <video src="../demo.mp4" poster="../demo.jpg" autoplay muted loop playsinline aria-label="У шоломі: дотик пальцем до меню, зміна розміру монітора двома руками, режим фокусу і вікно на справжню клавіатуру"></video>
-        <img class="poster" src="../demo.jpg" alt="Prostir у шоломі: монітори навколо й меню">
+      <div class="demo">
+        <video poster="../demo.jpg" width="1280" height="720" muted loop playsinline preload="none" controls aria-label="У шоломі: дотик пальцем до меню, зміна розміру монітора двома руками, режим фокусу і вікно на справжню клавіатуру">
+          <source src="../demo.mp4" type="video/mp4">
+        </video>
+        <button class="demo-toggle" type="button" hidden data-play="Відтворити відео" data-pause="Зупинити відео"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 1.5v13l11-6.5z"/></svg><span>Відтворити відео</span></button>
       </div>
     </div>
   </div>
 
-  <section>
+  <section aria-labelledby="features">
     <div class="wrap">
+      <h2 class="sr-only" id="features">Що вміє Prostir</h2>
       <div class="band reveal">
         <div class="copy">
           <h3>Справжні монітори, а не картинки вікон</h3>
@@ -114,19 +115,26 @@
         <img src="menu-monitors.png" width="1280" height="960" loading="lazy" alt="Меню в шоломі, вкладка «Монітори»: список моніторів, розміри, розкладка, вигин і режим">
       </div>
 
+      <div class="band stat reveal">
+        <h3><span class="figure-number">14<small>мс</small></span><span class="figure-label">від закодованого кадру на ПК до екрана шолома, по Wi-Fi</span></h3>
+        <div class="copy">
+          <p>Ця частина охоплює мережу, декодування й показ. Заміряно на ноутбуці автора (Intel Arc) із Quest 3. Це не вся затримка від вашого екрана до очей: захоплення й кодування екрана на ПК додають ще кілька мілісекунд.</p>
+          <p>ПК кодує відеокартою, Quest декодує апаратно просто в компоновник, тож текст лишається чітким.</p>
+        </div>
+      </div>
+
       <div class="band reveal">
         <div class="copy">
-          <div class="figure-number">14<small>мс</small></div>
-          <p>Від закодованого кадру до екрана шолома по Wi-Fi, заміряно на ноутбуці автора (Intel Arc, Quest 3). Захоплення й кодування екрана додають ще кілька мілісекунд.</p>
-          <p>ПК кодує відеокартою, Quest декодує апаратно просто в компоновник, тож текст лишається чітким.</p>
+          <h3>Робота, кіно, лежачи</h3>
+          <p>Профілі одним натиском перемикають монітори, екран ноутбука, розкладку й фон. Монітори того самого розміру лишаються, тож вікна на них не стрибають.</p>
         </div>
         <img src="menu-profiles.png" width="1280" height="960" loading="lazy" alt="Меню в шоломі, вкладка «Профілі»: Робота, Кіно, Лежачи">
       </div>
 
       <div class="band flip reveal">
         <div class="copy">
-          <h3>Робота, кіно, лежачи</h3>
-          <p>Профілі одним натиском перемикають монітори, екран ноутбука, розкладку й фон. Монітори того самого розміру лишаються, тож вікна на них не стрибають.</p>
+          <h3>Кімната або панорама</h3>
+          <p>Позаду моніторів: чорний фон, ваша кімната через камери шолома або одна з чотирьох вбудованих панорам: ніч, захід, космос і сяйво.</p>
         </div>
         <img src="../backgrounds.jpg" width="1932" height="972" loading="lazy" alt="Чотири вбудовані панорами: ніч, захід, космос, сяйво">
       </div>
@@ -143,10 +151,10 @@
       <ul class="points reveal">
         <li><h3>І екран ноутбука</h3><p>Висить під головним монітором без шва і зникає, коли кришку закрито.</p></li>
         <li><h3>Режим фокусу</h3><p>Усі монітори, крім того, де миша, темнішають.</p></li>
-        <li><h3>Звук і мікрофон</h3><p>Звук із ПК грає в шоломі, а програми на ПК чують мікрофон шолома, поки записують.</p></li>
+        <li><h3>Звук і мікрофон</h3><p>Звук із ПК грає в шоломі, а програми на ПК чують мікрофон шолома, поки записують. Перемикач мікрофона в меню шолома це вимикає.</p></li>
         <li><h3>Зняли шолом</h3><p>Через 10 секунд вікна, панель і звук повертаються на ноутбук.</p></li>
         <li><h3>Вікно на клавіатуру</h3><p>Прямокутник на справжній клавіатурі показує стіл через камери.</p></li>
-        <li><h3>Сполучення й шифрування</h3><p>ПК нічого не транслює шолому, з яким не сполучений.</p></li>
+        <li><h3>Сполучення й шифрування</h3><p>ПК нічого не транслює шолому, з яким не сполучений. Сполучення починається, лише коли ви підтвердите його в шоломі й введете 6-значний код.</p></li>
       </ul>
     </div>
   </section>
@@ -154,26 +162,75 @@
   <section id="install">
     <div class="wrap">
       <h2>Встановлення</h2>
+      <p class="intro">У кожному <a href="https://github.com/OlexiyOdarchuk/prostir/releases">релізі</a> є обидві частини: програма для ПК і застосунок для шолома, файл APK.</p>
       <div class="steps">
         <div>
           <h3>На ПК</h3>
           <ol>
-            <li>Завантажте <code>prostir-&lt;версія&gt;-x86_64-linux.tar.gz</code> з <a href="https://github.com/OlexiyOdarchuk/prostir/releases">релізів</a>.</li>
-            <li>Розпакуйте й запустіть встановлення. Воно ставить у <code>~/.local</code> і не потребує root.
+            <li>Встановіть Prostir одним із цих способів. Лише одним: пакети ставлять у <code>/usr/bin</code>, архів у <code>~/.local/bin</code>, і разом вийде дві копії.
+              <ul class="ways">
+                <li><h4>Arch Linux і похідні</h4>З AUR:
+<pre><code>yay -S prostir-bin</code></pre></li>
+                <li><h4>Debian, Ubuntu</h4>Завантажте файл <code>.deb</code> з релізу, тоді:
+<pre><code>sudo apt install ./prostir_*.deb</code></pre></li>
+                <li><h4>Fedora, openSUSE</h4>Завантажте файл <code>.rpm</code> з релізу, тоді у Fedora:
+<pre><code>sudo dnf install ./prostir-*.rpm</code></pre>
+                  або в openSUSE:
+<pre><code>sudo zypper install --allow-unsigned-rpm ./prostir-*.rpm</code></pre></li>
+                <li><h4>Будь-який дистрибутив, без root</h4>Завантажте <code>prostir-&lt;версія&gt;-x86_64-linux.tar.gz</code>, розпакуйте й запустіть встановлення, яке ставить у <code>~/.local</code>:
 <pre><code>tar xf prostir-*-x86_64-linux.tar.gz
 cd prostir-*/
-./install.sh --autostart</code></pre></li>
-            <li>Запустіть Prostir з меню застосунків. У треї з'явиться іконка. У Hyprland додайте <code>prostir</code> в автозапуск конфігу; рядок є в README.</li>
+./install.sh --autostart</code></pre>
+                  Пакети вище самі тягнуть GStreamer і PipeWire; з архівом встановіть їх самі (див. <a href="#requirements">Вимоги</a>).</li>
+              </ul>
+            </li>
+            <li>Запустіть Prostir з меню застосунків. Вікна в нього немає: у треї з'явиться іконка. Щоб він запускався разом із сеансом, увімкніть у меню трею «Запускати разом із системою».</li>
+            <li>У Hyprland без uwsm запускайте його з конфігу. У <code>hyprland.conf</code>:
+<pre><code>exec-once = prostir</code></pre>
+              або в <code>hyprland.lua</code>:
+<pre><code>hl.on("hyprland.start", function () hl.exec_cmd("prostir") end)</code></pre>
+              Якщо ставили з архіву й <code>~/.local/bin</code> немає у <code>PATH</code>, пишіть <code>~/.local/bin/prostir</code> замість <code>prostir</code>. Якщо ввімкнено <code>ecosystem:enforce_permissions</code>, дозвольте ще захоплення екрана, у <code>hyprland.conf</code>:
+<pre><code>permission = /usr/(local/)?bin/prostir|.*/\.local/bin/prostir, screencopy, allow</code></pre>
+              або в <code>hyprland.lua</code>:
+<pre><code>hl.permission("/usr/(local/)?bin/prostir|.*/\\.local/bin/prostir", "screencopy", "allow")</code></pre></li>
           </ol>
         </div>
         <div>
           <h3>На шоломі</h3>
           <ol>
+            <li>Зробіть акаунт Meta акаунтом розробника: створіть організацію або приєднайтеся до неї на <a href="https://developers.meta.com/horizon/">developers.meta.com</a>. Це безплатно, але Meta може попросити підтвердити акаунт. Без цього перемикача режиму розробника не буде.</li>
             <li>Увімкніть режим розробника в застосунку Meta Horizon на телефоні: Пристрої → Налаштування шолома → Режим розробника.</li>
-            <li>Підключіть шолом кабелем USB і встановіть APK з того самого релізу:
+            <li>Встановіть <code>adb</code> на ПК: пакет <code>android-tools</code> в Arch, Fedora й openSUSE, <code>adb</code> у Debian і Ubuntu.</li>
+            <li>Підключіть шолом до ПК кабелем USB і вдягніть його. Погодьтеся на «Allow USB debugging», краще з позначкою «Always allow from this computer». Тепер <code>adb devices</code> показує шолом як <code>device</code>, а не <code>unauthorized</code>.</li>
+            <li>Встановіть APK з того самого релізу:
 <pre><code>adb install prostir-*.apk</code></pre></li>
-            <li>Відкрийте Prostir: Бібліотека → Невідомі джерела. Шолом знайде ПК у тій самій мережі Wi-Fi або через кабель; уперше введіть 6-значний код, який він покаже, у віконці на ПК.</li>
+            <li>У шоломі відкрийте бібліотеку (Library), у фільтрі виберіть «Невідомі джерела» (Unknown sources) і запустіть Prostir. Деякі версії Horizon OS показують його там за назвою пакета, <code>dev.prostir.client</code>.</li>
+            <li>Шолом знайде ПК у тій самій мережі Wi-Fi або через кабель. Першого разу підтвердьте в шоломі сполучення з цим ПК, а тоді введіть 6-значний код, який покаже шолом, у віконці на ПК.</li>
           </ol>
+          <p class="note">Через кабель ПК передає з'єднання за допомогою adb, тож для USB потрібні adb на ПК і режим розробника на шоломі. Для Wi-Fi, коли застосунок уже встановлено, не потрібне ні те, ні інше.</p>
+        </div>
+      </div>
+
+      <div class="steps">
+        <div id="update">
+          <h3>Оновлення</h3>
+          <ul>
+            <li>AUR: разом зі звичайним оновленням системи, наприклад <code>yay -Syu</code>.</li>
+            <li><code>.deb</code> або <code>.rpm</code>: встановіть новіший файл так само.</li>
+            <li>Архів: розпакуйте новий реліз і ще раз запустіть <code>./install.sh</code>.</li>
+            <li>Шолом: встановіть новий APK поверх старого; налаштування й сполучення лишаються.
+<pre><code>adb install -r prostir-*.apk</code></pre></li>
+          </ul>
+          <p class="note">Оновлюйте обидві частини, коли можете. Трохи різні версії працюють разом, бо кожна сторона пропускає повідомлення, яких не знає. Якщо різниця завелика, шолом скаже, що саме оновити.</p>
+        </div>
+        <div id="uninstall">
+          <h3>Видалення</h3>
+          <ul>
+            <li>AUR: <code>sudo pacman -R prostir-bin</code>. Debian, Ubuntu: <code>sudo apt remove prostir</code>. Fedora: <code>sudo dnf remove prostir</code>. openSUSE: <code>sudo zypper remove prostir</code>.</li>
+            <li>Архів: запустіть <code class="nw">./install.sh --uninstall</code> у розпакованій папці.</li>
+            <li>Налаштування й сполучення лишаються в <code>~/.config/prostir</code>. Щоб прибрати їх, видаліть цю папку, а якщо вмикали автозапуск, то й <code>~/.config/autostart/prostir.desktop</code>.</li>
+            <li>Шолом: <code>adb uninstall dev.prostir.client</code> або видаліть застосунок у бібліотеці, у «Невідомих джерелах».</li>
+          </ul>
         </div>
       </div>
     </div>
@@ -188,8 +245,13 @@ cd prostir-*/
           <ul>
             <li>KDE Plasma 6 або Hyprland, на Wayland. Сеанси X11 не підтримуються.</li>
             <li>GNOME поки не підтримується. <a href="https://github.com/OlexiyOdarchuk/prostir/issues/1">Хочете його? Проголосуйте 👍 на GitHub.</a></li>
-            <li>Графіка Intel або AMD з кодуванням VA-API. NVIDIA працює лише з <code>--software</code>, тоді кодує процесор.</li>
-            <li>PipeWire і GStreamer 1.22 або новіший з плагіном <code>va</code>.</li>
+            <li>PipeWire з <code>pw-cli</code> і <code>pw-loopback</code>, GStreamer 1.22 або новіший із плагінами PipeWire і PulseAudio.</li>
+            <li>Для кодування відеокартою: графіка Intel або AMD з кодуванням H.264 чи HEVC через VA-API і плагін GStreamer <code>va</code>: <code>gst-plugin-va</code> в Arch, в інших дистрибутивах він у gst-plugins-bad.</li>
+            <li>Без цього, наприклад на NVIDIA, Prostir кодує процесором через x264, і тоді потрібен <code>x264enc</code> з gst-plugins-ugly. Див. <a href="#help">Допомогу</a>.</li>
+            <li>Для сполучення одна з програм <code>kdialog</code>, <code>zenity</code>, <code>fuzzel</code>, <code>wofi</code> чи <code>rofi</code>, щоб показати віконце для коду.</li>
+            <li>У Hyprland панель із треєм для меню Prostir (Waybar з модулем <code>tray</code>) і служба сповіщень, наприклад mako, dunst чи swaync.</li>
+            <li>Брандмауер, якщо він є, має пропускати TCP 47830 і UDP 47831. Див. <a href="#help">Допомогу</a>.</li>
+            <li>Для USB: <code>adb</code> на ПК.</li>
           </ul>
         </div>
         <div>
@@ -202,6 +264,49 @@ cd prostir-*/
         </div>
       </div>
       <p class="muted">Версія 0.1, автор користується нею щодня на Plasma 6.8 і Hyprland 0.57 з графікою Intel Arc. Проблеми й ідеї пишіть в <a href="https://github.com/OlexiyOdarchuk/prostir/issues">issues на GitHub</a>.</p>
+    </div>
+  </section>
+
+  <section id="help">
+    <div class="wrap">
+      <h2>Допомога</h2>
+      <div class="faq">
+        <div>
+          <h3>Шолом бачить ПК, але не підключається</h3>
+          <p>Найчастіше заважає брандмауер. ПК приймає з'єднання на порту TCP 47830 і оголошує себе на порту UDP 47831; дозвольте обидва. З ufw:</p>
+<pre><code>sudo ufw allow 47830/tcp
+sudo ufw allow 47831/udp</code></pre>
+          <p>З firewalld:</p>
+<pre><code>sudo firewall-cmd --add-port=47830/tcp --add-port=47831/udp --permanent
+sudo firewall-cmd --reload</code></pre>
+        </div>
+        <div>
+          <h3>Шолом не знаходить ПК</h3>
+          <p>Обидва мають бути в одній мережі, і мережа не повинна ізолювати пристрої один від одного, як часто роблять гостьові мережі. Введіть IP-адресу ПК на клавіатурі в меню шолома або підключіться кабелем (потрібен adb).</p>
+          <p>Якщо на ПК є брандмауер, перевірте й порти вище.</p>
+        </div>
+        <div>
+          <h3>NVIDIA, або шолом каже, що бракує кодера</h3>
+          <p>Prostir кодує відеокартою через VA-API. Коли це недоступно, він сам переходить на процесор і кодує через x264. Так буває на NVIDIA, без плагіна GStreamer <code>va</code> і з Mesa, яку постачають Fedora й openSUSE: у ній немає кодування H.264 і HEVC.</p>
+          <p>Для кодування процесором потрібен <code>x264enc</code>: <code>gst-plugins-ugly</code> в Arch, <code>gstreamer1.0-plugins-ugly</code> у Debian і Ubuntu, <code>gstreamer1-plugins-ugly</code> з RPM Fusion у Fedora, <code>gstreamer-plugins-ugly</code> з Packman в openSUSE. Якщо не працює жоден спосіб, шолом покаже, чого бракує. <code class="nw">prostir --software</code> завжди кодує процесором.</p>
+        </div>
+        <div>
+          <h3>Після запуску в Hyprland нічого не видно</h3>
+          <p>У Prostir немає вікна; його меню в треї, а власного трею Hyprland не має. Додайте панель із треєм, наприклад Waybar з модулем <code>tray</code>. Для сповіщень запустіть службу сповіщень, наприклад mako, dunst чи swaync.</p>
+        </div>
+        <div>
+          <h3>На ПК не відкривається віконце сполучення</h3>
+          <p>Встановіть одну з програм <code>kdialog</code>, <code>zenity</code>, <code>fuzzel</code>, <code>wofi</code> чи <code>rofi</code>. Або натисніть у шоломі кнопку під кодом, щоб поміняти сторони: тоді ПК покаже код у меню трею, а ви введете його в шоломі.</p>
+        </div>
+        <div>
+          <h3>Чи надсилає Prostir щось про мене?</h3>
+          <p>Нічого, за чим можна впізнати вас чи ваш ПК. Офіційні збірки раз на день анонімно рахують кожен ПК, і це можна вимкнути в треї («Рахувати цей ПК серед користувачів») або змінною <code>PROSTIR_NO_COUNT=1</code>. Подробиці в <a href="privacy.html">політиці конфіденційності</a>.</p>
+        </div>
+        <div>
+          <h3>Журнали для звіту про помилку</h3>
+          <p>ПК: запустіть <code>prostir</code> у терміналі; <code>RUST_LOG=debug prostir</code> додає подробиць. Шолом: <code>adb logcat -s prostir</code>. Тоді відкрийте <a href="https://github.com/OlexiyOdarchuk/prostir/issues">issue на GitHub</a>.</p>
+        </div>
+      </div>
     </div>
   </section>
 </main>

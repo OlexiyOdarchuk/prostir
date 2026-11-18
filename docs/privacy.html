@@ -12,16 +12,14 @@
   <link rel="alternate" hreflang="en" href="https://prostir.ishawyha.dev/privacy.html">
   <link rel="alternate" hreflang="uk" href="https://prostir.ishawyha.dev/uk/privacy.html">
   <link rel="alternate" hreflang="x-default" href="https://prostir.ishawyha.dev/privacy.html">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="preload" href="fonts/noto-sans-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="site.css">
 </head>
 <body>
 <header class="top">
   <div class="wrap">
     <a class="brand" href="./"><img src="icon.svg" alt="" width="32" height="32">Prostir</a>
-    <nav aria-label="Sections">
+    <nav class="sections" aria-label="Sections">
       <a href="./">Home</a>
       <a href="uk/privacy.html" hreflang="uk" lang="uk">Українською</a>
     </nav>
@@ -31,19 +29,21 @@
 <main class="wrap">
   <article class="doc">
     <h1>Privacy policy</h1>
-    <p class="muted">Last updated: 17 November 2026.</p>
+    <p class="muted">Last updated: 18 November 2026.</p>
 
     <p>Prostir is two programs: one on your PC and one on your Meta Quest headset. They talk to each other, and the PC sends one anonymous count a day (below). Prostir has no accounts and no servers of its own, and it does not send anything about you to its author or to anyone else.</p>
 
     <h2>Counting users</h2>
     <p>To know how many people use Prostir, the PC program sends one request a day to <a href="https://www.goatcounter.com/">GoatCounter</a>, when a headset connects. The request contains only the path <code>/day/</code> followed by the date, and the very first time also <code>/install</code>. It carries no identifier, host name, settings or anything else about you or your PC. GoatCounter does not store IP addresses. The totals are public on this site.</p>
-    <p>It is on by default. Turn it off with the tray item "Count this PC among users", or start Prostir with the environment variable <code>PROSTIR_NO_COUNT=1</code>. Builds made from the source code never count.</p>
+    <p>It is on by default. The first time Prostir starts, it shows a notification that says it counts once a day, anonymously, and how to turn that off. The first count is sent no earlier than the next day (UTC), so you can turn it off before anything is sent. Turn it off with the tray item "Count this PC among users", or start Prostir with the environment variable <code>PROSTIR_NO_COUNT=1</code>. Builds made from the source code never count.</p>
+    <p>Official builds contain the key they send the counts with. Anyone can extract it from the program, but it can only add counts, so the worst misuse is inflated numbers. Read the totals on this site as approximate.</p>
+    <p>The count relies on a legitimate interest in knowing whether the project is used. Turning it off is how you object to it, and no count is sent after that.</p>
 
     <h2>What travels between the headset and your PC</h2>
     <p>The picture of your virtual monitors, PC sound, the headset microphone (see below), which monitor has the mouse, and the settings you change in the headset menu. All of it goes directly between your two devices, over your local network or a USB cable, encrypted with the Noise protocol. To find your PC, the PC broadcasts its host name on the local network.</p>
 
     <h2>Microphone</h2>
-    <p>The headset records only while an app on your PC is recording from the "Prostir headset microphone" device, and only if you allowed microphone access. The sound goes to your PC and nowhere else. You can turn this off in the menu under Sound, language.</p>
+    <p>The headset records only while an app on your PC is recording from the "Prostir headset microphone" device, only if you allowed microphone access, and only while the microphone switch in the headset menu (Sound, language) is on. The headset itself enforces that switch: while it is off, the headset does not record, whatever the PC asks. The sound goes to your PC and nowhere else.</p>
 
     <h2>Cameras and hand tracking</h2>
     <p>The room background and the keyboard window use the Quest's passthrough. The headset system draws the camera image; Prostir never receives camera images. Hand tracking data is used on the headset to draw your hands and to let you point and touch the menu. It is not stored or sent anywhere.</p>
@@ -55,10 +55,11 @@
     <p>If you install Prostir from the Meta Horizon Store, the app asks Meta's platform whether your account owns it when it starts. That check is between the headset and Meta, under <a href="https://www.meta.com/legal/privacy-policy/">Meta's privacy policy</a>; Prostir does not see or keep its result anywhere else.</p>
 
     <h2>This website</h2>
-    <p>The site is hosted on GitHub Pages, which keeps server logs under <a href="https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement">GitHub's privacy statement</a>. Fonts load from Google Fonts. The user numbers on the home page are read by your browser from GoatCounter's public counter. The site sets no cookies and runs no analytics.</p>
+    <p>The site is hosted on GitHub Pages, which keeps server logs under <a href="https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement">GitHub's privacy statement</a>. Fonts are served from this site too. The user numbers on the home page are read by your browser from GoatCounter's public counter. The site sets no cookies and runs no analytics.</p>
 
-    <h2>Questions</h2>
-    <p>Open an issue at <a href="https://github.com/OlexiyOdarchuk/prostir/issues">github.com/OlexiyOdarchuk/prostir</a>. If this policy changes, the date at the top changes with it.</p>
+    <h2>Questions and requests</h2>
+    <p>Prostir and this site are maintained by the GitHub user <a href="https://github.com/OlexiyOdarchuk">OlexiyOdarchuk</a>. Prostir has no servers of its own, so it holds nothing about you that could be looked up or deleted; what stays on your own devices is described above.</p>
+    <p>For a private question or request, or to report a security problem, use GitHub's private reporting: <a href="https://github.com/OlexiyOdarchuk/prostir/security/advisories/new">report privately</a>. Only the maintainers see it. For anything else, open an issue at <a href="https://github.com/OlexiyOdarchuk/prostir/issues">github.com/OlexiyOdarchuk/prostir</a>. If this policy changes, the date at the top changes with it.</p>
   </article>
 </main>
 
