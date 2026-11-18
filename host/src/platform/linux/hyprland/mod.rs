@@ -19,7 +19,7 @@ use anyhow::{Context, Result, bail};
 use log::{info, warn};
 use serde_json::Value;
 
-use crate::platform::kde::virtual_output::{Geometry, MonitorSpec};
+use crate::platform::{Geometry, MonitorSpec};
 
 /// Names of Prostir's outputs; anything else is a real display.
 pub const PREFIX: &str = "Prostir-";

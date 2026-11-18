@@ -3,6 +3,7 @@
 mod displays;
 mod encoder;
 mod i18n;
+mod layout;
 mod outbox;
 mod pairing;
 mod platform;
@@ -23,7 +24,7 @@ use prostir_proto::{ClientMsg, Codec, HostMsg, NO_FOCUS};
 
 use displays::{Displays, SavedMonitors};
 use encoder::EncoderConfig;
-use platform::kde::virtual_output::MonitorSpec;
+use platform::MonitorSpec;
 use platform::{audio, focus, hyprland, notifications, sound_source, tray};
 
 #[derive(Parser, Debug)]

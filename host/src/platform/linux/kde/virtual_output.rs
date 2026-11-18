@@ -15,6 +15,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+
+use crate::platform::{Geometry, MonitorSpec};
 use log::{info, warn};
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
 use wayland_client::protocol::{wl_output, wl_registry};
@@ -26,42 +28,6 @@ use wayland_protocols_plasma::screencast::v1::client::{
 
 /// Pointer mode from the protocol: render the cursor into the stream.
 const POINTER_EMBEDDED: u32 = 2;
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct MonitorSpec {
-    /// Size in pixels of the encoded stream.
-    pub width: u32,
-    pub height: u32,
-    /// KWin output scale (UI scaling on that monitor); 1.0 keeps what KScreen remembers.
-    pub scale: f64,
-}
-
-impl MonitorSpec {
-    pub fn validate(&self) -> Result<()> {
-        if !(320..=7680).contains(&self.width)
-            || !(240..=4320).contains(&self.height)
-            || !(0.5..=4.0).contains(&self.scale)
-        {
-            bail!(
-                "monitor {}x{}@{} is out of range",
-                self.width,
-                self.height,
-                self.scale
-            );
-        }
-        Ok(())
-    }
-}
-
-impl std::fmt::Display for MonitorSpec {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}x{}", self.width, self.height)?;
-        if (self.scale - 1.0).abs() > f64::EPSILON {
-            write!(f, "@{}", self.scale)?;
-        }
-        Ok(())
-    }
-}
 
 #[derive(Default)]
 struct StreamState {
@@ -454,18 +420,6 @@ impl Drop for VirtualOutput {
 }
 
 /// Logical geometry `(x, y, width, height)` of each enabled output, from KScreen.
-/// Where KScreen has an output: logical position and size, and its priority (1 = primary).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Geometry {
-    pub x: i32,
-    pub y: i32,
-    pub w: i32,
-    pub h: i32,
-    pub priority: Option<u32>,
-    /// `false` for an output KDE lists as disabled (a closed laptop lid).
-    pub enabled: bool,
-}
-
 pub fn output_geometries() -> HashMap<String, Geometry> {
     let Ok(out) = std::process::Command::new("kscreen-doctor")
         .arg("-o")

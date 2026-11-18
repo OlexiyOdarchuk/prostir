@@ -8,9 +8,8 @@ use anyhow::Result;
 use crate::encoder::{Encoder, Input};
 use crate::platform::hyprland;
 use crate::platform::hyprland::screencopy::Capture;
-use crate::platform::kde::virtual_output::{
-    self, Geometry, MonitorSpec, Screencast, VirtualOutput,
-};
+use crate::platform::kde::virtual_output::{self, Screencast, VirtualOutput};
+use crate::platform::{Geometry, MonitorSpec};
 
 pub enum Desktop {
     Kde(Screencast),

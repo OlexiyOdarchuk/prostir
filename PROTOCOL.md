@@ -598,7 +598,7 @@ comparable between monitors and to the monitors' own pixel sizes.
 
 ### What the host does with it
 
-(Implementation-defined; `host/src/displays.rs`.)
+(Implementation-defined; `host/src/displays.rs` and `host/src/layout.rs`.)
 
 1. Clamps every known `center` and `middle` to ±100000.
 2. Keeps the rows, drops ids that are neither a current monitor nor the active mirror,
