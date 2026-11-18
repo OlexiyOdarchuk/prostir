@@ -1,0 +1,5 @@
+# The headset's CPU (Snapdragon XR2) has ARMv8 AES and PMULL instructions, which the
+# encrypted connection (Noise with AES-GCM) uses only when these are set: without them
+# the aes and polyval crates fall back to slow software code on Android.
+[target.aarch64-linux-android]
+rustflags = ["--cfg", "aes_armv8", "--cfg", "polyval_armv8"]

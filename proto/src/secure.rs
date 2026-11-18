@@ -19,7 +19,9 @@ use sha2::Sha256;
 use snow::StatelessTransportState;
 use spake2::{Ed25519Group, Identity as SpakeId, Password, Spake2};
 
-const NOISE: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
+/// AES-GCM rather than ChaChaPoly: both CPUs have hardware AES (AES-NI, ARMv8 crypto),
+/// while ChaCha20 and Poly1305 run in plain software on the headset.
+const NOISE: &str = "Noise_XX_25519_AESGCM_BLAKE2s";
 const MAX_NOISE: usize = 65535;
 const TAG: usize = 16;
 /// Largest plaintext per encrypted chunk.
