@@ -170,19 +170,23 @@ enum Target {
     Panel,
     MenuButton,
     Monitor(u8),
-    /// The bar under a monitor: press and drag at once.
-    Bar(u8),
+    /// "Attach" under a detached window: back onto the monitors.
+    Attach(u8),
     /// The menu by the left wrist.
     Wrist,
     Keyboard,
 }
 
-/// The bar under a pointed-at monitor: length, how far below the bottom edge (to its
-/// centre), the height that can be hit, and how long it stays after the pointer left.
-const BAR_LENGTH: f32 = 0.16;
-const BAR_GAP: f32 = 0.035;
-const BAR_HIT_HEIGHT: f32 = 0.05;
-const BAR_LINGER: Duration = Duration::from_millis(900);
+/// The "Attach" button under a pointed-at detached window: size in the room and in
+/// pixels, how far below the window, and how long it stays after the pointer left.
+const ATTACH_WIDTH: f32 = 0.11;
+const ATTACH_PX: (u32, u32) = (352, 96);
+const ATTACH_GAP: f32 = 0.03;
+const ATTACH_LINGER: Duration = Duration::from_millis(1200);
+
+fn attach_height() -> f32 {
+    ATTACH_WIDTH * ATTACH_PX.1 as f32 / ATTACH_PX.0 as f32
+}
 /// Width of the wrist menu in the room.
 const WRIST_MENU_WIDTH: f32 = 0.13;
 /// How long an open palm faces the face before its menu appears.
@@ -314,8 +318,8 @@ struct Scene {
     tab: Tab,
     /// Follow mode is moving the monitors right now.
     following: bool,
-    /// Per hand: the monitor whose bar is shown, and when it was last pointed at.
-    bar_for: [Option<(u8, Instant)>; 2],
+    /// The detached window whose "Attach" button shows, and when it was pointed at.
+    attach_for: Option<(u8, Instant)>,
     /// The wrist menu, while the left palm is turned to the face.
     wrist: Option<Placement>,
     /// The PC can move the mouse.
@@ -841,14 +845,15 @@ impl Scene {
         }
     }
 
-    /// Where the bar under monitor `id` is.
-    fn bar_place(&self, id: u8) -> Option<Placement> {
-        let p = self.placements.get(&id)?;
-        let down = self.height_of(id) / 2.0 + BAR_GAP;
+    /// Where the "Attach" button under detached window `id` is (as drawn, while it
+    /// glides).
+    fn attach_place(&self, id: u8) -> Option<Placement> {
+        let p = self.shown.get(&id).or_else(|| self.placements.get(&id))?;
+        let down = p.width * self.monitors.get(&id)?.aspect() / 2.0 + ATTACH_GAP;
         Some(Placement {
             position: p.position + p.rotation * Vec3::new(0.0, -down, 0.005),
             rotation: p.rotation,
-            width: BAR_LENGTH,
+            width: ATTACH_WIDTH,
         })
     }
 
@@ -888,13 +893,13 @@ impl Scene {
                 layout::hit_surface(ray, w, wrist_menu_height(), None),
             );
         }
-        for (id, _) in self.bar_for.iter().flatten() {
-            if let Some(b) = self.bar_place(*id) {
-                consider(
-                    Target::Bar(*id),
-                    layout::hit_surface(ray, &b, BAR_HIT_HEIGHT, None),
-                );
-            }
+        if let Some((id, _)) = self.attach_for
+            && let Some(b) = self.attach_place(id)
+        {
+            consider(
+                Target::Attach(id),
+                layout::hit_surface(ray, &b, attach_height(), None),
+            );
         }
         let curve = self.curve_radius();
         for id in self.monitors.keys() {
@@ -1247,6 +1252,9 @@ fn run(app: &AndroidApp) -> Result<()> {
     let mut button_layer = ImageLayer::new(&session, format, BUTTON_PX, BUTTON_PX, false)?;
     let mut cursor_layer = ImageLayer::new(&session, format, CURSOR_PX, CURSOR_PX, true)?;
     let mut toast_layer = ImageLayer::new(&session, format, TOAST_PX.0, TOAST_PX.1, false)?;
+    let mut attach_layer = ImageLayer::new(&session, format, ATTACH_PX.0, ATTACH_PX.1, false)?;
+    // What the "Attach" texture shows now: language and lit (pointed at).
+    let mut attach_drawn: Option<(Lang, bool)> = None;
     cursor_layer.upload(&gl, &ui::cursor_image(CURSOR_PX))?;
     let mut button_hovered = false;
     // The left hand's menu gesture as last seen, to act once per gesture.
@@ -1350,7 +1358,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         tab: tab_from_code(settings.last_tab),
         update_needed: None,
         following: false,
-        bar_for: [None, None],
+        attach_for: None,
         wrist: None,
         can_move_mouse: false,
         refresh_due: false,
@@ -1378,7 +1386,7 @@ fn run(app: &AndroidApp) -> Result<()> {
 
     let mut hold_since: [Option<Instant>; 2] = [None, None];
     // Grabs started on a monitor's bar (they end when the press ends).
-    let mut bar_grab = [false; 2];
+
     let mut pokes = [Poke::default(); 2];
     // Touches that just happened: (where, when), drawn as a ring spreading out.
     let mut rings: Vec<(Vec3, Instant)> = Vec::new();
@@ -1628,20 +1636,19 @@ fn run(app: &AndroidApp) -> Result<()> {
         // Pointing, clicking and dragging.
         let mut picks: [Option<(Target, Hit)>; 2] =
             std::array::from_fn(|h| controls.state[h].ray.and_then(|r| scene.pick(r)));
-        // A monitor pointed at (or held) shows its bar; it lingers so the pointer can
-        // move down onto it.
-        for (h, pick) in picks.iter().enumerate() {
-            let pointed = match pick {
-                Some((Target::Monitor(id) | Target::Bar(id), _)) => Some(*id),
-                _ => scene.grabs[h]
-                    .map(|g| g.id)
-                    .filter(|id| scene.monitors.contains_key(id)),
-            };
-            if let Some(id) = pointed {
-                scene.bar_for[h] = Some((id, Instant::now()));
-            } else if scene.bar_for[h].is_some_and(|(_, t)| t.elapsed() > BAR_LINGER) {
-                scene.bar_for[h] = None;
-            }
+        // A detached window pointed at shows "Attach" under it; it lingers so the
+        // pointer can move down onto it.
+        let pointed = picks.iter().flatten().find_map(|(t, _)| match t {
+            Target::Monitor(id) | Target::Attach(id) if is_window_panel(*id) => Some(*id),
+            _ => None,
+        });
+        if let Some(id) = pointed {
+            scene.attach_for = Some((id, Instant::now()));
+        } else if scene
+            .attach_for
+            .is_some_and(|(id, t)| t.elapsed() > ATTACH_LINGER || !scene.monitors.contains_key(&id))
+        {
+            scene.attach_for = None;
         }
 
         // The wrist menu: pointed at, or touched with the right index finger.
@@ -1811,22 +1818,17 @@ fn run(app: &AndroidApp) -> Result<()> {
             if input.select.pressed {
                 let mut clicked = false;
                 match picks[hand] {
-                    Some((Target::Bar(id), hit))
-                        if scene.grabs[1 - hand].is_none_or(|g| g.id != id) =>
-                    {
+                    Some((Target::Attach(id), hit)) => {
                         clicked = true;
-                        if let Some(p) = scene.placements.get(&id) {
-                            // Held by the bar: the same point of the monitor follows.
-                            let down = scene.height_of(id) / 2.0 + BAR_GAP;
-                            let local = hit.local - Vec2::new(0.0, down);
-                            let grab = Grab::start(id, hit.t, local, p);
-                            scene.grabs[hand] = Some(match input.ray {
-                                Some(ray) if input.is_hand => grab.with_reach(ray.origin, head),
-                                _ => grab,
-                            });
-                            bar_grab[hand] = true;
-                            controls.pulse(&session, hand);
-                        }
+                        rings.push((hit.point, Instant::now()));
+                        controls.pulse(&session, hand);
+                        scene.attach_for = None;
+                        handle_action(
+                            &mut scene,
+                            Action::CloseWindow(id),
+                            &mut passthrough,
+                            &mut controls,
+                        );
                     }
                     Some((Target::Panel, hit)) => {
                         panel.hover(Some(panel_point(&hit)));
@@ -1866,20 +1868,13 @@ fn run(app: &AndroidApp) -> Result<()> {
             if input.select.released {
                 hold_since[hand] = None;
             }
-            let (start_grab, mut end_grab) = if input.is_hand {
+            let (start_grab, end_grab) = if input.is_hand {
                 let held = input.select.down
                     && hold_since[hand].is_some_and(|t| t.elapsed() >= HOLD_TO_DRAG);
                 (held && scene.grabs[hand].is_none(), input.select.released)
             } else {
                 (input.grab.pressed, input.grab.released)
             };
-            // Taken by the bar with the trigger: letting the trigger go drops it.
-            if bar_grab[hand] && input.select.released {
-                end_grab = true;
-            }
-            if end_grab || scene.grabs[hand].is_none() {
-                bar_grab[hand] = false;
-            }
 
             if end_grab && scene.scaling.is_some_and(|s| s.hand == hand) {
                 scene.scaling = None;
@@ -1996,6 +1991,19 @@ fn run(app: &AndroidApp) -> Result<()> {
         {
             scene.toast = None;
         }
+        if scene.attach_for.is_some() {
+            let lit = picks
+                .iter()
+                .flatten()
+                .any(|(t, _)| matches!(t, Target::Attach(_)));
+            let want = (scene.lang(), lit);
+            if attach_drawn != Some(want) {
+                let label = scene.lang().t("Прикріпити", "Attach");
+                attach_layer
+                    .upload(&gl, &panel.pill_image(label, ATTACH_PX.0, ATTACH_PX.1, lit))?;
+                attach_drawn = Some(want);
+            }
+        }
         if scene.wrist.is_some()
             && let Some(pixels) = wrist_panel.render_if_dirty()
         {
@@ -2049,7 +2057,7 @@ fn run(app: &AndroidApp) -> Result<()> {
             let (radius, alpha) = match pick.0 {
                 Target::Panel | Target::MenuButton | Target::Keyboard => (0.012, 0.55),
                 Target::Monitor(_) => (0.03, 0.3),
-                Target::Bar(_) => continue,
+                Target::Attach(_) => (0.01, 0.5),
                 Target::Wrist => (0.008, 0.55),
             };
             spheres.push(Sphere::glow(pick.1.point, radius, [0.72, 0.84, 1.0, alpha]));
@@ -2073,44 +2081,6 @@ fn run(app: &AndroidApp) -> Result<()> {
                     spheres.push(Sphere::glow(point, 0.02, [1.0, 0.85, 0.35, 0.8]));
                 }
                 _ => scene.finder = None,
-            }
-        }
-        // The bar under a pointed-at monitor: a row of small balls, lit while pointed
-        // at or held.
-        let mut bars: Vec<(u8, bool)> = Vec::new();
-        for (h, pick) in picks.iter().enumerate() {
-            if let Some((id, _)) = scene.bar_for[h] {
-                let lit = matches!(pick, Some((Target::Bar(b), _)) if *b == id)
-                    || scene.grabs[h].is_some_and(|g| g.id == id);
-                match bars.iter_mut().find(|b| b.0 == id) {
-                    Some(b) => b.1 |= lit,
-                    None => bars.push((id, lit)),
-                }
-            }
-        }
-        for (id, lit) in bars {
-            let (Some(p), Some(shown)) = (scene.bar_place(id), scene.shown.get(&id)) else {
-                continue;
-            };
-            // Follow the monitor as drawn (it glides towards its place).
-            let target = scene.placements[&id];
-            let at = shown.position
-                + shown.rotation * (target.rotation.inverse() * (p.position - target.position));
-            let along = shown.rotation * Vec3::X;
-            let (radius, color) = if lit {
-                (0.0075, [0.72, 0.84, 1.0, 0.95])
-            } else {
-                (0.0055, [0.9, 0.92, 0.96, 0.6])
-            };
-            let n = 24;
-            for i in 0..=n {
-                let k = i as f32 / n as f32 - 0.5;
-                spheres.push(Sphere {
-                    center: at + along * (k * BAR_LENGTH),
-                    radius,
-                    color,
-                    kind: overlay::Kind::Ball,
-                });
             }
         }
         // Hands are drawn over everything (the compositor has no depth for them), so
@@ -2417,6 +2387,12 @@ fn run(app: &AndroidApp) -> Result<()> {
             )
         });
         layers.extend(toast_quad.iter().map(as_layer));
+        let attach_quad = scene
+            .attach_for
+            .filter(|_| attach_drawn.is_some())
+            .and_then(|(id, _)| scene.attach_place(id))
+            .map(|p| attach_layer.quad(&local, posef(&p), ATTACH_WIDTH, attach_height()));
+        layers.extend(attach_quad.iter().map(as_layer));
         let wrist_quad = scene
             .wrist
             .filter(|_| wrist_layer.ready())

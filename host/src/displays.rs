@@ -567,6 +567,8 @@ pub struct Displays {
     windows: BTreeMap<u8, Monitor>,
     /// When the window panels are next checked for a closed window.
     windows_checked: Instant,
+    /// The window on each panel, as it was before (to put it back).
+    windows_origin: HashMap<u8, windows::ActiveWindow>,
     /// A new panel output to place once the compositor lists it.
     windows_unplaced: bool,
     /// Left-to-right order of the monitors, in the headset and in KDE.
@@ -614,6 +616,7 @@ impl Displays {
             monitors: BTreeMap::new(),
             windows: BTreeMap::new(),
             windows_checked: Instant::now(),
+            windows_origin: HashMap::new(),
             windows_unplaced: false,
             order: Vec::new(),
             rows: Vec::new(),
@@ -1489,6 +1492,7 @@ impl Displays {
         if !self.streaming {
             self.windows[&id].encoder.set_paused(true);
         }
+        self.windows_origin.insert(id, window);
         self.windows_checked = Instant::now() + Duration::from_secs(1);
         // Hyprland lists a new output a moment later: placed again at the next check.
         self.windows_unplaced = true;
@@ -1496,10 +1500,22 @@ impl Displays {
         Ok(id)
     }
 
-    /// Removes a window panel; its window goes back to the other monitors.
+    /// Removes a window panel; its window goes back where it was detached from (or,
+    /// when that monitor is gone, to the others).
     pub fn close_window_panel(&mut self, id: u8) {
+        self.close_panel(id, true);
+    }
+
+    fn close_panel(&mut self, id: u8, put_back: bool) {
+        let origin = self.windows_origin.remove(&id);
         if let Some(m) = self.windows.remove(&id) {
             windows::forget_panel(m.output.output_name());
+            if put_back
+                && let Some(w) = origin.filter(|w| !w.output.is_empty())
+                && let Err(e) = windows::put_back(&w, &w.output)
+            {
+                warn!("cannot put the window back on {}: {e:#}", w.output);
+            }
             self.router.remove_stream(id);
             drop(m);
             self.apply_kde_layout();
@@ -1534,7 +1550,7 @@ impl Displays {
                 .find(|(_, m)| m.output.output_name() == name)
             {
                 info!("the window on panel {id} is gone: closing the panel");
-                self.close_window_panel(id);
+                self.close_panel(id, false);
             }
         }
     }

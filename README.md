@@ -110,7 +110,9 @@ over the keyboard, on any background.
 A single window can also leave the desktop: "Detach window" gives the PC's active
 window an output of its own, its size, and the headset shows it as a floating panel
 without a frame, closer to you than the monitors. Up to three, since the headset has
-only so many video decoders. Close the window and the panel goes. "Window here" moves
+only so many video decoders. "Attach" under the panel (it shows while you point at
+it) puts the window back on the monitor it came from; closing the window removes the
+panel too. "Window here" moves
 the active window to the monitor in front of you, and a screenshot of that monitor
 lands in `~/Pictures/Prostir`.
 
@@ -333,7 +335,8 @@ a powered hub.
 | Wrist menu | | turn the left palm to your face; press with the right index finger |
 | Press a button in the menu | trigger | touch it with a finger, or pinch from afar |
 | Click on a monitor | trigger | pinch |
-| Move a monitor | point at it, then press the trigger on the bar that appears under it, or hold grip anywhere on it | pinch the bar under it, or pinch and hold anywhere on it for about 0.3 s |
+| Move a monitor | hold grip and point | pinch and hold anywhere on it for about 0.3 s |
+| Put a detached window back | point at it and press "Attach" under it | same, with a pinch |
 | Move the menu | hold grip and point | touch an empty spot with a finger and drag |
 | Nearer or farther | thumbstick up or down while holding | move your hand away or closer |
 | Bigger or smaller | thumbstick left or right while holding, or hold it with both controllers and move them apart or together | hold it with both hands and move them apart or together |

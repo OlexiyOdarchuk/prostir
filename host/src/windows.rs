@@ -25,6 +25,8 @@ pub struct ActiveWindow {
     pub height: i32,
     /// Scale of the output it is on.
     pub scale: f64,
+    /// The output it is on.
+    pub output: String,
 }
 
 /// What the KWin scripts report.
@@ -45,15 +47,15 @@ pub fn active() -> Option<ActiveWindow> {
         let v: Value = serde_json::from_str(&json).ok()?;
         let size = v.get("size")?.as_array()?;
         let monitor = v.get("monitor").and_then(Value::as_i64);
-        let scale = hyprland_monitors()
+        let on = hyprland_monitors()
             .into_iter()
-            .find(|(id, _, _)| Some(*id) == monitor)
-            .map_or(1.0, |m| m.2);
+            .find(|(id, _, _)| Some(*id) == monitor);
         return Some(ActiveWindow {
             id: v.get("address")?.as_str()?.to_owned(),
             width: size.first()?.as_i64()? as i32,
             height: size.get(1)?.as_i64()? as i32,
-            scale,
+            scale: on.as_ref().map_or(1.0, |m| m.2),
+            output: on.map(|m| m.1).unwrap_or_default(),
         });
     }
     kde_active()
@@ -171,6 +173,36 @@ fn kde_move_script(id: &str, output: &str, fill: bool) -> String {
            workspace.screensChanged.connect(retry);
          }}"
     )
+}
+
+/// Puts window `w` back on `output` as an ordinary window (out of full screen): a
+/// window panel being closed.
+pub fn put_back(w: &ActiveWindow, output: &str) -> Result<()> {
+    if hyprland::running() {
+        let address = &w.id;
+        dispatch(
+            &format!("hl.dsp.focus({{window = \"address:{address}\"}})"),
+            &format!("focuswindow address:{address}"),
+        );
+        dispatch(
+            "hl.dsp.window.fullscreen_state({internal = 0, client = 0})",
+            "fullscreenstate 0 0",
+        );
+        return move_to(w, output, false);
+    }
+    let script = format!(
+        "const win = workspace.windowList().find(function (w) {{
+           return w.internalId.toString() === {id};
+         }});
+         const out = workspace.screens.find(function (s) {{ return s.name === {output}; }});
+         if (win) {{
+           win.fullScreen = false;
+           if (out) workspace.sendClientToScreen(win, out);
+         }}",
+        id = js_string(&w.id),
+        output = js_string(output),
+    );
+    kwin_run("prostir-put-back", &script, true)
 }
 
 /// Stops watching the window of panel `output` (KDE).
@@ -325,12 +357,13 @@ struct Host(SyncSender<Report>);
 #[zbus::interface(name = "dev.prostir.Host")]
 impl Host {
     /// The active window: KWin id (empty: none), logical size, output scale.
-    fn window(&self, id: String, width: i32, height: i32, scale: f64) {
+    fn window(&self, id: String, width: i32, height: i32, scale: f64, output: String) {
         let w = (!id.is_empty()).then_some(ActiveWindow {
             id,
             width,
             height,
             scale,
+            output,
         });
         let _ = self.0.try_send(Report::Window(w));
     }
@@ -372,9 +405,10 @@ fn kde_active() -> Option<ActiveWindow> {
            const g = w.frameGeometry;
            callDBus('{BUS}', '{PATH}', '{BUS}', 'Window', w.internalId.toString(),
                     Math.round(g.width), Math.round(g.height),
-                    w.output ? w.output.devicePixelRatio : 1.0);
+                    w.output ? w.output.devicePixelRatio : 1.0,
+                    w.output ? w.output.name : '');
          }} else {{
-           callDBus('{BUS}', '{PATH}', '{BUS}', 'Window', '', 0, 0, 1.0);
+           callDBus('{BUS}', '{PATH}', '{BUS}', 'Window', '', 0, 0, 1.0, '');
          }}"
     );
     ask_kwin(&script, |r| match r {
@@ -488,6 +522,7 @@ mod tests {
             width: 801,
             height: 100,
             scale: 1.5,
+            output: String::new(),
         };
         assert_eq!(panel_size(&w), (1202, 300));
     }

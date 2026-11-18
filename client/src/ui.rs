@@ -1183,6 +1183,31 @@ impl Panel {
 }
 
 impl Panel {
+    /// A button on its own layer: `label` on a pill, accent-coloured when `lit`.
+    /// Premultiplied RGBA.
+    pub fn pill_image(&mut self, label: &str, width: u32, height: u32, lit: bool) -> Vec<u8> {
+        let mut p = Pixmap::new(width, height).expect("pill size");
+        let (w, h) = (width as f32, height as f32);
+        let bg = if lit { ACCENT } else { [16, 18, 24, 235] };
+        fill(&mut p, rounded(rect(0.0, 0.0, w, h), h / 2.0), bg);
+        let mut size = h * 0.4;
+        while size > 12.0 && self.text_width(label, size, true) > w - h * 0.6 {
+            size -= 1.0;
+        }
+        let tw = self.text_width(label, size, true);
+        let fg = [255, 255, 255, 255];
+        self.draw_text(
+            &mut p,
+            (w - tw) / 2.0,
+            h / 2.0 + size * 0.36,
+            size,
+            true,
+            fg,
+            label,
+        );
+        p.take()
+    }
+
     /// A short message on a dark pill, `width`×`height`, for a toast layer: one
     /// line, or two when long (the end cut off with "…" if even that is not enough).
     /// Premultiplied RGBA.
