@@ -120,6 +120,8 @@ pub enum NetEvent {
     PcSettings(prostir_proto::PcSettings, u8),
     /// The PC's tray asks to bring the monitors in front.
     Recenter,
+    /// Something done on the PC, to show briefly.
+    Notice(String),
     /// A PC announces itself on the network but does not accept the connection
     /// (a firewall on the PC); `None` once connecting works again.
     Unreachable(Option<String>),
@@ -905,6 +907,9 @@ fn run_session(
             }
             HostMsg::Recenter => {
                 let _ = events.send(NetEvent::Recenter);
+            }
+            HostMsg::Notice { text } => {
+                let _ = events.send(NetEvent::Notice(text));
             }
             // The PC asks; the headset's own switch decides (checked below too).
             HostMsg::MicActive { active } => mic_asked = active,

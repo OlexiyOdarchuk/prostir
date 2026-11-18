@@ -30,6 +30,15 @@ fn main() {
         mic_denied: std::env::var("MIC_DENIED").is_ok(),
         confirm_save: None,
         unreachable: std::env::var("BLOCKED").ok(),
+        windows: if std::env::var("WINDOWS").is_ok() {
+            vec![MonitorEntry {
+                id: 10,
+                width: 1200,
+                height: 800,
+            }]
+        } else {
+            Vec::new()
+        },
         pc: Some((
             prostir_proto::PcSettings {
                 quality: 30,

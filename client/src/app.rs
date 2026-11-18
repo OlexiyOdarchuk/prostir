@@ -20,7 +20,7 @@ use glam::{Vec2, Vec3};
 use log::{error, info, warn};
 use openxr as xr;
 use openxr::sys::Handle as _;
-use prostir_proto::{ClientMsg, MIRROR_ID};
+use prostir_proto::{ClientMsg, MIRROR_ID, is_window_panel};
 
 use crate::i18n::{Lang, Language};
 use crate::input::Controls;
@@ -43,6 +43,11 @@ const PANEL_WIDTH: f32 = 0.62;
 const BUTTON_SIZE: f32 = 0.075;
 const CURSOR_PX: u32 = 64;
 const BUTTON_PX: u32 = 128;
+/// Toast texture and its size in the room.
+const TOAST_PX: (u32, u32) = (1024, 96);
+const TOAST_WIDTH: f32 = 0.42;
+/// How long a toast stays.
+const TOAST_FOR: Duration = Duration::from_secs(4);
 const ERROR_SHOWN_FOR: Duration = Duration::from_secs(8);
 const CONFIRM_FOR: Duration = Duration::from_secs(4);
 /// How long a pinch must be held on a monitor before it starts dragging it.
@@ -204,6 +209,8 @@ struct Scene {
     tab: Tab,
     /// Follow mode is moving the monitors right now.
     following: bool,
+    /// A short message shown on its own: text, since when, where (`None` until placed).
+    toast: Option<(String, Instant, Option<Placement>)>,
     /// The PC speaks another protocol: (the PC is newer, its app version).
     update_needed: Option<(bool, String)>,
     /// Where layouts are centred and which way they face (head position, yaw).
@@ -245,7 +252,7 @@ impl Scene {
             .monitors
             .keys()
             .copied()
-            .filter(|id| *id != MIRROR_ID && !ids.contains(id))
+            .filter(|id| *id != MIRROR_ID && !is_window_panel(*id) && !ids.contains(id))
             .collect();
         rest.sort_unstable();
         ids.extend(rest);
@@ -390,6 +397,18 @@ impl Scene {
     }
 
     fn arrange_all(&mut self) {
+        // Window panels stay where they are, whatever the layout.
+        let panels: Vec<(u8, Placement)> = self
+            .placements
+            .iter()
+            .filter(|(id, _)| is_window_panel(**id))
+            .map(|(id, p)| (*id, *p))
+            .collect();
+        self.arrange_monitors();
+        self.placements.extend(panels);
+    }
+
+    fn arrange_monitors(&mut self) {
         if self.settings.cinema {
             self.placements = self.around_user(layout::cinema(
                 &self.quest_sizes(),
@@ -413,6 +432,53 @@ impl Scene {
         self.grabs = [None, None];
         layout::save(&self.layout_path, &self.placements);
         self.send_layout();
+    }
+
+    /// A new window panel: in front of the user, a little closer than the monitors and
+    /// below eye level, beside panels already there. Flat, at the monitors' sharpness.
+    fn place_window_panel(&mut self, id: u8) {
+        let Some(m) = self.monitors.get(&id) else {
+            return;
+        };
+        const DISTANCE: f32 = 0.8;
+        let (head, forward) = self.head;
+        let flat = Vec3::new(forward.x, 0.0, forward.z).normalize_or(-Vec3::Z);
+        let right = Vec3::new(-flat.z, 0.0, flat.x);
+        let others = self
+            .placements
+            .keys()
+            .filter(|k| is_window_panel(**k) && **k != id)
+            .count();
+        let width = (m.width_px as f32 * layout::METRES_PER_PIXEL * DISTANCE / layout::RADIUS)
+            .clamp(0.2, 1.2);
+        let position = head + flat * DISTANCE - Vec3::Y * 0.12 + right * (0.15 * others as f32);
+        self.placements.insert(
+            id,
+            Placement {
+                position,
+                rotation: layout::facing(position, Vec3::new(head.x, position.y, head.z)),
+                width,
+            },
+        );
+    }
+
+    /// Shows `text` for a few seconds, below the line of sight.
+    fn show_toast(&mut self, text: String) {
+        info!("toast: {text}");
+        self.toast = Some((text, Instant::now(), None));
+    }
+
+    /// The monitor most straight ahead of the head (not a window panel).
+    fn monitor_in_front(&self) -> Option<u8> {
+        let (head, forward) = self.head;
+        self.placements
+            .iter()
+            .filter(|(id, _)| !is_window_panel(**id) && self.monitors.contains_key(*id))
+            .max_by(|a, b| {
+                let score = |p: &Placement| (p.position - head).normalize_or_zero().dot(forward);
+                score(a.1).total_cmp(&score(b.1))
+            })
+            .map(|(id, _)| *id)
     }
 
     /// Follow mode: once the head has turned (or moved) well away from where the
@@ -564,7 +630,12 @@ impl Scene {
             if let Some(p) = self.placements.get(id) {
                 consider(
                     Target::Monitor(*id),
-                    layout::hit_surface(ray, p, self.height_of(*id), curve),
+                    layout::hit_surface(
+                        ray,
+                        p,
+                        self.height_of(*id),
+                        curve.filter(|_| !is_window_panel(*id)),
+                    ),
                 );
             }
         }
@@ -685,6 +756,16 @@ impl Scene {
                 .quest_sizes()
                 .into_iter()
                 .map(|(id, width, height)| MonitorEntry { id, width, height })
+                .collect(),
+            windows: self
+                .monitors
+                .iter()
+                .filter(|(id, _)| is_window_panel(**id))
+                .map(|(id, m)| MonitorEntry {
+                    id: *id,
+                    width: m.width_px,
+                    height: m.height_px,
+                })
                 .collect(),
             primary: self.primary,
             mirror_wanted: self.mirror_wanted,
@@ -879,6 +960,7 @@ fn run(app: &AndroidApp) -> Result<()> {
     let mut panel_layer = ImageLayer::new(&session, format, ui::WIDTH, ui::HEIGHT, false)?;
     let mut button_layer = ImageLayer::new(&session, format, BUTTON_PX, BUTTON_PX, false)?;
     let mut cursor_layer = ImageLayer::new(&session, format, CURSOR_PX, CURSOR_PX, true)?;
+    let mut toast_layer = ImageLayer::new(&session, format, TOAST_PX.0, TOAST_PX.1, false)?;
     cursor_layer.upload(&gl, &ui::cursor_image(CURSOR_PX))?;
     let mut button_hovered = false;
     // The left hand's menu gesture as last seen, to act once per gesture.
@@ -968,6 +1050,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         tab: tab_from_code(settings.last_tab),
         update_needed: None,
         following: false,
+        toast: None,
         center: (Vec3::ZERO, 0.0),
         sent_layout: None,
         pending_layout: None,
@@ -1482,6 +1565,24 @@ fn run(app: &AndroidApp) -> Result<()> {
         }
         crate::i18n::set_current(scene.lang());
         panel_was_open = scene.panel_open;
+        // A new toast: drawn once, placed where the user looks now.
+        if let Some((text, _, place @ None)) = &mut scene.toast {
+            toast_layer.upload(&gl, &panel.toast_image(text, TOAST_PX.0, TOAST_PX.1))?;
+            let (head, forward) = scene.head;
+            let at = head + forward.normalize_or(-Vec3::Z) * 0.7 - Vec3::Y * 0.18;
+            *place = Some(Placement {
+                position: at,
+                rotation: layout::facing(at, head),
+                width: TOAST_WIDTH,
+            });
+        }
+        if scene
+            .toast
+            .as_ref()
+            .is_some_and(|t| t.1.elapsed() > TOAST_FOR)
+        {
+            scene.toast = None;
+        }
         if scene.panel_open {
             let ui_state = scene.ui_state(
                 passthrough.is_some(),
@@ -1734,7 +1835,8 @@ fn run(app: &AndroidApp) -> Result<()> {
                 },
                 image_array_index: 0,
             };
-            if let Some(radius) = curve {
+            // Window panels stay flat.
+            if let Some(radius) = curve.filter(|_| !is_window_panel(*id)) {
                 let c = Cylinder::new(p, radius);
                 cylinders.push(xr::sys::CompositionLayerCylinderKHR {
                     ty: xr::sys::CompositionLayerCylinderKHR::TYPE,
@@ -1816,6 +1918,15 @@ fn run(app: &AndroidApp) -> Result<()> {
         layers.extend(quads.iter().map(as_layer));
         layers.extend(button.iter().map(as_layer));
         layers.extend(panel_quad.iter().map(as_layer));
+        let toast_quad = scene.toast.as_ref().and_then(|t| t.2).map(|p| {
+            toast_layer.quad(
+                &local,
+                posef(&p),
+                TOAST_WIDTH,
+                TOAST_WIDTH * TOAST_PX.1 as f32 / TOAST_PX.0 as f32,
+            )
+        });
+        layers.extend(toast_quad.iter().map(as_layer));
         layers.extend(hands_layer.iter().map(as_layer));
         layers.extend(cursors.iter().map(as_layer));
         // The compositor supports 16 layers at most.
@@ -1872,6 +1983,7 @@ fn handle_net_event(
         NetEvent::Unreachable(name) => scene.unreachable = name,
         NetEvent::PcSettings(settings, encoders) => scene.pc = Some((settings, encoders)),
         NetEvent::Recenter => scene.recenter(),
+        NetEvent::Notice(text) => scene.show_toast(text),
         NetEvent::Pairing { host, code } => {
             let failed = scene.pairing.as_ref().is_some_and(|p| p.failed);
             scene.pairing = Some(ui::PairingView {
@@ -1952,7 +2064,11 @@ fn handle_net_event(
                             swapchain,
                         },
                     );
-                    if scene.relayout_pending() {
+                    if is_window_panel(id) {
+                        if !scene.placements.contains_key(&id) {
+                            scene.place_window_panel(id);
+                        }
+                    } else if scene.relayout_pending() {
                         scene.arrange_all();
                     } else if !scene.placements.contains_key(&id) && !scene.settings.cinema {
                         if id == MIRROR_ID {
@@ -1974,7 +2090,9 @@ fn handle_net_event(
                     *g = None;
                 }
             }
-            if removed && id != MIRROR_ID {
+            if removed && is_window_panel(id) {
+                scene.placements.remove(&id);
+            } else if removed && id != MIRROR_ID {
                 scene.placements.remove(&id);
                 scene.arrange_all();
             }
@@ -2080,6 +2198,22 @@ fn handle_action(
             scene.settings.focus = on;
             scene.settings.save(settings_path);
         }
+        Action::DetachWindow => {
+            scene.send(ClientMsg::DetachWindow);
+            // The panel appears in front: the menu steps aside.
+            scene.panel_open = false;
+        }
+        Action::WindowHere => {
+            if let Some(id) = scene.monitor_in_front() {
+                scene.send(ClientMsg::WindowHere { id });
+            }
+        }
+        Action::Screenshot => {
+            if let Some(id) = scene.monitor_in_front() {
+                scene.send(ClientMsg::Screenshot { id });
+            }
+        }
+        Action::CloseWindow(id) => scene.send(ClientMsg::RemoveMonitor { id }),
         Action::Follow(on) => {
             scene.settings.follow = on;
             scene.settings.save(settings_path);

@@ -61,6 +61,8 @@ pub struct UiState {
     pub mic_denied: bool,
     /// How the PC encodes and what it can encode with (while connected).
     pub pc: Option<(PcSettings, u8)>,
+    /// Window panels shown (detached PC windows).
+    pub windows: Vec<MonitorEntry>,
     /// The physical display is being shown (its lid is open).
     pub mirror_active: bool,
     pub settings: Settings,
@@ -176,6 +178,14 @@ pub enum Action {
     ShowTips,
     /// The monitors follow the head.
     Follow(bool),
+    /// Put the PC's active window on a panel of its own.
+    DetachWindow,
+    /// Move the PC's active window to the monitor in front.
+    WindowHere,
+    /// Save a picture of the monitor in front on the PC.
+    Screenshot,
+    /// Close a window panel (its window goes back to the monitors).
+    CloseWindow(u8),
     Close,
 }
 
@@ -903,6 +913,38 @@ impl Panel {
     }
 }
 
+impl Panel {
+    /// A short message on a dark pill, `width`×`height`, for a toast layer.
+    /// Premultiplied RGBA.
+    pub fn toast_image(&mut self, message: &str, width: u32, height: u32) -> Vec<u8> {
+        let mut p = Pixmap::new(width, height).expect("toast size");
+        let (w, h) = (width as f32, height as f32);
+        fill(
+            &mut p,
+            rounded(rect(0.0, 0.0, w, h), h / 2.0),
+            [16, 18, 24, 235],
+        );
+        let size = h * 0.36;
+        // Too long: cut, keeping the end (a file name) readable.
+        let mut shown: String = message.to_owned();
+        while self.text_width(&shown, size, true) > w - h && shown.chars().count() > 8 {
+            let rest: String = shown.chars().skip(2).collect();
+            shown = format!("…{rest}");
+        }
+        let tw = self.text_width(&shown, size, true);
+        self.draw_text(
+            &mut p,
+            (w - tw) / 2.0,
+            h / 2.0 + size * 0.36,
+            size,
+            true,
+            TEXT,
+            &shown,
+        );
+        p.take()
+    }
+}
+
 /// Pointer dot: white with a dark rim so it shows on light and dark content.
 /// Premultiplied RGBA, `size`×`size`.
 pub fn cursor_image(size: u32) -> Vec<u8> {
@@ -1010,6 +1052,33 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
             "×",
             style,
             removable.then_some(Action::Remove(m.id)),
+        ));
+        y += 70.0;
+    }
+    // Detached windows: a name, the size and a close button.
+    for (i, w) in s.windows.iter().enumerate() {
+        items.push(Item::Box(rect(lx, y, lw, 62.0), [255, 255, 255, 8]));
+        items.push(text(
+            lx + 20.0,
+            y + 29.0,
+            22.0,
+            true,
+            TEXT,
+            &format!("{} {}", l.t("Вікно", "Window"), i + 1),
+        ));
+        items.push(text(
+            lx + 20.0,
+            y + 52.0,
+            16.0,
+            false,
+            MUTED,
+            &format!("{} × {}", w.width, w.height),
+        ));
+        items.push(button(
+            rect(lx + lw - 58.0, y + 7.0, 48.0, 48.0),
+            "×",
+            Style::Danger,
+            Some(Action::CloseWindow(w.id)),
         ));
         y += 70.0;
     }
@@ -1840,8 +1909,7 @@ fn build_quick(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
         let action = (connected && !active).then_some(Action::ApplyProfile(i));
         items.push(button(r, name, style, action));
     }
-    // The tiles sit low, where a hand reaches without lifting the arm.
-    y += 72.0 + 60.0;
+    y += 72.0 + 40.0;
     let on_off = |on: bool| {
         if on {
             l.t("Увімкнено", "On")
@@ -1850,8 +1918,9 @@ fn build_quick(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
         }
     };
     let tw = (w - 2.0 * 12.0) / 3.0;
-    let th = 170.0;
-    let tiles: [(&str, String, bool, Option<Action>); 6] = [
+    let th = 140.0;
+    let full = s.windows.len() >= prostir_proto::WINDOW_IDS.len();
+    let tiles: [(&str, String, bool, Option<Action>); 9] = [
         (
             l.t("Перед собою", "In front of me"),
             l.t("Повернути все до себе", "Turn everything to me")
@@ -1899,6 +1968,31 @@ fn build_quick(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
             .to_owned(),
             s.mic_wanted,
             connected.then_some(Action::SetMic(!s.mic_wanted)),
+        ),
+        (
+            l.t("Відкріпити вікно", "Detach window"),
+            if full {
+                l.t("Уже три: закрийте одне", "Three already: close one")
+            } else {
+                l.t("Активне вікно ПК окремо", "The PC's active window apart")
+            }
+            .to_owned(),
+            false,
+            (connected && !full).then_some(Action::DetachWindow),
+        ),
+        (
+            l.t("Вікно сюди", "Window here"),
+            l.t("На монітор перед вами", "To the monitor in front")
+                .to_owned(),
+            false,
+            connected.then_some(Action::WindowHere),
+        ),
+        (
+            l.t("Знімок екрана", "Screenshot"),
+            l.t("Монітора перед вами", "Of the monitor in front")
+                .to_owned(),
+            false,
+            connected.then_some(Action::Screenshot),
         ),
     ];
     for (i, (title, state, on, action)) in tiles.into_iter().enumerate() {
@@ -2357,6 +2451,11 @@ mod tests {
                 },
                 7,
             )),
+            windows: vec![MonitorEntry {
+                id: 10,
+                width: 1200,
+                height: 800,
+            }],
             host: Some("workstation".into()),
             found: Vec::new(),
             ip_input: None,
