@@ -88,6 +88,8 @@ pub struct Settings {
     pub left_handed: bool,
     /// The headset display at 72 Hz instead of 90 (the video is 60 frames a second).
     pub battery_saver: bool,
+    /// The PC's desktop notifications shown in the headset.
+    pub notifications: bool,
     pub language: Language,
     /// The language of the PC last connected to (for "like the PC" before connecting).
     pub pc_language: Option<Lang>,
@@ -112,6 +114,7 @@ impl Default for Settings {
             large_menu: false,
             left_handed: false,
             battery_saver: false,
+            notifications: false,
             language: Language::LikePc,
             pc_language: None,
         }
@@ -156,6 +159,7 @@ impl Settings {
                 Some(("large-menu", v)) => s.large_menu = v == "on",
                 Some(("left-handed", v)) => s.left_handed = v == "on",
                 Some(("battery-saver", v)) => s.battery_saver = v == "on",
+                Some(("notifications", v)) => s.notifications = v == "on",
                 Some(("language", v)) => {
                     s.language = match v {
                         "uk" => Language::Fixed(Lang::Uk),
@@ -223,7 +227,7 @@ impl Settings {
         format!(
             "preset {preset}\ncurve {curve}\nbackground {background}\nhands {hands}\n\
              focus {}\ncinema {}\ncinema-screen {}\nlanguage {}\npc-language {}\nintro {}\nkeyboard-window {}\nmic {}\ntab {}\nfollow {}\n\
-             gaze-mouse {}\nlarge-menu {}\nleft-handed {}\nbattery-saver {}\n",
+             gaze-mouse {}\nlarge-menu {}\nleft-handed {}\nbattery-saver {}\nnotifications {}\n",
             on(self.focus),
             on(self.cinema),
             self.cinema_screen
@@ -241,7 +245,8 @@ impl Settings {
             on(self.gaze_mouse),
             on(self.large_menu),
             on(self.left_handed),
-            on(self.battery_saver)
+            on(self.battery_saver),
+            on(self.notifications)
         )
     }
 }
@@ -272,6 +277,7 @@ mod tests {
             large_menu: true,
             left_handed: true,
             battery_saver: true,
+            notifications: true,
             language: Language::Fixed(Lang::En),
             pc_language: Some(Lang::Uk),
         };

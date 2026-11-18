@@ -135,6 +135,7 @@ fn main() -> Result<()> {
                 Some("shot") => Some(ClientMsg::Screenshot { id: num(&what) }),
                 Some("close") => Some(ClientMsg::RemoveMonitor { id: num(&what) }),
                 Some("find") => Some(ClientMsg::FindMouse),
+                Some("notify") => Some(ClientMsg::SetNotifications { enabled: true }),
                 Some("mouse") => Some(ClientMsg::MouseTo {
                     id: num(&what),
                     x: 32768,

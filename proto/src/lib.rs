@@ -336,6 +336,10 @@ pub enum ClientMsg {
     },
     /// Where is the mouse? (answered with [`HostMsg::MouseAt`])
     FindMouse,
+    /// Pass the PC's desktop notifications to the headset (as [`HostMsg::Notice`]).
+    SetNotifications {
+        enabled: bool,
+    },
     /// Put the mouse on monitor `id`, at `x`/`y` across its image (0..=65535).
     MouseTo {
         id: u8,
@@ -405,6 +409,7 @@ mod tag {
     pub const SCREENSHOT: u8 = 122;
     pub const FIND_MOUSE: u8 = 123;
     pub const MOUSE_TO: u8 = 124;
+    pub const SET_NOTIFICATIONS: u8 = 125;
 }
 
 fn invalid(msg: &str) -> io::Error {
@@ -696,6 +701,9 @@ impl ClientMsg {
             ClientMsg::WindowHere { id } => write_frame(w, tag::WINDOW_HERE, &[&[*id]]),
             ClientMsg::Screenshot { id } => write_frame(w, tag::SCREENSHOT, &[&[*id]]),
             ClientMsg::FindMouse => write_frame(w, tag::FIND_MOUSE, &[]),
+            ClientMsg::SetNotifications { enabled } => {
+                write_frame(w, tag::SET_NOTIFICATIONS, &[&[*enabled as u8]])
+            }
             ClientMsg::MouseTo { id, x, y } => write_frame(
                 w,
                 tag::MOUSE_TO,
@@ -743,6 +751,9 @@ impl ClientMsg {
             tag::WINDOW_HERE => ClientMsg::WindowHere { id: c.u8()? },
             tag::SCREENSHOT => ClientMsg::Screenshot { id: c.u8()? },
             tag::FIND_MOUSE => ClientMsg::FindMouse,
+            tag::SET_NOTIFICATIONS => ClientMsg::SetNotifications {
+                enabled: c.u8()? != 0,
+            },
             tag::MOUSE_TO => ClientMsg::MouseTo {
                 id: c.u8()?,
                 x: c.u16()?,
@@ -996,6 +1007,7 @@ mod tests {
             ClientMsg::WindowHere { id: 1 },
             ClientMsg::Screenshot { id: 0 },
             ClientMsg::FindMouse,
+            ClientMsg::SetNotifications { enabled: true },
             ClientMsg::MouseTo {
                 id: 2,
                 x: 1,

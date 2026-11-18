@@ -2365,6 +2365,9 @@ fn handle_net_event(
             scene.send(ClientMsg::SetMic {
                 enabled: scene.settings.mic,
             });
+            if scene.settings.notifications {
+                scene.send(ClientMsg::SetNotifications { enabled: true });
+            }
             if !scene.worn {
                 scene.tell_presence();
             }
@@ -2621,6 +2624,11 @@ fn handle_action(
             scene.settings.save(settings_path);
             set_menu_scale(on);
             scene.panel_place.width = panel_width();
+        }
+        Action::Notifications(on) => {
+            scene.settings.notifications = on;
+            scene.settings.save(settings_path);
+            scene.send(ClientMsg::SetNotifications { enabled: on });
         }
         Action::BatterySaver(on) => {
             scene.settings.battery_saver = on;

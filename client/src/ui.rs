@@ -230,6 +230,8 @@ pub enum Action {
     LeftHanded(bool),
     /// 72 Hz display to save battery.
     BatterySaver(bool),
+    /// Show the PC's notifications in the headset.
+    Notifications(bool),
     Close,
 }
 
@@ -2197,7 +2199,32 @@ fn build_settings(s: &UiState, section: Section, items: &mut Vec<Item>, top: f32
                 ],
             );
         }
-        Section::Pc => build_pc(s, items, cx, cw.min(700.0), ctop),
+        Section::Pc => {
+            let w = cw.min(700.0);
+            let mut y = build_pc(s, items, cx, w, ctop);
+            let on = s.settings.notifications;
+            segmented(
+                items,
+                cx,
+                w,
+                &mut y,
+                l.t("Сповіщення ПК у шоломі", "PC notifications in the headset"),
+                vec![
+                    (
+                        l.t("Вимкнено", "Off"),
+                        Action::Notifications(false),
+                        !on,
+                        true,
+                    ),
+                    (
+                        l.t("Увімкнено", "On"),
+                        Action::Notifications(true),
+                        on,
+                        true,
+                    ),
+                ],
+            );
+        }
         Section::Controls => build_controls(s, items, cx, cw.min(640.0), ctop),
         Section::Help => {
             hints(l, items, cx, ctop + 10.0);
@@ -2364,7 +2391,7 @@ fn build_controls(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32
 }
 
 /// How the PC encodes: quality, codec, graphics card or CPU, text preset.
-fn build_pc(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
+fn build_pc(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -> f32 {
     let l = s.lang;
     let Some((pc, encoders)) = s.pc else {
         items.push(text(
@@ -2378,7 +2405,7 @@ fn build_pc(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
                 "Available while a PC is connected.",
             ),
         ));
-        return;
+        return y + 70.0;
     };
     use prostir_proto::encoders::{CPU_H264, GPU_H264, GPU_H265};
     let set = |change: &dyn Fn(&mut PcSettings)| {
@@ -2480,6 +2507,7 @@ fn build_pc(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
             ),
         ],
     );
+    y
 }
 
 /// PC sound and headset microphone.

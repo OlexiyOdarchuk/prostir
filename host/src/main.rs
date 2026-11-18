@@ -7,6 +7,7 @@ mod encoder;
 mod focus;
 mod hyprland;
 mod i18n;
+mod notifications;
 mod outbox;
 mod pairing;
 mod screencopy;
@@ -275,6 +276,8 @@ fn serve_client(
     // The display under the mouse, for dimming the others in the headset.
     let active_output = focus::ActiveOutput::new();
     let mut battery_warned = false;
+    // PC notifications passed to the headset, while it asks for them.
+    let mut notifications: Option<notifications::Watcher> = None;
     let mut focus = None;
     let mut next_focus = Instant::now();
     let result = loop {
@@ -395,6 +398,13 @@ fn serve_client(
                 }),
                 Err(e) => report(displays, format!("{e:#}")),
             },
+            Ok(Ok(ClientMsg::SetNotifications { enabled })) => {
+                notifications = if enabled {
+                    notifications.or_else(|| notifications::watch(displays.router.clone()))
+                } else {
+                    None
+                };
+            }
             Ok(Ok(ClientMsg::FindMouse)) => {
                 if let Some((id, x, y)) = displays.find_mouse() {
                     displays.router.send(HostMsg::MouseAt { id, x, y });
