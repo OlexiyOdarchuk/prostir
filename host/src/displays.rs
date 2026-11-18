@@ -4,7 +4,6 @@ use crate::i18n::t;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -15,6 +14,7 @@ use prostir_proto::{Codec, HostMsg, LayoutRow, MIRROR_ID};
 use crate::audio::{AudioOut, MicIn};
 use crate::desktop::{Desktop, Output};
 use crate::encoder::{Encoder, EncoderConfig, EncoderEvent, Input};
+use crate::outbox::Outbox;
 use crate::virtual_output::{self, MonitorSpec, Screencast};
 
 /// Retry timing after failures: 2 s, then doubling up to 2 min.
@@ -48,18 +48,33 @@ struct StreamSlot {
     size: Option<(u32, u32)>,
     announced: bool,
     need_keyframe: bool,
+    /// When a keyframe was last asked for: asking again on every frame while waiting
+    /// would make the encoder emit one huge keyframe after another.
+    keyframe_asked: Option<Instant>,
     /// pts → when the encoded frame was queued for sending.
-    sent: HashMap<u64, Instant>,
+    sent: BTreeMap<u64, Instant>,
     latency: LatencyStats,
 }
 
 impl StreamSlot {
+    /// Whether to ask the encoder for a keyframe now (at most every 300 ms).
+    fn ask_keyframe(&mut self) -> bool {
+        let due = self
+            .keyframe_asked
+            .is_none_or(|t| t.elapsed() >= Duration::from_millis(300));
+        if due {
+            self.keyframe_asked = Some(Instant::now());
+        }
+        due
+    }
+
     fn new() -> Self {
         Self {
             size: None,
             announced: false,
             need_keyframe: true,
-            sent: HashMap::new(),
+            keyframe_asked: None,
+            sent: BTreeMap::new(),
             latency: LatencyStats::default(),
         }
     }
@@ -110,7 +125,7 @@ pub struct Router {
 }
 
 struct RouterInner {
-    tx: Option<SyncSender<HostMsg>>,
+    tx: Option<Arc<Outbox>>,
     streams: BTreeMap<u8, StreamSlot>,
 }
 
@@ -127,7 +142,7 @@ impl Router {
         }
     }
 
-    pub fn attach(&self, tx: SyncSender<HostMsg>) {
+    pub fn attach(&self, tx: Arc<Outbox>) {
         let mut inner = self.inner.lock().unwrap();
         inner.tx = Some(tx);
         for s in inner.streams.values_mut() {
@@ -140,11 +155,11 @@ impl Router {
         self.inner.lock().unwrap().tx = None;
     }
 
-    /// Sends a control message to the connected client, if any.
+    /// Sends a control message to the connected client, if any. Never blocks.
     pub fn send(&self, msg: HostMsg) {
         let mut inner = self.inner.lock().unwrap();
         if let Some(tx) = &inner.tx
-            && tx.send(msg).is_err()
+            && !tx.control(msg)
         {
             inner.tx = None;
         }
@@ -163,7 +178,7 @@ impl Router {
         let announced = inner.streams.remove(&id).is_some_and(|s| s.announced);
         if announced
             && let Some(tx) = &inner.tx
-            && tx.send(HostMsg::StreamEnd { id }).is_err()
+            && !tx.control(HostMsg::StreamEnd { id })
         {
             inner.tx = None;
         }
@@ -173,7 +188,7 @@ impl Router {
     /// in sound beats growing latency).
     pub fn send_audio(&self, pcm: Vec<u8>) {
         if let Some(tx) = &self.inner.lock().unwrap().tx {
-            let _ = tx.try_send(HostMsg::Audio { pcm });
+            tx.audio(HostMsg::Audio { pcm });
         }
     }
 
@@ -186,12 +201,22 @@ impl Router {
             Some(sent) => slot.latency.add(id, sent.elapsed().as_secs_f64() * 1e3),
             None => debug!("shown frame {pts_us} of Prostir-{} is unknown", id + 1),
         }
+        // The headset reports only some frames: older ones are done too.
+        slot.sent = slot.sent.split_off(&pts_us);
     }
 
     /// Returns `true` when the encoder should produce a keyframe.
     fn on_event(&self, id: u8, event: EncoderEvent) -> bool {
         let mut inner = self.inner.lock().unwrap();
         let RouterInner { tx, streams } = &mut *inner;
+        // Streams whose queued frames were too late to send: they need a keyframe.
+        if let Some(outbox) = tx {
+            for lost in outbox.take_dropped() {
+                if let Some(s) = streams.get_mut(&lost) {
+                    s.need_keyframe = true;
+                }
+            }
+        }
         let Some(slot) = streams.get_mut(&id) else {
             return false;
         };
@@ -230,39 +255,37 @@ impl Router {
                         codec: self.codec,
                         name: stream_name(id),
                     };
-                    if sender.send(start).is_err() {
+                    if !sender.control(start) {
                         *tx = None;
                         return false;
                     }
                     slot.announced = true;
                 }
                 if slot.need_keyframe && !keyframe {
-                    return true;
+                    return slot.ask_keyframe();
                 }
-                match sender.try_send(HostMsg::Frame {
+                let bytes = data.len();
+                let msg = HostMsg::Frame {
                     id,
                     pts_us,
                     keyframe,
                     data,
-                }) {
-                    Ok(()) => {
-                        slot.need_keyframe = false;
-                        if slot.sent.len() > 256 {
-                            slot.sent.clear();
-                        }
-                        slot.sent.insert(pts_us, Instant::now());
-                        false
+                };
+                if sender.video(id, keyframe, bytes, msg) {
+                    slot.need_keyframe = false;
+                    if keyframe {
+                        slot.keyframe_asked = None;
                     }
-                    Err(TrySendError::Full(_)) => {
-                        // The network can't keep up: drop until the next keyframe so the
-                        // decoder never sees a broken reference chain.
-                        slot.need_keyframe = true;
-                        true
+                    if slot.sent.len() > 256 {
+                        slot.sent.clear();
                     }
-                    Err(TrySendError::Disconnected(_)) => {
-                        *tx = None;
-                        false
-                    }
+                    slot.sent.insert(pts_us, Instant::now());
+                    false
+                } else {
+                    // Too much waiting already: drop until the next keyframe so the
+                    // decoder never sees a broken reference chain.
+                    slot.need_keyframe = true;
+                    slot.ask_keyframe()
                 }
             }
         }

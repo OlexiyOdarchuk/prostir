@@ -7,6 +7,7 @@ mod encoder;
 mod focus;
 mod hyprland;
 mod i18n;
+mod outbox;
 mod pairing;
 mod screencopy;
 mod tray;
@@ -15,6 +16,7 @@ mod virtual_output;
 
 use std::io::{BufReader, BufWriter, ErrorKind, Write};
 use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream, UdpSocket};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
@@ -179,6 +181,9 @@ fn set_keepalive(stream: &TcpStream) {
     set(libc::IPPROTO_TCP, libc::TCP_KEEPCNT, 3);
     // Unacknowledged data (frames) also gives up after 10 s.
     set(libc::IPPROTO_TCP, libc::TCP_USER_TIMEOUT, 10_000);
+    // Keep little unsent data in the kernel (Linux would let it grow to megabytes):
+    // frames wait in the outbox instead, where late ones can still be dropped.
+    set(libc::IPPROTO_TCP, libc::TCP_NOTSENT_LOWAT, 256 * 1024);
 }
 
 fn serve_client(
@@ -189,28 +194,32 @@ fn serve_client(
     control: &mut Control,
     via: &'static str,
 ) -> Result<()> {
-    let mut writer = BufWriter::with_capacity(1 << 20, writer);
-
-    // Room for ~0.3 s of 10 ms sound slices next to video frames.
-    let (tx, rx) = mpsc::sync_channel::<HostMsg>(64);
+    // A small buffer: anything waiting belongs in the outbox, where old video frames
+    // can still be dropped, not in a buffer where they can only be sent late.
+    let mut writer = BufWriter::with_capacity(64 * 1024, writer);
+    // A short Wi-Fi stall drops frames (see the outbox) instead of ending the session;
+    // TCP_USER_TIMEOUT notices a headset that is really gone.
+    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+    let outbox = Arc::new(outbox::Outbox::default());
     let writer_thread = {
         let stream = stream.try_clone()?;
+        let outbox = outbox.clone();
         std::thread::Builder::new()
             .name("net-writer".into())
             .spawn(move || {
                 let result = (|| -> std::io::Result<()> {
-                    while let Ok(msg) = rx.recv() {
+                    while let Some(msg) = outbox.next() {
                         msg.write(&mut writer)?;
-                        while let Ok(msg) = rx.try_recv() {
-                            msg.write(&mut writer)?;
+                        if outbox.is_idle() {
+                            writer.flush()?;
                         }
-                        writer.flush()?;
                     }
                     Ok(())
                 })();
                 if let Err(e) = result {
                     info!("connection closed while sending: {e}");
                 }
+                outbox.close();
                 let _ = stream.shutdown(Shutdown::Both);
             })?
     };
@@ -228,7 +237,7 @@ fn serve_client(
             }
         })?;
 
-    displays.router.attach(tx);
+    displays.router.attach(outbox.clone());
     if let Some(id) = displays.primary() {
         displays.router.send(HostMsg::PrimaryChanged { id });
     }
@@ -362,6 +371,7 @@ fn serve_client(
     };
     displays.set_streaming(false);
     displays.router.detach();
+    outbox.close();
     let _ = stream.shutdown(Shutdown::Both);
     let _ = writer_thread.join();
     result
