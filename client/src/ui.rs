@@ -260,6 +260,11 @@ pub enum Action {
     ForgetPc(usize),
     /// Sound comes from the monitor of the window playing it.
     SoundFromScreen(bool),
+    /// 12-hour clock.
+    Clock12h(bool),
+    DateStyle(crate::settings::DateStyle),
+    /// Show the round ☰ button under the main monitor.
+    MenuButton(bool),
     Close,
 }
 
@@ -647,6 +652,11 @@ impl Panel {
         };
         let x = centred(self, &s.date, date, false);
         items.push(text(x, cy - 26.0, date, false, MUTED, &s.date));
+        // "12:05 PM" is wider than "14:05": smaller, to stay in the circle.
+        let mut time = time;
+        while time > 22.0 && self.text_width(&s.clock, time, true) > 1.6 * (r0 - 12.0) {
+            time -= 1.0;
+        }
         let x = centred(self, &s.clock, time, true);
         items.push(text(
             x,
@@ -2526,6 +2536,54 @@ fn build_settings(s: &UiState, section: Section, items: &mut Vec<Item>, top: f32
                     ),
                 ],
             );
+            // The clock and date on the palm menu, each choice shown as it looks.
+            let w = cw.min(620.0);
+            let st = s.settings;
+            segmented(
+                items,
+                cx,
+                w,
+                &mut y,
+                l.t("Час", "Time"),
+                vec![
+                    ("14:05", Action::Clock12h(false), !st.clock_12h, true),
+                    ("2:05 PM", Action::Clock12h(true), st.clock_12h, true),
+                ],
+            );
+            use crate::settings::DateStyle;
+            segmented(
+                items,
+                cx,
+                w,
+                &mut y,
+                l.t("Дата", "Date"),
+                vec![
+                    (
+                        l.t("Мовою меню", "As the menu"),
+                        Action::DateStyle(DateStyle::LikeMenu),
+                        st.date_style == DateStyle::LikeMenu,
+                        true,
+                    ),
+                    (
+                        "Ср, 18 лист.",
+                        Action::DateStyle(DateStyle::Ukrainian),
+                        st.date_style == DateStyle::Ukrainian,
+                        true,
+                    ),
+                    (
+                        "Wed, Nov 18",
+                        Action::DateStyle(DateStyle::English),
+                        st.date_style == DateStyle::English,
+                        true,
+                    ),
+                    (
+                        "18.11.2026",
+                        Action::DateStyle(DateStyle::Numbers),
+                        st.date_style == DateStyle::Numbers,
+                        true,
+                    ),
+                ],
+            );
         }
         Section::Pc => {
             let w = cw.min(700.0);
@@ -2717,6 +2775,31 @@ fn build_controls(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32
             "The video runs at 60 frames a second, so 72 Hz keeps all of it.",
         ),
     ));
+    y += 22.0;
+    segmented(
+        items,
+        lx,
+        lw,
+        &mut y,
+        l.t(
+            "Кругла кнопка меню біля монітора",
+            "Round menu button by the monitor",
+        ),
+        vec![
+            (
+                l.t("Показувати", "Show"),
+                Action::MenuButton(true),
+                st.menu_button,
+                true,
+            ),
+            (
+                l.t("Сховати", "Hide"),
+                Action::MenuButton(false),
+                !st.menu_button,
+                true,
+            ),
+        ],
+    );
 }
 
 /// The PCs this headset is paired with, each with "Forget" (pressed twice).
@@ -3125,8 +3208,8 @@ mod tests {
             )),
             can_move_mouse: false,
             paired: vec!["workstation".into(), "a-much-longer-laptop-name".into()],
-            clock: "23:59".into(),
-            date: "Ср, 18 лист.".into(),
+            clock: "12:59 PM".into(),
+            date: "Wed, Nov 18".into(),
             confirm_forget: Some(1),
             windows: vec![MonitorEntry {
                 id: 10,

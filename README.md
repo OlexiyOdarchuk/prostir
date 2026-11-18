@@ -426,10 +426,13 @@ down or cinema, and not while dragging all together.
   `/sdcard/Android/data/dev.prostir.client/files/` on the headset.
 - **Controls**: hands, mouse follows the gaze (where the PC allows it), menu size,
   which hand gets the palm menu (Palm menu: left or right hand), and the headset display
-  rate (90 Hz, or 72 Hz to save battery: the video is 60 frames a second either way).
+  rate (90 Hz, or 72 Hz to save battery: the video is 60 frames a second either way),
+  and whether the round menu button shows by the monitor.
 - **Sound**: where PC sound plays, which microphone the PC uses, and sound from the
   screen.
-- **Language**: like the PC, Ukrainian or English.
+- **Language**: like the PC, Ukrainian or English; the palm menu's clock in 24 or 12
+  hours (14:05 or 2:05 PM) and its date in the menu's language, Ukrainian, English or
+  numbers.
 - **PC**: video quality (15, 30 or 50 Mbit/s per monitor), encoding on the graphics
   card or the processor, HEVC or H.264, sharper text, the PC's notifications in the
   headset, and the PCs this headset is paired with, each of which you can forget.

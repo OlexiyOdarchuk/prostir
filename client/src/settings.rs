@@ -53,6 +53,20 @@ impl Background {
     }
 }
 
+/// How the date on the palm menu is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DateStyle {
+    /// In the menu's language.
+    #[default]
+    LikeMenu,
+    /// `Ср, 18 лист.`
+    Ukrainian,
+    /// `Wed, Nov 18`
+    English,
+    /// `18.11.2026`
+    Numbers,
+}
+
 /// What tracked hands do in the headset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandMode {
@@ -95,6 +109,12 @@ pub struct Settings {
     pub move_all: bool,
     /// Sound placed on the side of the monitor whose window plays it.
     pub sound_from_screen: bool,
+    /// The clock in 12-hour time (2:05 PM) rather than 24-hour (14:05).
+    pub clock_12h: bool,
+    /// How the date is written (see [`DateStyle`]).
+    pub date_style: DateStyle,
+    /// The round ☰ button under the main monitor.
+    pub menu_button: bool,
     /// The mouse goes to the monitor the user looks at (where the PC allows it).
     pub gaze_mouse: bool,
     /// A bigger menu, easier to read and hit.
@@ -130,6 +150,9 @@ impl Default for Settings {
             magnet: true,
             move_all: false,
             sound_from_screen: false,
+            clock_12h: false,
+            date_style: DateStyle::LikeMenu,
+            menu_button: true,
             gaze_mouse: false,
             large_menu: false,
             left_handed: false,
@@ -179,6 +202,16 @@ impl Settings {
                 Some(("magnet", v)) => s.magnet = v != "off",
                 Some(("move-all", v)) => s.move_all = v == "on",
                 Some(("sound-from-screen", v)) => s.sound_from_screen = v == "on",
+                Some(("clock", v)) => s.clock_12h = v == "12h",
+                Some(("date", v)) => {
+                    s.date_style = match v {
+                        "uk" => DateStyle::Ukrainian,
+                        "en" => DateStyle::English,
+                        "numbers" => DateStyle::Numbers,
+                        _ => DateStyle::LikeMenu,
+                    }
+                }
+                Some(("menu-button", v)) => s.menu_button = v != "off",
                 Some(("gaze-mouse", v)) => s.gaze_mouse = v == "on",
                 Some(("large-menu", v)) => s.large_menu = v == "on",
                 Some(("left-handed", v)) => s.left_handed = v == "on",
@@ -254,7 +287,7 @@ impl Settings {
         format!(
             "preset {preset}\ncurve {curve}\nbackground {background}\nhands {hands}\n\
              focus {}\ncinema {}\ncinema-screen {}\nlanguage {}\npc-language {}\nintro {}\nkeyboard-window {}\nmic {}\ntab {}\nfollow {}\n\
-             gaze-mouse {}\nlarge-menu {}\nleft-handed {}\nbattery-saver {}\nnotifications {}\nrest-every {}\nmagnet {}\nmove-all {}\nsound-from-screen {}\n",
+             gaze-mouse {}\nlarge-menu {}\nleft-handed {}\nbattery-saver {}\nnotifications {}\nrest-every {}\nmagnet {}\nmove-all {}\nsound-from-screen {}\nclock {}\ndate {}\nmenu-button {}\n",
             on(self.focus),
             on(self.cinema),
             self.cinema_screen
@@ -277,7 +310,15 @@ impl Settings {
             self.rest_every,
             on(self.magnet),
             on(self.move_all),
-            on(self.sound_from_screen)
+            on(self.sound_from_screen),
+            if self.clock_12h { "12h" } else { "24h" },
+            match self.date_style {
+                DateStyle::LikeMenu => "like-menu",
+                DateStyle::Ukrainian => "uk",
+                DateStyle::English => "en",
+                DateStyle::Numbers => "numbers",
+            },
+            on(self.menu_button)
         )
     }
 }
@@ -307,6 +348,9 @@ mod tests {
             magnet: false,
             move_all: true,
             sound_from_screen: true,
+            clock_12h: true,
+            date_style: DateStyle::Numbers,
+            menu_button: false,
             gaze_mouse: true,
             large_menu: true,
             left_handed: true,

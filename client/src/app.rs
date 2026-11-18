@@ -123,30 +123,56 @@ fn set_refresh_rate(session: &xr::Session<Gfx>, saver: bool) {
     }
 }
 
-/// The headset's local time as `14:05`, with the broken-down time.
-fn local_clock() -> (String, Option<libc::tm>) {
+/// The headset's local time, broken down.
+fn local_time() -> Option<libc::tm> {
     // SAFETY: plain libc time calls on a zeroed `tm`.
     unsafe {
         let now = libc::time(std::ptr::null_mut());
         let mut tm: libc::tm = std::mem::zeroed();
-        if libc::localtime_r(&now, &mut tm).is_null() {
-            return (String::new(), None);
-        }
-        (format!("{:02}:{:02}", tm.tm_hour, tm.tm_min), Some(tm))
+        (!libc::localtime_r(&now, &mut tm).is_null()).then_some(tm)
     }
 }
 
-/// Today, short: `Ср, 18 лист.` or `Wed 18 Nov`.
-fn local_date(lang: Lang) -> String {
-    let Some(tm) = local_clock().1 else {
-        return String::new();
+/// The time as `14:05` or `2:05 PM`.
+fn clock_text(tm: &libc::tm, twelve: bool) -> String {
+    if !twelve {
+        return format!("{:02}:{:02}", tm.tm_hour, tm.tm_min);
+    }
+    let hour = match tm.tm_hour % 12 {
+        0 => 12,
+        h => h,
     };
+    let half = if tm.tm_hour < 12 { "AM" } else { "PM" };
+    format!("{hour}:{:02} {half}", tm.tm_min)
+}
+
+/// The date as `Ср, 18 лист.`, `Wed, Nov 18` or `18.11.2026`.
+fn date_text(tm: &libc::tm, style: crate::settings::DateStyle, lang: Lang) -> String {
+    use crate::settings::DateStyle;
     let (day, month) = (
         tm.tm_wday.clamp(0, 6) as usize,
         tm.tm_mon.clamp(0, 11) as usize,
     );
-    match lang {
-        Lang::Uk => {
+    let style = match (style, lang) {
+        (DateStyle::LikeMenu, Lang::Uk) => DateStyle::Ukrainian,
+        (DateStyle::LikeMenu, Lang::En) => DateStyle::English,
+        (s, _) => s,
+    };
+    match style {
+        DateStyle::English => {
+            const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+            const MONTHS: [&str; 12] = [
+                "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+            ];
+            format!("{}, {} {}", DAYS[day], MONTHS[month], tm.tm_mday)
+        }
+        DateStyle::Numbers => format!(
+            "{:02}.{:02}.{}",
+            tm.tm_mday,
+            tm.tm_mon + 1,
+            tm.tm_year + 1900
+        ),
+        _ => {
             const DAYS: [&str; 7] = ["Нд", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"];
             const MONTHS: [&str; 12] = [
                 "січ.",
@@ -163,13 +189,6 @@ fn local_date(lang: Lang) -> String {
                 "груд.",
             ];
             format!("{}, {} {}", DAYS[day], tm.tm_mday, MONTHS[month])
-        }
-        Lang::En => {
-            const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-            const MONTHS: [&str; 12] = [
-                "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-            ];
-            format!("{} {} {}", DAYS[day], tm.tm_mday, MONTHS[month])
         }
     }
 }
@@ -1123,6 +1142,12 @@ impl Scene {
     /// is not shown (cinema on another screen), under the first monitor that is: with
     /// hands, the button is the only way back to the menu.
     fn place_button(&mut self) {
+        // Hidden in the settings: the menu opens from the palm menu, the hand gesture
+        // or the controller.
+        if !self.settings.menu_button {
+            self.button_place = None;
+            return;
+        }
         let shown = |id: &u8| self.placements.contains_key(id);
         let anchor = self
             .primary
@@ -1284,8 +1309,12 @@ impl Scene {
                 .filter(|(_, at)| at.elapsed() < CONFIRM_FOR)
                 .map(|(i, _)| i),
             paired: self.paired.iter().map(|(_, n)| n.clone()).collect(),
-            clock: local_clock().0,
-            date: local_date(self.lang()),
+            clock: local_time()
+                .map(|t| clock_text(&t, self.settings.clock_12h))
+                .unwrap_or_default(),
+            date: local_time()
+                .map(|t| date_text(&t, self.settings.date_style, self.lang()))
+                .unwrap_or_default(),
             confirm_forget: self
                 .confirm_forget
                 .filter(|(_, at)| at.elapsed() < CONFIRM_FOR)
@@ -2988,6 +3017,18 @@ fn handle_action(
             scene.settings.rest_every = minutes;
             scene.settings.save(settings_path);
             scene.worn_for = Duration::ZERO;
+        }
+        Action::Clock12h(on) => {
+            scene.settings.clock_12h = on;
+            scene.settings.save(settings_path);
+        }
+        Action::DateStyle(style) => {
+            scene.settings.date_style = style;
+            scene.settings.save(settings_path);
+        }
+        Action::MenuButton(on) => {
+            scene.settings.menu_button = on;
+            scene.settings.save(settings_path);
         }
         Action::SoundFromScreen(on) => {
             scene.settings.sound_from_screen = on;
