@@ -335,6 +335,53 @@ pub fn screenshot(output: Option<&str>) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Decodes one keyframe of a monitor's stream into a PNG in the Pictures folder (a
+/// screenshot of just that monitor where the desktop's tool cannot take one output).
+pub fn keyframe_to_png(data: &[u8], codec: prostir_proto::Codec) -> Result<PathBuf> {
+    use gstreamer as gst;
+    use gstreamer::prelude::*;
+    let dir = pictures_dir().join("Prostir");
+    std::fs::create_dir_all(&dir).with_context(|| format!("cannot create {dir:?}"))?;
+    let path = dir.join(format!("{}.png", timestamp()));
+    let (caps, parse) = match codec {
+        prostir_proto::Codec::H264 => ("video/x-h264", "h264parse"),
+        prostir_proto::Codec::H265 => ("video/x-h265", "h265parse"),
+    };
+    let pipeline = gst::parse::launch(&format!(
+        "appsrc name=src caps={caps},stream-format=byte-stream,alignment=au ! {parse} ! \
+         decodebin ! videoconvert ! pngenc snapshot=true ! filesink name=sink"
+    ))?
+    .downcast::<gst::Pipeline>()
+    .map_err(|_| anyhow::anyhow!("not a pipeline"))?;
+    let sink = pipeline.by_name("sink").context("no filesink")?;
+    sink.set_property("location", path.to_string_lossy().as_ref());
+    let src = pipeline
+        .by_name("src")
+        .context("no appsrc")?
+        .downcast::<gstreamer_app::AppSrc>()
+        .map_err(|_| anyhow::anyhow!("not an appsrc"))?;
+    pipeline.set_state(gst::State::Playing)?;
+    let pushed = src
+        .push_buffer(gst::Buffer::from_slice(data.to_vec()))
+        .map_err(|e| anyhow::anyhow!("{e:?}"))
+        .and_then(|_| src.end_of_stream().map_err(|e| anyhow::anyhow!("{e:?}")));
+    let bus = pipeline.bus().context("no bus")?;
+    let ended = bus.timed_pop_filtered(
+        gst::ClockTime::from_seconds(5),
+        &[gst::MessageType::Eos, gst::MessageType::Error],
+    );
+    let _ = pipeline.set_state(gst::State::Null);
+    pushed?;
+    match ended.as_ref().map(|m| m.view()) {
+        Some(gst::MessageView::Eos(_)) if path.exists() => {
+            info!("screenshot saved to {path:?}");
+            Ok(path)
+        }
+        Some(gst::MessageView::Error(e)) => bail!("{}", e.error()),
+        _ => bail!("the frame was not decoded in time"),
+    }
+}
+
 fn pictures_dir() -> PathBuf {
     let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
     std::process::Command::new("xdg-user-dir")
@@ -610,5 +657,40 @@ mod tests {
     #[test]
     fn js_strings_are_quoted() {
         assert_eq!(js_string("a'b\"c"), "\"a'b\\\"c\"");
+    }
+}
+
+#[cfg(test)]
+mod live {
+    /// A keyframe from the graphics card's encoder becomes a PNG (run by hand:
+    /// `cargo test -- --ignored keyframe`; needs the VA plugin and a GPU).
+    #[test]
+    #[ignore]
+    fn keyframe_becomes_png() {
+        use gstreamer as gst;
+        use gstreamer::prelude::*;
+        gst::init().unwrap();
+        let pipeline = gst::parse::launch(
+            "videotestsrc num-buffers=1 ! video/x-raw,width=640,height=360 ! vapostproc ! \
+             vah265enc ! h265parse config-interval=-1 ! \
+             video/x-h265,stream-format=byte-stream,alignment=au ! appsink name=out",
+        )
+        .unwrap()
+        .downcast::<gst::Pipeline>()
+        .unwrap();
+        let out = pipeline
+            .by_name("out")
+            .unwrap()
+            .downcast::<gstreamer_app::AppSink>()
+            .unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let sample = out.pull_sample().unwrap();
+        let data = sample.buffer().unwrap().map_readable().unwrap().to_vec();
+        pipeline.set_state(gst::State::Null).unwrap();
+        let path = super::keyframe_to_png(&data, prostir_proto::Codec::H265).unwrap();
+        let png = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(&png[1..4], b"PNG");
+        eprintln!("decoded {} bytes into a {} byte PNG", data.len(), png.len());
     }
 }

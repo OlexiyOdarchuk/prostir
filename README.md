@@ -143,7 +143,7 @@ rings.
 
 With your hands shown, hold your left palm open towards your face for a quarter of a
 second and a round menu appears on it: In front, Focus, Cinema, Mouse?, Screenshot and
-Line up around Menu in the middle, which also shows the time and date. Press a sector with the other hand's index finger,
+Line up around Menu in the middle, which also shows the time, the date and the headset's battery. Press a sector with the other hand's index finger,
 or point at it. The hand holding the menu is not drawn over it, and a hand reaching
 for a menu turns see-through, so it does not hide the buttons. "In front" turns the
 whole arrangement so the primary monitor is straight ahead.
@@ -182,7 +182,8 @@ has not been paired with.
   gst-plugins-ugly. See [NVIDIA and CPU encoding](#nvidia-and-cpu-encoding).
 - On KDE, `kscreen-doctor`, which comes with Plasma. Optional: `qdbus6` for matching
   wallpapers, `adb` for USB, and one of `kdialog`, `zenity`, `fuzzel`, `wofi` or `rofi`
-  for the pairing dialog. Screenshots use `spectacle` on KDE and `grim` on Hyprland.
+  for the pairing dialog. Screenshots use `grim` on Hyprland; on KDE Prostir decodes a frame of
+  that monitor's own stream (and falls back to `spectacle` for the whole desktop).
 - On Hyprland, a bar with a tray (Waybar with the `tray` module) for the menu, and a
   notification daemon (mako, dunst, swaync) for messages. See [Hyprland](#hyprland).
 
@@ -421,7 +422,7 @@ down or cinema, and not while dragging all together.
 **Settings**, in parts:
 
 - **Look**: background (black, the room, the room dimmed, a panorama or your own
-  photo), focus mode, the keyboard window, rest reminders. For your own background,
+  photo), focus mode, the keyboard window, rest reminders, monitor brightness. For your own background,
   copy an equirectangular `background.jpg` or `background.png` to
   `/sdcard/Android/data/dev.prostir.client/files/` on the headset.
 - **Controls**: hands, mouse follows the gaze (where the PC allows it), menu size,

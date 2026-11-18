@@ -104,6 +104,8 @@ pub struct UiState {
     pub can_move_mouse: bool,
     /// Names of the PCs this headset is paired with.
     pub paired: Vec<String>,
+    /// The headset's battery: percent, charging.
+    pub battery: Option<(u8, bool)>,
     /// Local time, `14:05`, and the date, `Ср, 18 лист.`, for the palm menu.
     pub clock: String,
     pub date: String,
@@ -265,6 +267,8 @@ pub enum Action {
     DateStyle(crate::settings::DateStyle),
     /// Show the round ☰ button under the main monitor.
     MenuButton(bool),
+    /// How bright the monitors are, percent.
+    Brightness(u8),
     Close,
 }
 
@@ -650,6 +654,21 @@ impl Panel {
         let centred = |this: &mut Self, s: &str, size: f32, medium: bool| {
             cx - this.text_width(s, size, medium) / 2.0
         };
+        if let Some((percent, charging)) = s.battery {
+            let battery = if charging {
+                format!("{percent} % · {}", l.t("заряджається", "charging"))
+            } else {
+                format!("{percent} %")
+            };
+            let size = 15.0;
+            let x = centred(self, &battery, size, false);
+            let color = if percent <= 15 && !charging {
+                DANGER
+            } else {
+                MUTED
+            };
+            items.push(text(x, cy - 52.0, size, false, color, &battery));
+        }
         let x = centred(self, &s.date, date, false);
         items.push(text(x, cy - 26.0, date, false, MUTED, &s.date));
         // "12:05 PM" is wider than "14:05": smaller, to stay in the circle.
@@ -1906,17 +1925,18 @@ fn build_look(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, rx: f32, rw:
         ],
     );
     y -= 12.0;
-    for line in [
+    items.push(text(
+        rx,
+        y,
+        19.0,
+        false,
+        MUTED,
         l.t(
-            "Монітори, на яких немає миші,",
-            "Monitors without the mouse",
+            "Монітори, на яких немає миші, темнішають.",
+            "Monitors without the mouse get darker.",
         ),
-        l.t("стають темнішими.", "get darker."),
-    ] {
-        items.push(text(rx, y, 19.0, false, MUTED, line));
-        y += 28.0;
-    }
-    y += 40.0;
+    ));
+    y += 48.0;
     segmented(
         items,
         rx,
@@ -1939,24 +1959,18 @@ fn build_look(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, rx: f32, rw:
         ],
     );
     y -= 12.0;
-    for line in [
+    items.push(text(
+        rx,
+        y,
+        19.0,
+        false,
+        MUTED,
         l.t(
-            "Прямокутник, крізь який видно справжній стіл.",
-            "A rectangle you see the real desk through.",
+            "Видно справжній стіл; поставте його на клавіатуру.",
+            "Shows the real desk; put it over the keyboard.",
         ),
-        l.t(
-            "Перенесіть його на клавіатуру, як монітор.",
-            "Move it onto the keyboard like a monitor.",
-        ),
-        l.t(
-            "Поки він увімкнений, камери шолома працюють.",
-            "The headset cameras run while it is on.",
-        ),
-    ] {
-        items.push(text(rx, y, 19.0, false, MUTED, line));
-        y += 28.0;
-    }
-    y += 34.0;
+    ));
+    y += 48.0;
     let every = st.rest_every;
     segmented(
         items,
@@ -1972,6 +1986,29 @@ fn build_look(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, rx: f32, rw:
         .into_iter()
         .map(|(m, label)| (label, Action::RestEvery(m), every == m, true))
         .collect(),
+    );
+    segmented(
+        items,
+        rx,
+        rw,
+        &mut y,
+        l.t("Яскравість моніторів", "Monitor brightness"),
+        [100u8, 80, 60, 40]
+            .into_iter()
+            .map(|p| {
+                (
+                    match p {
+                        100 => "100 %",
+                        80 => "80 %",
+                        60 => "60 %",
+                        _ => "40 %",
+                    },
+                    Action::Brightness(p),
+                    st.brightness == p,
+                    true,
+                )
+            })
+            .collect(),
     );
 }
 
@@ -3208,6 +3245,7 @@ mod tests {
             )),
             can_move_mouse: false,
             paired: vec!["workstation".into(), "a-much-longer-laptop-name".into()],
+            battery: Some((100, true)),
             clock: "12:59 PM".into(),
             date: "Wed, Nov 18".into(),
             confirm_forget: Some(1),

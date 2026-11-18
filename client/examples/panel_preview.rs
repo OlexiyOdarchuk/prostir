@@ -32,6 +32,7 @@ fn main() {
         unreachable: std::env::var("BLOCKED").ok(),
         can_move_mouse: std::env::var("NO_MOUSE").is_err(),
         paired: vec!["workstation".into(), "laptop".into()],
+        battery: Some((72, false)),
         clock: "14:05".into(),
         date: if std::env::var("LANG_UI").as_deref() == Ok("en") {
             "Wed 18 Nov".into()

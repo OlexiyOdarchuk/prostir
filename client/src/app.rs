@@ -400,6 +400,8 @@ struct Scene {
     selected: Option<u8>,
     /// The PC can move the mouse.
     can_move_mouse: bool,
+    /// The headset's battery (percent, charging), read once a minute.
+    headset_battery: Option<(u8, bool)>,
     /// The monitor the sound comes from, as the PC says.
     sound_from: Option<u8>,
     /// The display rate setting changed: apply it.
@@ -1309,6 +1311,7 @@ impl Scene {
                 .filter(|(_, at)| at.elapsed() < CONFIRM_FOR)
                 .map(|(i, _)| i),
             paired: self.paired.iter().map(|(_, n)| n.clone()).collect(),
+            battery: self.headset_battery,
             clock: local_time()
                 .map(|t| clock_text(&t, self.settings.clock_12h))
                 .unwrap_or_default(),
@@ -1602,6 +1605,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         wrist: None,
         selected: None,
         can_move_mouse: false,
+        headset_battery: crate::mic::battery(),
         sound_from: None,
         refresh_due: false,
         worn_for: Duration::ZERO,
@@ -1866,12 +1870,11 @@ fn run(app: &AndroidApp) -> Result<()> {
             scene.tidy_up();
         }
         scene.place_button();
-        // The headset's battery for the PC's tray, once a minute.
-        if scene.feedback.is_some()
-            && last_battery.is_none_or(|t: Instant| t.elapsed() >= Duration::from_secs(60))
-        {
+        // The headset's battery, once a minute: on the palm menu, and for the PC's tray.
+        if last_battery.is_none_or(|t: Instant| t.elapsed() >= Duration::from_secs(60)) {
             last_battery = Some(Instant::now());
-            if let Some((percent, charging)) = crate::mic::battery() {
+            scene.headset_battery = crate::mic::battery();
+            if let Some((percent, charging)) = scene.headset_battery {
                 scene.send(ClientMsg::Battery { percent, charging });
             }
         }
@@ -2526,7 +2529,11 @@ fn run(app: &AndroidApp) -> Result<()> {
                 // Fading in: premultiplied, so colour and alpha scale together.
                 let t = scene.appear.get(id).copied().unwrap_or(1.0);
                 let t = t * t * (3.0 - 2.0 * t);
-                let b = scene.brightness.get(id).copied().unwrap_or(1.0) * t;
+                // Focus dimming, the brightness setting and fading in, together.
+                let b = scene.brightness.get(id).copied().unwrap_or(1.0)
+                    * t
+                    * f32::from(scene.settings.brightness)
+                    / 100.0;
                 xr::sys::CompositionLayerColorScaleBiasKHR {
                     ty: xr::sys::CompositionLayerColorScaleBiasKHR::TYPE,
                     next: video_next,
@@ -3017,6 +3024,10 @@ fn handle_action(
             scene.settings.rest_every = minutes;
             scene.settings.save(settings_path);
             scene.worn_for = Duration::ZERO;
+        }
+        Action::Brightness(percent) => {
+            scene.settings.brightness = percent;
+            scene.settings.save(settings_path);
         }
         Action::Clock12h(on) => {
             scene.settings.clock_12h = on;

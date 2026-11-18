@@ -122,6 +122,8 @@ fn stream_name(id: u8) -> String {
 pub struct Router {
     /// The codec announced with new streams (it can change: see `set_pc_settings`).
     codec: AtomicU8,
+    /// A screenshot waiting for the next keyframe of stream `id` (see `screenshot`).
+    snapshot: Mutex<Option<(u8, std::sync::mpsc::SyncSender<Vec<u8>>)>>,
     inner: Mutex<RouterInner>,
     failed: AtomicBool,
     mirror_failed: AtomicBool,
@@ -142,6 +144,7 @@ impl Router {
             }),
             failed: AtomicBool::new(false),
             mirror_failed: AtomicBool::new(false),
+            snapshot: Mutex::new(None),
         }
     }
 
@@ -246,6 +249,14 @@ impl Router {
                 keyframe,
                 data,
             } => {
+                if keyframe {
+                    let mut wanted = self.snapshot.lock().unwrap();
+                    if wanted.as_ref().is_some_and(|(want, _)| *want == id)
+                        && let Some((_, tx)) = wanted.take()
+                    {
+                        let _ = tx.try_send(data.clone());
+                    }
+                }
                 let Some(sender) = tx else { return false };
                 if !slot.announced {
                     let Some((width, height)) = slot.size else {
@@ -1734,12 +1745,32 @@ impl Displays {
 
     /// Saves a picture of monitor `id` (all of them where only that is possible).
     pub fn screenshot(&self, id: u8) -> Result<std::path::PathBuf> {
-        let output = self
-            .monitors
-            .get(&id)
-            .or_else(|| self.windows.get(&id))
-            .map(|m| m.output.output_name().to_owned());
-        windows::screenshot(output.as_deref())
+        let monitor = self.monitors.get(&id).or_else(|| self.windows.get(&id));
+        // KDE's screenshot tool cannot take one output by name: the monitor's own
+        // stream can. A fresh keyframe, decoded into a PNG; the whole desktop if not.
+        if self.desktop.is_kde()
+            && let Some(m) = monitor
+            && self.streaming
+        {
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            *self.router.snapshot.lock().unwrap() = Some((id, tx));
+            m.encoder.force_keyframe();
+            let frame = rx.recv_timeout(Duration::from_secs(2));
+            self.router.snapshot.lock().unwrap().take();
+            let codec = if self.router.codec.load(Ordering::Relaxed) == Codec::H264 as u8 {
+                Codec::H264
+            } else {
+                Codec::H265
+            };
+            match frame
+                .map_err(anyhow::Error::from)
+                .and_then(|data| windows::keyframe_to_png(&data, codec))
+            {
+                Ok(path) => return Ok(path),
+                Err(e) => warn!("screenshot from the stream: {e:#}; taking the whole desktop"),
+            }
+        }
+        windows::screenshot(monitor.map(|m| m.output.output_name()))
     }
 
     pub fn force_keyframe(&self, id: u8) {

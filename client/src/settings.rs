@@ -115,6 +115,8 @@ pub struct Settings {
     pub date_style: DateStyle,
     /// The round ☰ button under the main monitor.
     pub menu_button: bool,
+    /// How bright the monitors are, percent (40 to 100).
+    pub brightness: u8,
     /// The mouse goes to the monitor the user looks at (where the PC allows it).
     pub gaze_mouse: bool,
     /// A bigger menu, easier to read and hit.
@@ -153,6 +155,7 @@ impl Default for Settings {
             clock_12h: false,
             date_style: DateStyle::LikeMenu,
             menu_button: true,
+            brightness: 100,
             gaze_mouse: false,
             large_menu: false,
             left_handed: false,
@@ -212,6 +215,9 @@ impl Settings {
                     }
                 }
                 Some(("menu-button", v)) => s.menu_button = v != "off",
+                Some(("brightness", v)) => {
+                    s.brightness = v.trim().parse::<u8>().unwrap_or(100).clamp(40, 100)
+                }
                 Some(("gaze-mouse", v)) => s.gaze_mouse = v == "on",
                 Some(("large-menu", v)) => s.large_menu = v == "on",
                 Some(("left-handed", v)) => s.left_handed = v == "on",
@@ -287,7 +293,7 @@ impl Settings {
         format!(
             "preset {preset}\ncurve {curve}\nbackground {background}\nhands {hands}\n\
              focus {}\ncinema {}\ncinema-screen {}\nlanguage {}\npc-language {}\nintro {}\nkeyboard-window {}\nmic {}\ntab {}\nfollow {}\n\
-             gaze-mouse {}\nlarge-menu {}\nleft-handed {}\nbattery-saver {}\nnotifications {}\nrest-every {}\nmagnet {}\nmove-all {}\nsound-from-screen {}\nclock {}\ndate {}\nmenu-button {}\n",
+             gaze-mouse {}\nlarge-menu {}\nleft-handed {}\nbattery-saver {}\nnotifications {}\nrest-every {}\nmagnet {}\nmove-all {}\nsound-from-screen {}\nclock {}\ndate {}\nmenu-button {}\nbrightness {}\n",
             on(self.focus),
             on(self.cinema),
             self.cinema_screen
@@ -318,7 +324,8 @@ impl Settings {
                 DateStyle::English => "en",
                 DateStyle::Numbers => "numbers",
             },
-            on(self.menu_button)
+            on(self.menu_button),
+            self.brightness
         )
     }
 }
@@ -351,6 +358,7 @@ mod tests {
             clock_12h: true,
             date_style: DateStyle::Numbers,
             menu_button: false,
+            brightness: 60,
             gaze_mouse: true,
             large_menu: true,
             left_handed: true,
