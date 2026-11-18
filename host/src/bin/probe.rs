@@ -168,6 +168,9 @@ fn main() -> Result<()> {
             HostMsg::MicActive { active } => println!("PC is recording: {active}"),
             HostMsg::Focus { id } => println!("mouse on: {id}"),
             HostMsg::Unknown { tag } => println!("skipped message {tag} from a newer PC"),
+            HostMsg::PcSettings { settings, encoders } => {
+                println!("PC encodes: {settings:?}, can use {encoders:#05b}")
+            }
             HostMsg::Incompatible { protocol, app } => {
                 println!("PC speaks protocol v{protocol} (app {app}): update one side");
                 break;

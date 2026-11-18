@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use log::{debug, error, info, warn};
-use prostir_proto::{Codec, HostMsg, LayoutRow, MIRROR_ID, NEXT};
+use prostir_proto::{Codec, HostMsg, LayoutRow, MIRROR_ID, NEXT, PcSettings};
+use std::sync::atomic::AtomicU8;
 
 use crate::audio::{AudioOut, MicIn};
 use crate::desktop::{Desktop, Output};
@@ -118,7 +119,8 @@ fn stream_name(id: u8) -> String {
 
 /// Delivers encoder output to whichever client is connected.
 pub struct Router {
-    codec: Codec,
+    /// The codec announced with new streams (it can change: see `set_pc_settings`).
+    codec: AtomicU8,
     inner: Mutex<RouterInner>,
     failed: AtomicBool,
     mirror_failed: AtomicBool,
@@ -132,7 +134,7 @@ struct RouterInner {
 impl Router {
     fn new(codec: Codec) -> Self {
         Self {
-            codec,
+            codec: AtomicU8::new(codec as u8),
             inner: Mutex::new(RouterInner {
                 tx: None,
                 streams: BTreeMap::new(),
@@ -252,7 +254,11 @@ impl Router {
                         id,
                         width,
                         height,
-                        codec: self.codec,
+                        codec: if self.codec.load(Ordering::Relaxed) == Codec::H264 as u8 {
+                            Codec::H264
+                        } else {
+                            Codec::H265
+                        },
                         name: stream_name(id),
                     };
                     if !sender.control(start) {
@@ -448,6 +454,10 @@ pub struct SavedMonitors {
     pub bitrate: Option<u32>,
     /// Clearer-text encoder preset.
     pub sharp: bool,
+    /// Codec chosen in the headset menu, if any.
+    pub codec: Option<Codec>,
+    /// Encode on the CPU, chosen in the headset menu.
+    pub software: bool,
     /// Rows from top to bottom: (left edge in pixels, number of monitors), covering
     /// `specs` in order. Empty: one row.
     /// Rows: the seen centre of each monitor in it ([`NEXT`] if unknown).
@@ -476,6 +486,8 @@ pub fn load_saved(parse: impl Fn(&str) -> Result<MonitorSpec, String>) -> Option
     let mut mic = true;
     let mut bitrate = None;
     let mut sharp = false;
+    let mut codec = None;
+    let mut software = false;
     let mut rows: Vec<Vec<i32>> = Vec::new();
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
         if line == "row" || line.starts_with("row ") {
@@ -484,6 +496,18 @@ pub fn load_saved(parse: impl Fn(&str) -> Result<MonitorSpec, String>) -> Option
         }
         if let Some(v) = line.strip_prefix("sharp ") {
             sharp = v.trim() == "on";
+            continue;
+        }
+        if let Some(v) = line.strip_prefix("codec ") {
+            codec = match v.trim() {
+                "h264" => Some(Codec::H264),
+                "h265" => Some(Codec::H265),
+                _ => None,
+            };
+            continue;
+        }
+        if let Some(v) = line.strip_prefix("software ") {
+            software = v.trim() == "on";
             continue;
         }
         if let Some(v) = line.strip_prefix("bitrate ") {
@@ -529,6 +553,8 @@ pub fn load_saved(parse: impl Fn(&str) -> Result<MonitorSpec, String>) -> Option
         mic,
         bitrate,
         sharp,
+        codec,
+        software,
         rows,
     })
 }
@@ -806,6 +832,83 @@ impl Displays {
         for (_, e) in self.encoders() {
             e.set_target_usage(value);
         }
+    }
+
+    /// How the PC encodes, for the headset menu.
+    pub fn pc_settings(&self) -> PcSettings {
+        PcSettings {
+            quality: self.cfg.bitrate_kbps / 1000,
+            codec: self.cfg.codec,
+            software: self.cfg.backend == crate::encoder::Backend::X264,
+            sharp: self.cfg.sharp,
+        }
+    }
+
+    /// Tells the headset how the PC encodes and what it could encode with.
+    pub fn announce_pc_settings(&self) {
+        self.router.send(HostMsg::PcSettings {
+            settings: self.pc_settings(),
+            encoders: crate::encoder::available(),
+        });
+    }
+
+    /// Settings changed in the headset menu. Quality and the text preset apply on the
+    /// fly; another codec or the CPU encoder restarts the encoders (the monitors and
+    /// their windows stay).
+    pub fn set_pc_settings(&mut self, wanted: PcSettings) -> Result<()> {
+        let quality = wanted.quality.clamp(5, 100);
+        if quality != self.cfg.bitrate_kbps / 1000 {
+            self.set_bitrate(quality);
+        }
+        if wanted.sharp != self.cfg.sharp {
+            self.set_sharp(wanted.sharp);
+        }
+        let current = self.pc_settings();
+        if wanted.codec != current.codec || wanted.software != current.software {
+            let (backend, codec) = crate::encoder::pick(wanted.codec, wanted.software)?;
+            info!("encoding with {backend:?} {codec:?} (from the headset menu)");
+            self.cfg.backend = backend;
+            self.cfg.codec = codec;
+            self.router.codec.store(codec as u8, Ordering::Relaxed);
+            self.restart_encoders()?;
+        }
+        self.save();
+        self.announce_pc_settings();
+        Ok(())
+    }
+
+    /// New encoders for every stream with the current settings. Each old one stops
+    /// before its replacement starts, so the headset never gets frames of two codecs
+    /// for one stream.
+    fn restart_encoders(&mut self) -> Result<()> {
+        let ids: Vec<u8> = self.monitors.keys().copied().collect();
+        for id in ids {
+            let Some(Monitor {
+                encoder,
+                mut output,
+                spec,
+            }) = self.monitors.remove(&id)
+            else {
+                continue;
+            };
+            output.detach();
+            drop(encoder);
+            let encoder = self.start_encoder(id, &output.input())?;
+            output.attach(&encoder, self.cfg.backend.takes_dmabuf())?;
+            encoder.force_keyframe();
+            self.monitors.insert(
+                id,
+                Monitor {
+                    encoder,
+                    output,
+                    spec,
+                },
+            );
+        }
+        // The mirror starts again by itself, with the new settings.
+        self.stop_mirror();
+        self.mirror_retry = Instant::now();
+        Ok(())
     }
 
     /// Applies a new bitrate to every running encoder and to monitors added later.
@@ -1311,12 +1414,21 @@ impl Displays {
                 )
             })
             .chain(std::iter::once(format!(
-                "mirror {}\naudio {}\nmic {}\nbitrate {}\nsharp {}\n",
+                "mirror {}\naudio {}\nmic {}\nbitrate {}\nsharp {}\ncodec {}\nsoftware {}\n",
                 if self.mirror_wanted { "on" } else { "off" },
                 if self.audio_wanted { "on" } else { "off" },
                 if self.mic_wanted { "on" } else { "off" },
                 self.cfg.bitrate_kbps / 1000,
-                if self.cfg.sharp { "on" } else { "off" }
+                if self.cfg.sharp { "on" } else { "off" },
+                match self.cfg.codec {
+                    Codec::H264 => "h264",
+                    Codec::H265 => "h265",
+                },
+                if self.cfg.backend == crate::encoder::Backend::X264 {
+                    "on"
+                } else {
+                    "off"
+                }
             )))
             .collect();
         let result = path

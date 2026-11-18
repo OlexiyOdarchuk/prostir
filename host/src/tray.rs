@@ -72,6 +72,16 @@ pub fn set_status(handle: Option<&Handle>, status: Status) {
 }
 
 /// Shows (or hides) the pairing code in the tray.
+/// Quality and the text preset changed elsewhere (the headset menu).
+pub fn set_encoding(handle: Option<&Handle>, bitrate: u32, sharp: bool) {
+    if let Some(h) = handle {
+        h.update(|t| {
+            t.bitrate = bitrate;
+            t.sharp = sharp;
+        });
+    }
+}
+
 pub fn set_pairing(handle: Option<&Handle>, code: Option<String>) {
     if let Some(h) = handle {
         h.update(|t| t.pairing_code = code);

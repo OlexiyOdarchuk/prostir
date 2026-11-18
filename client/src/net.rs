@@ -116,6 +116,8 @@ pub enum NetEvent {
     },
     /// The codes did not match; a new attempt follows.
     PairingFailed,
+    /// How the PC encodes and what it can encode with.
+    PcSettings(prostir_proto::PcSettings, u8),
     /// A PC announces itself on the network but does not accept the connection
     /// (a firewall on the PC); `None` once connecting works again.
     Unreachable(Option<String>),
@@ -896,6 +898,9 @@ fn run_session(
             }
             // The headset's own switch decides about its microphone.
             HostMsg::MicWanted { .. } => {}
+            HostMsg::PcSettings { settings, encoders } => {
+                let _ = events.send(NetEvent::PcSettings(settings, encoders));
+            }
             // The PC asks; the headset's own switch decides (checked below too).
             HostMsg::MicActive { active } => mic_asked = active,
             // From a newer PC: skipped, the session goes on.

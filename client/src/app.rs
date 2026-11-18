@@ -186,6 +186,8 @@ struct Scene {
     pairing: Option<ui::PairingView>,
     /// A PC on the network that refuses the connection (a firewall).
     unreachable: Option<String>,
+    /// How the connected PC encodes, and what it can encode with.
+    pc: Option<(prostir_proto::PcSettings, u8)>,
     /// An unknown PC waiting for "Pair" or "Not now" (survives the disconnect that
     /// follows the question).
     pair_offer: Option<(String, bool)>,
@@ -607,6 +609,7 @@ impl Scene {
             pairing: self.pairing.clone(),
             pair_offer: self.pair_offer.clone(),
             unreachable: self.unreachable.clone(),
+            pc: self.pc,
             monitors: self
                 .quest_sizes()
                 .into_iter()
@@ -651,20 +654,28 @@ impl Scene {
 /// The user's own panorama (`background.jpg/.png` next to `host.txt`), if there is one.
 /// The menu tab as stored in the settings (the menu opens on the last one).
 fn tab_code(tab: Tab) -> u8 {
+    use ui::Section;
     match tab {
-        Tab::Monitors => 0,
-        Tab::Profiles => 1,
-        Tab::Look => 2,
-        Tab::Sound => 3,
+        Tab::Quick => 0,
+        Tab::Monitors => 1,
+        Tab::Settings(Section::Look) => 2,
+        Tab::Settings(Section::Sound) => 3,
+        Tab::Settings(Section::Language) => 4,
+        Tab::Settings(Section::Pc) => 5,
+        Tab::Settings(Section::Help) => 6,
     }
 }
 
 fn tab_from_code(code: u8) -> Tab {
+    use ui::Section;
     match code {
-        1 => Tab::Profiles,
-        2 => Tab::Look,
-        3 => Tab::Sound,
-        _ => Tab::Monitors,
+        1 => Tab::Monitors,
+        2 => Tab::Settings(Section::Look),
+        3 => Tab::Settings(Section::Sound),
+        4 => Tab::Settings(Section::Language),
+        5 => Tab::Settings(Section::Pc),
+        6 => Tab::Settings(Section::Help),
+        _ => Tab::Quick,
     }
 }
 
@@ -874,6 +885,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         pairing: None,
         pair_offer: None,
         unreachable: None,
+        pc: None,
         steering,
         offline_since: Some(Instant::now()),
         feedback: None,
@@ -1774,6 +1786,7 @@ fn handle_net_event(
         }
         NetEvent::Hosts(hosts) => scene.found = hosts,
         NetEvent::Unreachable(name) => scene.unreachable = name,
+        NetEvent::PcSettings(settings, encoders) => scene.pc = Some((settings, encoders)),
         NetEvent::Pairing { host, code } => {
             let failed = scene.pairing.as_ref().is_some_and(|p| p.failed);
             scene.pairing = Some(ui::PairingView {
@@ -1802,6 +1815,7 @@ fn handle_net_event(
             scene.offline_since = Some(Instant::now());
             scene.pairing = None;
             scene.host = None;
+            scene.pc = None;
             scene.feedback = None;
         }
         NetEvent::PrimaryChanged(id) => {
@@ -2075,6 +2089,17 @@ fn handle_action(
             }
         }
         Action::AskMic => crate::mic::ask_again(),
+        Action::SetPc(settings) => {
+            // Shown at once; the PC confirms (or corrects) with its own message.
+            if let Some((pc, _)) = &mut scene.pc {
+                *pc = settings;
+            }
+            scene.send(ClientMsg::SetPcSettings { settings });
+        }
+        Action::ShowTips => {
+            scene.settings.intro_seen = false;
+            scene.settings.save(settings_path);
+        }
         Action::ConnectTo(i) => {
             if let Some(h) = scene.found.get(i) {
                 scene.steering.connect_to(h.addr);

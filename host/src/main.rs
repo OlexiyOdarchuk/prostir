@@ -43,10 +43,11 @@ struct Args {
     #[arg(long)]
     keep_primary: bool,
     /// Video codec.
-    /// HEVC by default: sharpest small text. H.264 needs far less memory on Intel (~9 MB
-    /// against ~70 MB of driver memory per monitor) at a slightly softer picture.
-    #[arg(long, value_enum, default_value_t = CodecArg::H265)]
-    codec: CodecArg,
+    /// Video codec. Without it: the one chosen in the headset menu, else HEVC (sharpest
+    /// small text). H.264 needs far less memory on Intel (~9 MB against ~70 MB of driver
+    /// memory per monitor) at a slightly softer picture.
+    #[arg(long, value_enum)]
+    codec: Option<CodecArg>,
     /// Bitrate per monitor, Mbit/s (default: the quality chosen in the tray, or 30).
     #[arg(long)]
     bitrate: Option<u32>,
@@ -116,6 +117,7 @@ impl Control {
                     if let Some(d) = displays.as_deref_mut() {
                         d.set_bitrate(mbps);
                         d.save();
+                        d.announce_pc_settings();
                     }
                 }
                 tray::Command::SetSharp(sharp) => {
@@ -124,6 +126,7 @@ impl Control {
                     if let Some(d) = displays.as_deref_mut() {
                         d.set_sharp(sharp);
                         d.save();
+                        d.announce_pc_settings();
                     }
                 }
                 tray::Command::SetCounting(on) => usage::set_enabled(on),
@@ -255,6 +258,7 @@ fn serve_client(
     displays.router.send(HostMsg::MicWanted {
         enabled: displays.mic_wanted(),
     });
+    displays.announce_pc_settings();
     displays.set_streaming(true);
     displays.force_keyframes();
     usage::headset_connected();
@@ -360,6 +364,16 @@ fn serve_client(
                 displays.set_primary(id);
                 displays.save();
                 displays::sync_wallpapers();
+            }
+            Ok(Ok(ClientMsg::SetPcSettings { settings })) => {
+                match displays.set_pc_settings(settings) {
+                    Ok(()) => {
+                        control.bitrate = settings.quality.clamp(5, 100);
+                        control.sharp = settings.sharp;
+                        tray::set_encoding(control.tray.as_ref(), control.bitrate, control.sharp);
+                    }
+                    Err(e) => report(displays, format!("{e:#}")),
+                }
             }
             Ok(Ok(ClientMsg::Unknown { tag })) => {
                 debug!("skipping message {tag} from a newer headset")
@@ -478,11 +492,15 @@ fn spawn_adb_reverse(port: u16) {
 }
 
 fn create_displays(args: &Args, bitrate: u32, sharp: bool) -> Result<Displays> {
+    let stored = displays::load_saved(parse_monitor);
+    // The command line wins, then the headset menu's choice, then HEVC.
     let prefer = match args.codec {
-        CodecArg::H264 => Codec::H264,
-        CodecArg::H265 => Codec::H265,
+        Some(CodecArg::H264) => Codec::H264,
+        Some(CodecArg::H265) => Codec::H265,
+        None => stored.as_ref().and_then(|s| s.codec).unwrap_or(Codec::H265),
     };
-    let (backend, codec) = encoder::pick(prefer, args.software)?;
+    let software = args.software || stored.as_ref().is_some_and(|s| s.software);
+    let (backend, codec) = encoder::pick(prefer, software)?;
     info!("encoding with {backend:?} {codec:?}");
     let cfg = EncoderConfig {
         codec,
@@ -490,7 +508,6 @@ fn create_displays(args: &Args, bitrate: u32, sharp: bool) -> Result<Displays> {
         backend,
         sharp,
     };
-    let stored = displays::load_saved(parse_monitor);
     let mirror = stored.as_ref().is_none_or(|s| s.mirror);
     let saved = match stored {
         Some(saved) if args.monitors.is_empty() => saved,
@@ -502,6 +519,8 @@ fn create_displays(args: &Args, bitrate: u32, sharp: bool) -> Result<Displays> {
             mic: true,
             bitrate: None,
             sharp,
+            codec: None,
+            software,
             rows: Vec::new(),
         },
         _ => SavedMonitors {
@@ -512,6 +531,8 @@ fn create_displays(args: &Args, bitrate: u32, sharp: bool) -> Result<Displays> {
             mic: true,
             bitrate: None,
             sharp,
+            codec: None,
+            software,
             rows: Vec::new(),
         },
     };

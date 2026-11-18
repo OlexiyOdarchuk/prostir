@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 
 use fontdue::{Font, FontSettings, Metrics};
+use prostir_proto::PcSettings;
 use tiny_skia::{FillRule, Paint, Path, PathBuilder, Pixmap, Rect, Stroke, Transform};
 
 use crate::i18n::{Lang, Language};
@@ -58,6 +59,8 @@ pub struct UiState {
     pub mic_wanted: bool,
     /// Access to the microphone was refused in the system.
     pub mic_denied: bool,
+    /// How the PC encodes and what it can encode with (while connected).
+    pub pc: Option<(PcSettings, u8)>,
     /// The physical display is being shown (its lid is open).
     pub mirror_active: bool,
     pub settings: Settings,
@@ -87,11 +90,36 @@ pub struct UiState {
 /// Pages of the menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Tab {
+    /// Large tiles for what is used every day.
     #[default]
+    Quick,
     Monitors,
-    Profiles,
+    Settings(Section),
+}
+
+/// A part of the Settings tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Section {
+    #[default]
     Look,
     Sound,
+    Language,
+    Pc,
+    Help,
+}
+
+impl Tab {
+    fn section(self) -> Option<Section> {
+        match self {
+            Tab::Settings(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// The same top-level tab (any section of Settings counts as Settings).
+    fn same_page(self, other: Tab) -> bool {
+        std::mem::discriminant(&self) == std::mem::discriminant(&other)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -142,6 +170,10 @@ pub enum Action {
     PairAnswer(bool),
     /// Ask for microphone access again after it was refused.
     AskMic,
+    /// Change how the PC encodes.
+    SetPc(PcSettings),
+    /// Show the first-run tips again.
+    ShowTips,
     Close,
 }
 
@@ -161,8 +193,6 @@ enum Style {
 enum Item {
     Panel(Rect),
     Box(Rect, [u8; 4]),
-    /// A thin outline around a card (the active profile).
-    Outline(Rect, [u8; 4]),
     /// A small filled circle: a status light.
     Dot {
         x: f32,
@@ -290,7 +320,10 @@ impl Panel {
                             r.width() - 16.0
                         ));
                     }
-                    boxes.push((*r, label.clone(), true));
+                    // An empty label: a tile, whose own texts are drawn on top of it.
+                    if !label.is_empty() {
+                        boxes.push((*r, label.clone(), true));
+                    }
                 }
                 Item::Text {
                     x,
@@ -423,22 +456,25 @@ impl Panel {
             return items;
         }
 
-        // Tabs.
+        // Tabs: everyday things, the monitors, everything set once.
         let tabs = [
+            (Tab::Quick, l.t("Швидке", "Quick")),
             (Tab::Monitors, l.t("Монітори", "Monitors")),
-            (Tab::Profiles, l.t("Профілі", "Profiles")),
-            (Tab::Look, l.t("Вигляд", "Look")),
-            (Tab::Sound, l.t("Звук і мова", "Sound, language")),
+            (
+                Tab::Settings(s.tab.section().unwrap_or_default()),
+                l.t("Налаштування", "Settings"),
+            ),
         ];
+        let tab_w = (w - 2.0 * lx - 2.0 * 10.0) / 3.0;
         // A track the tabs sit in, so they read as one control, apart from the
         // option buttons below.
         items.push(Item::Box(
-            rect(lx - 6.0, 122.0, 4.0 * 210.0 + 2.0, 62.0),
+            rect(lx - 6.0, 122.0, w - 2.0 * lx + 12.0, 62.0),
             [255, 255, 255, 10],
         ));
         for (i, (tab, label)) in tabs.into_iter().enumerate() {
-            let r = rect(lx + i as f32 * 210.0, 128.0, 200.0, 50.0);
-            if s.tab == tab {
+            let r = rect(lx + i as f32 * (tab_w + 10.0), 128.0, tab_w, 50.0);
+            if s.tab.same_page(tab) {
                 items.push(button(r, label, Style::TabOn, None));
             } else {
                 items.push(button(r, label, Style::TabOff, Some(Action::Tab(tab))));
@@ -447,57 +483,19 @@ impl Panel {
 
         let top = 230.0;
         match s.tab {
+            Tab::Quick => build_quick(s, &mut items, lx, w - 2.0 * lx, top - 12.0),
             Tab::Monitors => {
-                if s.host.is_none() {
-                    self.build_connection(s, &mut items, lx, lw, top);
+                let left = monitor_list(s, &mut items, lx, lw, top - 12.0);
+                let right = build_monitor_options(s, &mut items, rx, rw, top);
+                // Under the list if there is room above the error line, else on the
+                // right (with six monitors listed).
+                if left + 34.0 + 70.0 < HEIGHT as f32 - 60.0 {
+                    save_as_profile(s, &mut items, lx, lw, left + 34.0);
                 } else {
-                    let y = monitor_list(s, &mut items, lx, lw, top - 12.0);
-                    // The control hints, where there is room for them (not with six
-                    // monitors listed) above the error line.
-                    let at = y.max(640.0) + 30.0;
-                    if at + 4.0 * 30.0 < HEIGHT as f32 - 60.0 {
-                        hints(l, &mut items, lx, at);
-                    }
+                    save_as_profile(s, &mut items, rx, rw, right);
                 }
-                build_monitor_options(s, &mut items, rx, rw, top);
             }
-            Tab::Profiles => {
-                build_profiles(s, &mut items, lx, rx + rw - lx, top - 12.0);
-            }
-            Tab::Look => {
-                build_look(s, &mut items, lx, lw, rx, rw, top);
-            }
-            Tab::Sound => {
-                build_sound(s, &mut items, lx, lw, top - 12.0);
-                let mut y = top;
-                segmented(
-                    &mut items,
-                    rx,
-                    rw,
-                    &mut y,
-                    l.t("Мова · Language", "Language · Мова"),
-                    vec![
-                        (
-                            l.t("Як на ПК", "Same as PC"),
-                            Action::Language(Language::LikePc),
-                            s.settings.language == Language::LikePc,
-                            true,
-                        ),
-                        (
-                            "Українська",
-                            Action::Language(Language::Fixed(Lang::Uk)),
-                            s.settings.language == Language::Fixed(Lang::Uk),
-                            true,
-                        ),
-                        (
-                            "English",
-                            Action::Language(Language::Fixed(Lang::En)),
-                            s.settings.language == Language::Fixed(Lang::En),
-                            true,
-                        ),
-                    ],
-                );
-            }
+            Tab::Settings(section) => build_settings(s, section, &mut items, top - 12.0),
         }
         if let Some(e) = &s.error {
             items.push(text(lx, HEIGHT as f32 - 34.0, 21.0, true, DANGER, e));
@@ -794,7 +792,6 @@ impl Panel {
             match item {
                 Item::Panel(r) => fill(&mut pixmap, rounded(*r, 36.0), [16, 18, 24, 240]),
                 Item::Box(r, color) => fill(&mut pixmap, rounded(*r, 14.0), *color),
-                Item::Outline(r, color) => stroke(&mut pixmap, rounded(*r, 14.0), *color, 2.0),
                 Item::Dot { x, y, r, color } => fill(&mut pixmap, circle(*x, *y, *r), *color),
                 Item::Text {
                     x,
@@ -1120,7 +1117,7 @@ fn segmented(
 }
 
 /// Add a monitor, layout, curve.
-fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, mut y: f32) {
+fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, mut y: f32) -> f32 {
     let l = s.lang;
     items.push(text(
         rx,
@@ -1296,6 +1293,7 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
                 .collect(),
         );
     }
+    y
 }
 
 /// Background and hands on the left, focus mode on the right.
@@ -1395,7 +1393,8 @@ fn build_look(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, rx: f32, rw:
         ],
     );
 
-    let mut y = top;
+    // Side by side, or (one column) under the background and hands.
+    let mut y = if rx == lx { y - 10.0 } else { top };
     segmented(
         items,
         rx,
@@ -1765,119 +1764,388 @@ fn build_intro(l: Lang, items: &mut Vec<Item>, x: f32, w: f32) {
     ));
 }
 
-/// "1 монітор", "3 монітори", "5 моніторів" / "1 monitor", "3 monitors".
-fn monitors_count(l: Lang, n: usize) -> String {
-    let word = match l {
-        Lang::En if n == 1 => "monitor",
-        Lang::En => "monitors",
-        Lang::Uk if n % 10 == 1 && n % 100 != 11 => "монітор",
-        Lang::Uk if (2..=4).contains(&(n % 10)) && !(12..=14).contains(&(n % 100)) => "монітори",
-        Lang::Uk => "моніторів",
+/// A big square button with a title and its state underneath: what is on is lit.
+#[allow(clippy::too_many_arguments)]
+fn tile(
+    items: &mut Vec<Item>,
+    r: Rect,
+    title: &str,
+    state: &str,
+    on: bool,
+    action: Option<Action>,
+) {
+    let style = match (&action, on) {
+        (None, _) => Style::Disabled,
+        (_, true) => Style::Selected,
+        _ => Style::Normal,
     };
-    format!("{n} {word}")
+    items.push(button(r, "", style, action));
+    let (fg, sub) = if on {
+        ([255, 255, 255, 255], [225, 235, 255, 255])
+    } else {
+        (TEXT, MUTED)
+    };
+    items.push(text(r.left() + 26.0, r.top() + 62.0, 27.0, true, fg, title));
+    items.push(text(
+        r.left() + 24.0,
+        r.top() + 104.0,
+        19.0,
+        false,
+        sub,
+        state,
+    ));
 }
 
-/// One card per profile: switch to it, or store the current setup in it.
-fn build_profiles(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
+/// Everyday things in one place: profiles to switch to, and toggles as tiles.
+fn build_quick(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
     let l = s.lang;
+    let st = s.settings;
+    let connected = s.host.is_some();
+    items.push(text(
+        x,
+        y + 14.0,
+        21.0,
+        true,
+        SECTION,
+        l.t("Профіль", "Profile"),
+    ));
+    y += 32.0;
     let names = [
         l.t("Робота", "Work"),
         l.t("Кіно", "Cinema"),
         l.t("Лежачи", "Lying down"),
     ];
-    for (i, p) in s.profiles.iter().enumerate() {
-        items.push(Item::Box(rect(x, y, w, 104.0), [255, 255, 255, 12]));
-        items.push(text(
-            x + 24.0,
-            y + 42.0,
-            26.0,
-            true,
-            TEXT,
-            names.get(i).copied().unwrap_or("—"),
-        ));
-        let mut sizes: Vec<String> = Vec::new();
-        for (w, h) in &p.sizes {
-            sizes.push(format!("{w}×{h}"));
-        }
-        let layout = if p.settings.cinema {
-            l.t("кінотеатр", "cinema")
-        } else {
-            match p.settings.preset {
-                Preset::Arc => l.t("навколо", "around"),
-                Preset::Wall => l.t("стіна", "wall"),
-                Preset::Overhead => l.t("лежачи", "lying down"),
-            }
+    let cw = (w - 2.0 * 12.0) / 3.0;
+    for (i, name) in names.iter().enumerate() {
+        let r = rect(x + i as f32 * (cw + 12.0), y, cw, 72.0);
+        let active = s.active_profile == Some(i);
+        let style = match (connected, active) {
+            (false, _) => Style::Disabled,
+            (true, true) => Style::Selected,
+            (true, false) => Style::Normal,
         };
-        let mut summary = format!(
-            "{}: {} · {layout}",
-            monitors_count(l, p.sizes.len()),
-            sizes.join(", ")
-        );
-        if p.mirror {
-            summary.push_str(l.t(" · екран ноутбука", " · laptop screen"));
-        }
-        items.push(text(x + 24.0, y + 78.0, 19.0, false, MUTED, &summary));
-        let save = rect(x + w - 16.0 - 230.0, y + 28.0, 230.0, 48.0);
-        let apply = rect(save.left() - 10.0 - 200.0, y + 28.0, 200.0, 48.0);
-        if s.active_profile == Some(i) {
-            // A state, not a button: the card is marked instead.
-            items.push(Item::Outline(rect(x, y, w, 104.0), [61, 126, 255, 170]));
-            let label = l.t("Увімкнено", "Active");
-            items.push(Item::Dot {
-                x: apply.left() + 34.0,
-                y: apply.top() + 24.0,
-                r: 6.0,
-                color: ACCENT,
-            });
-            items.push(text(
-                apply.left() + 50.0,
-                apply.top() + 31.0,
-                21.0,
-                true,
-                ACCENT,
-                label,
-            ));
+        let action = (connected && !active).then_some(Action::ApplyProfile(i));
+        items.push(button(r, name, style, action));
+    }
+    // The tiles sit low, where a hand reaches without lifting the arm.
+    y += 72.0 + 60.0;
+    let on_off = |on: bool| {
+        if on {
+            l.t("Увімкнено", "On")
         } else {
-            let (style, action) = if s.host.is_some() {
-                (Style::Normal, Some(Action::ApplyProfile(i)))
+            l.t("Вимкнено", "Off")
+        }
+    };
+    let tw = (w - 2.0 * 12.0) / 3.0;
+    let th = 170.0;
+    let tiles: [(&str, String, bool, Option<Action>); 6] = [
+        (
+            l.t("Перед собою", "In front of me"),
+            l.t("Повернути все до себе", "Turn everything to me")
+                .to_owned(),
+            false,
+            Some(Action::Recenter),
+        ),
+        (
+            l.t("Фокус", "Focus"),
+            on_off(st.focus).to_owned(),
+            st.focus,
+            Some(Action::Focus(!st.focus)),
+        ),
+        (
+            l.t("Кінотеатр", "Cinema"),
+            on_off(st.cinema).to_owned(),
+            st.cinema,
+            Some(Action::Cinema(!st.cinema)),
+        ),
+        (
+            l.t("Вікно на клавіатуру", "Keyboard window"),
+            on_off(st.keyboard_window).to_owned(),
+            st.keyboard_window,
+            s.keyboard_available
+                .then_some(Action::KeyboardWindow(!st.keyboard_window)),
+        ),
+        (
+            l.t("Звук ПК", "PC sound"),
+            if s.audio_wanted {
+                l.t("У шоломі", "In the headset")
             } else {
-                (Style::Disabled, None)
-            };
-            items.push(button(apply, l.t("Увімкнути", "Switch to"), style, action));
-        }
-        // Overwriting a profile asks for a second press, like removing a monitor.
+                l.t("На ПК", "On the PC")
+            }
+            .to_owned(),
+            s.audio_wanted,
+            connected.then_some(Action::SetAudio(!s.audio_wanted)),
+        ),
+        (
+            l.t("Мікрофон", "Microphone"),
+            if s.mic_wanted {
+                l.t("Мікрофон шолома", "The headset's")
+            } else {
+                l.t("Мікрофон ПК", "The PC's")
+            }
+            .to_owned(),
+            s.mic_wanted,
+            connected.then_some(Action::SetMic(!s.mic_wanted)),
+        ),
+    ];
+    for (i, (title, state, on, action)) in tiles.into_iter().enumerate() {
+        let r = rect(
+            x + (i % 3) as f32 * (tw + 12.0),
+            y + (i / 3) as f32 * (th + 12.0),
+            tw,
+            th,
+        );
+        tile(items, r, title, &state, on, action);
+    }
+}
+
+/// Saves the current setup into one of the profiles (second press confirms).
+fn save_as_profile(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
+    let l = s.lang;
+    items.push(text(
+        x,
+        y,
+        21.0,
+        true,
+        SECTION,
+        l.t("Зберегти як профіль", "Save as profile"),
+    ));
+    y += 18.0;
+    let names = [
+        l.t("Робота", "Work"),
+        l.t("Кіно", "Cinema"),
+        l.t("Лежачи", "Lying down"),
+    ];
+    let bw = (w - 2.0 * 10.0) / 3.0;
+    for (i, name) in names.iter().enumerate() {
         let armed = s.confirm_save == Some(i);
-        let (style, action) = match (s.host.is_some(), armed) {
-            (false, _) => (Style::Disabled, None),
-            (true, true) => (Style::Armed, Some(Action::SaveProfile(i))),
-            (true, false) => (Style::Normal, Some(Action::SaveProfile(i))),
-        };
         let label = if armed {
-            l.t("Замінити? Ще раз", "Replace? Press again")
+            l.t("Замінити?", "Replace?")
         } else {
-            l.t("Зберегти поточне", "Save current")
+            name
         };
-        items.push(button(save, label, style, action));
-        y += 116.0;
+        let style = match (s.host.is_some(), armed) {
+            (false, _) => Style::Disabled,
+            (true, true) => Style::Armed,
+            (true, false) => Style::Normal,
+        };
+        items.push(button(
+            rect(x + i as f32 * (bw + 10.0), y, bw, 48.0),
+            label,
+            style,
+            s.host.is_some().then_some(Action::SaveProfile(i)),
+        ));
     }
-    y += 24.0;
-    for line in [
-        l.t(
-            "«Зберегти поточне» записує в профіль теперішні монітори, головний,",
-            "“Save current” stores the current monitors, the primary one,",
-        ),
-        l.t(
-            "екран ноутбука, розкладку, вигин, фон і режим. Монітори того самого розміру",
-            "laptop screen, layout, curve, background and mode. Monitors of the same size",
-        ),
-        l.t(
-            "при перемиканні лишаються, тож вікна на них не зникають.",
-            "are kept when switching, so their windows stay.",
-        ),
-    ] {
-        items.push(text(x, y, 19.0, false, MUTED, line));
-        y += 30.0;
+}
+
+/// Settings: the parts listed on the left, the chosen one on the right.
+fn build_settings(s: &UiState, section: Section, items: &mut Vec<Item>, top: f32) {
+    let l = s.lang;
+    let (nx, nw) = (44.0, 230.0);
+    let sections = [
+        (Section::Look, l.t("Вигляд", "Look")),
+        (Section::Sound, l.t("Звук", "Sound")),
+        (Section::Language, l.t("Мова", "Language")),
+        (Section::Pc, l.t("ПК", "PC")),
+        (Section::Help, l.t("Довідка", "Help")),
+    ];
+    for (i, (sec, label)) in sections.into_iter().enumerate() {
+        let r = rect(nx, top + i as f32 * 60.0, nw, 52.0);
+        if sec == section {
+            items.push(button(r, label, Style::TabOn, None));
+        } else {
+            items.push(button(
+                r,
+                label,
+                Style::TabOff,
+                Some(Action::Tab(Tab::Settings(sec))),
+            ));
+        }
     }
+    // A thin line between the list and the content.
+    items.push(Item::Box(
+        rect(nx + nw + 20.0, top, 2.0, 640.0),
+        [255, 255, 255, 14],
+    ));
+    let (cx, cw) = (nx + nw + 50.0, WIDTH as f32 - (nx + nw + 50.0) - 44.0);
+    let ctop = top + 12.0;
+    match section {
+        Section::Look => {
+            let col = cw.min(640.0);
+            build_look(s, items, cx, col, cx, col, ctop);
+        }
+        Section::Sound => build_sound(s, items, cx, cw.min(620.0), ctop - 12.0),
+        Section::Language => {
+            let mut y = ctop;
+            segmented(
+                items,
+                cx,
+                cw.min(620.0),
+                &mut y,
+                l.t("Мова меню · Language", "Menu language · Мова"),
+                vec![
+                    (
+                        l.t("Як на ПК", "Same as PC"),
+                        Action::Language(Language::LikePc),
+                        s.settings.language == Language::LikePc,
+                        true,
+                    ),
+                    (
+                        "Українська",
+                        Action::Language(Language::Fixed(Lang::Uk)),
+                        s.settings.language == Language::Fixed(Lang::Uk),
+                        true,
+                    ),
+                    (
+                        "English",
+                        Action::Language(Language::Fixed(Lang::En)),
+                        s.settings.language == Language::Fixed(Lang::En),
+                        true,
+                    ),
+                ],
+            );
+        }
+        Section::Pc => build_pc(s, items, cx, cw.min(700.0), ctop),
+        Section::Help => {
+            hints(l, items, cx, ctop + 10.0);
+            items.push(button(
+                rect(cx, ctop + 170.0, 300.0, 50.0),
+                l.t("Показати підказки знову", "Show the tips again"),
+                Style::Normal,
+                Some(Action::ShowTips),
+            ));
+            items.push(text(
+                cx,
+                ctop + 270.0,
+                19.0,
+                false,
+                MUTED,
+                &format!(
+                    "Prostir {} · prostir.ishawyha.dev",
+                    env!("CARGO_PKG_VERSION")
+                ),
+            ));
+        }
+    }
+}
+
+/// How the PC encodes: quality, codec, graphics card or CPU, text preset.
+fn build_pc(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
+    let l = s.lang;
+    let Some((pc, encoders)) = s.pc else {
+        items.push(text(
+            x,
+            y + 20.0,
+            21.0,
+            false,
+            MUTED,
+            l.t(
+                "Доступно, коли ПК підключено.",
+                "Available while a PC is connected.",
+            ),
+        ));
+        return;
+    };
+    use prostir_proto::encoders::{CPU_H264, GPU_H264, GPU_H265};
+    let set = |change: &dyn Fn(&mut PcSettings)| {
+        let mut p = pc;
+        change(&mut p);
+        Action::SetPc(p)
+    };
+    segmented(
+        items,
+        x,
+        w,
+        &mut y,
+        l.t("Якість відео", "Video quality"),
+        [
+            (15, l.t("Економна", "Economy")),
+            (30, l.t("Звичайна", "Normal")),
+            (50, l.t("Висока", "High")),
+        ]
+        .into_iter()
+        .map(|(q, label)| (label, set(&|p| p.quality = q), pc.quality == q, true))
+        .collect(),
+    );
+    let gpu = !pc.software;
+    segmented(
+        items,
+        x,
+        w,
+        &mut y,
+        l.t("Кодує", "Encoding on"),
+        vec![
+            (
+                l.t("Відеокарта", "Graphics card"),
+                set(&|p| p.software = false),
+                gpu,
+                encoders & (GPU_H264 | GPU_H265) != 0,
+            ),
+            (
+                l.t("Процесор", "Processor"),
+                set(&|p| {
+                    p.software = true;
+                    p.codec = prostir_proto::Codec::H264;
+                }),
+                !gpu,
+                encoders & CPU_H264 != 0,
+            ),
+        ],
+    );
+    segmented(
+        items,
+        x,
+        w,
+        &mut y,
+        l.t("Кодек", "Codec"),
+        vec![
+            (
+                "HEVC",
+                set(&|p| p.codec = prostir_proto::Codec::H265),
+                pc.codec == prostir_proto::Codec::H265,
+                gpu && encoders & GPU_H265 != 0,
+            ),
+            (
+                "H.264",
+                set(&|p| p.codec = prostir_proto::Codec::H264),
+                pc.codec == prostir_proto::Codec::H264,
+                encoders & (GPU_H264 | CPU_H264) != 0,
+            ),
+        ],
+    );
+    items.push(text(
+        x,
+        y - 18.0,
+        18.0,
+        false,
+        MUTED,
+        l.t(
+            "HEVC: найчіткіший текст. H.264: менше пам'яті на ПК.",
+            "HEVC: the sharpest text. H.264: less memory on the PC.",
+        ),
+    ));
+    y += 22.0;
+    segmented(
+        items,
+        x,
+        w,
+        &mut y,
+        l.t("Чіткіший текст (+2 мс)", "Sharper text (+2 ms)"),
+        vec![
+            (
+                l.t("Вимкнено", "Off"),
+                set(&|p| p.sharp = false),
+                !pc.sharp,
+                gpu,
+            ),
+            (
+                l.t("Увімкнено", "On"),
+                set(&|p| p.sharp = true),
+                pc.sharp,
+                gpu,
+            ),
+        ],
+    );
 }
 
 /// PC sound and headset microphone.
@@ -2067,6 +2335,15 @@ mod tests {
             unreachable: Some("workstation-with-a-long-name".into()),
             pair_offer: None,
             mic_denied: true,
+            pc: Some((
+                PcSettings {
+                    quality: 30,
+                    codec: prostir_proto::Codec::H265,
+                    software: false,
+                    sharp: true,
+                },
+                7,
+            )),
             host: Some("workstation".into()),
             found: Vec::new(),
             ip_input: None,
@@ -2131,7 +2408,15 @@ mod tests {
     fn nothing_overflows() {
         let mut states = Vec::new();
         for lang in [Lang::Uk, Lang::En] {
-            for tab in [Tab::Monitors, Tab::Profiles, Tab::Look, Tab::Sound] {
+            for tab in [
+                Tab::Quick,
+                Tab::Monitors,
+                Tab::Settings(Section::Look),
+                Tab::Settings(Section::Sound),
+                Tab::Settings(Section::Language),
+                Tab::Settings(Section::Pc),
+                Tab::Settings(Section::Help),
+            ] {
                 let mut st = sample_state();
                 st.lang = lang;
                 st.tab = tab;

@@ -42,6 +42,50 @@ pub struct LayoutRow {
     pub centers: Vec<i32>,
 }
 
+/// How the PC encodes, changed from the headset menu ([`HostMsg::PcSettings`],
+/// [`ClientMsg::SetPcSettings`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PcSettings {
+    /// Bitrate per monitor, Mbit/s.
+    pub quality: u32,
+    pub codec: Codec,
+    /// Encode on the CPU (x264) instead of the graphics card.
+    pub software: bool,
+    /// Slower encoder preset for clearer small text.
+    pub sharp: bool,
+}
+
+impl PcSettings {
+    fn bytes(&self) -> [u8; 7] {
+        let q = self.quality.to_le_bytes();
+        [
+            q[0],
+            q[1],
+            q[2],
+            q[3],
+            self.codec as u8,
+            self.software as u8,
+            self.sharp as u8,
+        ]
+    }
+
+    fn read(c: &mut Cursor) -> io::Result<Self> {
+        Ok(Self {
+            quality: c.u32()?,
+            codec: Codec::from_u8(c.u8()?).unwrap_or(Codec::H265),
+            software: c.u8()? != 0,
+            sharp: c.u8()? != 0,
+        })
+    }
+}
+
+/// What the PC can encode with ([`HostMsg::PcSettings`]).
+pub mod encoders {
+    pub const GPU_H264: u8 = 1;
+    pub const GPU_H265: u8 = 2;
+    pub const CPU_H264: u8 = 4;
+}
+
 /// In [`LayoutRow::centers`]: no position, right after the previous monitor.
 pub const NEXT: i32 = i32::MIN;
 
@@ -142,6 +186,11 @@ pub enum HostMsg {
         /// The PC app's version, e.g. `0.2.0`.
         app: String,
     },
+    /// The PC's encoding settings and what it can encode with (bits of [`encoders`]).
+    PcSettings {
+        settings: PcSettings,
+        encoders: u8,
+    },
     /// The monitor the mouse is on ([`NO_FOCUS`] if none of the streamed ones).
     Focus {
         id: u8,
@@ -234,6 +283,10 @@ pub enum ClientMsg {
     Presence {
         worn: bool,
     },
+    /// Change how the PC encodes (from the headset menu).
+    SetPcSettings {
+        settings: PcSettings,
+    },
     /// Start pairing. `headset_shows`: the headset displays the code and the PC asks
     /// for it; otherwise the PC displays it and the headset asks.
     PairBegin {
@@ -268,6 +321,7 @@ mod tag {
     pub const MIC_ACTIVE: u8 = 15;
     pub const FOCUS: u8 = 16;
     pub const INCOMPATIBLE: u8 = 17;
+    pub const PC_SETTINGS: u8 = 18;
     pub const HELLO: u8 = 101;
     pub const REQUEST_KEYFRAME: u8 = 102;
     pub const FRAME_SHOWN: u8 = 103;
@@ -285,6 +339,7 @@ mod tag {
     pub const PRESENCE: u8 = 115;
     pub const SET_MONITORS: u8 = 116;
     pub const SET_LAYOUT: u8 = 117;
+    pub const SET_PC_SETTINGS: u8 = 118;
 }
 
 fn invalid(msg: &str) -> io::Error {
@@ -384,6 +439,9 @@ impl HostMsg {
             HostMsg::PairingRequired => write_frame(w, tag::PAIRING_REQUIRED, &[]),
             HostMsg::Audio { pcm } => write_frame(w, tag::AUDIO, &[pcm]),
             HostMsg::Focus { id } => write_frame(w, tag::FOCUS, &[&[*id]]),
+            HostMsg::PcSettings { settings, encoders } => {
+                write_frame(w, tag::PC_SETTINGS, &[&settings.bytes(), &[*encoders]])
+            }
             HostMsg::Incompatible { protocol, app } => write_frame(
                 w,
                 tag::INCOMPATIBLE,
@@ -445,6 +503,10 @@ impl HostMsg {
             tag::PRIMARY_CHANGED => HostMsg::PrimaryChanged { id: c.u8()? },
             tag::PAIRING_REQUIRED => HostMsg::PairingRequired,
             tag::FOCUS => HostMsg::Focus { id: c.u8()? },
+            tag::PC_SETTINGS => HostMsg::PcSettings {
+                settings: PcSettings::read(&mut c)?,
+                encoders: c.u8()?,
+            },
             tag::INCOMPATIBLE => HostMsg::Incompatible {
                 protocol: c.u32()?,
                 app: String::from_utf8_lossy(c.rest()).into_owned(),
@@ -538,6 +600,9 @@ impl ClientMsg {
             ClientMsg::SetMic { enabled } => write_frame(w, tag::SET_MIC, &[&[*enabled as u8]]),
             ClientMsg::Mic { pcm } => write_frame(w, tag::MIC, &[pcm]),
             ClientMsg::Presence { worn } => write_frame(w, tag::PRESENCE, &[&[*worn as u8]]),
+            ClientMsg::SetPcSettings { settings } => {
+                write_frame(w, tag::SET_PC_SETTINGS, &[&settings.bytes()])
+            }
             ClientMsg::PairConfirm { tag } => write_frame(w, tag::PAIR_CONFIRM, &[tag]),
             ClientMsg::SetMirror { enabled } => {
                 write_frame(w, tag::SET_MIRROR, &[&[*enabled as u8]])
@@ -576,6 +641,9 @@ impl ClientMsg {
                 pcm: c.rest().to_vec(),
             },
             tag::PRESENCE => ClientMsg::Presence { worn: c.u8()? != 0 },
+            tag::SET_PC_SETTINGS => ClientMsg::SetPcSettings {
+                settings: PcSettings::read(&mut c)?,
+            },
             tag::SET_AUDIO => ClientMsg::SetAudio {
                 enabled: c.u8()? != 0,
             },
@@ -714,6 +782,15 @@ mod tests {
             HostMsg::MicWanted { enabled: true },
             HostMsg::MicActive { active: true },
             HostMsg::Focus { id: 2 },
+            HostMsg::PcSettings {
+                settings: PcSettings {
+                    quality: 30,
+                    codec: Codec::H264,
+                    software: false,
+                    sharp: true,
+                },
+                encoders: encoders::GPU_H264 | encoders::GPU_H265,
+            },
             HostMsg::Incompatible {
                 protocol: 10,
                 app: "0.3.0".into(),
@@ -790,6 +867,14 @@ mod tests {
                 pcm: vec![1, 0, 2, 0],
             },
             ClientMsg::Presence { worn: true },
+            ClientMsg::SetPcSettings {
+                settings: PcSettings {
+                    quality: 50,
+                    codec: Codec::H265,
+                    software: true,
+                    sharp: false,
+                },
+            },
         ] {
             let mut buf = Vec::new();
             m.write(&mut buf).unwrap();

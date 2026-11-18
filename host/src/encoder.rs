@@ -42,6 +42,28 @@ impl Backend {
     }
 }
 
+/// What this PC can encode with, as bits of [`prostir_proto::encoders`].
+pub fn available() -> u8 {
+    use prostir_proto::encoders::{CPU_H264, GPU_H264, GPU_H265};
+    let has = |backend: Backend, codec: Codec| {
+        backend
+            .elements(codec)
+            .iter()
+            .all(|e| gst::ElementFactory::find(e).is_some())
+    };
+    let mut bits = 0;
+    if has(Backend::Va, Codec::H264) || has(Backend::Nvenc, Codec::H264) {
+        bits |= GPU_H264;
+    }
+    if has(Backend::Va, Codec::H265) || has(Backend::Nvenc, Codec::H265) {
+        bits |= GPU_H265;
+    }
+    if has(Backend::X264, Codec::H264) {
+        bits |= CPU_H264;
+    }
+    bits
+}
+
 /// Picks the first encoder this PC has: VA-API, then NVENC, then x264 on the CPU, in
 /// the preferred codec first. `software` forces x264. The error names what to install.
 pub fn pick(prefer: Codec, software: bool) -> Result<(Backend, Codec)> {

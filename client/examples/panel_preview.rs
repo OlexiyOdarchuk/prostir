@@ -1,10 +1,10 @@
 //! Renders the headset menu to a PNG for checking the design on the desktop.
 //! cargo run -p prostir-client --example panel_preview -- panel.png [hover_x hover_y]
-//! Environment: TAB=look|sound, LANG_UI=en, PAIR=show|type|failed, OFFLINE=1, KEYPAD=…
+//! Environment: TAB=monitors|look|sound|language|pc|help (default: quick), LANG_UI=en, PAIR=show|type|failed, OFFLINE=1, KEYPAD=…
 
 use prostir::i18n::Lang;
 use prostir::settings::Settings;
-use prostir::ui::{MonitorEntry, PairingView, Panel, Tab, UiState};
+use prostir::ui::{MonitorEntry, PairingView, Panel, Section, Tab, UiState};
 
 fn questmon_pairing(mode: &str) -> PairingView {
     PairingView {
@@ -30,6 +30,15 @@ fn main() {
         mic_denied: std::env::var("MIC_DENIED").is_ok(),
         confirm_save: None,
         unreachable: std::env::var("BLOCKED").ok(),
+        pc: Some((
+            prostir_proto::PcSettings {
+                quality: 30,
+                codec: prostir_proto::Codec::H265,
+                software: false,
+                sharp: false,
+            },
+            7,
+        )),
         pair_offer: std::env::var("OFFER")
             .ok()
             .map(|v| ("workstation 192.168.1.10".into(), v == "failed")),
@@ -79,10 +88,13 @@ fn main() {
             .ok()
             .map(|v| (v == "pc", "0.2.0".into())),
         tab: match std::env::var("TAB").as_deref() {
-            Ok("look") => Tab::Look,
-            Ok("profiles") => Tab::Profiles,
-            Ok("sound") => Tab::Sound,
-            _ => Tab::Monitors,
+            Ok("monitors") => Tab::Monitors,
+            Ok("look") => Tab::Settings(Section::Look),
+            Ok("sound") => Tab::Settings(Section::Sound),
+            Ok("language") => Tab::Settings(Section::Language),
+            Ok("pc") => Tab::Settings(Section::Pc),
+            Ok("help") => Tab::Settings(Section::Help),
+            _ => Tab::Quick,
         },
         profiles: (0..prostir::profiles::SLOTS)
             .map(prostir::profiles::Profile::default_for)

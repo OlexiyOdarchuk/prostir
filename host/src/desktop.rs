@@ -169,6 +169,13 @@ impl Output {
         }
     }
 
+    /// Stops feeding the current encoder (before it is replaced).
+    pub fn detach(&mut self) {
+        if let Self::Hyprland(o) = self {
+            o.capture = None;
+        }
+    }
+
     /// Starts feeding `encoder` (Hyprland; KWin feeds it through PipeWire by itself).
     pub fn attach(&mut self, encoder: &Encoder, dmabuf: bool) -> Result<()> {
         if let Self::Hyprland(o) = self {
