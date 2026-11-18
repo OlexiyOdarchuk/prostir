@@ -154,6 +154,129 @@ pub fn rows_by_position(
         .collect()
 }
 
+/// Lines up monitors the user placed by hand, keeping their arrangement: monitors at
+/// about the same height stay a row, and each row becomes tidy, side by side without
+/// gaps or overlaps, at one distance and height, facing the user, centred where the row
+/// was. Rows that overlap or nearly touch are stacked so they just touch. `center` is
+/// where the layout faces from (position, yaw).
+pub fn tidy(
+    placements: &HashMap<u8, Placement>,
+    monitors: &[(u8, u32, u32)],
+    center: (Vec3, f32),
+) -> HashMap<u8, Placement> {
+    struct Item {
+        id: u8,
+        yaw: f32,
+        y: f32,
+        distance: f32,
+        width: f32,
+        height: f32,
+    }
+    let unturn = Quat::from_rotation_y(-center.1);
+    let turn = Quat::from_rotation_y(center.1);
+    let mut items: Vec<Item> = monitors
+        .iter()
+        .filter_map(|&(id, w, h)| {
+            let p = placements.get(&id)?;
+            let local = unturn * (p.position - center.0);
+            Some(Item {
+                id,
+                yaw: local.x.atan2(-local.z),
+                y: local.y,
+                distance: Vec2::new(local.x, local.z).length().max(0.3),
+                width: p.width,
+                height: p.width * h as f32 / w.max(1) as f32,
+            })
+        })
+        .collect();
+    items.sort_by(|a, b| b.y.total_cmp(&a.y));
+    // Rows: centres closer in height than most of a monitor.
+    let mut rows: Vec<Vec<Item>> = Vec::new();
+    for it in items {
+        match rows.iter_mut().find(|r| {
+            let first = &r[0];
+            (first.y - it.y).abs() < 0.5 * first.height.max(it.height)
+        }) {
+            Some(r) => r.push(it),
+            None => rows.push(vec![it]),
+        }
+    }
+    // Each row: one height (the average), one distance, side by side.
+    struct Row {
+        y: f32,
+        height: f32,
+        distance: f32,
+        items: Vec<Item>,
+    }
+    let mut rows: Vec<Row> = rows
+        .into_iter()
+        .map(|mut r| {
+            r.sort_by(|a, b| a.yaw.total_cmp(&b.yaw));
+            let n = r.len() as f32;
+            Row {
+                y: r.iter().map(|m| m.y).sum::<f32>() / n,
+                height: r.iter().map(|m| m.height).fold(0.0, f32::max),
+                distance: r.iter().map(|m| m.distance).sum::<f32>() / n,
+                items: r,
+            }
+        })
+        .collect();
+    // Top to bottom: a row that overlaps the one above, or almost touches it, moves
+    // down to touch it.
+    rows.sort_by(|a, b| b.y.total_cmp(&a.y));
+    for i in 1..rows.len() {
+        let above_bottom = rows[i - 1].y - rows[i - 1].height / 2.0;
+        let top = rows[i].y + rows[i].height / 2.0;
+        let gap = above_bottom - top;
+        if gap < 0.15 * rows[i].height {
+            rows[i].y = above_bottom - rows[i].height / 2.0;
+        }
+    }
+    let mut out = HashMap::new();
+    for row in &rows {
+        let half_angle = |w: f32| (w / 2.0 / row.distance).min(0.95).asin();
+        // Centred where the row's edges were.
+        let first = &row.items[0];
+        let last = &row.items[row.items.len() - 1];
+        let mid =
+            ((first.yaw - half_angle(first.width)) + (last.yaw + half_angle(last.width))) / 2.0;
+        let total: f32 = row.items.iter().map(|m| 2.0 * half_angle(m.width)).sum();
+        let mut yaw = mid - total / 2.0;
+        for m in &row.items {
+            let half = half_angle(m.width);
+            let a = yaw + half;
+            let r = row.distance * half.cos();
+            let local = Vec3::new(r * a.sin(), row.y, -r * a.cos());
+            let position = center.0 + turn * local;
+            out.insert(
+                m.id,
+                Placement {
+                    position,
+                    rotation: turn * facing(local, Vec3::new(0.0, row.y, 0.0)),
+                    width: m.width,
+                },
+            );
+            yaw += 2.0 * half;
+        }
+    }
+    out
+}
+
+/// Puts the laptop mirror right under `primary`, on its plane, keeping its own width.
+pub fn under(
+    primary: &Placement,
+    primary_height: f32,
+    mirror: &Placement,
+    mirror_height: f32,
+) -> Placement {
+    let down = primary.rotation * Vec3::Y;
+    Placement {
+        position: primary.position - down * (primary_height / 2.0 + mirror_height / 2.0),
+        rotation: primary.rotation,
+        width: mirror.width,
+    }
+}
+
 /// The monitor shown in cinema mode: the one at position `pick` in the row, else the
 /// largest landscape one (films are wide), else the first.
 pub fn cinema_choice(monitors: &[(u8, u32, u32)], pick: Option<u8>) -> Option<u8> {
@@ -813,5 +936,37 @@ mod tests {
         let rows = rows_by_position(&grid, &four, center);
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|r| r.ids.len() == 2));
+    }
+
+    /// Monitors placed roughly by hand: A keeps two rows (one monitor above the middle)
+    /// and makes each row tidy instead of throwing everything into one arc.
+    #[test]
+    fn tidy_keeps_the_arrangement() {
+        let center = (Vec3::ZERO, 0.0);
+        let three = [(0, 2560, 1440), (1, 2560, 1440), (2, 2560, 1440)];
+        let mut rough = arrange(Preset::Arc, &[(0, 2560, 1440), (1, 2560, 1440)], None, None);
+        // Pull them apart a little and tilt one: what hands leave behind.
+        rough.get_mut(&0).unwrap().position += Vec3::new(-0.08, 0.03, 0.05);
+        let mid = rough[&1].position;
+        let up = mid + Vec3::new(0.05, 0.9, 0.02);
+        rough.insert(
+            2,
+            Placement {
+                position: up,
+                rotation: facing(up, Vec3::ZERO),
+                width: rough[&1].width,
+            },
+        );
+        let tidy = tidy(&rough, &three, center);
+        assert_eq!(tidy.len(), 3);
+        // Still two rows: monitor 2 above the others.
+        assert!(tidy[&2].position.y > tidy[&1].position.y + 0.5);
+        // The bottom row: same height, and the two monitors touch (no gap).
+        assert!((tidy[&0].position.y - tidy[&1].position.y).abs() < 1e-4);
+        // Neighbours touch: the right edge of one is the left edge of the next.
+        let edge =
+            |p: &Placement, side: f32| p.position + p.rotation * Vec3::X * (side * p.width / 2.0);
+        let gap = edge(&tidy[&0], 1.0).distance(edge(&tidy[&1], -1.0));
+        assert!(gap < 0.01, "gap {gap} m");
     }
 }

@@ -409,6 +409,33 @@ impl Scene {
         self.send_layout();
     }
 
+    /// The A button: lines up what the user arranged by hand (see `layout::tidy`)
+    /// instead of replacing it with the preset. Cinema and lying down (monitors over
+    /// the head) still rebuild their own arrangement.
+    fn tidy_up(&mut self) {
+        if self.settings.cinema
+            || self.settings.preset == crate::settings::Preset::Overhead
+            || self.placements.is_empty()
+        {
+            self.arrange_all();
+            return;
+        }
+        let mirror = self.placements.get(&MIRROR_ID).copied();
+        let mut tidy = layout::tidy(&self.placements, &self.quest_sizes(), self.center);
+        // The laptop screen follows the primary monitor.
+        if let (Some(m), Some(p)) = (mirror, self.primary.and_then(|id| tidy.get(&id).copied())) {
+            let primary = self.primary.unwrap_or_default();
+            let under = layout::under(&p, self.height_of(primary), &m, self.height_of(MIRROR_ID));
+            tidy.insert(MIRROR_ID, under);
+        } else if let Some(m) = mirror {
+            tidy.insert(MIRROR_ID, m);
+        }
+        self.placements = tidy;
+        self.grabs = [None, None];
+        layout::save(&self.layout_path, &self.placements);
+        self.send_layout();
+    }
+
     fn curve_radius(&self) -> Option<f32> {
         if !self.curve_supported {
             return None;
@@ -1073,7 +1100,7 @@ fn run(app: &AndroidApp) -> Result<()> {
             }
         }
         if controls.align_pressed(&session) {
-            scene.arrange_all();
+            scene.tidy_up();
         }
         scene.place_button();
 
