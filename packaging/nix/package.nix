@@ -103,7 +103,8 @@ rustPlatform.buildRustPackage {
     wrapProgram $out/bin/prostir \
       --prefix GST_PLUGIN_SYSTEM_PATH_1_0 : "${lib.makeSearchPathOutput "lib" "lib/gstreamer-1.0" plugins}" \
       --set-default LIBVA_DRIVERS_PATH "${lib.concatStringsSep ":" vaDrivers}" \
-      --suffix PATH : "${lib.makeBinPath tools}"
+      --suffix PATH : "${lib.makeBinPath tools}" \
+      --set PROSTIR_EXE "$out/bin/prostir"
   '';
 
   meta = {

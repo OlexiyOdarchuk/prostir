@@ -39,7 +39,6 @@ jobs:
       # step.
       - name: Build
         env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
           KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE }}
           KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASS }}
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
@@ -53,6 +52,7 @@ jobs:
             echo "::error::ANDROID_KEYSTORE, ANDROID_KEYSTORE_PASS and ANDROID_KEY_ALIAS must be set"
             exit 1
           fi
+          export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
           export KEYSTORE="$RUNNER_TEMP/release.keystore"
           trap 'rm -f "$KEYSTORE"' EXIT
           (umask 077 && printf '%s' "$KEYSTORE_B64" | base64 -d > "$KEYSTORE")
@@ -65,12 +65,17 @@ jobs:
           strip --strip-debug target/release/prostir
           cargo deb -p prostir-host --no-build -o dist/
           cargo generate-rpm -p host -o dist/
-          (cd dist && sha256sum *.tar.gz *.apk *.deb *.rpm THIRD-PARTY-LICENSES.txt > SHA256SUMS)
+          (cd dist && sha256sum ./*.tar.gz ./*.apk ./*.deb ./*.rpm THIRD-PARTY-LICENSES.txt | sed 's| \./| |' > SHA256SUMS)
+          # The release text: this version's part of the changelog.
+          v="${GITHUB_REF_NAME#v}"
+          awk -v v="$v" '$0 ~ "^## "v"( |$)" {on=1; next} /^## / {on=0} on' CHANGELOG.md > dist/NOTES.md
+          test -s dist/NOTES.md
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dist
           if-no-files-found: error
           path: |
+            dist/NOTES.md
             dist/*.tar.gz
             dist/*.apk
             dist/*.deb
@@ -91,6 +96,7 @@ jobs:
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           draft: true
+          body_path: dist/NOTES.md
           fail_on_unmatched_files: true
           files: |
             dist/*.tar.gz

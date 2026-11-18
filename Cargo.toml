@@ -9,6 +9,7 @@ edition = "2024"
 license = "GPL-3.0-or-later"
 authors = ["Prostir contributors"]
 repository = "https://github.com/OlexiyOdarchuk/prostir"
+homepage = "https://prostir.ishawyha.dev"
 rust-version = "1.90"
 
 [profile.release]

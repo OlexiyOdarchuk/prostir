@@ -5,8 +5,9 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
-description = "Prostir client for Meta Quest: virtual monitors as OpenXR compositor layers"
+description = "Prostir client for Meta Quest 3 and 3S: virtual monitors as OpenXR compositor layers"
 
 [features]
 # Meta Horizon Store build: the store's entitlement check through the Meta Platform

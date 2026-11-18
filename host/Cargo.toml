@@ -5,8 +5,9 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
-description = "Prostir host: virtual KDE Plasma monitors streamed to a Meta Quest headset"
+description = "Prostir host: virtual KDE Plasma 6 and Hyprland monitors streamed to a Meta Quest 3 or 3S"
 
 [[bin]]
 name = "prostir"
@@ -46,21 +47,22 @@ wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 #
 # Runtime needs: GStreamer with the VA plugin (hardware encoding), x264enc for the CPU
 # fallback (NVIDIA, or no VA encoder), pipewiresrc, pulsesrc/pulsesink, h264parse and
-# h265parse; pw-cli and pw-loopback; pactl; kscreen-doctor and qdbus6 on KDE Plasma.
+# h265parse; pw-cli and pw-loopback; pactl; kscreen-doctor and qdbus6 on KDE Plasma;
+# grim for screenshots on Hyprland (optional).
 [package.metadata.deb]
 name = "prostir"
 maintainer = "Prostir contributors <https://github.com/OlexiyOdarchuk/prostir>"
 section = "utils"
 priority = "optional"
 extended-description = """\
-Prostir puts extra monitors for a KDE Plasma or Hyprland desktop into a Meta Quest \
-3 headset. They are real outputs of the desktop, streamed to the headset over the \
+Prostir puts extra monitors for a KDE Plasma 6 or Hyprland desktop into a Meta \
+Quest 3 or 3S headset. They are real outputs of the desktop, streamed to the headset over the \
 local network. This package is the PC part; the headset app comes as an APK from the \
 same release."""
 depends = "$auto, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-pipewire, pipewire-bin, pipewire-pulse, pulseaudio-utils, curl"
 # "x | hyprland": tools only KDE Plasma needs, so a Hyprland system does not pull them in.
 recommends = "mesa-va-drivers | intel-media-va-driver-non-free | intel-media-va-driver, gstreamer1.0-plugins-ugly, kdialog | zenity | fuzzel | wofi | rofi, libnotify-bin, libkscreen-bin | hyprland, qdbus-qt6 | hyprland"
-suggests = "adb"
+suggests = "adb, grim"
 assets = [
     ["target/release/prostir", "usr/bin/", "755"],
     ["../packaging/prostir.desktop", "usr/share/applications/", "644"],
@@ -75,7 +77,7 @@ assets = [
 # --excludedocs keep them.
 [package.metadata.generate-rpm]
 name = "prostir"
-summary = "Extra KDE Plasma and Hyprland monitors in a Meta Quest 3 headset"
+summary = "Extra KDE Plasma 6 and Hyprland monitors in a Meta Quest 3 or 3S headset"
 license = "GPL-3.0-or-later"
 # The automatic requirements come from `ldd` on the build machine (Ubuntu in CI), which
 # also lists libraries that only that machine's GStreamer and GLib pull in. The direct
@@ -92,7 +94,7 @@ assets = [
 ]
 
 [package.metadata.generate-rpm.requires]
-glibc = "*"
+glibc = ">= 2.39"
 libgcc = "*"
 glib2 = "*"
 gstreamer1 = "*"
@@ -114,6 +116,7 @@ qt6-qttools = "*"
 
 [package.metadata.generate-rpm.suggests]
 libkscreen = "*"
+grim = "*"
 kdialog = "*"
 zenity = "*"
 android-tools = "*"

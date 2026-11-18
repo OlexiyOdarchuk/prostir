@@ -2,7 +2,7 @@
 pkgname=prostir-bin
 pkgver=@VERSION@
 pkgrel=1
-pkgdesc="Extra KDE Plasma and Hyprland monitors in a Meta Quest 3 headset (PC part)"
+pkgdesc="Extra KDE Plasma 6 and Hyprland monitors in a Meta Quest 3 or 3S headset (PC part)"
 arch=('x86_64')
 url="https://prostir.ishawyha.dev"
 license=('GPL-3.0-or-later')
@@ -19,6 +19,8 @@ optdepends=('gst-plugins-ugly: encoding on the CPU with x264 (NVIDIA, or no VA-A
             'kdialog: the pairing dialog (or zenity, fuzzel, wofi, rofi)'
             'zenity: the pairing dialog (or kdialog, fuzzel, wofi, rofi)'
             'libnotify: notifications'
+            'grim: screenshots on Hyprland'
+            'spectacle: whole-desktop screenshots on KDE when a monitor cannot be captured'
             'android-tools: connecting the headset over USB (developer mode)')
 provides=('prostir')
 conflicts=('prostir')
