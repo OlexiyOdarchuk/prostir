@@ -163,7 +163,11 @@ pub fn tidy(
     placements: &HashMap<u8, Placement>,
     monitors: &[(u8, u32, u32)],
     center: (Vec3, f32),
+    wall: bool,
 ) -> HashMap<u8, Placement> {
+    if wall {
+        return tidy_wall(placements, monitors, center);
+    }
     struct Item {
         id: u8,
         yaw: f32,
@@ -262,6 +266,76 @@ pub fn tidy(
     out
 }
 
+/// [`tidy`] for a wall: everything into one plane (at the monitors' average depth),
+/// facing the same way; rows side by side, centred where they were, stacked to touch.
+fn tidy_wall(
+    placements: &HashMap<u8, Placement>,
+    monitors: &[(u8, u32, u32)],
+    center: (Vec3, f32),
+) -> HashMap<u8, Placement> {
+    let unturn = Quat::from_rotation_y(-center.1);
+    let turn = Quat::from_rotation_y(center.1);
+    // (id, local position, width, height)
+    let mut items: Vec<(u8, Vec3, f32, f32)> = monitors
+        .iter()
+        .filter_map(|&(id, w, h)| {
+            let p = placements.get(&id)?;
+            let local = unturn * (p.position - center.0);
+            Some((id, local, p.width, p.width * h as f32 / w.max(1) as f32))
+        })
+        .collect();
+    if items.is_empty() {
+        return HashMap::new();
+    }
+    let depth = items.iter().map(|m| m.1.z).sum::<f32>() / items.len() as f32;
+    items.sort_by(|a, b| b.1.y.total_cmp(&a.1.y));
+    let mut rows: Vec<Vec<(u8, Vec3, f32, f32)>> = Vec::new();
+    for it in items {
+        match rows
+            .iter_mut()
+            .find(|r| (r[0].1.y - it.1.y).abs() < 0.5 * r[0].3.max(it.3))
+        {
+            Some(r) => r.push(it),
+            None => rows.push(vec![it]),
+        }
+    }
+    let mut ys: Vec<(f32, f32)> = rows
+        .iter()
+        .map(|r| {
+            let y = r.iter().map(|m| m.1.y).sum::<f32>() / r.len() as f32;
+            (y, r.iter().map(|m| m.3).fold(0.0, f32::max))
+        })
+        .collect();
+    for i in 1..ys.len() {
+        let above_bottom = ys[i - 1].0 - ys[i - 1].1 / 2.0;
+        if above_bottom - (ys[i].0 + ys[i].1 / 2.0) < 0.15 * ys[i].1 {
+            ys[i].0 = above_bottom - ys[i].1 / 2.0;
+        }
+    }
+    let mut out = HashMap::new();
+    for (mut row, (y, _)) in rows.into_iter().zip(ys) {
+        row.sort_by(|a, b| a.1.x.total_cmp(&b.1.x));
+        let left = row[0].1.x - row[0].2 / 2.0;
+        let last = &row[row.len() - 1];
+        let mid = (left + last.1.x + last.2 / 2.0) / 2.0;
+        let total: f32 = row.iter().map(|m| m.2).sum();
+        let mut x = mid - total / 2.0;
+        for (id, _, w, _) in row {
+            let local = Vec3::new(x + w / 2.0, y, depth);
+            out.insert(
+                id,
+                Placement {
+                    position: center.0 + turn * local,
+                    rotation: turn,
+                    width: w,
+                },
+            );
+            x += w;
+        }
+    }
+    out
+}
+
 /// Puts the laptop mirror right under `primary`, on its plane, keeping its own width.
 pub fn under(
     primary: &Placement,
@@ -347,22 +421,20 @@ pub fn arrange_curved(
             };
             row(&sorted, y, &mut out);
         }
-        Preset::Grid if sorted.len() > 2 => {
-            let split = sorted.len().div_ceil(2);
-            let (bottom, top) = sorted.split_at(split);
-            let hb = bottom.iter().map(|m| m.2).fold(0.0, f32::max);
-            let ht = top.iter().map(|m| m.2).fold(0.0, f32::max);
-            // The seam between the rows sits at eye height.
-            row(bottom, -hb / 2.0, &mut out);
-            row(top, ht / 2.0, &mut out);
-        }
-        Preset::Grid => row(&sorted, -EYE_DROP, &mut out),
-        Preset::Column => {
-            let total: f32 = sorted.iter().map(|m| m.2).sum();
-            let mut top = total / 2.0 - EYE_DROP;
-            for &(id, w, h) in &sorted {
-                out.insert(id, on_cylinder(0.0, top - h / 2.0, w));
-                top -= h;
+        Preset::Wall => {
+            // Side by side in one plane straight ahead, all facing the same way.
+            let total: f32 = sorted.iter().map(|m| m.1).sum();
+            let mut x = -total / 2.0;
+            for &(id, w, _) in &sorted {
+                out.insert(
+                    id,
+                    Placement {
+                        position: Vec3::new(x + w / 2.0, -EYE_DROP, -RADIUS),
+                        rotation: Quat::IDENTITY,
+                        width: w,
+                    },
+                );
+                x += w;
             }
         }
     }
@@ -719,7 +791,7 @@ mod tests {
             (2, 1440, 2560),
             (3, 3440, 1440),
         ];
-        for preset in [Preset::Arc, Preset::Grid, Preset::Column, Preset::Overhead] {
+        for preset in [Preset::Arc, Preset::Wall, Preset::Overhead] {
             let l = arrange(preset, &mons, Some(0), Some((100, 2880, 1800)));
             assert_eq!(l.len(), 5, "{preset:?}");
             assert!(
@@ -925,17 +997,11 @@ mod tests {
         assert!((rows[0].centers[0] - middle).abs() < 100, "{rows:?}");
         assert!(rows[1].centers[0] < middle - 1500, "{rows:?}");
 
-        // A grid of four: two rows of two.
-        let four = [
-            (0, 2560, 1440),
-            (1, 2560, 1440),
-            (2, 2560, 1440),
-            (3, 2560, 1440),
-        ];
-        let grid = arrange(Preset::Grid, &four, None, None);
-        let rows = rows_by_position(&grid, &four, center);
-        assert_eq!(rows.len(), 2);
-        assert!(rows.iter().all(|r| r.ids.len() == 2));
+        // A wall: one row, left to right.
+        let wall = arrange(Preset::Wall, &three, None, None);
+        let rows = rows_by_position(&wall, &three, center);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].ids, vec![0, 1, 2]);
     }
 
     /// Monitors placed roughly by hand: A keeps two rows (one monitor above the middle)
@@ -957,7 +1023,7 @@ mod tests {
                 width: rough[&1].width,
             },
         );
-        let tidy = tidy(&rough, &three, center);
+        let tidy = tidy(&rough, &three, center, false);
         assert_eq!(tidy.len(), 3);
         // Still two rows: monitor 2 above the others.
         assert!(tidy[&2].position.y > tidy[&1].position.y + 0.5);
@@ -968,5 +1034,20 @@ mod tests {
             |p: &Placement, side: f32| p.position + p.rotation * Vec3::X * (side * p.width / 2.0);
         let gap = edge(&tidy[&0], 1.0).distance(edge(&tidy[&1], -1.0));
         assert!(gap < 0.01, "gap {gap} m");
+    }
+
+    /// A wall: A brings everything into one plane, facing one way, rows touching.
+    #[test]
+    fn tidy_wall_is_flat() {
+        let center = (Vec3::ZERO, 0.0);
+        let two = [(0, 2560, 1440), (1, 2560, 1440)];
+        let mut rough = arrange(Preset::Wall, &two, None, None);
+        rough.get_mut(&1).unwrap().position += Vec3::new(0.2, 0.05, 0.3);
+        rough.get_mut(&1).unwrap().rotation = Quat::from_rotation_y(0.4);
+        let t = tidy(&rough, &two, center, true);
+        assert!((t[&0].position.z - t[&1].position.z).abs() < 1e-5);
+        assert!(t[&0].rotation.angle_between(t[&1].rotation) < 1e-5);
+        let gap = (t[&1].position.x - t[&1].width / 2.0) - (t[&0].position.x + t[&0].width / 2.0);
+        assert!(gap.abs() < 1e-4, "gap {gap}");
     }
 }

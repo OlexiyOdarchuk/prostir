@@ -7,12 +7,10 @@ use crate::i18n::{Lang, Language};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Preset {
-    /// Side by side on an arc around the user.
+    /// Around the user: wherever a monitor is put, it turns to face them.
     Arc,
-    /// Two rows.
-    Grid,
-    /// One above another.
-    Column,
+    /// A flat wall: all monitors in one plane, facing the same way, for walking along.
+    Wall,
     /// Above the head, for lying down.
     Overhead,
 }
@@ -116,8 +114,7 @@ impl Settings {
             match line.split_once(' ') {
                 Some(("preset", v)) => {
                     s.preset = match v {
-                        "grid" => Preset::Grid,
-                        "column" => Preset::Column,
+                        "wall" => Preset::Wall,
                         "overhead" => Preset::Overhead,
                         _ => Preset::Arc,
                     }
@@ -176,8 +173,7 @@ impl Settings {
     pub fn to_text(&self) -> String {
         let preset = match self.preset {
             Preset::Arc => "arc",
-            Preset::Grid => "grid",
-            Preset::Column => "column",
+            Preset::Wall => "wall",
             Preset::Overhead => "overhead",
         };
         let curve = match self.curve {

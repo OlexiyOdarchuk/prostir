@@ -1183,23 +1183,22 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
         &mut y,
         l.t("Розкладка", "Layout"),
         vec![
-            (l.t("Дуга", "Arc"), Action::Preset(Preset::Arc), false, true),
             (
-                l.t("Сітка", "Grid"),
-                Action::Preset(Preset::Grid),
-                false,
+                l.t("Навколо мене", "Around me"),
+                Action::Preset(Preset::Arc),
+                st.preset == Preset::Arc,
                 true,
             ),
             (
-                l.t("Стовпчик", "Column"),
-                Action::Preset(Preset::Column),
-                false,
+                l.t("Стіна", "Wall"),
+                Action::Preset(Preset::Wall),
+                st.preset == Preset::Wall,
                 true,
             ),
             (
                 l.t("Лежачи", "Lying down"),
                 Action::Preset(Preset::Overhead),
-                false,
+                st.preset == Preset::Overhead,
                 true,
             ),
         ],
@@ -1777,9 +1776,8 @@ fn build_profiles(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32
             l.t("кінотеатр", "cinema")
         } else {
             match p.settings.preset {
-                Preset::Arc => l.t("дуга", "arc"),
-                Preset::Grid => l.t("сітка", "grid"),
-                Preset::Column => l.t("стовпчик", "column"),
+                Preset::Arc => l.t("навколо", "around"),
+                Preset::Wall => l.t("стіна", "wall"),
                 Preset::Overhead => l.t("лежачи", "lying down"),
             }
         };

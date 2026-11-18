@@ -421,7 +421,8 @@ impl Scene {
             return;
         }
         let mirror = self.placements.get(&MIRROR_ID).copied();
-        let mut tidy = layout::tidy(&self.placements, &self.quest_sizes(), self.center);
+        let wall = self.settings.preset == crate::settings::Preset::Wall;
+        let mut tidy = layout::tidy(&self.placements, &self.quest_sizes(), self.center, wall);
         // The laptop screen follows the primary monitor.
         if let (Some(m), Some(p)) = (mirror, self.primary.and_then(|id| tidy.get(&id).copied())) {
             let primary = self.primary.unwrap_or_default();
@@ -1292,11 +1293,17 @@ fn run(app: &AndroidApp) -> Result<()> {
                     KEYBOARD_ID => scene.keyboard_place.as_mut(),
                     id => scene.placements.get_mut(&id),
                 };
+                let wall = scene.settings.preset == crate::settings::Preset::Wall
+                    && !scene.settings.cinema;
+                let wall_facing = glam::Quat::from_rotation_y(scene.center.1);
                 if let Some(p) = target {
                     grab.update(p, ray, head, input.stick, dt);
                     if grab.id == KEYBOARD_ID {
                         // It follows the hand but stays flat, like the desk.
                         p.rotation = lying_flat(p.position, head);
+                    } else if wall && grab.id != PANEL_ID {
+                        // On a wall, monitors stay parallel to it wherever they go.
+                        p.rotation = wall_facing;
                     }
                     scene.grabs[hand] = Some(grab);
                 }
