@@ -91,6 +91,7 @@ pub fn rows_by_position(
     placements: &HashMap<u8, Placement>,
     monitors: &[(u8, u32, u32)],
     center: (Vec3, f32),
+    preset: Preset,
 ) -> Vec<LayoutRow> {
     struct Seen {
         id: u8,
@@ -100,7 +101,14 @@ pub fn rows_by_position(
         half_height: f32,
         width_px: u32,
     }
-    let unturn = Quat::from_rotation_y(-center.1);
+    // Lying down, the monitors are a band tilted up overhead: looked at along the tilt,
+    // so a row there stays a row (not a "V" the mouse cannot cross sideways).
+    let tilt = if preset == Preset::Overhead {
+        OVERHEAD_PITCH
+    } else {
+        0.0
+    };
+    let unturn = Quat::from_rotation_x(-tilt) * Quat::from_rotation_y(-center.1);
     let mut seen: Vec<Seen> = monitors
         .iter()
         .filter_map(|&(id, w, h)| {
@@ -367,10 +375,23 @@ pub fn stick(
     let all = on_cylinders(placements, monitors, center);
     let mut m = *all.iter().find(|m| m.id == id)?;
     let others: Vec<OnCylinder> = all.into_iter().filter(|o| o.id != id).collect();
-    let n = *others
-        .iter()
-        .min_by(|a, b| m.separation(a).total_cmp(&m.separation(b)))?;
-    if m.separation(&n) >= m.width.min(n.width) / 2.0 {
+    // The nearest; between two it touches equally (dropped on a seam), the one its
+    // centre is closer to.
+    let closeness = |o: &OnCylinder| {
+        (
+            m.separation(o),
+            (m.yaw - o.yaw).abs() * m.radius.min(o.radius) + (m.y - o.y).abs(),
+        )
+    };
+    let n = *others.iter().min_by(|a, b| {
+        let (sa, da) = closeness(a);
+        let (sb, db) = closeness(b);
+        sa.total_cmp(&sb).then(da.total_cmp(&db))
+    })?;
+    // Close (within a third of a monitor) and at about the same distance: a monitor
+    // pulled nearer or pushed away on purpose stays there.
+    let depth = m.radius / n.radius;
+    if m.separation(&n) >= m.width.min(n.width) / 3.0 || !(0.7..=1.45).contains(&depth) {
         return None;
     }
     let (across, side) = attach(&mut m, &n, &others);
@@ -379,6 +400,92 @@ pub fn stick(
         neighbour: n.id,
         across,
         side,
+    })
+}
+
+/// The magnet on a wall: like [`stick`], but in the wall's plane (monitors there are
+/// flat in one plane, facing the same way).
+pub fn stick_on_wall(
+    placements: &HashMap<u8, Placement>,
+    monitors: &[(u8, u32, u32)],
+    center: (Vec3, f32),
+    id: u8,
+) -> Option<Stick> {
+    let unturn = Quat::from_rotation_y(-center.1);
+    let turn = Quat::from_rotation_y(center.1);
+    // (id, local centre, width, height)
+    let all: Vec<(u8, Vec3, f32, f32)> = monitors
+        .iter()
+        .filter_map(|&(oid, w, h)| {
+            let p = placements.get(&oid)?;
+            Some((
+                oid,
+                unturn * (p.position - center.0),
+                p.width,
+                p.width * h as f32 / w.max(1) as f32,
+            ))
+        })
+        .collect();
+    let (_, mut at, mw, mh) = *all.iter().find(|m| m.0 == id)?;
+    let gaps = |a: Vec3, aw: f32, ah: f32, b: Vec3, bw: f32, bh: f32| {
+        (
+            (a.x - b.x).abs() - (aw + bw) / 2.0,
+            (a.y - b.y).abs() - (ah + bh) / 2.0,
+        )
+    };
+    let sep = |o: &(u8, Vec3, f32, f32)| {
+        let (gx, gy) = gaps(at, mw, mh, o.1, o.2, o.3);
+        (gx.max(gy).max(0.0), at.distance(o.1))
+    };
+    let others: Vec<(u8, Vec3, f32, f32)> = all.iter().filter(|o| o.0 != id).copied().collect();
+    let n = *others.iter().min_by(|a, b| {
+        let (sa, da) = sep(a);
+        let (sb, db) = sep(b);
+        sa.total_cmp(&sb).then(da.total_cmp(&db))
+    })?;
+    let depth = at.z / n.1.z.min(-0.1);
+    if sep(&n).0 >= mw.min(n.2) / 3.0 || !(0.7..=1.45).contains(&depth) {
+        return None;
+    }
+    let (gx, gy) = gaps(at, mw, mh, n.1, n.2, n.3);
+    let across = gx > gy;
+    let side = |a: f32, b: f32| if a >= b { 1.0 } else { -1.0 };
+    let dir = if across {
+        side(at.x, n.1.x)
+    } else {
+        side(at.y, n.1.y)
+    };
+    at.z = n.1.z;
+    if across {
+        at.x = n.1.x + dir * (n.2 + mw) / 2.0;
+        at.y = align(at.y, mh / 2.0, n.1.y, n.3 / 2.0);
+    } else {
+        at.y = n.1.y + dir * (n.3 + mh) / 2.0;
+        at.x = align(at.x, mw / 2.0, n.1.x, n.2 / 2.0);
+    }
+    // Still on top of another one: past it, the same way.
+    for _ in 0..others.len() {
+        let Some(o) = others.iter().find(|o| {
+            let (gx, gy) = gaps(at, mw, mh, o.1, o.2, o.3);
+            gx < -1e-3 && gy < -1e-3
+        }) else {
+            break;
+        };
+        if across {
+            at.x = o.1.x + dir * (o.2 + mw) / 2.0;
+        } else {
+            at.y = o.1.y + dir * (o.3 + mh) / 2.0;
+        }
+    }
+    Some(Stick {
+        placement: Placement {
+            position: center.0 + turn * at,
+            rotation: turn,
+            width: mw,
+        },
+        neighbour: n.0,
+        across,
+        side: dir,
     })
 }
 
@@ -1128,7 +1235,7 @@ mod tests {
         // An arc: one row, left to right.
         let three = [(0, 2560, 1440), (1, 1440, 2560), (2, 2560, 1440)];
         let arc = arrange(Preset::Arc, &three, Some(1), None);
-        let rows = rows_by_position(&arc, &three, center);
+        let rows = rows_by_position(&arc, &three, center, Preset::Arc);
         assert_eq!(
             rows.len(),
             1,
@@ -1143,7 +1250,7 @@ mod tests {
         top.position = Vec3::new(mid.position.x, mid.position.y + 1.0, mid.position.z);
         top.rotation = facing(top.position, Vec3::ZERO);
         lifted.insert(2, top);
-        let rows = rows_by_position(&lifted, &three, center);
+        let rows = rows_by_position(&lifted, &three, center, Preset::Arc);
         assert_eq!(
             rows.iter().map(|r| r.ids.clone()).collect::<Vec<_>>(),
             vec![vec![2], vec![0, 1]]
@@ -1155,7 +1262,7 @@ mod tests {
 
         // A wall: one row, left to right.
         let wall = arrange(Preset::Wall, &three, None, None);
-        let rows = rows_by_position(&wall, &three, center);
+        let rows = rows_by_position(&wall, &three, center, Preset::Arc);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].ids, vec![0, 1, 2]);
     }
@@ -1283,6 +1390,59 @@ mod tests {
         // Straight above it, on the same cylinder.
         assert!(m.yaw.abs() < 1e-3);
         assert!((m.radius - a.radius).abs() < 1e-3);
+    }
+
+    #[test]
+    fn dropped_on_a_seam_it_joins_the_nearer_monitor() {
+        // An arc of three; monitor 0 dropped mostly over monitor 2.
+        let three = [(0, 2560, 1440), (1, 2560, 1440), (2, 2560, 1440)];
+        let mut p = arrange(Preset::Arc, &[(1, 2560, 1440), (2, 2560, 1440)], None, None);
+        let over2 = p[&2].position + p[&2].rotation * Vec3::new(0.4, 0.0, 0.0);
+        p.insert(
+            0,
+            Placement {
+                position: over2,
+                rotation: facing(over2, Vec3::new(0.0, over2.y, 0.0)),
+                width: p[&1].width,
+            },
+        );
+        let s = stick(&p, &three, (Vec3::ZERO, 0.0), 0).expect("sticks");
+        assert_eq!(s.neighbour, 2);
+        // Right of monitor 2, not thrown far around.
+        let yaw = s.placement.position.x.atan2(-s.placement.position.z);
+        assert!(yaw < 1.6, "yaw {yaw}");
+    }
+
+    #[test]
+    fn a_monitor_pulled_near_on_purpose_stays() {
+        let (before, _, sizes) = snap_case(&[
+            (0, Vec3::new(0.0, 0.0, -1.1), 1.2),
+            // Overlapping the anchor as seen, but at two thirds of its distance.
+            (1, Vec3::new(0.45, 0.0, -0.3), 1.2),
+        ]);
+        assert!(stick(&before, &sizes, (Vec3::ZERO, 0.0), 1).is_none());
+    }
+
+    #[test]
+    fn on_a_wall_the_magnet_stays_in_the_plane() {
+        let two = [(0, 2560, 1440), (1, 2560, 1440)];
+        let mut p = arrange(Preset::Wall, &two, None, None);
+        let w = p[&0].width;
+        p.get_mut(&1).unwrap().position = p[&0].position + Vec3::new(w + 0.1, 0.03, 0.05);
+        let s = stick_on_wall(&p, &two, (Vec3::ZERO, 0.0), 1).expect("sticks");
+        assert!((s.placement.position.z - p[&0].position.z).abs() < 1e-5);
+        assert!((s.placement.position.x - (p[&0].position.x + w)).abs() < 1e-4);
+        assert!((s.placement.position.y - p[&0].position.y).abs() < 1e-4);
+    }
+
+    #[test]
+    fn lying_down_the_monitors_are_one_row() {
+        let center = (Vec3::ZERO, 0.0);
+        let three = [(0, 2560, 1440), (1, 2560, 1440), (2, 2560, 1440)];
+        let overhead = arrange(Preset::Overhead, &three, None, None);
+        let rows = rows_by_position(&overhead, &three, center, Preset::Overhead);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].ids, vec![0, 1, 2]);
     }
 
     #[test]

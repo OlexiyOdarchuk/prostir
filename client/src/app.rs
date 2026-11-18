@@ -319,6 +319,9 @@ struct Scene {
     tab: Tab,
     /// Follow mode is moving the monitors right now.
     following: bool,
+    /// Follow mode waits for the head to come back first: a monitor was just placed
+    /// with the head turned, and the arrangement must not swing after it.
+    follow_hold: bool,
     /// The detached window whose "Attach" button shows, and when it was pointed at.
     attach_for: Option<(u8, Instant)>,
     /// The wrist menu, while the left palm is turned to the face.
@@ -413,7 +416,12 @@ impl Scene {
             return;
         }
         // The laptop screen too: the PC puts it where it stands here.
-        let rows = layout::rows_by_position(&self.placements, &self.layout_sizes(), self.center);
+        let rows = layout::rows_by_position(
+            &self.placements,
+            &self.layout_sizes(),
+            self.center,
+            self.settings.preset,
+        );
         if rows.is_empty() || self.sent_layout.as_ref() == Some(&rows) {
             self.pending_layout = None;
             return;
@@ -775,6 +783,12 @@ impl Scene {
         turn =
             (turn + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
         let shift = Vec3::new(head.x - pos.x, 0.0, head.z - pos.z);
+        if self.follow_hold {
+            if turn.abs() < START_TURN && shift.length() < START_MOVE {
+                self.follow_hold = false;
+            }
+            return;
+        }
         if !self.following && (turn.abs() > START_TURN || shift.length() > START_MOVE) {
             self.following = true;
         }
@@ -887,14 +901,20 @@ impl Scene {
     /// The magnet: where monitor `id`, let go now, would stick (not on a wall, where
     /// monitors stay in its plane, nor for the laptop screen or window panels).
     fn stick_of(&self, id: u8) -> Option<layout::Stick> {
+        // Lying down the monitors are a tilted band the presets keep exact; window
+        // panels float on their own.
         if self.settings.cinema
-            || self.settings.preset == crate::settings::Preset::Wall
+            || self.settings.preset == crate::settings::Preset::Overhead
             || is_window_panel(id)
             || !self.monitors.contains_key(&id)
         {
             return None;
         }
-        layout::stick(&self.placements, &self.layout_sizes(), self.center, id)
+        if self.settings.preset == crate::settings::Preset::Wall {
+            layout::stick_on_wall(&self.placements, &self.layout_sizes(), self.center, id)
+        } else {
+            layout::stick(&self.placements, &self.layout_sizes(), self.center, id)
+        }
     }
 
     /// The monitors that make up the arrangement: the Quest monitors and the laptop
@@ -1426,6 +1446,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         tab: tab_from_code(settings.last_tab),
         update_needed: None,
         following: false,
+        follow_hold: false,
         attach_for: None,
         wrist: None,
         selected: None,
@@ -1950,6 +1971,7 @@ fn run(app: &AndroidApp) -> Result<()> {
                 layout::save(&scene.layout_path, &scene.placements);
             }
             if end_grab && let Some(released) = scene.grabs[hand].take() {
+                scene.follow_hold = true;
                 // Letting go with the first hand ends resizing too.
                 scene.scaling = None;
                 if released.id == KEYBOARD_ID {
