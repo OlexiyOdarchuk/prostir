@@ -143,8 +143,17 @@ enum Target {
     Panel,
     MenuButton,
     Monitor(u8),
+    /// The bar under a monitor: press and drag at once.
+    Bar(u8),
     Keyboard,
 }
+
+/// The bar under a pointed-at monitor: length, how far below the bottom edge (to its
+/// centre), the height that can be hit, and how long it stays after the pointer left.
+const BAR_LENGTH: f32 = 0.16;
+const BAR_GAP: f32 = 0.035;
+const BAR_HIT_HEIGHT: f32 = 0.05;
+const BAR_LINGER: Duration = Duration::from_millis(900);
 
 /// Lying flat (facing up) with its far edge pointing away from `head`, like a
 /// keyboard on a desk.
@@ -209,6 +218,8 @@ struct Scene {
     tab: Tab,
     /// Follow mode is moving the monitors right now.
     following: bool,
+    /// Per hand: the monitor whose bar is shown, and when it was last pointed at.
+    bar_for: [Option<(u8, Instant)>; 2],
     /// A short message shown on its own: text, since when, where (`None` until placed).
     toast: Option<(String, Instant, Option<Placement>)>,
     /// The PC speaks another protocol: (the PC is newer, its app version).
@@ -619,6 +630,17 @@ impl Scene {
         }
     }
 
+    /// Where the bar under monitor `id` is.
+    fn bar_place(&self, id: u8) -> Option<Placement> {
+        let p = self.placements.get(&id)?;
+        let down = self.height_of(id) / 2.0 + BAR_GAP;
+        Some(Placement {
+            position: p.position + p.rotation * Vec3::new(0.0, -down, 0.005),
+            rotation: p.rotation,
+            width: BAR_LENGTH,
+        })
+    }
+
     /// Nearest thing the ray points at.
     fn pick(&self, ray: Ray) -> Option<(Target, Hit)> {
         let mut best: Option<(Target, Hit)> = None;
@@ -648,6 +670,14 @@ impl Scene {
                 Target::MenuButton,
                 layout::hit_surface(ray, b, BUTTON_SIZE, None),
             );
+        }
+        for (id, _) in self.bar_for.iter().flatten() {
+            if let Some(b) = self.bar_place(*id) {
+                consider(
+                    Target::Bar(*id),
+                    layout::hit_surface(ray, &b, BAR_HIT_HEIGHT, None),
+                );
+            }
         }
         let curve = self.curve_radius();
         for id in self.monitors.keys() {
@@ -1080,6 +1110,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         tab: tab_from_code(settings.last_tab),
         update_needed: None,
         following: false,
+        bar_for: [None, None],
         toast: None,
         center: (Vec3::ZERO, 0.0),
         sent_layout: None,
@@ -1098,6 +1129,8 @@ fn run(app: &AndroidApp) -> Result<()> {
     };
 
     let mut hold_since: [Option<Instant>; 2] = [None, None];
+    // Grabs started on a monitor's bar (they end when the press ends).
+    let mut bar_grab = [false; 2];
     let mut pokes = [Poke::default(); 2];
     // Touches that just happened: (where, when), drawn as a ring spreading out.
     let mut rings: Vec<(Vec3, Instant)> = Vec::new();
@@ -1343,6 +1376,21 @@ fn run(app: &AndroidApp) -> Result<()> {
         // Pointing, clicking and dragging.
         let mut picks: [Option<(Target, Hit)>; 2] =
             std::array::from_fn(|h| controls.state[h].ray.and_then(|r| scene.pick(r)));
+        // A monitor pointed at (or held) shows its bar; it lingers so the pointer can
+        // move down onto it.
+        for (h, pick) in picks.iter().enumerate() {
+            let pointed = match pick {
+                Some((Target::Monitor(id) | Target::Bar(id), _)) => Some(*id),
+                _ => scene.grabs[h]
+                    .map(|g| g.id)
+                    .filter(|id| scene.monitors.contains_key(id)),
+            };
+            if let Some(id) = pointed {
+                scene.bar_for[h] = Some((id, Instant::now()));
+            } else if scene.bar_for[h].is_some_and(|(_, t)| t.elapsed() > BAR_LINGER) {
+                scene.bar_for[h] = None;
+            }
+        }
         let panel_point = |hit: &Hit| {
             let x = (hit.local.x / PANEL_WIDTH + 0.5) * ui::WIDTH as f32;
             let y = (0.5 - hit.local.y / panel_height()) * ui::HEIGHT as f32;
@@ -1465,6 +1513,23 @@ fn run(app: &AndroidApp) -> Result<()> {
             if input.select.pressed {
                 let mut clicked = false;
                 match picks[hand] {
+                    Some((Target::Bar(id), hit))
+                        if scene.grabs[1 - hand].is_none_or(|g| g.id != id) =>
+                    {
+                        clicked = true;
+                        if let Some(p) = scene.placements.get(&id) {
+                            // Held by the bar: the same point of the monitor follows.
+                            let down = scene.height_of(id) / 2.0 + BAR_GAP;
+                            let local = hit.local - Vec2::new(0.0, down);
+                            let grab = Grab::start(id, hit.t, local, p);
+                            scene.grabs[hand] = Some(match input.ray {
+                                Some(ray) if input.is_hand => grab.with_reach(ray.origin, head),
+                                _ => grab,
+                            });
+                            bar_grab[hand] = true;
+                            controls.pulse(&session, hand);
+                        }
+                    }
                     Some((Target::Panel, hit)) => {
                         panel.hover(Some(panel_point(&hit)));
                         if let Some(action) = panel.hovered_action() {
@@ -1494,13 +1559,20 @@ fn run(app: &AndroidApp) -> Result<()> {
             if input.select.released {
                 hold_since[hand] = None;
             }
-            let (start_grab, end_grab) = if input.is_hand {
+            let (start_grab, mut end_grab) = if input.is_hand {
                 let held = input.select.down
                     && hold_since[hand].is_some_and(|t| t.elapsed() >= HOLD_TO_DRAG);
                 (held && scene.grabs[hand].is_none(), input.select.released)
             } else {
                 (input.grab.pressed, input.grab.released)
             };
+            // Taken by the bar with the trigger: letting the trigger go drops it.
+            if bar_grab[hand] && input.select.released {
+                end_grab = true;
+            }
+            if end_grab || scene.grabs[hand].is_none() {
+                bar_grab[hand] = false;
+            }
 
             if end_grab && scene.scaling.is_some_and(|s| s.hand == hand) {
                 scene.scaling = None;
@@ -1661,8 +1733,47 @@ fn run(app: &AndroidApp) -> Result<()> {
             let (radius, alpha) = match pick.0 {
                 Target::Panel | Target::MenuButton | Target::Keyboard => (0.012, 0.55),
                 Target::Monitor(_) => (0.03, 0.3),
+                Target::Bar(_) => continue,
             };
             spheres.push(Sphere::glow(pick.1.point, radius, [0.72, 0.84, 1.0, alpha]));
+        }
+        // The bar under a pointed-at monitor: a row of small balls, lit while pointed
+        // at or held.
+        let mut bars: Vec<(u8, bool)> = Vec::new();
+        for (h, pick) in picks.iter().enumerate() {
+            if let Some((id, _)) = scene.bar_for[h] {
+                let lit = matches!(pick, Some((Target::Bar(b), _)) if *b == id)
+                    || scene.grabs[h].is_some_and(|g| g.id == id);
+                match bars.iter_mut().find(|b| b.0 == id) {
+                    Some(b) => b.1 |= lit,
+                    None => bars.push((id, lit)),
+                }
+            }
+        }
+        for (id, lit) in bars {
+            let (Some(p), Some(shown)) = (scene.bar_place(id), scene.shown.get(&id)) else {
+                continue;
+            };
+            // Follow the monitor as drawn (it glides towards its place).
+            let target = scene.placements[&id];
+            let at = shown.position
+                + shown.rotation * (target.rotation.inverse() * (p.position - target.position));
+            let along = shown.rotation * Vec3::X;
+            let (radius, color) = if lit {
+                (0.0075, [0.72, 0.84, 1.0, 0.95])
+            } else {
+                (0.0055, [0.9, 0.92, 0.96, 0.6])
+            };
+            let n = 24;
+            for i in 0..=n {
+                let k = i as f32 / n as f32 - 0.5;
+                spheres.push(Sphere {
+                    center: at + along * (k * BAR_LENGTH),
+                    radius,
+                    color,
+                    kind: overlay::Kind::Ball,
+                });
+            }
         }
         for j in joints.iter().flatten() {
             overlay::hand_spheres(j, &mut spheres);
