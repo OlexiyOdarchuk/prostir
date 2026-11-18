@@ -1,6 +1,6 @@
 //! Renders the headset menu to a PNG for checking the design on the desktop.
 //! cargo run -p prostir-client --example panel_preview -- panel.png [hover_x hover_y]
-//! Environment: TAB=monitors|look|sound|language|pc|help (default: quick), LANG_UI=en, PAIR=show|type|failed, OFFLINE=1, KEYPAD=…
+//! Environment: WRIST=1 (the wrist menu), TAB=monitors|look|sound|language|pc|help (default: quick), LANG_UI=en, PAIR=show|type|failed, OFFLINE=1, KEYPAD=…
 
 use prostir::i18n::Lang;
 use prostir::settings::Settings;
@@ -119,17 +119,24 @@ fn main() {
             Lang::Uk
         },
     };
-    let mut panel = Panel::new();
+    // WRIST=1: the wrist menu instead.
+    let wrist = std::env::var("WRIST").is_ok();
+    let (w, h) = if wrist {
+        (prostir::ui::WRIST_WIDTH, prostir::ui::WRIST_HEIGHT)
+    } else {
+        (prostir::ui::WIDTH, prostir::ui::HEIGHT)
+    };
+    let mut panel = if wrist { Panel::wrist() } else { Panel::new() };
     panel.set_state(&state);
     panel.hover(hover);
     let rgba = panel.render_if_dirty().unwrap().to_vec();
     let pixmap = tiny_skia::Pixmap::from_vec(
         rgba,
-        tiny_skia::IntSize::from_wh(prostir::ui::WIDTH, prostir::ui::HEIGHT).unwrap(),
+        tiny_skia::IntSize::from_wh(w, h).unwrap(),
     )
     .unwrap();
     // Composite over a dark grey so translucent parts are visible in the preview.
-    let mut bg = tiny_skia::Pixmap::new(prostir::ui::WIDTH, prostir::ui::HEIGHT).unwrap();
+    let mut bg = tiny_skia::Pixmap::new(w, h).unwrap();
     bg.fill(tiny_skia::Color::from_rgba8(40, 44, 52, 255));
     bg.draw_pixmap(
         0,

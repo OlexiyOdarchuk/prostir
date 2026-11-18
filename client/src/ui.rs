@@ -13,6 +13,9 @@ use crate::settings::{Background, Curve, HandMode, Preset, Settings, Sky};
 
 pub const WIDTH: u32 = 1280;
 pub const HEIGHT: u32 = 960;
+/// The small menu by the left wrist, in pixels.
+pub const WRIST_WIDTH: u32 = 520;
+pub const WRIST_HEIGHT: u32 = 320;
 /// Same limit as the host's.
 pub const MAX_MONITORS: usize = 6;
 
@@ -213,6 +216,8 @@ pub enum Action {
     Screenshot,
     /// Close a window panel (its window goes back to the monitors).
     CloseWindow(u8),
+    /// Open the main menu (from the wrist menu).
+    OpenMenu,
     Close,
 }
 
@@ -275,6 +280,8 @@ pub struct Panel {
     hovered: Option<usize>,
     pixmap: Pixmap,
     dirty: bool,
+    /// The wrist menu rather than the main one.
+    wrist: bool,
 }
 
 impl Default for Panel {
@@ -295,6 +302,16 @@ impl Panel {
             hovered: None,
             pixmap: Pixmap::new(WIDTH, HEIGHT).expect("panel size"),
             dirty: true,
+            wrist: false,
+        }
+    }
+
+    /// The small menu by the left wrist: four big buttons.
+    pub fn wrist() -> Self {
+        Self {
+            pixmap: Pixmap::new(WRIST_WIDTH, WRIST_HEIGHT).expect("wrist menu size"),
+            wrist: true,
+            ..Self::new()
         }
     }
 
@@ -302,7 +319,11 @@ impl Panel {
         if self.state.as_ref() == Some(state) {
             return;
         }
-        self.items = self.build(state);
+        self.items = if self.wrist {
+            self.build_wrist(state)
+        } else {
+            self.build(state)
+        };
         self.state = Some(state.clone());
         self.hovered = None;
         self.dirty = true;
@@ -401,6 +422,48 @@ impl Panel {
             .filter(|c| !c.is_whitespace() && self.regular.lookup_glyph_index(*c) == 0)
             .collect();
         (!missing.is_empty()).then(|| format!("no glyph for {missing:?} in {text:?}"))
+    }
+
+    /// The wrist menu: what is needed without opening the main menu, in big buttons.
+    fn build_wrist(&mut self, s: &UiState) -> Vec<Item> {
+        let l = s.lang;
+        let st = s.settings;
+        let (w, h) = (WRIST_WIDTH as f32, WRIST_HEIGHT as f32);
+        let mut items = vec![Item::Panel(rect(0.0, 0.0, w, h))];
+        let gap = 14.0;
+        let (bw, bh) = ((w - 3.0 * gap) / 2.0, (h - 3.0 * gap) / 2.0);
+        let buttons = [
+            (l.t("Перед собою", "In front"), false, Action::Recenter),
+            (l.t("Фокус", "Focus"), st.focus, Action::Focus(!st.focus)),
+            (
+                l.t("Кінотеатр", "Cinema"),
+                st.cinema,
+                Action::Cinema(!st.cinema),
+            ),
+            (l.t("Меню", "Menu"), false, Action::OpenMenu),
+        ];
+        let size = 30.0;
+        for (i, (label, on, action)) in buttons.into_iter().enumerate() {
+            let r = rect(
+                gap + (i % 2) as f32 * (bw + gap),
+                gap + (i / 2) as f32 * (bh + gap),
+                bw,
+                bh,
+            );
+            let style = if on { Style::Selected } else { Style::Normal };
+            // An empty label: the bigger text goes on top.
+            items.push(button(r, "", style, Some(action)));
+            let tw = self.text_width(label, size, true);
+            items.push(text(
+                r.left() + (r.width() - tw) / 2.0,
+                r.top() + r.height() / 2.0 + size * 0.36,
+                size,
+                true,
+                [255, 255, 255, 255],
+                label,
+            ));
+        }
+        items
     }
 
     /// Premultiplied RGBA, top row first, when it changed since the last call.

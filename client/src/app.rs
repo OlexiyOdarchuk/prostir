@@ -145,6 +145,8 @@ enum Target {
     Monitor(u8),
     /// The bar under a monitor: press and drag at once.
     Bar(u8),
+    /// The menu by the left wrist.
+    Wrist,
     Keyboard,
 }
 
@@ -154,6 +156,42 @@ const BAR_LENGTH: f32 = 0.16;
 const BAR_GAP: f32 = 0.035;
 const BAR_HIT_HEIGHT: f32 = 0.05;
 const BAR_LINGER: Duration = Duration::from_millis(900);
+/// Width of the wrist menu in the room.
+const WRIST_MENU_WIDTH: f32 = 0.15;
+
+fn wrist_menu_height() -> f32 {
+    WRIST_MENU_WIDTH * ui::WRIST_HEIGHT as f32 / ui::WRIST_WIDTH as f32
+}
+
+/// Where the wrist menu goes: beside the left hand, thumb side, while its palm is
+/// turned to the face (`shown`: it is up already, which takes less to keep).
+fn wrist_menu_place(
+    joints: Option<&[(Vec3, f32); 26]>,
+    head: Vec3,
+    previous: Option<Placement>,
+) -> Option<Placement> {
+    let j = joints?;
+    let (palm, wrist, index, middle, little) = (j[0].0, j[1].0, j[6].0, j[11].0, j[21].0);
+    // The left palm's normal (index × little, from the wrist).
+    let normal = (index - wrist).cross(little - wrist).normalize_or_zero();
+    let facing = normal.dot((head - palm).normalize_or_zero());
+    let needed = if previous.is_some() { 0.45 } else { 0.7 };
+    if facing < needed {
+        return None;
+    }
+    let side = (index - little).normalize_or_zero();
+    let up = (middle - wrist).normalize_or_zero();
+    let mut at = palm + side * 0.095 + normal * 0.025 + up * 0.01;
+    // Hands shake a little: the menu follows smoothly.
+    if let Some(p) = previous {
+        at = p.position.lerp(at, 0.35);
+    }
+    Some(Placement {
+        position: at,
+        rotation: layout::facing(at, head),
+        width: WRIST_MENU_WIDTH,
+    })
+}
 
 /// Lying flat (facing up) with its far edge pointing away from `head`, like a
 /// keyboard on a desk.
@@ -220,6 +258,8 @@ struct Scene {
     following: bool,
     /// Per hand: the monitor whose bar is shown, and when it was last pointed at.
     bar_for: [Option<(u8, Instant)>; 2],
+    /// The wrist menu, while the left palm is turned to the face.
+    wrist: Option<Placement>,
     /// A short message shown on its own: text, since when, where (`None` until placed).
     toast: Option<(String, Instant, Option<Placement>)>,
     /// The PC speaks another protocol: (the PC is newer, its app version).
@@ -671,6 +711,12 @@ impl Scene {
                 layout::hit_surface(ray, b, BUTTON_SIZE, None),
             );
         }
+        if let Some(w) = &self.wrist {
+            consider(
+                Target::Wrist,
+                layout::hit_surface(ray, w, wrist_menu_height(), None),
+            );
+        }
         for (id, _) in self.bar_for.iter().flatten() {
             if let Some(b) = self.bar_place(*id) {
                 consider(
@@ -1029,6 +1075,11 @@ fn run(app: &AndroidApp) -> Result<()> {
     let mut last_battery: Option<Instant> = None;
     button_layer.upload(&gl, &ui::menu_button_image(BUTTON_PX, false))?;
     let mut panel = Panel::new();
+    let mut wrist_panel = Panel::wrist();
+    let mut wrist_layer =
+        ImageLayer::new(&session, format, ui::WRIST_WIDTH, ui::WRIST_HEIGHT, false)?;
+    // The right fingertip left the wrist menu since its last press.
+    let mut wrist_poke_armed = true;
     // Tracked hands and pointer rays, drawn on top of everything.
     let hand_trackers = if exts.ext_hand_tracking {
         let make = |h| session.create_hand_tracker(h);
@@ -1111,6 +1162,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         update_needed: None,
         following: false,
         bar_for: [None, None],
+        wrist: None,
         toast: None,
         center: (Vec3::ZERO, 0.0),
         sent_layout: None,
@@ -1325,6 +1377,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         let hands_in_view = tips.iter().any(Option::is_some);
         scene.hands_in_view = hands_in_view;
         controls.hands_from_joints(&joints, head, forward);
+        scene.wrist = wrist_menu_place(joints[0].as_ref(), head, scene.wrist);
 
         // Pairing needs the menu, and so do the first-run tips: open it where the
         // user is looking.
@@ -1389,6 +1442,51 @@ fn run(app: &AndroidApp) -> Result<()> {
                 scene.bar_for[h] = Some((id, Instant::now()));
             } else if scene.bar_for[h].is_some_and(|(_, t)| t.elapsed() > BAR_LINGER) {
                 scene.bar_for[h] = None;
+            }
+        }
+
+        // The wrist menu: pointed at, or touched with the right index finger.
+        let wrist_point = |local: Vec2| {
+            (
+                (local.x / WRIST_MENU_WIDTH + 0.5) * ui::WRIST_WIDTH as f32,
+                (0.5 - local.y / wrist_menu_height()) * ui::WRIST_HEIGHT as f32,
+            )
+        };
+        let mut wrist_hover = picks
+            .iter()
+            .flatten()
+            .find_map(|(t, hit)| matches!(t, Target::Wrist).then(|| wrist_point(hit.local)));
+        let mut wrist_pressed = false;
+        if let (Some(w), Some(tip)) = (scene.wrist, tips[1]) {
+            let local = w.rotation.inverse() * (tip - w.position);
+            let inside =
+                local.x.abs() < WRIST_MENU_WIDTH / 2.0 && local.y.abs() < wrist_menu_height() / 2.0;
+            if inside && local.z < 0.04 {
+                wrist_hover = Some(wrist_point(Vec2::new(local.x, local.y)));
+            }
+            if inside && local.z < 0.008 && local.z > -0.03 && wrist_poke_armed {
+                wrist_poke_armed = false;
+                wrist_pressed = true;
+                rings.push((tip, Instant::now()));
+            }
+            if !inside || local.z > 0.02 {
+                wrist_poke_armed = true;
+            }
+        } else {
+            wrist_poke_armed = true;
+        }
+        if scene.wrist.is_some() {
+            let ui_state = scene.ui_state(
+                passthrough.is_some(),
+                passthrough.as_ref().is_some_and(|p| p.window_supported()),
+                exts.khr_composition_layer_equirect2,
+                custom_pano,
+            );
+            wrist_panel.set_state(&ui_state);
+            wrist_panel.hover(wrist_hover);
+            if wrist_pressed && let Some(action) = wrist_panel.hovered_action() {
+                controls.pulse(&session, 1);
+                handle_action(&mut scene, action, &mut passthrough, &mut controls);
             }
         }
         let panel_point = |hit: &Hit| {
@@ -1539,6 +1637,15 @@ fn run(app: &AndroidApp) -> Result<()> {
                             handle_action(&mut scene, action, &mut passthrough, &mut controls);
                         }
                     }
+                    Some((Target::Wrist, hit)) => {
+                        clicked = true;
+                        wrist_panel.hover(Some(wrist_point(hit.local)));
+                        if let Some(action) = wrist_panel.hovered_action() {
+                            rings.push((hit.point, Instant::now()));
+                            controls.pulse(&session, hand);
+                            handle_action(&mut scene, action, &mut passthrough, &mut controls);
+                        }
+                    }
                     Some((Target::MenuButton, hit)) => {
                         rings.push((hit.point, Instant::now()));
                         clicked = true;
@@ -1685,6 +1792,11 @@ fn run(app: &AndroidApp) -> Result<()> {
         {
             scene.toast = None;
         }
+        if scene.wrist.is_some()
+            && let Some(pixels) = wrist_panel.render_if_dirty()
+        {
+            wrist_layer.upload(&gl, pixels)?;
+        }
         if scene.panel_open {
             let ui_state = scene.ui_state(
                 passthrough.is_some(),
@@ -1734,6 +1846,7 @@ fn run(app: &AndroidApp) -> Result<()> {
                 Target::Panel | Target::MenuButton | Target::Keyboard => (0.012, 0.55),
                 Target::Monitor(_) => (0.03, 0.3),
                 Target::Bar(_) => continue,
+                Target::Wrist => (0.008, 0.55),
             };
             spheres.push(Sphere::glow(pick.1.point, radius, [0.72, 0.84, 1.0, alpha]));
         }
@@ -2068,6 +2181,11 @@ fn run(app: &AndroidApp) -> Result<()> {
             )
         });
         layers.extend(toast_quad.iter().map(as_layer));
+        let wrist_quad = scene
+            .wrist
+            .filter(|_| wrist_layer.ready())
+            .map(|w| wrist_layer.quad(&local, posef(&w), WRIST_MENU_WIDTH, wrist_menu_height()));
+        layers.extend(wrist_quad.iter().map(as_layer));
         layers.extend(hands_layer.iter().map(as_layer));
         layers.extend(cursors.iter().map(as_layer));
         // The compositor supports 16 layers at most.
@@ -2355,6 +2473,11 @@ fn handle_action(
             }
         }
         Action::CloseWindow(id) => scene.send(ClientMsg::RemoveMonitor { id }),
+        Action::OpenMenu => {
+            let (head, forward) = scene.head;
+            let touch = scene.hands_in_view;
+            scene.open_panel(head, forward, touch);
+        }
         Action::Follow(on) => {
             scene.settings.follow = on;
             scene.settings.save(settings_path);
