@@ -64,6 +64,7 @@
     <nav class="sections" aria-label="Sections">
       <a href="#install">Install</a>
       <a href="#requirements">Requirements</a>
+      <a href="#help">Help</a>
       <a href="https://github.com/OlexiyOdarchuk/prostir">GitHub</a>
     </nav>
     <nav class="lang" aria-label="Language">
@@ -150,10 +151,10 @@
       <ul class="points reveal">
         <li><h3>The laptop screen too</h3><p>It hangs under the main monitor without a seam and disappears when you close the lid.</p></li>
         <li><h3>Focus mode</h3><p>Every monitor except the one with the mouse gets darker.</p></li>
-        <li><h3>Sound and microphone</h3><p>PC sound plays in the headset, and PC apps hear the headset microphone while they record.</p></li>
+        <li><h3>Sound and microphone</h3><p>PC sound plays in the headset, and PC apps hear the headset microphone while they record. The microphone switch in the headset menu turns that off.</p></li>
         <li><h3>Headset off, desk back</h3><p>After 10 seconds off your head, windows, panel and sound return to the laptop.</p></li>
         <li><h3>Keyboard window</h3><p>A rectangle over the real keyboard shows the desk through the cameras.</p></li>
-        <li><h3>Paired and encrypted</h3><p>A PC streams nothing to a headset it has not been paired with.</p></li>
+        <li><h3>Paired and encrypted</h3><p>A PC streams nothing to a headset it has not been paired with. Pairing starts only after you confirm it in the headset and type a 6-digit code.</p></li>
       </ul>
     </div>
   </section>
@@ -161,26 +162,75 @@
   <section id="install">
     <div class="wrap">
       <h2>Install</h2>
+      <p class="intro">Each <a href="https://github.com/OlexiyOdarchuk/prostir/releases">release</a> has both parts: the program for the PC and the app for the headset, an APK file.</p>
       <div class="steps">
         <div>
           <h3>On the PC</h3>
           <ol>
-            <li>Download <code>prostir-&lt;version&gt;-x86_64-linux.tar.gz</code> from <a href="https://github.com/OlexiyOdarchuk/prostir/releases">Releases</a>.</li>
-            <li>Unpack it and run the installer. It installs into <code>~/.local</code> and needs no root.
+            <li>Install Prostir in one of these ways. Use only one: the packages install to <code>/usr/bin</code>, the tarball to <code>~/.local/bin</code>, and both together give two copies.
+              <ul class="ways">
+                <li><h4>Arch Linux and derivatives</h4>From the AUR:
+<pre><code>yay -S prostir-bin</code></pre></li>
+                <li><h4>Debian, Ubuntu</h4>Download the <code>.deb</code> file from the release, then:
+<pre><code>sudo apt install ./prostir_*.deb</code></pre></li>
+                <li><h4>Fedora, openSUSE</h4>Download the <code>.rpm</code> file from the release, then on Fedora:
+<pre><code>sudo dnf install ./prostir-*.rpm</code></pre>
+                  or on openSUSE:
+<pre><code>sudo zypper install --allow-unsigned-rpm ./prostir-*.rpm</code></pre></li>
+                <li><h4>Any distribution, without root</h4>Download <code>prostir-&lt;version&gt;-x86_64-linux.tar.gz</code>, unpack it and run the installer, which installs into <code>~/.local</code>:
 <pre><code>tar xf prostir-*-x86_64-linux.tar.gz
 cd prostir-*/
-./install.sh --autostart</code></pre></li>
-            <li>Start Prostir from the application menu. Its icon appears in the tray. On Hyprland, add <code>prostir</code> to the config's autostart; the README shows the line.</li>
+./install.sh --autostart</code></pre>
+                  The packages above pull in GStreamer and PipeWire; with the tarball, install them yourself (see <a href="#requirements">Requirements</a>).</li>
+              </ul>
+            </li>
+            <li>Start Prostir from the application menu. It has no window: its icon appears in the tray. To start it with the session, turn on "Start with the system" in the tray menu.</li>
+            <li>On Hyprland without uwsm, start it from the config instead. In <code>hyprland.conf</code>:
+<pre><code>exec-once = prostir</code></pre>
+              or in <code>hyprland.lua</code>:
+<pre><code>hl.on("hyprland.start", function () hl.exec_cmd("prostir") end)</code></pre>
+              With the tarball, if <code>~/.local/bin</code> is not on your <code>PATH</code>, write <code>~/.local/bin/prostir</code> instead of <code>prostir</code>. If <code>ecosystem:enforce_permissions</code> is on, also allow screen capture, in <code>hyprland.conf</code>:
+<pre><code>permission = /usr/(local/)?bin/prostir|.*/\.local/bin/prostir, screencopy, allow</code></pre>
+              or in <code>hyprland.lua</code>:
+<pre><code>hl.permission("/usr/(local/)?bin/prostir|.*/\\.local/bin/prostir", "screencopy", "allow")</code></pre></li>
           </ol>
         </div>
         <div>
           <h3>On the headset</h3>
           <ol>
+            <li>Make your Meta account a developer account: create or join an organization at <a href="https://developers.meta.com/horizon/">developers.meta.com</a>. It is free, but Meta may ask you to verify the account. Without it, the developer mode switch does not appear.</li>
             <li>Turn on developer mode in the Meta Horizon phone app: Devices → Headset settings → Developer mode.</li>
-            <li>Connect the headset with a USB cable and install the APK from the same release:
+            <li>Install <code>adb</code> on the PC: the <code>android-tools</code> package on Arch, Fedora and openSUSE, <code>adb</code> on Debian and Ubuntu.</li>
+            <li>Connect the headset to the PC with a USB cable and put it on. Accept "Allow USB debugging", ideally with "Always allow from this computer". Now <code>adb devices</code> lists the headset as <code>device</code>, not <code>unauthorized</code>.</li>
+            <li>Install the APK from the same release:
 <pre><code>adb install prostir-*.apk</code></pre></li>
-            <li>Open Prostir from Library → Unknown sources. The headset finds the PC on the same Wi-Fi network or over the cable; the first time, type the 6-digit code it shows into the dialog on the PC.</li>
+            <li>In the headset, open the Library, pick Unknown sources in the filter and start Prostir. Some Horizon OS versions list it there by its package name, <code>dev.prostir.client</code>.</li>
+            <li>The headset finds the PC on the same Wi-Fi network or over the cable. The first time, confirm "Pair with &lt;PC name&gt;?" in the headset, then type the 6-digit code it shows into the dialog that opens on the PC.</li>
           </ol>
+          <p class="note">Over the cable, the PC forwards the connection with adb, so USB needs adb on the PC and developer mode on the headset. Wi-Fi needs neither once the app is installed.</p>
+        </div>
+      </div>
+
+      <div class="steps">
+        <div id="update">
+          <h3>Update</h3>
+          <ul>
+            <li>AUR: with your usual system update, for example <code>yay -Syu</code>.</li>
+            <li><code>.deb</code> or <code>.rpm</code>: install the newer file the same way.</li>
+            <li>Tarball: unpack the new release and run <code>./install.sh</code> again.</li>
+            <li>Headset: install the new APK over the old one; settings and pairings stay.
+<pre><code>adb install -r prostir-*.apk</code></pre></li>
+          </ul>
+          <p class="note">Update both sides when you can. Versions a little apart still work together, because each side skips messages it does not know. If they are too far apart, the headset says which side to update.</p>
+        </div>
+        <div id="uninstall">
+          <h3>Uninstall</h3>
+          <ul>
+            <li>AUR: <code>sudo pacman -R prostir-bin</code>. Debian, Ubuntu: <code>sudo apt remove prostir</code>. Fedora: <code>sudo dnf remove prostir</code>. openSUSE: <code>sudo zypper remove prostir</code>.</li>
+            <li>Tarball: run <code>./install.sh --uninstall</code> in the unpacked folder.</li>
+            <li>Settings and pairings stay in <code>~/.config/prostir</code>. Delete that folder to remove them, and <code>~/.config/autostart/prostir.desktop</code> if you turned on autostart.</li>
+            <li>Headset: <code>adb uninstall dev.prostir.client</code>, or uninstall it from Unknown sources in the Library.</li>
+          </ul>
         </div>
       </div>
     </div>
@@ -195,8 +245,13 @@ cd prostir-*/
           <ul>
             <li>KDE Plasma 6 or Hyprland, on Wayland. X11 sessions are not supported.</li>
             <li>GNOME is not supported yet. <a href="https://github.com/OlexiyOdarchuk/prostir/issues/1">Want it? Vote with a 👍 on GitHub.</a></li>
-            <li>Intel or AMD graphics with VA-API encoding. NVIDIA works only with <code>--software</code>, which encodes on the CPU.</li>
-            <li>PipeWire and GStreamer 1.22 or newer with the <code>va</code> plugin.</li>
+            <li>PipeWire with <code>pw-cli</code> and <code>pw-loopback</code>, and GStreamer 1.22 or newer with its PipeWire and PulseAudio plugins.</li>
+            <li>For encoding on the GPU: Intel or AMD graphics with VA-API H.264 or HEVC encoding, and the GStreamer <code>va</code> plugin: <code>gst-plugin-va</code> on Arch, part of gst-plugins-bad elsewhere.</li>
+            <li>Without that, for example on NVIDIA, Prostir encodes on the CPU with x264, which needs <code>x264enc</code> from gst-plugins-ugly. See <a href="#help">Help</a>.</li>
+            <li>For pairing, one of <code>kdialog</code>, <code>zenity</code>, <code>fuzzel</code>, <code>wofi</code> or <code>rofi</code> to show the code dialog.</li>
+            <li>On Hyprland, a bar with a tray for Prostir's menu (Waybar with its <code>tray</code> module), and a notification daemon such as mako, dunst or swaync.</li>
+            <li>A firewall, if you have one, must allow TCP 47830 and UDP 47831. See <a href="#help">Help</a>.</li>
+            <li>For USB: <code>adb</code> on the PC.</li>
           </ul>
         </div>
         <div>
@@ -209,6 +264,49 @@ cd prostir-*/
         </div>
       </div>
       <p class="muted">Version 0.1, used every day by its author on Plasma 6.8 and Hyprland 0.57 with Intel Arc graphics. Problems and ideas go to <a href="https://github.com/OlexiyOdarchuk/prostir/issues">GitHub issues</a>.</p>
+    </div>
+  </section>
+
+  <section id="help">
+    <div class="wrap">
+      <h2>Help</h2>
+      <div class="faq">
+        <div>
+          <h3>The headset lists the PC but does not connect</h3>
+          <p>Usually a firewall. The PC accepts the connection on TCP port 47830 and announces itself on UDP port 47831; allow both. With ufw:</p>
+<pre><code>sudo ufw allow 47830/tcp
+sudo ufw allow 47831/udp</code></pre>
+          <p>With firewalld:</p>
+<pre><code>sudo firewall-cmd --add-port=47830/tcp --add-port=47831/udp --permanent
+sudo firewall-cmd --reload</code></pre>
+        </div>
+        <div>
+          <h3>The headset does not find the PC</h3>
+          <p>Both must be on the same network, and the network must not isolate its devices from each other, as guest networks often do. Type the PC's IP address on the keypad in the headset menu, or connect with the cable (needs adb).</p>
+          <p>If the PC is behind a firewall, check the ports above too.</p>
+        </div>
+        <div>
+          <h3>NVIDIA, or the headset says an encoder is missing</h3>
+          <p>Prostir encodes on the GPU through VA-API. When that is not available, it switches to the CPU and encodes with x264 by itself. This happens on NVIDIA, without the GStreamer <code>va</code> plugin, and with the Mesa that Fedora and openSUSE ship, which leaves out H.264 and HEVC encoding.</p>
+          <p>The CPU path needs <code>x264enc</code>: <code>gst-plugins-ugly</code> on Arch, <code>gstreamer1.0-plugins-ugly</code> on Debian and Ubuntu, <code>gstreamer1-plugins-ugly</code> from RPM Fusion on Fedora, <code>gstreamer-plugins-ugly</code> from Packman on openSUSE. If neither path works, the headset shows what is missing. <code>prostir --software</code> always encodes on the CPU.</p>
+        </div>
+        <div>
+          <h3>Nothing appears after starting Prostir on Hyprland</h3>
+          <p>Prostir has no window; its menu is in the tray, and Hyprland has no tray of its own. Add a bar with one, for example Waybar with the <code>tray</code> module. For its notifications, run a notification daemon such as mako, dunst or swaync.</p>
+        </div>
+        <div>
+          <h3>No pairing dialog opens on the PC</h3>
+          <p>Install one of <code>kdialog</code>, <code>zenity</code>, <code>fuzzel</code>, <code>wofi</code> or <code>rofi</code>. Or press the button under the code in the headset to swap sides: the PC then shows a code in its tray menu, and you type it in the headset.</p>
+        </div>
+        <div>
+          <h3>Does Prostir send anything about me?</h3>
+          <p>Nothing that identifies you or your PC. Official builds count each PC once a day, anonymously, and you can turn that off in the tray ("Count this PC among users") or with <code>PROSTIR_NO_COUNT=1</code>. The <a href="privacy.html">privacy policy</a> has the details.</p>
+        </div>
+        <div>
+          <h3>Logs for a bug report</h3>
+          <p>PC: run <code>prostir</code> in a terminal; <code>RUST_LOG=debug prostir</code> adds more detail. Headset: <code>adb logcat -s prostir</code>. Then open an <a href="https://github.com/OlexiyOdarchuk/prostir/issues">issue on GitHub</a>.</p>
+        </div>
+      </div>
     </div>
   </section>
 </main>
