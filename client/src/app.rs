@@ -1282,7 +1282,11 @@ fn run(app: &AndroidApp) -> Result<()> {
     let mut scene = Scene {
         monitors: HashMap::new(),
         order: Vec::new(),
-        placements: layout::load(&layout_path),
+        // Window panels are placed afresh when they appear.
+        placements: layout::load(&layout_path)
+            .into_iter()
+            .filter(|(id, _)| !is_window_panel(*id))
+            .collect(),
         primary: None,
         mirror_wanted: true,
         audio_wanted: true,
@@ -2649,8 +2653,18 @@ fn handle_action(
             if on {
                 scene.arrange_all();
             } else {
-                // Back to the desk layout as it was saved.
-                scene.placements = layout::load(&scene.layout_path);
+                // Back to the desk layout as it was saved; window panels stay put.
+                let panels: Vec<(u8, Placement)> = scene
+                    .placements
+                    .iter()
+                    .filter(|(id, _)| is_window_panel(**id))
+                    .map(|(id, p)| (*id, *p))
+                    .collect();
+                scene.placements = layout::load(&scene.layout_path)
+                    .into_iter()
+                    .filter(|(id, _)| !is_window_panel(*id))
+                    .chain(panels)
+                    .collect();
                 if scene
                     .monitors
                     .keys()
