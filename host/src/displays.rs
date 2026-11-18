@@ -456,7 +456,7 @@ pub struct Displays {
     windows_origin: HashMap<u8, ActiveWindow>,
     /// A new panel output to place once the compositor lists it.
     windows_unplaced: bool,
-    /// Left-to-right order of the monitors, in the headset and in KDE.
+    /// Left-to-right order of the monitors, in the headset and on the desktop.
     order: Vec<u8>,
     /// How the headset arranges the monitors in rows (see `effective_rows`).
     rows: Vec<LayoutRow>,
@@ -1220,7 +1220,7 @@ impl Displays {
         rows
     }
 
-    /// Arranges KDE's outputs in the rows the headset shows them in.
+    /// Arranges the desktop's outputs in the rows the headset shows them in.
     pub fn set_layout(&mut self, mut rows: Vec<LayoutRow>) {
         // Offsets are desktop pixels; anything this far out is nonsense (and would
         // overflow the arithmetic below).

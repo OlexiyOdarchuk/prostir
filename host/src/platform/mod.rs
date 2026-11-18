@@ -1,4 +1,49 @@
-//! The door from the core to the operating system.
+//! The door from the core to the operating system: the core (`main.rs`, `displays.rs`,
+//! `layout.rs`, `encoder.rs`, `pairing.rs`, `outbox.rs`, `usage.rs`, `i18n.rs`) reaches
+//! the desktop, the sound system and the user's files only through this module.
+//!
+//! This file holds what every platform shares: the types below and two traits. Each
+//! operating system has a module of its own (`linux/`, picked with `cfg`) whose public
+//! items are re-exported here, so the core writes `platform::windows::active()` and
+//! never names the OS.
+//!
+//! # A new operating system (Windows)
+//!
+//! Add `platform/windows/mod.rs`, select it below next to `linux`, and provide what
+//! `linux/mod.rs` exports, with the same names and signatures:
+//!
+//! - `Desktop` implementing [`DesktopBackend`] and `Output` implementing
+//!   [`OutputBackend`]: creating and removing virtual monitors and the laptop-screen
+//!   mirror, their geometry and placement, the primary output, and the frame source
+//!   for the encoder ([`crate::encoder::Input`]: GStreamer source elements, or an
+//!   `appsrc` named `src` that [`OutputBackend::attach`] feeds).
+//! - `windows`: `active`, `cursor`, `all_windows`, `can_move_cursor`, `move_cursor`,
+//!   `move_to`, `put_back`, `forget_panel`, `vacated`, `screenshot`, `screenshot_path`.
+//! - `focus::ActiveOutput` (`new`, `get`): the output the user works on.
+//! - `audio`: `AudioOut` (PC sound to the headset, as a default output device while it
+//!   exists), `MicIn` (the headset microphone as the default input: `push`, `in_use`),
+//!   `restore_after_crash`.
+//! - `sound_source::Watcher` (`start`, `output`): the output whose window plays sound.
+//! - `notifications::watch`: the PC's desktop notifications, as text.
+//! - `tray`: `spawn`, `Handle`, `set_status`, `set_battery`, `set_encoding`,
+//!   `set_pairing`; the tray menu also turns autostart on and off.
+//! - `dialogs`: `ask_code` (the pairing code typed on the PC), `notify` and
+//!   `notify_and_wait` (desktop notifications).
+//! - System: `config_home`, `single_instance`, `quit_on_signals`, `quit_requested`,
+//!   `clean_up_after_crash`, `give_memory_back`, `set_keepalive`, `hostname`,
+//!   `broadcast_addresses`. The private runtime dir stays inside the platform.
+//!
+//! The compiler checks the list: the core does not build until everything is there.
+//!
+//! # A new Linux desktop (GNOME)
+//!
+//! Linux picks the desktop at run time (`linux/desktop.rs`: KDE Plasma or Hyprland).
+//! Add a `linux/gnome/` module next to `linux/kde/` and `linux/hyprland/`, a variant
+//! for it in `Desktop` and `Output` (making monitors, streaming them, placing them),
+//! and a branch in each function of `linux/windows.rs` and in `linux/focus.rs` (the
+//! active window and output, moving windows, the mouse, screenshots). Sound,
+//! notifications, the tray, dialogs and the system part are the same on every Linux
+//! desktop.
 
 use std::collections::HashMap;
 
@@ -11,6 +56,10 @@ mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::*;
 
+#[cfg(not(target_os = "linux"))]
+compile_error!("Prostir has no platform layer for this operating system yet (see platform/mod.rs)");
+
+/// A virtual monitor to make: its mode and scale.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MonitorSpec {
     /// Size in pixels of the encoded stream.
