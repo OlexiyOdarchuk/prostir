@@ -521,6 +521,13 @@ fn create_displays(args: &Args, bitrate: u32, sharp: bool) -> Result<Displays> {
     Ok(displays)
 }
 
+/// After a session the freed buffers would stay with the process: hand them back to
+/// the system, so Prostir waiting in the background stays small.
+fn give_memory_back() {
+    // SAFETY: plain glibc call; only releases memory that is already free.
+    unsafe { libc::malloc_trim(0) };
+}
+
 /// Set by SIGTERM, SIGINT and SIGHUP; the main loop then quits normally, so monitors,
 /// the sound output and the microphone are put back by the usual clean-up.
 static QUIT: AtomicBool = AtomicBool::new(false);
@@ -698,6 +705,7 @@ fn main() -> Result<()> {
                 {
                     info!("removing virtual monitors until the headset is worn again");
                     displays = None;
+                    give_memory_back();
                 }
                 control.show(None, displays.as_ref());
                 if args.linger > 0 && displays.as_ref().is_some_and(|d| d.healthy()) {
@@ -709,6 +717,7 @@ fn main() -> Result<()> {
                 if displays.is_some() && idle_since.elapsed() >= Duration::from_secs(args.linger) {
                     displays = None;
                     control.show(None, None);
+                    give_memory_back();
                 }
                 std::thread::sleep(Duration::from_millis(200));
             }
