@@ -225,6 +225,8 @@ pub enum Action {
     Follow(bool),
     /// A monitor let go almost against another sticks to it.
     Magnet(bool),
+    /// Dragging one monitor moves the whole arrangement.
+    MoveAll(bool),
     /// Put the PC's active window on a panel of its own.
     DetachWindow,
     /// Move the PC's active window to the monitor in front.
@@ -1582,20 +1584,18 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
     ));
     y += 18.0;
     let full = s.monitors.len() >= MAX_MONITORS || s.host.is_none();
-    let wide = format!("3440 × 1440 {}", l.t("широкий", "wide"));
-    let tall = format!("1440 × 2560 {}", l.t("портрет", "portrait"));
     let sizes = [
-        (1920, 1080, "1920 × 1080"),
-        (2560, 1440, "2560 × 1440"),
-        (3840, 2160, "3840 × 2160"),
-        (3440, 1440, wide.as_str()),
-        (1440, 2560, tall.as_str()),
+        (1920, 1080, "1920×1080"),
+        (2560, 1440, "2560×1440"),
+        (3840, 2160, "3840×2160"),
+        (3440, 1440, "3440×1440"),
+        (1440, 2560, "1440×2560"),
     ];
-    let bw = (rw - 10.0) / 2.0;
+    let bw = (rw - 2.0 * 10.0) / 3.0;
     for (i, (width, height, label)) in sizes.iter().enumerate() {
         let r = rect(
-            rx + (i % 2) as f32 * (bw + 10.0),
-            y + (i / 2) as f32 * 58.0,
+            rx + (i % 3) as f32 * (bw + 10.0),
+            y + (i / 3) as f32 * 58.0,
             bw,
             48.0,
         );
@@ -1612,7 +1612,7 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
         };
         items.push(button(r, label, style, action));
     }
-    y += 3.0 * 58.0 + 40.0;
+    y += 2.0 * 58.0 + 40.0;
     if s.monitors.len() >= MAX_MONITORS {
         items.push(text(
             rx,
@@ -1710,6 +1710,27 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
         ],
     );
     y = y.max(y2);
+    segmented(
+        items,
+        rx,
+        rw,
+        &mut y,
+        l.t("Тягнути", "Drag"),
+        vec![
+            (
+                l.t("Один монітор", "One monitor"),
+                Action::MoveAll(false),
+                !st.move_all,
+                true,
+            ),
+            (
+                l.t("Усі разом", "All together"),
+                Action::MoveAll(true),
+                st.move_all,
+                true,
+            ),
+        ],
+    );
     // The cinema screen can be picked before switching to cinema.
     if s.monitors.len() > 1 {
         let sizes: Vec<(u8, u32, u32)> = s

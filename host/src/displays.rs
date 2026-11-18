@@ -311,6 +311,112 @@ struct Seat {
     h: i32,
 }
 
+/// Desktop positions (top-left, logical pixels) when the headset said where each
+/// monitor is seen, across and up: the desktop is what the eyes see. Starting from
+/// `main`, each monitor joins the nearest one already placed on the side where they
+/// meet in the headset, touching it, with the offset along that edge as seen (lined
+/// up when within a few pixels), and always sharing enough of the edge for the mouse
+/// to cross. Nothing overlaps.
+fn arrange_free(seats: &[Seat], main: u8) -> Vec<(u8, i32, i32)> {
+    const REACH: i32 = 200;
+    const LINE_UP: i32 = 24;
+    // As seen: top-left and size.
+    let seen = |m: &Seat| (m.center - m.w / 2, m.middle - m.h / 2);
+    let gaps = |a: &Seat, b: &Seat| {
+        let ((ax, ay), (bx, by)) = (seen(a), seen(b));
+        (
+            (ax - (bx + b.w)).max(bx - (ax + a.w)),
+            (ay - (by + b.h)).max(by - (ay + a.h)),
+        )
+    };
+    let mut rest: Vec<Seat> = seats.to_vec();
+    let Some(first) = rest
+        .iter()
+        .position(|m| m.id == main)
+        .or_else(|| (!rest.is_empty()).then_some(0))
+    else {
+        return Vec::new();
+    };
+    let m0 = rest.remove(first);
+    let (x0, y0) = seen(&m0);
+    let mut placed: Vec<(Seat, i32, i32)> = vec![(m0, x0, y0)];
+    let overlaps = |placed: &[(Seat, i32, i32)], m: &Seat, x: i32, y: i32| {
+        placed
+            .iter()
+            .find(|(n, nx, ny)| x < nx + n.w && *nx < x + m.w && y < ny + n.h && *ny < y + m.h)
+            .copied()
+    };
+    while !rest.is_empty() {
+        // The monitor closest to one already placed, as seen.
+        let (ri, pi) = (0..rest.len())
+            .flat_map(|ri| (0..placed.len()).map(move |pi| (ri, pi)))
+            .min_by_key(|&(ri, pi)| {
+                let (gx, gy) = gaps(&rest[ri], &placed[pi].0);
+                (
+                    gx.max(gy).max(0),
+                    (rest[ri].center - placed[pi].0.center).abs(),
+                )
+            })
+            .expect("not empty");
+        let m = rest.remove(ri);
+        let (n, nx, ny) = placed[pi];
+        let (gx, gy) = gaps(&m, &n);
+        let ((mx, my), (sx, sy)) = (seen(&m), seen(&n));
+        let across = gx > gy;
+        let line_up = |v: i32, edges: [i32; 2]| {
+            edges
+                .into_iter()
+                .find(|e| (v - e).abs() <= LINE_UP)
+                .unwrap_or(v)
+        };
+        let (mut x, mut y) = if across {
+            let x = if m.center >= n.center {
+                nx + n.w
+            } else {
+                nx - m.w
+            };
+            let y = line_up(ny + (my - sy), [ny, ny + n.h - m.h]);
+            let reach = REACH.min(m.h).min(n.h);
+            (x, y.clamp(ny - m.h + reach, ny + n.h - reach))
+        } else {
+            let y = if m.middle >= n.middle {
+                ny + n.h
+            } else {
+                ny - m.h
+            };
+            let x = line_up(nx + (mx - sx), [nx, nx + n.w - m.w]);
+            let reach = REACH.min(m.w).min(n.w);
+            (x.clamp(nx - m.w + reach, nx + n.w - reach), y)
+        };
+        // On top of another one: past it, the same way.
+        for _ in 0..placed.len() {
+            let Some((o, ox, oy)) = overlaps(&placed, &m, x, y) else {
+                break;
+            };
+            if across {
+                x = if m.center >= n.center {
+                    ox + o.w
+                } else {
+                    ox - m.w
+                };
+            } else {
+                y = if m.middle >= n.middle {
+                    oy + o.h
+                } else {
+                    oy - m.h
+                };
+            }
+        }
+        placed.push((m, x, y));
+    }
+    let min_x = placed.iter().map(|p| p.1).min().unwrap_or(0);
+    let min_y = placed.iter().map(|p| p.2).min().unwrap_or(0);
+    placed
+        .into_iter()
+        .map(|(m, x, y)| (m.id, x - min_x, y - min_y))
+        .collect()
+}
+
 /// Desktop positions (top-left, logical pixels) for monitors in rows, top to bottom,
 /// as the headset sees them. The row with `main` is laid out touching, left to right;
 /// every monitor of another row keeps its offset from the monitor of the row next to
@@ -1227,7 +1333,16 @@ impl Displays {
             .unwrap_or(0);
         let mut planned: Vec<(u8, String, i32, i32, i32, i32)> = Vec::new();
         let mut top = 0;
-        for (id, x, y) in arrange(&rows, main) {
+        // The headset said where each monitor is seen: the desktop follows that
+        // directly. Older headsets (or a saved layout): rows.
+        let seats: Vec<Seat> = rows.iter().flatten().copied().collect();
+        let arranged =
+            if !seats.is_empty() && seats.iter().all(|m| m.center != NEXT && m.middle != NEXT) {
+                arrange_free(&seats, main)
+            } else {
+                arrange(&rows, main)
+            };
+        for (id, x, y) in arranged {
             if let Some(seat) = rows.iter().flatten().find(|m| m.id == id) {
                 planned.push((id, names[&id].clone(), x, y, seat.w, seat.h));
                 top = top.max(y + seat.h);
@@ -1769,6 +1884,39 @@ mod arrange_tests {
         );
         let y = |id: u8| placed.iter().find(|p| p.0 == id).unwrap().2;
         assert_eq!(y(0) - y(1), (2560 - 1440) / 2);
+    }
+
+    #[test]
+    fn the_desktop_is_what_the_eyes_see() {
+        // A portrait primary in the middle; a landscape on its left, tops lined up; a
+        // landscape on its right, lower down; the laptop screen under the primary.
+        let at = |id, center, middle, w, h| Seat {
+            id,
+            center,
+            middle,
+            w,
+            h,
+        };
+        let seats = [
+            at(0, -2000, -560, 2560, 1440),
+            at(1, 0, 0, 1440, 2560),
+            at(2, 1950, 300, 2560, 1440),
+            at(MIRROR_ID, 0, 1800, 1920, 1080),
+        ];
+        let placed = arrange_free(&seats, 1);
+        let get = |id| *placed.iter().find(|p| p.0 == id).unwrap();
+        let (_, x0, y0) = get(0);
+        let (_, x1, y1) = get(1);
+        let (_, x2, y2) = get(2);
+        let (_, xm, ym) = get(MIRROR_ID);
+        // Side by side, touching; tops lined up on the left, lower on the right.
+        assert_eq!(x0 + 2560, x1);
+        assert_eq!(y0, y1);
+        assert_eq!(x1 + 1440, x2);
+        assert!(y2 > y1 + 200 && y2 < y1 + 2560 - 200, "y2 {y2}");
+        // The laptop screen under the primary, touching it.
+        assert_eq!(ym, y1 + 2560);
+        assert!(xm < x1 + 1440 && xm + 1920 > x1);
     }
 
     fn seat(id: u8, center: i32, w: i32, h: i32) -> Seat {

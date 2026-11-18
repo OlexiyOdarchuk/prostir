@@ -898,6 +898,31 @@ impl Scene {
         }
     }
 
+    /// "Move all together": monitor `id` went from `before` to `after` in the user's
+    /// hand, and the rest of the arrangement (monitors and the laptop screen, not
+    /// window panels) goes along as one piece: moved, turned and scaled with it.
+    fn carry_all(&mut self, id: u8, before: &Placement, after: &Placement) {
+        if !self.settings.move_all
+            || self.settings.cinema
+            || id == PANEL_ID
+            || id == KEYBOARD_ID
+            || is_window_panel(id)
+            || !self.monitors.contains_key(&id)
+        {
+            return;
+        }
+        let turn = after.rotation * before.rotation.inverse();
+        let scale = after.width / before.width.max(1e-3);
+        for (other, p) in self.placements.iter_mut() {
+            if *other == id || is_window_panel(*other) {
+                continue;
+            }
+            p.position = after.position + turn * (p.position - before.position) * scale;
+            p.rotation = (turn * p.rotation).normalize();
+            p.width = (p.width * scale).clamp(0.2, 8.0);
+        }
+    }
+
     /// The magnet: where monitor `id`, let go now, would stick (not on a wall, where
     /// monitors stay in its plane, nor for the laptop screen or window panels).
     fn stick_of(&self, id: u8) -> Option<layout::Stick> {
@@ -905,6 +930,7 @@ impl Scene {
         // panels float on their own.
         if self.settings.cinema
             || !self.settings.magnet
+            || self.settings.move_all
             || self.settings.preset == crate::settings::Preset::Overhead
             || is_window_panel(id)
             || !self.monitors.contains_key(&id)
@@ -1890,8 +1916,11 @@ fn run(app: &AndroidApp) -> Result<()> {
             && let (Some(a), Some(b)) = (controls.state[0].ray, controls.state[1].ray)
             && let Some(p) = scene.placements.get_mut(&s.id)
         {
+            let before = *p;
             let d = a.origin.distance(b.origin);
             p.width = (s.start_width * d / s.start_distance.max(0.05)).clamp(0.2, 8.0);
+            let after = *p;
+            scene.carry_all(s.id, &before, &after);
         }
 
         #[allow(clippy::needless_range_loop)] // `hand` indexes several per-hand arrays
@@ -2003,6 +2032,7 @@ fn run(app: &AndroidApp) -> Result<()> {
                     && !scene.settings.cinema;
                 let wall_facing = glam::Quat::from_rotation_y(scene.center.1);
                 if let Some(p) = target {
+                    let before = *p;
                     grab.update(p, ray, head, input.stick, dt);
                     if grab.id == KEYBOARD_ID {
                         // It follows the hand but stays flat, like the desk.
@@ -2011,7 +2041,9 @@ fn run(app: &AndroidApp) -> Result<()> {
                         // On a wall, monitors stay parallel to it wherever they go.
                         p.rotation = wall_facing;
                     }
+                    let after = *p;
                     scene.grabs[hand] = Some(grab);
+                    scene.carry_all(grab.id, &before, &after);
                 }
             } else if start_grab {
                 hold_since[hand] = None;
@@ -2874,6 +2906,10 @@ fn handle_action(
             let (head, forward) = scene.head;
             let touch = scene.hands_in_view;
             scene.open_panel(head, forward, touch);
+        }
+        Action::MoveAll(on) => {
+            scene.settings.move_all = on;
+            scene.settings.save(settings_path);
         }
         Action::Magnet(on) => {
             scene.settings.magnet = on;

@@ -91,6 +91,8 @@ pub struct Settings {
     pub follow: bool,
     /// A monitor let go almost against another sticks to it.
     pub magnet: bool,
+    /// Dragging one monitor moves the whole arrangement.
+    pub move_all: bool,
     /// The mouse goes to the monitor the user looks at (where the PC allows it).
     pub gaze_mouse: bool,
     /// A bigger menu, easier to read and hit.
@@ -124,6 +126,7 @@ impl Default for Settings {
             last_tab: 0,
             follow: false,
             magnet: true,
+            move_all: false,
             gaze_mouse: false,
             large_menu: false,
             left_handed: false,
@@ -171,6 +174,7 @@ impl Settings {
                 Some(("tab", v)) => s.last_tab = v.trim().parse().unwrap_or(0),
                 Some(("follow", v)) => s.follow = v == "on",
                 Some(("magnet", v)) => s.magnet = v != "off",
+                Some(("move-all", v)) => s.move_all = v == "on",
                 Some(("gaze-mouse", v)) => s.gaze_mouse = v == "on",
                 Some(("large-menu", v)) => s.large_menu = v == "on",
                 Some(("left-handed", v)) => s.left_handed = v == "on",
@@ -246,7 +250,7 @@ impl Settings {
         format!(
             "preset {preset}\ncurve {curve}\nbackground {background}\nhands {hands}\n\
              focus {}\ncinema {}\ncinema-screen {}\nlanguage {}\npc-language {}\nintro {}\nkeyboard-window {}\nmic {}\ntab {}\nfollow {}\n\
-             gaze-mouse {}\nlarge-menu {}\nleft-handed {}\nbattery-saver {}\nnotifications {}\nrest-every {}\nmagnet {}\n",
+             gaze-mouse {}\nlarge-menu {}\nleft-handed {}\nbattery-saver {}\nnotifications {}\nrest-every {}\nmagnet {}\nmove-all {}\n",
             on(self.focus),
             on(self.cinema),
             self.cinema_screen
@@ -267,7 +271,8 @@ impl Settings {
             on(self.battery_saver),
             on(self.notifications),
             self.rest_every,
-            on(self.magnet)
+            on(self.magnet),
+            on(self.move_all)
         )
     }
 }
@@ -295,6 +300,7 @@ mod tests {
             last_tab: 2,
             follow: true,
             magnet: false,
+            move_all: true,
             gaze_mouse: true,
             large_menu: true,
             left_handed: true,

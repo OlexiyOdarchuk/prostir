@@ -330,7 +330,7 @@ fn settle_along(b: &Beside, n: &Part, mw: f32, mh: f32) -> f32 {
 /// The A button: the user's own arrangement with the seams taken out. Starting from
 /// `anchor` (the primary monitor, which stays), each monitor within a monitor's width
 /// of one already done is joined to it edge to edge (see [`hinge`]), where along that
-/// edge the user put it, at the same size per pixel. Monitors put clearly apart stay
+/// edge the user put it, at the size the user gave it. Monitors put clearly apart stay
 /// as they are. `monitors` may include the laptop screen; `eye` is where the user sits.
 pub fn snap(
     placements: &HashMap<u8, Placement>,
@@ -359,15 +359,13 @@ pub fn snap(
         if let Some((n, b)) = joined
             && b.gap < m.1.width.min(n.1.width)
         {
-            // The same size per pixel as the neighbour: text the same size on both.
-            let mw = n.1.width / n.3 * m.3;
-            let mh = m.2 * mw / m.1.width;
+            // Sizes stay as the user made them: only the seams go.
+            let (mw, mh) = (m.1.width, m.2);
             let b = Beside {
                 along: settle_along(&b, &n, mw, mh),
                 ..b
             };
             m.1 = hinge(&n.1, n.2, mw, mh, &b, eye);
-            m.2 = mh;
         }
         placed.push(m);
     }
