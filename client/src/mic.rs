@@ -262,7 +262,12 @@ pub fn battery() -> Option<(u8, bool)> {
         let percent = env
             .call_method(&manager, "getIntProperty", "(I)I", &[JValue::Int(4)])?
             .i()?;
-        let charging = env.call_method(&manager, "isCharging", "()Z", &[])?.z()?;
+        // BATTERY_PROPERTY_STATUS: 2 is charging (isCharging also says yes when full
+        // and plugged in).
+        let status = env
+            .call_method(&manager, "getIntProperty", "(I)I", &[JValue::Int(6)])?
+            .i()?;
+        let charging = status == 2;
         Ok((percent.clamp(0, 100) as u8, charging))
     })
 }

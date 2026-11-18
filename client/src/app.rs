@@ -1501,8 +1501,9 @@ fn run(app: &AndroidApp) -> Result<()> {
     let mut button_hovered = false;
     // The left hand's menu gesture as last seen, to act once per gesture.
     let mut menu_gesture_held = false;
-    // When the battery was last reported to the PC.
+    // When the battery was last read, and whether the palm menu showed last frame.
     let mut last_battery: Option<Instant> = None;
+    let mut palm_was_shown = false;
     button_layer.upload(&gl, &ui::menu_button_image(BUTTON_PX, false))?;
     let mut panel = Panel::new();
     let mut wrist_panel = Panel::wrist();
@@ -1870,8 +1871,14 @@ fn run(app: &AndroidApp) -> Result<()> {
             scene.tidy_up();
         }
         scene.place_button();
-        // The headset's battery, once a minute: on the palm menu, and for the PC's tray.
-        if last_battery.is_none_or(|t: Instant| t.elapsed() >= Duration::from_secs(60)) {
+        // The headset's battery: on the palm menu (fresh when it appears, then every 15 s)
+        // and for the PC's tray (once a minute).
+        let palm_opened = scene.wrist.is_some() && !palm_was_shown;
+        palm_was_shown = scene.wrist.is_some();
+        let every = if scene.wrist.is_some() { 15 } else { 60 };
+        if palm_opened
+            || last_battery.is_none_or(|t: Instant| t.elapsed() >= Duration::from_secs(every))
+        {
             last_battery = Some(Instant::now());
             scene.headset_battery = crate::mic::battery();
             if let Some((percent, charging)) = scene.headset_battery {
