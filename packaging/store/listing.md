@@ -235,8 +235,7 @@ personal, non-commercial use and forbids modification unless the developer allow
 Prostir is GPL-3.0-or-later, and once it includes code from other contributors the
 store version must not add such restrictions (GPLv3 section 10).
 
-**Decision for the developer, not settled yet.** One option: in the Developer Dashboard,
-set a custom EULA along these lines:
+**Decided:** a custom EULA, set in the Developer Dashboard, with this text:
 
 > Prostir is free software, licensed under the GNU General Public License, version 3 or
 > (at your option) any later version, with an additional permission for linking the
@@ -244,6 +243,3 @@ set a custom EULA along these lines:
 > source code and the license texts are at https://github.com/OlexiyOdarchuk/prostir.
 > Third-party components keep their own licenses, listed in THIRD-PARTY-LICENSES.txt.
 
-Alternatively, extend LICENSE-EXCEPTION.md so that it explicitly permits distribution
-through the Meta Horizon Store under the store's terms. This is a legal choice for the
-developer to make.
