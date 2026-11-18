@@ -58,7 +58,6 @@ pub enum NetEvent {
     MirrorWanted(bool),
     /// Whether PC sound comes to the headset.
     AudioWanted(bool),
-    MicWanted(bool),
     /// The monitor the mouse is on, if it is one of ours.
     Focus(Option<u8>),
     /// Left-to-right order of the Quest monitors.
@@ -739,8 +738,10 @@ fn run_session(
     let mut streams: HashMap<u8, StreamSlot> = HashMap::new();
     // Started on the first sound slice, stopped with the session.
     let mut player: Option<crate::audio::Player> = None;
-    // Runs only while a PC app records from the headset microphone.
-    let mut _recorder: Option<crate::mic::Recorder> = None;
+    // Runs only while a PC app records from the headset microphone and the user's
+    // microphone switch on the headset is on.
+    let mut recorder: Option<crate::mic::Recorder> = None;
+    let mut mic_asked = false;
     let result = loop {
         let msg = match HostMsg::read(&mut reader) {
             Ok(m) => m,
@@ -834,12 +835,10 @@ fn run_session(
                 }
                 let _ = events.send(NetEvent::AudioWanted(enabled));
             }
-            HostMsg::MicWanted { enabled } => {
-                let _ = events.send(NetEvent::MicWanted(enabled));
-            }
-            HostMsg::MicActive { active } => {
-                _recorder = active.then(|| crate::mic::Recorder::start(feedback.clone()));
-            }
+            // The headset's own switch decides about its microphone.
+            HostMsg::MicWanted { .. } => {}
+            // The PC asks; the headset's own switch decides (checked below too).
+            HostMsg::MicActive { active } => mic_asked = active,
             // From a newer PC: skipped, the session goes on.
             HostMsg::Unknown { .. }
             | HostMsg::Welcome { .. }
@@ -847,6 +846,10 @@ fn run_session(
             | HostMsg::PairingRequired
             | HostMsg::PairMsg { .. }
             | HostMsg::PairResult { .. } => {}
+        }
+        let record = mic_asked && crate::mic::allowed();
+        if record != recorder.is_some() {
+            recorder = record.then(|| crate::mic::Recorder::start(feedback.clone()));
         }
     };
     for id in streams.into_keys() {

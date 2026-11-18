@@ -17,6 +17,30 @@ const PERMISSION: &str = "android.permission.RECORD_AUDIO";
 const FRAMES: usize = AUDIO_RATE as usize / 100;
 
 /// Records until dropped.
+/// The user's microphone switch, from the headset's own settings. Recording happens
+/// only while this is on, whatever the PC asks.
+static ALLOWED: AtomicBool = AtomicBool::new(true);
+
+pub fn set_allowed(allowed: bool) {
+    // Switched on again by hand: the system may ask for access once more.
+    if allowed && !ALLOWED.load(Ordering::Relaxed) {
+        DENIED.store(false, Ordering::Relaxed);
+    }
+    ALLOWED.store(allowed, Ordering::Relaxed);
+}
+
+/// Access to the microphone was refused: no more system prompts each time a PC app
+/// starts recording, and the menu says where to allow it.
+static DENIED: AtomicBool = AtomicBool::new(false);
+
+pub fn denied() -> bool {
+    DENIED.load(Ordering::Relaxed)
+}
+
+pub fn allowed() -> bool {
+    ALLOWED.load(Ordering::Relaxed)
+}
+
 pub struct Recorder {
     stop: Arc<AtomicBool>,
 }
@@ -75,7 +99,11 @@ fn record(input: &Input, feedback: &Feedback, stop: &AtomicBool) {
 /// waits up to a minute for the answer.
 fn ensure_permission(stop: &AtomicBool) -> bool {
     if has_permission() {
+        DENIED.store(false, Ordering::Relaxed);
         return true;
+    }
+    if DENIED.load(Ordering::Relaxed) {
+        return false;
     }
     request_permission();
     let until = Instant::now() + Duration::from_secs(60);
@@ -86,6 +114,7 @@ fn ensure_permission(stop: &AtomicBool) -> bool {
         }
     }
     warn!("no microphone permission");
+    DENIED.store(true, Ordering::Relaxed);
     false
 }
 

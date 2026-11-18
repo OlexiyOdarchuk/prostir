@@ -580,6 +580,7 @@ impl Scene {
             mirror_wanted: self.mirror_wanted,
             audio_wanted: self.audio_wanted,
             mic_wanted: self.mic_wanted,
+            mic_denied: self.mic_wanted && crate::mic::denied(),
             mirror_active: self.monitors.contains_key(&MIRROR_ID),
             settings: self.settings,
             room_available: room,
@@ -716,6 +717,7 @@ fn run(app: &AndroidApp) -> Result<()> {
     let settings_path = data_dir.join("settings.txt");
     let profiles_path = data_dir.join("profiles.txt");
     let settings = Settings::load(&settings_path);
+    crate::mic::set_allowed(settings.mic);
 
     // Passthrough keeps the cameras busy and costs battery: only when "Room" is chosen.
     let mut passthrough = if exts.fb_passthrough {
@@ -790,7 +792,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         primary: None,
         mirror_wanted: true,
         audio_wanted: true,
-        mic_wanted: true,
+        mic_wanted: settings.mic,
         focus: None,
         brightness: HashMap::new(),
         scaling: None,
@@ -1642,6 +1644,10 @@ fn handle_net_event(
             scene.feedback = Some(feedback);
             scene.sent_layout = None;
             scene.update_needed = None;
+            // The PC follows the headset's microphone switch.
+            scene.send(ClientMsg::SetMic {
+                enabled: scene.settings.mic,
+            });
             if !scene.worn {
                 scene.tell_presence();
             }
@@ -1688,7 +1694,6 @@ fn handle_net_event(
         }
         NetEvent::MirrorWanted(enabled) => scene.mirror_wanted = enabled,
         NetEvent::AudioWanted(enabled) => scene.audio_wanted = enabled,
-        NetEvent::MicWanted(enabled) => scene.mic_wanted = enabled,
         NetEvent::Focus(id) => scene.focus = id,
         NetEvent::Order(ids) => {
             scene.order = ids;
@@ -1872,6 +1877,9 @@ fn handle_action(
         }
         Action::SetMic(enabled) => {
             scene.mic_wanted = enabled;
+            scene.settings.mic = enabled;
+            scene.settings.save(&scene.settings_path);
+            crate::mic::set_allowed(enabled);
             scene.send(ClientMsg::SetMic { enabled });
         }
         Action::SetAudio(enabled) => {

@@ -54,6 +54,8 @@ pub struct UiState {
     /// PC sound goes to the headset.
     pub audio_wanted: bool,
     pub mic_wanted: bool,
+    /// Access to the microphone was refused in the system.
+    pub mic_denied: bool,
     /// The physical display is being shown (its lid is open).
     pub mirror_active: bool,
     pub settings: Settings,
@@ -1796,7 +1798,23 @@ fn build_sound(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32)
         note,
         (label, Style::Normal, Action::SetMic(!s.mic_wanted)),
     );
-    y += 100.0;
+    y += 70.0;
+    if s.mic_denied {
+        for line in [
+            l.t(
+                "Prostir не має доступу до мікрофона. Дозвольте його",
+                "Prostir may not use the microphone. Allow it in the",
+            ),
+            l.t(
+                "в налаштуваннях шолома (дозволи застосунків).",
+                "headset settings (app permissions).",
+            ),
+        ] {
+            items.push(text(lx, y, 19.0, false, DANGER, line));
+            y += 30.0;
+        }
+    }
+    y += 30.0;
     for line in [
         l.t(
             "Поки шолом підключено, звук із ПК грає в шоломі,",
@@ -1900,6 +1918,7 @@ mod tests {
         UiState {
             pairing: None,
             pair_offer: None,
+            mic_denied: true,
             host: Some("workstation".into()),
             found: Vec::new(),
             ip_input: None,
