@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Prostir privacy policy</title>
-  <meta name="description" content="What Prostir does with your data: no accounts, no servers of its own, and one anonymous count a day that you can turn off.">
+  <meta name="description" content="What Prostir does with your data: no accounts, no servers of its own, everything between your headset and your PC encrypted, and one anonymous count a day that you can turn off.">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="canonical" href="https://prostir.ishawyha.dev/privacy.html">
   <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -21,50 +21,86 @@
     <a class="brand" href="./"><img src="icon.svg" alt="" width="32" height="32">Prostir</a>
     <nav class="sections" aria-label="Sections">
       <a href="./">Home</a>
-      <a href="uk/privacy.html" hreflang="uk" lang="uk">Українською</a>
+      <a href="./#install">Install</a>
+      <a href="https://github.com/OlexiyOdarchuk/prostir">GitHub</a>
+    </nav>
+    <nav class="lang" aria-label="Language">
+      <a href="privacy.html" aria-current="page" hreflang="en" lang="en">EN</a>
+      <a href="uk/privacy.html" hreflang="uk" lang="uk">УКР</a>
     </nav>
   </div>
 </header>
 
-<main class="wrap">
+<main class="wrap doc-layout">
   <article class="doc">
     <h1>Privacy policy</h1>
     <p class="muted">Last updated: 18 November 2026.</p>
 
-    <p>Prostir is two programs: one on your PC and one on your Meta Quest headset. They talk to each other, and the PC sends one anonymous count a day (below). Prostir has no accounts and no servers of its own, and it does not send anything about you to its author or to anyone else.</p>
+    <div class="summary">
+      <p>In short</p>
+      <ul>
+        <li>Prostir has no accounts and no servers of its own, and sends nothing about you to its author or anyone else.</li>
+        <li>Your headset and your PC talk to each other directly, encrypted, over your own network or a USB cable.</li>
+        <li>Once a day the PC sends one anonymous count, which you can turn off before it is ever sent.</li>
+        <li>The microphone, PC notifications in the headset and sound from the screen work only when you turn them on.</li>
+      </ul>
+    </div>
 
-    <h2>Counting users</h2>
+    <h2 id="counting">Counting users</h2>
     <p>To know how many people use Prostir, the PC program sends one request a day to <a href="https://www.goatcounter.com/">GoatCounter</a>, when a headset connects. The request contains only the path <code>/day/</code> followed by the date, and the very first time also <code>/install</code>. It carries no identifier, host name, settings or anything else about you or your PC. GoatCounter does not store IP addresses. The totals are public on this site.</p>
     <p>It is on by default. The first time Prostir starts, it shows a notification that says it counts once a day, anonymously, and how to turn that off. The first count is sent no earlier than the next day (UTC), so you can turn it off before anything is sent. Turn it off with the tray item "Count this PC among users", or start Prostir with the environment variable <code>PROSTIR_NO_COUNT=1</code>. Builds made from the source code never count.</p>
     <p>Official builds contain the key they send the counts with. Anyone can extract it from the program, but it can only add counts, so the worst misuse is inflated numbers. Read the totals on this site as approximate.</p>
     <p>The count relies on a legitimate interest in knowing whether the project is used. Turning it off is how you object to it, and no count is sent after that.</p>
 
-    <h2>What travels between the headset and your PC</h2>
-    <p>The picture of your virtual monitors, PC sound, the headset microphone (see below), which monitor has the mouse, and the settings you change in the headset menu. All of it goes directly between your two devices, over your local network or a USB cable, encrypted with the Noise protocol. To find your PC, the PC broadcasts its host name on the local network.</p>
+    <h2 id="between">What travels between the headset and your PC</h2>
+    <p>The picture of your virtual monitors and detached windows, PC sound, the headset microphone (see below), which monitor has the mouse, the headset's battery level (shown in the PC's tray), the settings you change in the headset menu, and short messages the PC shows in the headset, such as "Screenshot saved". All of it goes directly between your two devices, over your local network or a USB cable, encrypted with the Noise protocol. To be found by the headset, the PC broadcasts its host name on the local network.</p>
+    <p>Screenshots you take from the headset are saved on your PC, in <code>Pictures/Prostir</code>, and go nowhere else.</p>
 
-    <h2>Microphone</h2>
-    <p>The headset records only while an app on your PC is recording from the "Prostir headset microphone" device, only if you allowed microphone access, and only while the microphone switch in the headset menu (Sound, language) is on. The headset itself enforces that switch: while it is off, the headset does not record, whatever the PC asks. The sound goes to your PC and nowhere else.</p>
+    <h2 id="microphone">Microphone</h2>
+    <p>The headset records only while an app on your PC is recording from the "Prostir headset microphone" device, only if you allowed microphone access, and only while the microphone switch in the headset menu (Quick, or Settings → Sound) is on. The headset itself enforces that switch: while it is off, the headset does not record, whatever the PC asks. The sound goes to your PC and nowhere else.</p>
 
-    <h2>Cameras and hand tracking</h2>
-    <p>The room background and the keyboard window use the Quest's passthrough. The headset system draws the camera image; Prostir never receives camera images. Hand tracking data is used on the headset to draw your hands and to let you point and touch the menu. It is not stored or sent anywhere.</p>
+    <h2 id="notifications">PC notifications in the headset</h2>
+    <p>Off by default (Settings → PC). When you turn it on, the PC reads the notifications other apps show on your desktop and passes each one's app name, title and text to the headset, which shows it for a few seconds and keeps nothing. Turn it off, or disconnect the headset, and the PC stops reading them.</p>
 
-    <h2>What is stored</h2>
-    <p>On the headset, inside the app: your settings, profiles, monitor positions and the keys of paired PCs. On the PC, in <code>~/.config/prostir</code>: the monitor setup, settings and the keys of paired headsets. To delete everything, uninstall the app from the headset and delete that folder on the PC; the tray item "Forget paired headsets" removes the pairings only.</p>
+    <h2 id="sound">Sound from the screen</h2>
+    <p>Off by default (Settings → Sound). When you turn it on, the PC checks every second and a half which programs are playing sound and on which monitor their windows are, asking PipeWire and your desktop (KDE Plasma or Hyprland). That stays on your PC: only the number of the monitor goes to the headset.</p>
 
-    <h2>Meta Horizon Store</h2>
+    <h2 id="cameras">Cameras and hand tracking</h2>
+    <p>The room backgrounds and the keyboard window use the Quest's passthrough. The headset system draws the camera image; Prostir never receives camera images. Hand tracking data is used on the headset to draw your hands, show the palm menu and let you point and touch. It is not stored or sent anywhere.</p>
+
+    <h2 id="stored">What is stored</h2>
+    <p>On the headset, inside the app: your settings, profiles, monitor positions and the keys of paired PCs. On the PC, in <code>~/.config/prostir</code>: the monitor setup, settings and the keys of paired headsets, and your screenshots in <code>Pictures/Prostir</code>. To delete everything, uninstall the app from the headset and delete that folder on the PC; the tray item "Forget paired headsets" removes the pairings only, and Settings → PC in the headset forgets a paired PC.</p>
+
+    <h2 id="store">Meta Horizon Store</h2>
     <p>If you install Prostir from the Meta Horizon Store, the app asks Meta's platform whether your account owns it when it starts. That check is between the headset and Meta, under <a href="https://www.meta.com/legal/privacy-policy/">Meta's privacy policy</a>; Prostir does not see or keep its result anywhere else.</p>
 
-    <h2>This website</h2>
+    <h2 id="website">This website</h2>
     <p>The site is hosted on GitHub Pages, which keeps server logs under <a href="https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement">GitHub's privacy statement</a>. Fonts are served from this site too. The user numbers on the home page are read by your browser from GoatCounter's public counter. The site sets no cookies and runs no analytics.</p>
 
-    <h2>Questions and requests</h2>
+    <h2 id="contact">Questions and requests</h2>
     <p>Prostir and this site are maintained by the GitHub user <a href="https://github.com/OlexiyOdarchuk">OlexiyOdarchuk</a>. Prostir has no servers of its own, so it holds nothing about you that could be looked up or deleted; what stays on your own devices is described above.</p>
     <p>For a private question or request, or to report a security problem, use GitHub's private reporting: <a href="https://github.com/OlexiyOdarchuk/prostir/security/advisories/new">report privately</a>. Only the maintainers see it. For anything else, open an issue at <a href="https://github.com/OlexiyOdarchuk/prostir/issues">github.com/OlexiyOdarchuk/prostir</a>. If this policy changes, the date at the top changes with it.</p>
   </article>
+  <nav class="toc" aria-label="On this page">
+    <p>On this page</p>
+      <a href="#counting">Counting users</a>
+      <a href="#between">What travels between the headset and your PC</a>
+      <a href="#microphone">Microphone</a>
+      <a href="#notifications">PC notifications in the headset</a>
+      <a href="#sound">Sound from the screen</a>
+      <a href="#cameras">Cameras and hand tracking</a>
+      <a href="#stored">What is stored</a>
+      <a href="#store">Meta Horizon Store</a>
+      <a href="#website">This website</a>
+      <a href="#contact">Questions and requests</a>
+  </nav>
 </main>
 
 <footer>
-  <div class="wrap"><p><a href="./">Prostir</a> · free software under the GPL-3.0-or-later.</p></div>
+  <div class="wrap">
+    <p>Prostir is free software under the <a href="https://github.com/OlexiyOdarchuk/prostir/blob/main/LICENSE">GPL-3.0-or-later</a>, with an <a href="https://github.com/OlexiyOdarchuk/prostir/blob/main/LICENSE-EXCEPTION.md">additional permission</a> for the Meta Platform SDK. <a href="privacy.html">Privacy</a>.</p>
+    <p>Meta and Meta Quest are trademarks of Meta Platforms, Inc. KDE and Plasma are trademarks of KDE e.V. Prostir is independent and not affiliated with them.</p>
+  </div>
 </footer>
 </body>
 </html>
