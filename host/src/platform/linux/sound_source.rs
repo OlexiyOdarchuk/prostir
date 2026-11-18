@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::windows;
+use crate::platform::windows;
 
 /// Looks every second and a half, off the session loop (asking KWin takes a moment).
 pub struct Watcher {
@@ -159,7 +159,7 @@ mod live {
     #[test]
     #[ignore]
     fn live_windows_and_sound() {
-        for w in crate::windows::all_windows() {
+        for w in crate::platform::windows::all_windows() {
             eprintln!("window {w:?}");
         }
         eprintln!("playing {:?}", super::playing());

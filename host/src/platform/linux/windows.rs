@@ -13,7 +13,7 @@ use anyhow::{Context, Result, bail};
 use log::{info, warn};
 use serde_json::Value;
 
-use crate::hyprland;
+use crate::platform::hyprland;
 
 /// The window that has the keyboard, as found when asked.
 #[derive(Debug, Clone)]

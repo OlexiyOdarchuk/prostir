@@ -16,7 +16,7 @@ use prostir_proto::secure::{
 };
 use prostir_proto::{ClientMsg, HostMsg, PROTOCOL_VERSION};
 
-use crate::tray;
+use crate::platform::tray;
 
 /// Wrong codes allowed per connection before giving up.
 const MAX_ATTEMPTS: u32 = 3;

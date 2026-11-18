@@ -12,12 +12,12 @@ use log::{debug, error, info, warn};
 use prostir_proto::{Codec, HostMsg, LayoutRow, MIRROR_ID, NEXT, PcSettings, WINDOW_IDS};
 use std::sync::atomic::AtomicU8;
 
-use crate::audio::{AudioOut, MicIn};
-use crate::desktop::{Desktop, Output};
 use crate::encoder::{Encoder, EncoderConfig, EncoderEvent, Input};
 use crate::outbox::Outbox;
-use crate::virtual_output::{self, MonitorSpec, Screencast};
-use crate::windows;
+use crate::platform::audio::{AudioOut, MicIn};
+use crate::platform::desktop::{Desktop, Output};
+use crate::platform::kde::virtual_output::{self, MonitorSpec, Screencast};
+use crate::platform::windows;
 
 /// Retry timing after failures: 2 s, then doubling up to 2 min.
 #[derive(Default)]
@@ -1407,7 +1407,7 @@ impl Displays {
                     && !ours.contains(&name.as_str())
                     && Some(name.as_str()) != mirror_name.as_deref()
                     && !name.starts_with("Virtual-")
-                    && !name.starts_with(crate::hyprland::PREFIX)
+                    && !name.starts_with(crate::platform::hyprland::PREFIX)
             })
             .collect();
         others.sort_by_key(|(name, _)| name.as_str());
@@ -1883,7 +1883,7 @@ impl Displays {
 /// wallpapers per screen, so new monitors would otherwise show the default one.
 /// Runs a little later because Plasma sets up desktops for new screens asynchronously.
 pub fn sync_wallpapers() {
-    if crate::hyprland::running() {
+    if crate::platform::hyprland::running() {
         return;
     }
     const SCRIPT: &str = r#"

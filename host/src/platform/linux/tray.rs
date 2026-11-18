@@ -365,7 +365,7 @@ impl ksni::Tray for Tray {
                 label: t("Запускати разом із системою", "Start with the system").into(),
                 checked: autostart_enabled(),
                 // Hyprland (without uwsm) ignores XDG autostart: its own config starts it.
-                visible: !crate::hyprland::running(),
+                visible: !crate::platform::hyprland::running(),
                 activate: Box::new(|_: &mut Self| set_autostart(!autostart_enabled())),
                 ..Default::default()
             }

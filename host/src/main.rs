@@ -1,21 +1,12 @@
 // Every unsafe block says why it is sound.
 #![deny(clippy::undocumented_unsafe_blocks)]
-mod audio;
-mod desktop;
 mod displays;
 mod encoder;
-mod focus;
-mod hyprland;
 mod i18n;
-mod notifications;
 mod outbox;
 mod pairing;
-mod screencopy;
-mod sound_source;
-mod tray;
+mod platform;
 mod usage;
-mod virtual_output;
-mod windows;
 
 use std::io::{BufReader, BufWriter, ErrorKind, Write};
 use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream, UdpSocket};
@@ -32,7 +23,8 @@ use prostir_proto::{ClientMsg, Codec, HostMsg, NO_FOCUS};
 
 use displays::{Displays, SavedMonitors};
 use encoder::EncoderConfig;
-use virtual_output::MonitorSpec;
+use platform::kde::virtual_output::MonitorSpec;
+use platform::{audio, focus, hyprland, notifications, sound_source, tray};
 
 #[derive(Parser, Debug)]
 #[command(about = "Virtual monitors for KDE Plasma and Hyprland, streamed to a Meta Quest 3")]

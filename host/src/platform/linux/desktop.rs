@@ -6,9 +6,11 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use crate::encoder::{Encoder, Input};
-use crate::hyprland;
-use crate::screencopy::Capture;
-use crate::virtual_output::{self, Geometry, MonitorSpec, Screencast, VirtualOutput};
+use crate::platform::hyprland;
+use crate::platform::hyprland::screencopy::Capture;
+use crate::platform::kde::virtual_output::{
+    self, Geometry, MonitorSpec, Screencast, VirtualOutput,
+};
 
 pub enum Desktop {
     Kde(Screencast),
