@@ -58,3 +58,23 @@ First public version.
   focused monitor. GNOME is next if people want it (issue #1).
 - The pairing code can be typed into fuzzel, wofi or rofi when neither kdialog nor
   zenity is installed.
+- Packages: `prostir-bin` on the AUR, plus a `.deb` and an `.rpm` (Fedora) in every
+  release. They pull in the VA encoder plugin (`gst-plugin-va` on Arch), `pactl` and the
+  PipeWire pieces, and recommend the x264 plugin for CPU encoding. The packaged program
+  is stripped of debug info (about 9 MB instead of 48 MB).
+- Every release ships `THIRD-PARTY-LICENSES.txt` with the licenses of the bundled Rust
+  crates, the Noto Sans font and the Khronos OpenXR loader; the APK carries it, the GPL
+  text and the exception under `assets/licenses/`. The `.rpm` now includes the GPL text.
+- `install.sh`: messages in English, a warning when `~/.local/bin` is not on `PATH`, the
+  Hyprland autostart and permission lines with the full path, and `--uninstall --purge`
+  to remove the settings too.
+- README: requirements per distribution (Fedora and openSUSE codecs, NVIDIA and CPU
+  encoding), firewall ports, Hyprland setup, Wi-Fi or USB, updating and uninstalling,
+  and a FAQ.
+- Pairing asks for confirmation in the headset first, and the PC slows down repeated
+  failed attempts.
+- Without a working VA-API encoder (NVIDIA, missing plugin or driver), the PC encodes
+  with x264 by itself; if that is missing too, the headset says what to install.
+- The usage counter announces itself with a notification on the first start and sends
+  its first count no earlier than the next day.
+- The headset's microphone switch has the final say over the microphone.
