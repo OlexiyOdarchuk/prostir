@@ -27,6 +27,9 @@ fn main() {
         _ => None,
     };
     let state = UiState {
+        pair_offer: std::env::var("OFFER")
+            .ok()
+            .map(|v| ("workstation 192.168.1.10".into(), v == "failed")),
         pairing: std::env::var("PAIR")
             .ok()
             .map(|mode| questmon_pairing(&mode)),

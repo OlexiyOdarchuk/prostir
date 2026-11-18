@@ -181,6 +181,9 @@ struct Scene {
     ip_input: Option<String>,
     /// Pairing with a new PC in progress.
     pairing: Option<ui::PairingView>,
+    /// An unknown PC waiting for "Pair" or "Not now" (survives the disconnect that
+    /// follows the question).
+    pair_offer: Option<(String, bool)>,
     steering: net::Steering,
     /// When the connection was lost (or the app started without one).
     offline_since: Option<Instant>,
@@ -567,6 +570,7 @@ impl Scene {
                 .collect(),
             ip_input: self.ip_input.clone(),
             pairing: self.pairing.clone(),
+            pair_offer: self.pair_offer.clone(),
             monitors: self
                 .quest_sizes()
                 .into_iter()
@@ -807,6 +811,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         found: Vec::new(),
         ip_input: None,
         pairing: None,
+        pair_offer: None,
         steering,
         offline_since: Some(Instant::now()),
         feedback: None,
@@ -1022,7 +1027,8 @@ fn run(app: &AndroidApp) -> Result<()> {
         // user is looking.
         let first_run =
             (!scene.settings.intro_seen && scene.host.is_some()) || scene.update_needed.is_some();
-        if (scene.pairing.is_some() || first_run) && !scene.panel_open {
+        if (scene.pairing.is_some() || scene.pair_offer.is_some() || first_run) && !scene.panel_open
+        {
             scene.open_panel(head, forward, hands_in_view);
         }
         // Without a PC there is nothing to see: show the connection screen.
@@ -1659,6 +1665,10 @@ fn handle_net_event(
             }
         }
         NetEvent::Paired => scene.pairing = None,
+        NetEvent::PairOffer { host, failed } => {
+            scene.pairing = None;
+            scene.pair_offer = Some((host, failed));
+        }
         NetEvent::Incompatible { pc_newer, pc_app } => {
             warn!("the PC runs Prostir {pc_app}: versions differ");
             scene.update_needed = Some((pc_newer, pc_app));
@@ -1947,6 +1957,10 @@ fn handle_action(
                 scene.steering.submit_code(std::mem::take(&mut p.typed));
                 p.failed = false;
             }
+        }
+        Action::PairAnswer(pair) => {
+            scene.steering.answer_offer(pair);
+            scene.pair_offer = None;
         }
         Action::PairOtherWay => {
             scene.steering.switch_pairing_side();

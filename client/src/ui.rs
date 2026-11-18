@@ -39,6 +39,8 @@ pub struct PairingView {
 #[derive(Debug, Clone, PartialEq)]
 pub struct UiState {
     pub pairing: Option<PairingView>,
+    /// An unknown PC: (its name, the last pairing stopped after wrong codes).
+    pub pair_offer: Option<(String, bool)>,
     /// Name of the connected PC, `None` while searching.
     pub host: Option<String>,
     /// PCs seen on the network while not connected: (name, address).
@@ -130,6 +132,8 @@ pub enum Action {
     ChangeHost,
     /// Pair the other way round (swap which side shows the code).
     PairOtherWay,
+    /// Answer to "Pair with this PC?".
+    PairAnswer(bool),
     Close,
 }
 
@@ -364,6 +368,10 @@ impl Panel {
 
         let (lx, lw) = (44.0, 580.0);
         let (rx, rw) = (680.0, 556.0);
+        if let Some((host, failed)) = &s.pair_offer {
+            build_pair_offer(l, &mut items, lx, lw, host, *failed);
+            return items;
+        }
         if let Some(p) = &s.pairing {
             self.build_pairing(l, p, &mut items, lx, lw, 150.0);
             return items;
@@ -1363,6 +1371,56 @@ fn build_look(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, rx: f32, rw:
     }
 }
 
+/// A PC this headset has not paired with: pair only if the user says so.
+fn build_pair_offer(l: Lang, items: &mut Vec<Item>, x: f32, w: f32, host: &str, failed: bool) {
+    let mut y = 180.0;
+    let title = if failed {
+        l.t(
+            "Код не підійшов кілька разів",
+            "The code did not match several times",
+        )
+    } else {
+        l.t("Новий ПК", "A new PC")
+    };
+    items.push(text(x, y, 34.0, true, TEXT, title));
+    y += 60.0;
+    let host: String = host.chars().take(40).collect();
+    items.push(text(x, y, 24.0, false, TEXT, &host));
+    y += 44.0;
+    for line in [
+        l.t(
+            "Сполучайте шолом лише зі своїм ПК.",
+            "Pair the headset only with your own PC.",
+        ),
+        l.t(
+            "Потрібно ввести код з одного пристрою на іншому.",
+            "You will type a code from one device into the other.",
+        ),
+    ] {
+        items.push(text(x, y, 20.0, false, MUTED, line));
+        y += 32.0;
+    }
+    y += 20.0;
+    let half = (w - 12.0) / 2.0;
+    let pair = if failed {
+        l.t("Спробувати ще", "Try again")
+    } else {
+        l.t("Сполучити", "Pair")
+    };
+    items.push(button(
+        rect(x, y, half, 56.0),
+        pair,
+        Style::Selected,
+        Some(Action::PairAnswer(true)),
+    ));
+    items.push(button(
+        rect(x + half + 12.0, y, half, 56.0),
+        l.t("Не зараз", "Not now"),
+        Style::Normal,
+        Some(Action::PairAnswer(false)),
+    ));
+}
+
 /// The headset and the PC cannot talk: which one to update, and where.
 fn build_update(l: Lang, items: &mut Vec<Item>, x: f32, w: f32, pc_newer: bool, pc_app: &str) {
     let ours = env!("CARGO_PKG_VERSION");
@@ -1841,6 +1899,7 @@ mod tests {
     pub fn sample_state() -> UiState {
         UiState {
             pairing: None,
+            pair_offer: None,
             host: Some("workstation".into()),
             found: Vec::new(),
             ip_input: None,
@@ -1930,6 +1989,16 @@ mod tests {
                     })
                     .collect();
                 states.push(st);
+            }
+            for failed in [false, true] {
+                let mut offer = sample_state();
+                offer.lang = lang;
+                offer.host = None;
+                offer.pair_offer = Some((
+                    "a-very-long-pc-name.example.lan 192.168.100.200".into(),
+                    failed,
+                ));
+                states.push(offer);
             }
             for pc_newer in [true, false] {
                 let mut update = sample_state();

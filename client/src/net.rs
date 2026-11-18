@@ -86,6 +86,12 @@ pub enum NetEvent {
     },
     /// The codes did not match; a new attempt follows.
     PairingFailed,
+    /// An unknown PC: ask the user whether to pair with it (`failed`: after several
+    /// wrong codes).
+    PairOffer {
+        host: String,
+        failed: bool,
+    },
     Paired,
     Disconnected,
     /// The PC speaks another protocol version: `pc_newer` says which side to update.
@@ -125,7 +131,19 @@ struct Steer {
     /// The headset is off the head: stay away from the PC, so it can give its
     /// desktop back to the laptop.
     taken_off: bool,
+    /// A PC this headset is not paired with, waiting for the user to say whether to
+    /// pair. Nothing connects on its own meanwhile.
+    offer: Option<(PeerKey, SocketAddr)>,
+    /// The user agreed to pair with this PC (until when).
+    approved: Option<(PeerKey, Instant)>,
 }
+
+type PeerKey = [u8; 32];
+
+/// How long a "Pair" answer holds for reconnecting and typing the code.
+const APPROVAL: Duration = Duration::from_secs(600);
+/// Wrong codes in a row before the headset stops and asks again.
+const PAIR_ATTEMPTS: u32 = 3;
 
 impl Steering {
     fn lock(&self) -> std::sync::MutexGuard<'_, Steer> {
@@ -171,6 +189,45 @@ impl Steering {
         }
     }
 
+    /// The user's answer to "Pair with this PC?".
+    pub fn answer_offer(&self, pair: bool) {
+        let mut s = self.lock();
+        if let Some((key, addr)) = s.offer.take() {
+            if pair {
+                s.approved = Some((key, Instant::now() + APPROVAL));
+                s.choice = Some(addr);
+                s.picking = false;
+            } else {
+                // Not this PC: wait for the user to pick one.
+                s.approved = None;
+                s.choice = None;
+                s.picking = true;
+            }
+        }
+        self.0.1.notify_all();
+    }
+
+    fn approved(&self, key: &PeerKey) -> bool {
+        self.lock()
+            .approved
+            .is_some_and(|(k, until)| &k == key && Instant::now() < until)
+    }
+
+    /// Asks the user about an unknown PC; the connection is closed meanwhile.
+    fn offer(&self, key: PeerKey, addr: SocketAddr) {
+        let mut s = self.lock();
+        s.offer = Some((key, addr));
+        s.approved = None;
+    }
+
+    /// While the user has not answered about an unknown PC, nothing connects.
+    fn wait_for_answer(&self) {
+        let mut s = self.lock();
+        while s.offer.is_some() && !s.taken_off {
+            s = self.0.1.wait(s).unwrap();
+        }
+    }
+
     /// Swaps which side shows the pairing code and restarts pairing.
     pub fn switch_pairing_side(&self) {
         let mut s = self.lock();
@@ -194,30 +251,28 @@ impl Steering {
 
     /// Waits for a typed code; `None` if the connection was dropped meanwhile.
     fn wait_code(&self, stream: &TcpStream) -> Option<String> {
-        let mut s = self.lock();
-        s.typed_code = None;
+        self.lock().typed_code = None;
         let deadline = Instant::now() + Duration::from_secs(300);
         loop {
-            if let Some(code) = s.typed_code.take() {
-                return Some(code);
+            {
+                let mut s = self.lock();
+                if let Some(code) = s.typed_code.take() {
+                    return Some(code);
+                }
+                // Dropped by "change PC" or "the other way round".
+                if s.current
+                    .as_ref()
+                    .is_none_or(|c| c.peer_addr().ok() != stream.peer_addr().ok())
+                {
+                    return None;
+                }
+                let _ = self.0.1.wait_timeout(s, Duration::from_millis(500));
             }
-            // Dropped by "change PC" or "the other way round".
-            let gone = s
-                .current
-                .as_ref()
-                .is_none_or(|c| c.peer_addr().ok() != stream.peer_addr().ok())
-                || stream.take_error().ok().flatten().is_some()
-                || matches!(stream.peek(&mut [0u8; 1]), Ok(0));
-            let left = deadline.saturating_duration_since(Instant::now());
-            if gone || left.is_zero() {
+            // Checked without holding the lock (the menu takes it every frame), and
+            // without blocking: the socket's read timeout is minutes long here.
+            if !alive(stream) || Instant::now() >= deadline {
                 return None;
             }
-            s = self
-                .0
-                .1
-                .wait_timeout(s, left.min(Duration::from_millis(500)))
-                .unwrap()
-                .0;
         }
     }
 }
@@ -242,6 +297,7 @@ pub fn spawn(events: Sender<NetEvent>, discovery: Discovery, steering: Steering)
             let mut round = 0u32;
             loop {
                 steering.wait_until_worn();
+                steering.wait_for_answer();
                 round += 1;
                 if let Some(stream) = connect(
                     beacon.as_ref(),
@@ -291,6 +347,30 @@ pub fn spawn(events: Sender<NetEvent>, discovery: Discovery, steering: Steering)
             }
         })
         .expect("spawn net thread");
+}
+
+/// The PC's name with its address, so a look-alike name from the network stands out.
+fn offer_label(host: &str, addr: SocketAddr) -> String {
+    let ip = addr.ip().to_string();
+    if host == ip || addr.ip().is_loopback() {
+        host.to_owned()
+    } else {
+        format!("{host} {ip}")
+    }
+}
+
+/// Whether the PC is still connected, without waiting for anything to arrive.
+fn alive(stream: &TcpStream) -> bool {
+    if stream.take_error().ok().flatten().is_some() || stream.set_nonblocking(true).is_err() {
+        return false;
+    }
+    let peeked = stream.peek(&mut [0u8; 1]);
+    let _ = stream.set_nonblocking(false);
+    match peeked {
+        Ok(0) => false,
+        Ok(_) => true,
+        Err(e) => e.kind() == std::io::ErrorKind::WouldBlock,
+    }
 }
 
 fn try_connect(addr: SocketAddr) -> Option<TcpStream> {
@@ -363,17 +443,19 @@ fn connect(
     events: &Sender<NetEvent>,
     round: u32,
 ) -> Option<TcpStream> {
-    // USB: the host keeps `adb reverse` active, so localhost reaches the PC.
-    if let Some(stream) = try_connect(SocketAddr::new(
-        Ipv4Addr::LOCALHOST.into(),
-        prostir_proto::TCP_PORT,
-    )) {
-        return Some(stream);
-    }
     let (choice, picking) = {
         let s = steering.lock();
         (s.choice, s.picking)
     };
+    // USB: the host keeps `adb reverse` active, so localhost reaches the PC. Not when
+    // the user is picking a PC or picked one on the network: that choice comes first.
+    let usb = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), prostir_proto::TCP_PORT);
+    if !picking
+        && choice.is_none_or(|c| c.ip().is_loopback())
+        && let Some(stream) = try_connect(usb)
+    {
+        return Some(stream);
+    }
     if let Some(stream) = choice.and_then(try_connect) {
         return Some(stream);
     }
@@ -456,13 +538,36 @@ struct Session<'a> {
 }
 
 impl Session<'_> {
-    /// Pairs with the PC, retrying with a fresh code until the codes match.
+    /// Pairs if the user agreed to; otherwise asks them and closes the connection
+    /// (the PC must not be held waiting for an answer).
+    fn pair_if_approved(&mut self, trusted: &mut TrustStore) -> std::io::Result<()> {
+        if self.steering.approved(&self.peer.key) {
+            return self.pair(trusted);
+        }
+        let addr = self.stream.peer_addr()?;
+        self.steering.offer(self.peer.key, addr);
+        let _ = self.events.send(NetEvent::PairOffer {
+            host: offer_label(self.host, addr),
+            failed: false,
+        });
+        Err(std::io::Error::other(
+            "waiting for the user to approve pairing",
+        ))
+    }
+
+    /// Pairs with the PC: up to [`PAIR_ATTEMPTS`] codes, then asks the user again.
     fn pair(&mut self, trusted: &mut TrustStore) -> std::io::Result<()> {
         // The user needs time to read and type the code.
         self.stream
             .set_read_timeout(Some(Duration::from_secs(300)))?;
-        loop {
+        for _ in 0..PAIR_ATTEMPTS {
             let pc_shows = self.steering.pc_shows_code();
+            // The PC makes its code only when asked, so ask first and then wait for
+            // the user to type what it shows.
+            self.feedback.send(&ClientMsg::PairBegin {
+                headset_shows: !pc_shows,
+                name: "Meta Quest".into(),
+            })?;
             let code = if pc_shows {
                 let _ = self.events.send(NetEvent::Pairing {
                     host: self.host.to_owned(),
@@ -479,10 +584,6 @@ impl Session<'_> {
                 });
                 code
             };
-            self.feedback.send(&ClientMsg::PairBegin {
-                headset_shows: !pc_shows,
-                name: "Meta Quest".into(),
-            })?;
             let (pairing, msg) = Pairing::start(&code);
             self.feedback.send(&ClientMsg::PairMsg { msg })?;
             let theirs = loop {
@@ -490,7 +591,10 @@ impl Session<'_> {
                     HostMsg::PairMsg { msg } => break Some(msg),
                     // The PC gave up this attempt (e.g. its dialog was cancelled).
                     HostMsg::PairResult { .. } => break None,
+                    // Not trusted yet: only a short line of plain text gets shown.
                     HostMsg::Error { text } => {
+                        let text: String =
+                            text.chars().filter(|c| !c.is_control()).take(160).collect();
                         let _ = self.events.send(NetEvent::HostError(text));
                     }
                     HostMsg::Unknown { .. } => {}
@@ -529,6 +633,14 @@ impl Session<'_> {
                 other => return Err(std::io::Error::other(format!("unexpected {other:?}"))),
             }
         }
+        // Several wrong codes: stop and let the user decide whether to go on.
+        let addr = self.stream.peer_addr()?;
+        self.steering.offer(self.peer.key, addr);
+        let _ = self.events.send(NetEvent::PairOffer {
+            host: offer_label(self.host, addr),
+            failed: true,
+        });
+        Err(std::io::Error::other("pairing stopped after wrong codes"))
     }
 }
 
@@ -576,9 +688,10 @@ fn run_session(
         peer: &peer,
         host: &host,
     };
-    // A PC we have never paired with must prove it knows the code too.
+    // A PC we have never paired with: pair only once the user said so in the menu,
+    // and never on our own (a hostile PC on the network could keep guessing codes).
     if !trusted.contains(&peer.key) {
-        session.pair(trusted)?;
+        session.pair_if_approved(trusted)?;
     }
     feedback.send(&ClientMsg::Hello {
         version: PROTOCOL_VERSION,
@@ -589,7 +702,7 @@ fn run_session(
         match HostMsg::read(session.reader)? {
             HostMsg::Welcome { language, .. } => break crate::i18n::Lang::from_code(&language),
             HostMsg::PairingRequired => {
-                session.pair(trusted)?;
+                session.pair_if_approved(trusted)?;
                 feedback.send(&ClientMsg::Hello {
                     version: PROTOCOL_VERSION,
                     min: prostir_proto::MIN_PROTOCOL,
