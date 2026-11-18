@@ -29,6 +29,9 @@ pub struct MonitorEntry {
     pub height: u32,
     /// Where it stands around the user, to tell monitors apart.
     pub place: Place,
+    /// As seen from where the user sits, in radians: centre (right, up) and half
+    /// size, for the map in the menu.
+    pub seen: Option<[f32; 4]>,
 }
 
 /// Where a monitor stands, as seen by the user.
@@ -82,6 +85,10 @@ pub struct UiState {
     pub ip_input: Option<String>,
     /// Quest monitors, sorted by id.
     pub monitors: Vec<MonitorEntry>,
+    /// The monitor picked on the map (its actions show under it).
+    pub selected: Option<u8>,
+    /// The laptop screen on the map: centre and half size as seen, in radians.
+    pub mirror_seen: Option<[f32; 4]>,
     pub primary: Option<u8>,
     pub mirror_wanted: bool,
     /// PC sound goes to the headset.
@@ -224,6 +231,10 @@ pub enum Action {
     Screenshot,
     /// Close a window panel (its window goes back to the monitors).
     CloseWindow(u8),
+    /// Pick a monitor on the map.
+    SelectMonitor(u8),
+    /// What the A button does: take the seams out of the arrangement.
+    Tidy,
     /// Open the main menu (from the wrist menu).
     OpenMenu,
     /// Show where the mouse is.
@@ -490,6 +501,9 @@ impl Panel {
                 }
                 Item::Button { rect: r, label, .. } => {
                     found.extend(self.missing_glyphs(label));
+                    if r.bottom() > HEIGHT as f32 - 36.0 {
+                        found.push(format!("below the bottom: button {label:?}"));
+                    }
                     let size = button_font_size(label);
                     let tw = self.text_width(label, size, true);
                     if tw > r.width() - 16.0 {
@@ -513,6 +527,10 @@ impl Panel {
                 } => {
                     found.extend(self.missing_glyphs(text));
                     let tw = self.text_width(text, *size, *medium);
+                    // Below the error line (which itself sits at HEIGHT - 34).
+                    if *baseline > HEIGHT as f32 - 34.0 {
+                        found.push(format!("below the bottom: {text:?}"));
+                    }
                     if x + tw > WIDTH as f32 - 32.0 {
                         found.push(format!("off the panel: {text:?}"));
                     }
@@ -567,6 +585,7 @@ impl Panel {
             ),
             (l.t("Де миша?", "Mouse?"), false, Action::FindMouse),
             (l.t("Знімок", "Screenshot"), false, Action::Screenshot),
+            (l.t("Вирівняти", "Line up"), false, Action::Tidy),
         ];
         let (r0, r1) = (outer * 0.4, outer - 10.0);
         let step = TAU / sectors.len() as f32;
@@ -736,14 +755,8 @@ impl Panel {
             Tab::Quick => build_quick(s, &mut items, lx, w - 2.0 * lx, top - 12.0),
             Tab::Monitors => {
                 let left = monitor_list(s, &mut items, lx, lw, top - 12.0);
-                let right = build_monitor_options(s, &mut items, rx, rw, top);
-                // Under the list if there is room above the error line, else on the
-                // right (with six monitors listed).
-                if left + 34.0 + 70.0 < HEIGHT as f32 - 60.0 {
-                    save_as_profile(s, &mut items, lx, lw, left + 34.0);
-                } else {
-                    save_as_profile(s, &mut items, rx, rw, right);
-                }
+                build_monitor_options(s, &mut items, rx, rw, top);
+                save_as_profile(s, &mut items, lx, lw, left + 30.0);
             }
             Tab::Settings(section) => build_settings(s, section, &mut items, top - 12.0),
         }
@@ -1294,37 +1307,82 @@ pub fn menu_button_image(size: u32, hovered: bool) -> Vec<u8> {
 }
 
 /// Quest monitors with reorder / primary / remove, then the laptop screen.
+/// The monitors as seen from where the user sits, on a small map: press one to pick
+/// it, and its actions show underneath.
 fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32) -> f32 {
     let l = s.lang;
-    let removable = s.monitors.len() > 1;
-    let count = s.monitors.len();
-    for (i, m) in s.monitors.iter().enumerate() {
-        items.push(Item::Box(rect(lx, y, lw, 62.0), [255, 255, 255, 12]));
-        // Move left / right in the row (also reorders KDE's layout).
-        for (k, (label, delta)) in [("‹", -1), ("›", 1)].into_iter().enumerate() {
-            let enabled = if delta < 0 { i > 0 } else { i + 1 < count };
-            items.push(button(
-                rect(lx + 8.0 + k as f32 * 48.0, y + 7.0, 44.0, 48.0),
-                label,
-                if enabled {
-                    Style::Normal
-                } else {
-                    Style::Disabled
-                },
-                enabled.then_some(Action::Move { id: m.id, delta }),
-            ));
-        }
+    let map_h = 210.0;
+    items.push(Item::Box(rect(lx, y, lw, map_h), [255, 255, 255, 8]));
+    // Fit everything seen into the box, keeping proportions.
+    let all: Vec<[f32; 4]> = s
+        .monitors
+        .iter()
+        .filter_map(|m| m.seen)
+        .chain(s.mirror_seen)
+        .collect();
+    let (mut x0, mut x1, mut y0, mut y1) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+    for [cx, cy, hw, hh] in &all {
+        x0 = x0.min(cx - hw);
+        x1 = x1.max(cx + hw);
+        y0 = y0.min(cy - hh);
+        y1 = y1.max(cy + hh);
+    }
+    let pad = 18.0;
+    let scale = if all.is_empty() {
+        1.0
+    } else {
+        ((lw - 2.0 * pad) / (x1 - x0).max(1e-3)).min((map_h - 2.0 * pad) / (y1 - y0).max(1e-3))
+    };
+    let (mx, my) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+    let to_rect = |[cx, cy, hw, hh]: [f32; 4]| {
+        let gap = 3.0;
+        rect(
+            lx + lw / 2.0 + (cx - hw - mx) * scale + gap,
+            y + map_h / 2.0 - (cy + hh - my) * scale + gap,
+            (2.0 * hw * scale - 2.0 * gap).max(8.0),
+            (2.0 * hh * scale - 2.0 * gap).max(8.0),
+        )
+    };
+    if let Some(m) = s.mirror_seen {
+        items.push(Item::Box(to_rect(m), [255, 255, 255, 14]));
+    }
+    let selected = s.selected.or(s.primary);
+    for m in &s.monitors {
+        let Some(seen) = m.seen else { continue };
+        let r = to_rect(seen);
+        let style = if selected == Some(m.id) {
+            Style::Selected
+        } else if s.primary == Some(m.id) {
+            Style::TabOn
+        } else {
+            Style::Normal
+        };
+        items.push(button(r, "", style, Some(Action::SelectMonitor(m.id))));
+        let label = (m.id + 1).to_string();
+        let size = (r.height() * 0.4).clamp(14.0, 30.0);
         items.push(text(
-            lx + 116.0,
-            y + 29.0,
+            r.left() + r.width() / 2.0 - size * 0.3,
+            r.top() + r.height() / 2.0 + size * 0.36,
+            size,
+            true,
+            [255, 255, 255, 255],
+            &label,
+        ));
+    }
+    y += map_h + 12.0;
+    // The picked monitor: what it is, and what can be done with it.
+    if let Some(m) = selected.and_then(|id| s.monitors.iter().find(|m| m.id == id)) {
+        items.push(text(
+            lx,
+            y + 24.0,
             22.0,
             true,
             TEXT,
             &format!("{} {}", l.t("Монітор", "Monitor"), m.id + 1),
         ));
         items.push(text(
-            lx + 116.0,
-            y + 52.0,
+            lx,
+            y + 50.0,
             16.0,
             false,
             MUTED,
@@ -1336,55 +1394,53 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
         let remove = rect(lx + lw - 58.0, y + 7.0, 48.0, 48.0);
         let primary = rect(lx + lw - 58.0 - 10.0 - 210.0, y + 7.0, 210.0, 48.0);
         if s.confirm_remove == Some(m.id) {
-            let both = rect(
-                primary.left(),
-                y + 7.0,
-                remove.right() - primary.left(),
-                48.0,
-            );
             items.push(button(
-                both,
+                rect(
+                    primary.left(),
+                    y + 7.0,
+                    remove.right() - primary.left(),
+                    48.0,
+                ),
                 l.t("Прибрати? Ще раз", "Remove? Press again"),
                 Style::Armed,
                 Some(Action::Remove(m.id)),
             ));
-            y += 70.0;
-            continue;
-        }
-        if s.primary == Some(m.id) {
-            items.push(button(
-                primary,
-                l.t("Головний", "Primary"),
-                Style::Selected,
-                None,
-            ));
         } else {
+            if s.primary == Some(m.id) {
+                items.push(button(
+                    primary,
+                    l.t("Головний", "Primary"),
+                    Style::Selected,
+                    None,
+                ));
+            } else {
+                items.push(button(
+                    primary,
+                    l.t("Зробити головним", "Make primary"),
+                    Style::Normal,
+                    Some(Action::MakePrimary(m.id)),
+                ));
+            }
+            let removable = s.monitors.len() > 1;
             items.push(button(
-                primary,
-                l.t("Зробити головним", "Make primary"),
-                Style::Normal,
-                Some(Action::MakePrimary(m.id)),
+                remove,
+                "×",
+                if removable {
+                    Style::Danger
+                } else {
+                    Style::Disabled
+                },
+                removable.then_some(Action::Remove(m.id)),
             ));
         }
-        let style = if removable {
-            Style::Danger
-        } else {
-            Style::Disabled
-        };
-        items.push(button(
-            remove,
-            "×",
-            style,
-            removable.then_some(Action::Remove(m.id)),
-        ));
         y += 70.0;
     }
     // Detached windows: a name, the size and a close button.
     for (i, w) in s.windows.iter().enumerate() {
-        items.push(Item::Box(rect(lx, y, lw, 62.0), [255, 255, 255, 8]));
+        items.push(Item::Box(rect(lx, y, lw, 52.0), [255, 255, 255, 8]));
         items.push(text(
             lx + 20.0,
-            y + 29.0,
+            y + 25.0,
             22.0,
             true,
             TEXT,
@@ -1392,19 +1448,19 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
         ));
         items.push(text(
             lx + 20.0,
-            y + 52.0,
+            y + 46.0,
             16.0,
             false,
             MUTED,
             &format!("{} × {}", w.width, w.height),
         ));
         items.push(button(
-            rect(lx + lw - 58.0, y + 7.0, 48.0, 48.0),
+            rect(lx + lw - 52.0, y + 6.0, 42.0, 40.0),
             "×",
             Style::Danger,
             Some(Action::CloseWindow(w.id)),
         ));
-        y += 70.0;
+        y += 58.0;
     }
     // Physical display mirror: shown or hidden, said by the highlighted option.
     let title = if s.mirror_wanted && !s.mirror_active {
@@ -1442,11 +1498,11 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
     items.push(button(
         rect(lx, y, lw, 52.0),
         l.t(
-            "Поставити все перед собою",
-            "Bring everything in front of me",
+            "Вирівняти: прибрати шви (кнопка A)",
+            "Line up: close the seams (A button)",
         ),
         Style::Normal,
-        Some(Action::Recenter),
+        Some(Action::Tidy),
     ));
     y + 52.0
 }
@@ -1623,27 +1679,6 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
                 Action::Curve(Curve::Strong),
                 st.curve == Curve::Strong,
                 s.curve_available,
-            ),
-        ],
-    );
-    segmented(
-        items,
-        rx,
-        rw,
-        &mut y,
-        l.t("Режим", "Mode"),
-        vec![
-            (
-                l.t("Робочий стіл", "Desk"),
-                Action::Cinema(false),
-                !st.cinema,
-                true,
-            ),
-            (
-                l.t("Кінотеатр", "Cinema"),
-                Action::Cinema(true),
-                st.cinema,
-                true,
             ),
         ],
     );
@@ -2123,8 +2158,8 @@ fn build_intro(l: Lang, items: &mut Vec<Item>, x: f32, w: f32) {
         (
             "Вирівняти",
             "Line up",
-            "Кнопка A ставить монітори рівно. «Поставити все перед собою» в меню розверне їх до вас.",
-            "The A button lines monitors up. \"Bring everything in front of me\" in the menu turns them to you.",
+            "Кнопка A прибирає шви між моніторами. Відпущений біля іншого монітор пристає сам.",
+            "The A button closes the seams between monitors. One let go next to another sticks to it.",
         ),
         (
             "Пальцем",
@@ -3000,6 +3035,7 @@ mod tests {
                 width: 1200,
                 height: 800,
                 place: Place::Unknown,
+                seen: None,
             }],
             host: Some("workstation".into()),
             found: Vec::new(),
@@ -3010,20 +3046,25 @@ mod tests {
                     width: 2560,
                     height: 1440,
                     place: Place::Unknown,
+                    seen: Some([-1.0, 0.0, 0.5, 0.28]),
                 },
                 MonitorEntry {
                     id: 1,
                     width: 2560,
                     height: 1440,
                     place: Place::Unknown,
+                    seen: Some([0.0, 0.0, 0.5, 0.28]),
                 },
                 MonitorEntry {
                     id: 2,
                     width: 1440,
                     height: 2560,
                     place: Place::Unknown,
+                    seen: Some([0.78, 0.12, 0.28, 0.5]),
                 },
             ],
+            selected: None,
+            mirror_seen: Some([0.0, -0.55, 0.35, 0.22]),
             primary: Some(1),
             mirror_wanted: true,
             audio_wanted: true,
@@ -3128,6 +3169,7 @@ mod tests {
                         height: 1440,
                         // The longest name.
                         place: Place::Right,
+                        seen: Some([(f32::from(id) - 2.5) * 0.9, 0.0, 0.45, 0.19]),
                     })
                     .collect();
                 states.push(st);

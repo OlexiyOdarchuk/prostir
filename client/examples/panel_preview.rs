@@ -39,6 +39,7 @@ fn main() {
                 width: 1200,
                 height: 800,
                 place: Default::default(),
+                seen: None,
             }]
         } else {
             Vec::new()
@@ -72,21 +73,26 @@ fn main() {
                 width: 2560,
                 height: 1440,
                 place: Default::default(),
+                seen: Some([-1.0, 0.0, 0.5, 0.28]),
             },
             MonitorEntry {
                 id: 1,
                 width: 2560,
                 height: 1440,
                 place: Default::default(),
+                seen: Some([0.0, 0.0, 0.5, 0.28]),
             },
             MonitorEntry {
                 id: 2,
                 width: 1440,
                 height: 2560,
                 place: Default::default(),
+                seen: Some([0.78, 0.12, 0.28, 0.5]),
             },
         ],
         primary: Some(1),
+        selected: None,
+        mirror_seen: Some([0.0, -0.55, 0.35, 0.22]),
         mirror_wanted: true,
         audio_wanted: true,
         mic_wanted: true,

@@ -323,6 +323,8 @@ struct Scene {
     attach_for: Option<(u8, Instant)>,
     /// The wrist menu, while the left palm is turned to the face.
     wrist: Option<Placement>,
+    /// The monitor picked on the menu's map.
+    selected: Option<u8>,
     /// The PC can move the mouse.
     can_move_mouse: bool,
     /// The display rate setting changed: apply it.
@@ -588,6 +590,21 @@ impl Scene {
                 width,
             },
         );
+    }
+
+    /// Monitor `id` as seen from where the user sits, for the menu's map: centre
+    /// (right, up) and half size, in radians.
+    fn seen_of(&self, id: u8) -> Option<[f32; 4]> {
+        let p = self.placements.get(&id)?;
+        let (eye, yaw) = self.center;
+        let d = glam::Quat::from_rotation_y(-yaw) * (p.position - eye);
+        let distance = d.length().max(0.3);
+        Some([
+            d.x.atan2(-d.z),
+            d.y.atan2(Vec2::new(d.x, d.z).length()),
+            (p.width / 2.0 / distance).atan(),
+            (self.height_of(id) / 2.0 / distance).atan(),
+        ])
     }
 
     /// Where monitor `id` stands, seen from where the user sits: up or down first
@@ -1065,6 +1082,7 @@ impl Scene {
                     width,
                     height,
                     place: self.place_of(id),
+                    seen: self.seen_of(id),
                 })
                 .collect(),
             windows: self
@@ -1076,9 +1094,16 @@ impl Scene {
                     width: m.width_px,
                     height: m.height_px,
                     place: ui::Place::Unknown,
+                    seen: None,
                 })
                 .collect(),
             primary: self.primary,
+            selected: self.selected.filter(|id| self.monitors.contains_key(id)),
+            mirror_seen: self
+                .monitors
+                .contains_key(&MIRROR_ID)
+                .then(|| self.seen_of(MIRROR_ID))
+                .flatten(),
             mirror_wanted: self.mirror_wanted,
             audio_wanted: self.audio_wanted,
             mic_wanted: self.mic_wanted,
@@ -1388,6 +1413,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         following: false,
         attach_for: None,
         wrist: None,
+        selected: None,
         can_move_mouse: false,
         refresh_due: false,
         worn_for: Duration::ZERO,
@@ -2771,6 +2797,11 @@ fn handle_action(
             }
         }
         Action::CloseWindow(id) => scene.send(ClientMsg::RemoveMonitor { id }),
+        Action::Tidy => scene.tidy_up(),
+        Action::SelectMonitor(id) => {
+            scene.selected = Some(id);
+            scene.confirm_remove = None;
+        }
         Action::FindMouse => scene.send(ClientMsg::FindMouse),
         Action::GazeMouse(on) => {
             scene.settings.gaze_mouse = on;
