@@ -410,7 +410,10 @@ fn serve_client(
             },
             Ok(Ok(ClientMsg::SetNotifications { enabled })) => {
                 notifications = if enabled {
-                    notifications.or_else(|| notifications::watch(displays.router.clone()))
+                    notifications.or_else(|| {
+                        let router = displays.router.clone();
+                        notifications::watch(move |text| router.send(HostMsg::Notice { text }))
+                    })
                 } else {
                     None
                 };

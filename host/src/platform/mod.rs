@@ -47,6 +47,20 @@ impl std::fmt::Display for MonitorSpec {
     }
 }
 
+/// The window that has the keyboard, as found when asked.
+#[derive(Debug, Clone)]
+pub struct ActiveWindow {
+    /// The desktop's id for it (Hyprland address, KWin internal id).
+    pub id: String,
+    /// Logical size on the desktop.
+    pub width: i32,
+    pub height: i32,
+    /// Scale of the output it is on.
+    pub scale: f64,
+    /// The output it is on.
+    pub output: String,
+}
+
 /// Where an output is on the desktop: logical position and size, and its priority
 /// (1 = primary; only KDE has priorities).
 #[derive(Debug, Clone, Copy, PartialEq)]

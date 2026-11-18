@@ -6,6 +6,7 @@
 //! and with `keyword` on `hyprland.conf` ones.
 
 pub mod screencopy;
+pub mod windows;
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Read, Write};

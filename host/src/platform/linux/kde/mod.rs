@@ -4,6 +4,7 @@
 pub mod kscreen;
 pub mod plasma;
 pub mod virtual_output;
+pub mod windows;
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};

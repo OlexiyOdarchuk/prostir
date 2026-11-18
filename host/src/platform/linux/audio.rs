@@ -3,7 +3,6 @@
 //! PCM and sent over the (encrypted) connection.
 
 use std::process::Command;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -12,8 +11,6 @@ use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use log::{info, warn};
 use prostir_proto::{AUDIO_CHANNELS, AUDIO_RATE, MIC_CHANNELS};
-
-use crate::displays::Router;
 
 const SINK: &str = "prostir_headset";
 
@@ -93,7 +90,8 @@ pub struct AudioOut {
 }
 
 impl AudioOut {
-    pub fn start(router: Arc<Router>) -> Result<Self> {
+    /// `on_sound` gets each slice of PC sound (raw PCM) as it is captured.
+    pub fn start(on_sound: impl Fn(Vec<u8>) + Send + Sync + 'static) -> Result<Self> {
         let sink = VirtualNode::create(
             SINK,
             crate::i18n::t("Prostir — шолом", "Prostir headset"),
@@ -120,7 +118,7 @@ impl AudioOut {
                     if let Some(buffer) = sample.buffer()
                         && let Ok(map) = buffer.map_readable()
                     {
-                        router.send_audio(map.as_slice().to_vec());
+                        on_sound(map.as_slice().to_vec());
                     }
                     Ok(gst::FlowSuccess::Ok)
                 })

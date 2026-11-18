@@ -13,11 +13,13 @@ use prostir_proto::{Codec, HostMsg, LayoutRow, MIRROR_ID, NEXT, PcSettings, WIND
 use std::sync::atomic::AtomicU8;
 
 use crate::encoder::{Encoder, EncoderConfig, EncoderEvent, Input};
-use crate::layout::{Seat, arrange, arrange_free};
+use crate::layout::{Seat, arrange, arrange_free, panel_size};
 use crate::outbox::Outbox;
 use crate::platform::audio::{AudioOut, MicIn};
 use crate::platform::windows;
-use crate::platform::{Desktop, DesktopBackend, Geometry, MonitorSpec, Output, OutputBackend};
+use crate::platform::{
+    ActiveWindow, Desktop, DesktopBackend, Geometry, MonitorSpec, Output, OutputBackend,
+};
 
 /// Retry timing after failures: 2 s, then doubling up to 2 min.
 #[derive(Default)]
@@ -453,7 +455,7 @@ pub struct Displays {
     /// When the window panels are next checked for a closed window.
     windows_checked: Instant,
     /// The window on each panel, as it was before (to put it back).
-    windows_origin: HashMap<u8, windows::ActiveWindow>,
+    windows_origin: HashMap<u8, ActiveWindow>,
     /// A new panel output to place once the compositor lists it.
     windows_unplaced: bool,
     /// Left-to-right order of the monitors, in the headset and in KDE.
@@ -849,7 +851,8 @@ impl Displays {
     fn sync_audio(&mut self) {
         let audio = self.streaming && self.audio_wanted;
         if audio && self.audio.is_none() && self.audio_retry.due() {
-            match AudioOut::start(self.router.clone()) {
+            let router = self.router.clone();
+            match AudioOut::start(move |pcm| router.send_audio(pcm)) {
                 Ok(a) => {
                     self.audio = Some(a);
                     self.audio_retry.succeeded();
@@ -1350,7 +1353,7 @@ impl Displays {
             "Немає активного вікна на ПК",
             "No active window on the PC",
         ))?;
-        let (width, height) = windows::panel_size(&window);
+        let (width, height) = panel_size(&window);
         let spec = MonitorSpec {
             width,
             height,

@@ -7,10 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use log::{info, warn};
-use prostir_proto::HostMsg;
 use zbus::zvariant::OwnedValue;
-
-use crate::displays::Router;
 
 /// Longest text passed on (a notification body can be long).
 const MAX_CHARS: usize = 140;
@@ -26,8 +23,8 @@ impl Drop for Watcher {
     }
 }
 
-/// Starts passing notifications to the headset through `router`.
-pub fn watch(router: Arc<Router>) -> Option<Watcher> {
+/// Starts passing notifications to the headset: `show` gets the text of each one.
+pub fn watch(show: impl Fn(String) + Send + 'static) -> Option<Watcher> {
     let conn = zbus::blocking::Connection::session()
         .inspect_err(|e| warn!("notifications: no session bus: {e}"))
         .ok()?;
@@ -68,7 +65,7 @@ pub fn watch(router: Arc<Router>) -> Option<Watcher> {
                     continue;
                 };
                 if let Some(text) = shown_text(&app, &summary, &body) {
-                    router.send(HostMsg::Notice { text });
+                    show(text);
                 }
             }
             info!("PC notifications no longer passed to the headset");
