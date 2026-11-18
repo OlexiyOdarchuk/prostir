@@ -154,121 +154,176 @@ pub fn rows_by_position(
         .collect()
 }
 
-/// Lines up monitors the user placed by hand, keeping their arrangement: monitors at
-/// about the same height stay a row, and each row becomes tidy, side by side without
-/// gaps or overlaps, at one distance and height, facing the user, centred where the row
-/// was. Rows that overlap or nearly touch are stacked so they just touch. `center` is
-/// where the layout faces from (position, yaw).
-pub fn tidy(
+/// A monitor as seen from the eye: its centre's direction (yaw to the right of the
+/// anchor monitor, pitch up), its distance, and its size in metres.
+#[derive(Debug, Clone, Copy)]
+struct Seen {
+    id: u8,
+    yaw: f32,
+    pitch: f32,
+    distance: f32,
+    width: f32,
+    height: f32,
+}
+
+impl Seen {
+    /// Half its width and height as angles.
+    fn half(&self) -> (f32, f32) {
+        (
+            (self.width / 2.0 / self.distance).atan(),
+            (self.height / 2.0 / self.distance).atan(),
+        )
+    }
+
+    /// Angular gaps to `other` across and up (negative: the ranges overlap).
+    fn gaps(&self, other: &Seen) -> (f32, f32) {
+        let ((aw, ah), (bw, bh)) = (self.half(), other.half());
+        (
+            (self.yaw - other.yaw).abs() - (aw + bw),
+            (self.pitch - other.pitch).abs() - (ah + bh),
+        )
+    }
+
+    /// How far apart the two are: the larger gap, or nothing when they overlap.
+    fn separation(&self, other: &Seen) -> f32 {
+        let (gx, gy) = self.gaps(other);
+        gx.max(gy).max(0.0)
+    }
+
+    fn overlaps(&self, other: &Seen) -> bool {
+        let (gx, gy) = self.gaps(other);
+        gx < -1e-3 && gy < -1e-3
+    }
+}
+
+/// Lines `value` (half size `half`) up with a neighbour at `other` (half size
+/// `other_half`): centres, first edges or last edges, whichever is nearest, when it
+/// is a small move (under a third of its size); otherwise it stays.
+fn align(value: f32, half: f32, other: f32, other_half: f32) -> f32 {
+    let options = [other, other + other_half - half, other - other_half + half];
+    let best = options
+        .into_iter()
+        .min_by(|a, b| (a - value).abs().total_cmp(&(b - value).abs()))
+        .unwrap_or(value);
+    if (best - value).abs() <= 2.0 * half / 3.0 {
+        best
+    } else {
+        value
+    }
+}
+
+/// The A button: the user's own arrangement, with the seams taken out. Seen from
+/// `eye`, monitors that overlap or almost touch (a gap under half a monitor) are moved
+/// to meet edge to edge, at the same distance as the neighbour they join and lined up
+/// with it when nearly so; monitors put clearly apart stay where they are. Every
+/// monitor turns to face the eye. `anchor` (the primary monitor) does not move.
+pub fn snap(
     placements: &HashMap<u8, Placement>,
     monitors: &[(u8, u32, u32)],
-    center: (Vec3, f32),
-    wall: bool,
+    eye: Vec3,
+    anchor: Option<u8>,
 ) -> HashMap<u8, Placement> {
-    if wall {
-        return tidy_wall(placements, monitors, center);
-    }
-    struct Item {
-        id: u8,
-        yaw: f32,
-        y: f32,
-        distance: f32,
-        width: f32,
-        height: f32,
-    }
-    let unturn = Quat::from_rotation_y(-center.1);
-    let turn = Quat::from_rotation_y(center.1);
-    let mut items: Vec<Item> = monitors
+    let seen = |id: u8, p: &Placement, w: u32, h: u32| {
+        let d = p.position - eye;
+        Seen {
+            id,
+            yaw: d.x.atan2(-d.z),
+            pitch: d.y.atan2(Vec2::new(d.x, d.z).length()),
+            distance: d.length().max(0.3),
+            width: p.width,
+            height: p.width * h as f32 / w.max(1) as f32,
+        }
+    };
+    let mut rest: Vec<Seen> = monitors
         .iter()
-        .filter_map(|&(id, w, h)| {
-            let p = placements.get(&id)?;
-            let local = unturn * (p.position - center.0);
-            Some(Item {
-                id,
-                yaw: local.x.atan2(-local.z),
-                y: local.y,
-                distance: Vec2::new(local.x, local.z).length().max(0.3),
-                width: p.width,
-                height: p.width * h as f32 / w.max(1) as f32,
+        .filter_map(|&(id, w, h)| Some(seen(id, placements.get(&id)?, w, h)))
+        .collect();
+    if rest.is_empty() {
+        return HashMap::new();
+    }
+    let first = rest.iter().position(|m| Some(m.id) == anchor).unwrap_or(0);
+    let mut placed = vec![rest.remove(first)];
+    // Yaw around the anchor, so nothing wraps around behind the user.
+    let base = placed[0].yaw;
+    let wrap = |a: f32| {
+        (a + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
+    };
+    placed[0].yaw = 0.0;
+    for m in &mut rest {
+        m.yaw = wrap(m.yaw - base);
+    }
+    // Outwards from the anchor: always the monitor closest to one already placed.
+    while !rest.is_empty() {
+        let (ri, pi, sep) = rest
+            .iter()
+            .enumerate()
+            .flat_map(|(ri, m)| {
+                placed
+                    .iter()
+                    .enumerate()
+                    .map(move |(pi, n)| (ri, pi, m.separation(n)))
             })
-        })
-        .collect();
-    items.sort_by(|a, b| b.y.total_cmp(&a.y));
-    // Rows: centres closer in height than most of a monitor.
-    let mut rows: Vec<Vec<Item>> = Vec::new();
-    for it in items {
-        match rows.iter_mut().find(|r| {
-            let first = &r[0];
-            (first.y - it.y).abs() < 0.5 * first.height.max(it.height)
-        }) {
-            Some(r) => r.push(it),
-            None => rows.push(vec![it]),
-        }
-    }
-    // Each row: one height (the average), one distance, side by side.
-    struct Row {
-        y: f32,
-        height: f32,
-        distance: f32,
-        items: Vec<Item>,
-    }
-    let mut rows: Vec<Row> = rows
-        .into_iter()
-        .map(|mut r| {
-            r.sort_by(|a, b| a.yaw.total_cmp(&b.yaw));
-            let n = r.len() as f32;
-            Row {
-                y: r.iter().map(|m| m.y).sum::<f32>() / n,
-                height: r.iter().map(|m| m.height).fold(0.0, f32::max),
-                distance: r.iter().map(|m| m.distance).sum::<f32>() / n,
-                items: r,
+            .min_by(|a, b| a.2.total_cmp(&b.2))
+            .expect("both lists are non-empty");
+        let mut m = rest.remove(ri);
+        let n = placed[pi];
+        let (mw, _) = m.half();
+        let (nw, _) = n.half();
+        if sep < mw.min(nw) {
+            let (gx, gy) = m.gaps(&n);
+            // Side by side when the gap across is the larger one, else above or below.
+            let across = gx > gy;
+            m.distance = n.distance;
+            let ((mw, mh), (nw, nh)) = (m.half(), n.half());
+            let side = |a: f32, b: f32| if a >= b { 1.0 } else { -1.0 };
+            if across {
+                m.yaw = n.yaw + side(m.yaw, n.yaw) * (nw + mw);
+                m.pitch = align(m.pitch, mh, n.pitch, nh);
+            } else {
+                m.pitch = n.pitch + side(m.pitch, n.pitch) * (nh + mh);
+                m.yaw = align(m.yaw, mw, n.yaw, nw);
             }
-        })
-        .collect();
-    // Top to bottom: a row that overlaps the one above, or almost touches it, moves
-    // down to touch it.
-    rows.sort_by(|a, b| b.y.total_cmp(&a.y));
-    for i in 1..rows.len() {
-        let above_bottom = rows[i - 1].y - rows[i - 1].height / 2.0;
-        let top = rows[i].y + rows[i].height / 2.0;
-        let gap = above_bottom - top;
-        if gap < 0.15 * rows[i].height {
-            rows[i].y = above_bottom - rows[i].height / 2.0;
+            // Still on top of another one: past it, the same way.
+            for _ in 0..placed.len() {
+                let Some(o) = placed.iter().find(|o| m.overlaps(o)).copied() else {
+                    break;
+                };
+                let ((mw, mh), (ow, oh)) = (m.half(), o.half());
+                if across {
+                    m.yaw = o.yaw + side(m.yaw, n.yaw) * (ow + mw);
+                } else {
+                    m.pitch = o.pitch + side(m.pitch, n.pitch) * (oh + mh);
+                }
+            }
         }
+        placed.push(m);
     }
-    let mut out = HashMap::new();
-    for row in &rows {
-        let half_angle = |w: f32| (w / 2.0 / row.distance).min(0.95).asin();
-        // Centred where the row's edges were.
-        let first = &row.items[0];
-        let last = &row.items[row.items.len() - 1];
-        let mid =
-            ((first.yaw - half_angle(first.width)) + (last.yaw + half_angle(last.width))) / 2.0;
-        let total: f32 = row.items.iter().map(|m| 2.0 * half_angle(m.width)).sum();
-        let mut yaw = mid - total / 2.0;
-        for m in &row.items {
-            let half = half_angle(m.width);
-            let a = yaw + half;
-            let r = row.distance * half.cos();
-            let local = Vec3::new(r * a.sin(), row.y, -r * a.cos());
-            let position = center.0 + turn * local;
-            out.insert(
+    placed
+        .into_iter()
+        .map(|m| {
+            let yaw = m.yaw + base;
+            let dir = Vec3::new(
+                m.pitch.cos() * yaw.sin(),
+                m.pitch.sin(),
+                -m.pitch.cos() * yaw.cos(),
+            );
+            let position = eye + dir * m.distance;
+            (
                 m.id,
                 Placement {
                     position,
-                    rotation: turn * facing(local, Vec3::new(0.0, row.y, 0.0)),
+                    rotation: facing(position, eye),
                     width: m.width,
                 },
-            );
-            yaw += 2.0 * half;
-        }
-    }
-    out
+            )
+        })
+        .collect()
 }
 
-/// [`tidy`] for a wall: everything into one plane (at the monitors' average depth),
-/// facing the same way; rows side by side, centred where they were, stacked to touch.
-fn tidy_wall(
+/// The A button on a wall: everything into one plane (at the monitors' average
+/// depth), facing the same way; rows side by side, centred where they were, stacked to
+/// touch.
+pub fn tidy_wall(
     placements: &HashMap<u8, Placement>,
     monitors: &[(u8, u32, u32)],
     center: (Vec3, f32),
@@ -1062,7 +1117,7 @@ mod tests {
                 width: rough[&1].width,
             },
         );
-        let tidy = tidy(&rough, &three, center, false);
+        let tidy = snap(&rough, &three, center.0, Some(1));
         assert_eq!(tidy.len(), 3);
         // Still two rows: monitor 2 above the others.
         assert!(tidy[&2].position.y > tidy[&1].position.y + 0.5);
@@ -1075,6 +1130,91 @@ mod tests {
         assert!(gap < 0.01, "gap {gap} m");
     }
 
+    fn snap_case(
+        positions: &[(u8, Vec3, f32)],
+    ) -> (
+        HashMap<u8, Placement>,
+        HashMap<u8, Placement>,
+        Vec<(u8, u32, u32)>,
+    ) {
+        let sizes: Vec<(u8, u32, u32)> = positions.iter().map(|p| (p.0, 2560, 1440)).collect();
+        let before: HashMap<u8, Placement> = positions
+            .iter()
+            .map(|&(id, at, width)| {
+                (
+                    id,
+                    Placement {
+                        position: at,
+                        rotation: facing(at, Vec3::ZERO),
+                        width,
+                    },
+                )
+            })
+            .collect();
+        let after = snap(&before, &sizes, Vec3::ZERO, Some(positions[0].0));
+        (before, after, sizes)
+    }
+
+    fn seen_of(p: &Placement, w: f32) -> Seen {
+        let d = p.position;
+        Seen {
+            id: 0,
+            yaw: d.x.atan2(-d.z),
+            pitch: d.y.atan2(Vec2::new(d.x, d.z).length()),
+            distance: d.length(),
+            width: w,
+            height: w * 1440.0 / 2560.0,
+        }
+    }
+
+    #[test]
+    fn snap_closes_seams_and_overlaps() {
+        // The anchor straight ahead; one overlapping it on the right, a little lower
+        // and nearer; one leaving a small gap on the left.
+        let (before, after, _) = snap_case(&[
+            (0, Vec3::new(0.0, 0.0, -1.1), 1.2),
+            (1, Vec3::new(1.0, -0.05, -0.8), 1.2),
+            (2, Vec3::new(-1.35, 0.02, -0.9), 1.2),
+        ]);
+        // The anchor stays.
+        assert!(after[&0].position.distance(before[&0].position) < 1e-4);
+        let a = seen_of(&after[&0], 1.2);
+        for id in [1, 2] {
+            let m = seen_of(&after[&id], 1.2);
+            let (gx, _) = m.gaps(&a);
+            assert!(gx.abs() < 1e-3, "monitor {id}: gap {gx}");
+            // Same distance and lined up.
+            assert!((m.distance - a.distance).abs() < 1e-3);
+            assert!((m.pitch - a.pitch).abs() < 1e-3);
+        }
+    }
+
+    #[test]
+    fn snap_leaves_monitors_put_apart() {
+        // Far to the right, on purpose.
+        let (before, after, _) = snap_case(&[
+            (0, Vec3::new(0.0, 0.0, -1.1), 1.2),
+            (1, Vec3::new(1.1, 0.0, 0.0), 1.2),
+        ]);
+        assert!(after[&1].position.distance(before[&1].position) < 1e-3);
+    }
+
+    #[test]
+    fn snap_stacks_rows_without_overlap() {
+        // One above the anchor, sunk into it.
+        let (_, after, _) = snap_case(&[
+            (0, Vec3::new(0.0, 0.0, -1.1), 1.2),
+            (1, Vec3::new(0.05, 0.5, -1.0), 1.2),
+        ]);
+        let a = seen_of(&after[&0], 1.2);
+        let m = seen_of(&after[&1], 1.2);
+        let (gx, gy) = m.gaps(&a);
+        assert!(gy.abs() < 1e-3, "vertical gap {gy}");
+        assert!(gx < 0.0);
+        // Lined up above it.
+        assert!(m.yaw.abs() < 1e-3);
+    }
+
     /// A wall: A brings everything into one plane, facing one way, rows touching.
     #[test]
     fn tidy_wall_is_flat() {
@@ -1083,7 +1223,7 @@ mod tests {
         let mut rough = arrange(Preset::Wall, &two, None, None);
         rough.get_mut(&1).unwrap().position += Vec3::new(0.2, 0.05, 0.3);
         rough.get_mut(&1).unwrap().rotation = Quat::from_rotation_y(0.4);
-        let t = tidy(&rough, &two, center, true);
+        let t = tidy_wall(&rough, &two, center);
         assert!((t[&0].position.z - t[&1].position.z).abs() < 1e-5);
         assert!(t[&0].rotation.angle_between(t[&1].rotation) < 1e-5);
         let gap = (t[&1].position.x - t[&1].width / 2.0) - (t[&0].position.x + t[&0].width / 2.0);

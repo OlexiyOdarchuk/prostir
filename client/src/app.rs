@@ -814,7 +814,20 @@ impl Scene {
         }
         let mirror = self.placements.get(&MIRROR_ID).copied();
         let wall = self.settings.preset == crate::settings::Preset::Wall;
-        let mut tidy = layout::tidy(&self.placements, &self.quest_sizes(), self.center, wall);
+        // On a wall everything goes into one plane; otherwise the seams are taken out
+        // of the user's own arrangement, seen from where they sit now.
+        let sizes = self.quest_sizes();
+        let mut tidy = if wall {
+            layout::tidy_wall(&self.placements, &sizes, self.center)
+        } else {
+            layout::snap(&self.placements, &sizes, self.head.0, self.primary)
+        };
+        // Window panels stay as they are.
+        for (id, p) in &self.placements {
+            if is_window_panel(*id) {
+                tidy.insert(*id, *p);
+            }
+        }
         // The laptop screen follows the primary monitor.
         if let (Some(m), Some(p)) = (mirror, self.primary.and_then(|id| tidy.get(&id).copied())) {
             let primary = self.primary.unwrap_or_default();
