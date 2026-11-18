@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Prostir: virtual monitors for Linux in a Meta Quest 3 (KDE Plasma, Hyprland)</title>
-  <meta name="description" content="Prostir adds virtual monitors to a Linux laptop or desktop with KDE Plasma or Hyprland, around you in a Meta Quest 3. Real desktop outputs streamed over Wi-Fi or USB, encoded on the GPU. Free and open source.">
+  <meta name="description" content="Prostir adds virtual monitors to a Linux laptop or desktop with KDE Plasma or Hyprland, around you in a Meta Quest 3. Real desktop outputs and floating windows, streamed over Wi-Fi or USB and encoded on the GPU. Free and open source.">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="canonical" href="https://prostir.ishawyha.dev/">
   <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -30,14 +30,16 @@
   "@type": "SoftwareApplication",
   "name": "Prostir",
   "url": "https://prostir.ishawyha.dev/",
-  "description": "Prostir adds virtual monitors to a Linux laptop or desktop with KDE Plasma or Hyprland, around you in a Meta Quest 3. Real desktop outputs streamed over Wi-Fi or USB, encoded on the GPU. Free and open source.",
+  "description": "Prostir adds virtual monitors to a Linux laptop or desktop with KDE Plasma or Hyprland, around you in a Meta Quest 3. Real desktop outputs and floating windows, streamed over Wi-Fi or USB and encoded on the GPU. Free and open source.",
   "applicationCategory": "UtilitiesApplication",
   "operatingSystem": "Linux (KDE Plasma 6, Hyprland), Meta Horizon OS",
   "inLanguage": "en",
   "image": "https://prostir.ishawyha.dev/headset.jpg",
   "screenshot": [
     "https://prostir.ishawyha.dev/headset.jpg",
+    "https://prostir.ishawyha.dev/menu-quick.png",
     "https://prostir.ishawyha.dev/menu-monitors.png",
+    "https://prostir.ishawyha.dev/menu-pc.png",
     "https://prostir.ishawyha.dev/hyprland.jpg"
   ],
   "downloadUrl": "https://github.com/OlexiyOdarchuk/prostir/releases",
@@ -111,8 +113,9 @@
         <div class="copy">
           <h3>Touch the menu</h3>
           <p>With your hands in view, the menu opens within reach and works like a touchscreen. Add a 1080p, 1440p, 4K, ultrawide or portrait monitor; move it, make it primary, curve the row.</p>
+          <p>To move a monitor, grab the bar that appears under it. Turn on "Follow my head" and the monitors glide after you once you have clearly looked elsewhere.</p>
         </div>
-        <img src="menu-monitors.png" width="1280" height="960" loading="lazy" alt="The headset menu, Monitors tab: the monitor list, sizes to add, layout, curve and mode">
+        <img src="menu-monitors.png" width="1280" height="960" loading="lazy" alt="The headset menu, Monitors tab: the monitor list, the laptop screen, saving a profile, sizes to add, layout, curve, mode, follow my head and the cinema screen">
       </div>
 
       <div class="band stat reveal">
@@ -127,23 +130,42 @@
         <div class="copy">
           <h3>Work, cinema, lying down</h3>
           <p>Profiles switch the monitors, the laptop screen, the layout and the background in one press. Monitors of the same size stay, so their windows do not move.</p>
+          <p>The Quick tab opens first, with the profiles and big tiles for what you switch every day: focus, cinema, PC sound, the microphone, a detached window, a screenshot.</p>
         </div>
-        <img src="menu-profiles.png" width="1280" height="960" loading="lazy" alt="The headset menu, Profiles tab: Work, Cinema and Lying down">
+        <img src="menu-quick.png" width="1280" height="960" loading="lazy" alt="The headset menu, Quick tab: the Work, Cinema and Lying down profiles, and tiles for in front of me, focus, cinema, keyboard window, PC sound, microphone, detach window, window here and screenshot">
       </div>
 
       <div class="band flip reveal">
         <div class="copy">
           <h3>Your room or a panorama</h3>
-          <p>Behind the monitors: black, your room through the headset cameras, or one of four built-in panoramas: night, sunset, space and aurora.</p>
+          <p>Behind the monitors: black, your room through the headset cameras, the room dimmed, a photo of your own, or one of four built-in panoramas: night, sunset, space and aurora.</p>
         </div>
         <img src="backgrounds.jpg" width="1932" height="972" loading="lazy" alt="The four built-in panoramas: night, sunset, space and aurora">
       </div>
 
       <div class="band reveal">
         <div class="copy">
+          <h3>Easy on your eyes and the battery</h3>
+          <p>Rest reminders can ask you to rest your eyes every 20 minutes or take a break every hour. They are off until you turn them on.</p>
+          <p>The headset display can run at 72 Hz instead of 90 Hz, so the battery lasts longer. The video is 60 frames a second either way.</p>
+        </div>
+        <img src="menu-look.png" width="1280" height="960" loading="lazy" alt="The headset menu, Settings, Look: background (black, room, dimmed, own photo or a panorama), focus mode, keyboard window and rest reminders">
+      </div>
+
+      <div class="band flip reveal">
+        <div class="copy">
+          <h3>PC settings in the headset</h3>
+          <p>Video quality (15, 30 or 50 Mbit/s per monitor), encoding on the graphics card or the processor, HEVC or H.264, and sharper text. The PC applies them and remembers them; a new codec takes about a second, and the monitors and windows stay.</p>
+          <p>The same page turns on the PC's notifications in the headset and lists the paired PCs, each of which you can forget.</p>
+        </div>
+        <img src="menu-pc.png" width="1280" height="960" loading="lazy" alt="The headset menu, Settings, PC: video quality, encoding on the graphics card or processor, codec, sharper text, PC notifications in the headset and the paired PCs">
+      </div>
+
+      <div class="band reveal">
+        <div class="copy">
           <h3>KDE Plasma or Hyprland</h3>
           <p>On Hyprland the monitors are headless outputs, captured straight into GPU buffers. Each gets its own Waybar and workspaces, and window rules apply to them like to any display.</p>
-          <p>The layout survives config reloads, and the monitors go away cleanly when Prostir quits.</p>
+          <p>The layout survives config reloads, and the monitors go away cleanly when Prostir quits. Here the mouse can also follow your gaze, jumping to the monitor you look at.</p>
         </div>
         <img src="hyprland.jpg" width="1920" height="1080" loading="lazy" alt="In the headset on Hyprland: an arc of three monitors under an aurora sky, system monitor on the left, code on a portrait monitor in the middle, the Prostir site on the right">
       </div>
@@ -154,6 +176,11 @@
         <li><h3>Sound and microphone</h3><p>PC sound plays in the headset, and PC apps hear the headset microphone while they record. The microphone switch in the headset menu turns that off.</p></li>
         <li><h3>Headset off, desk back</h3><p>After 10 seconds off your head, windows, panel and sound return to the laptop.</p></li>
         <li><h3>Keyboard window</h3><p>A rectangle over the real keyboard shows the desk through the cameras.</p></li>
+        <li><h3>Detach a window</h3><p>The PC's active window gets an output of its own and floats as a panel without a frame, closer than the monitors. Up to three at a time.</p></li>
+        <li><h3>Window here, screenshot</h3><p>Move the active window to the monitor in front of you, or save a screenshot of that monitor to <code>~/Pictures/Prostir</code>.</p></li>
+        <li><h3>Where is the mouse?</h3><p>Rings show the mouse pointer, on KDE and on Hyprland. On Hyprland the mouse can also follow your gaze.</p></li>
+        <li><h3>Wrist menu</h3><p>Turn your left palm to your face: in front of me, focus, cinema, where is the mouse, screenshot and the main menu. It can go on the right wrist instead.</p></li>
+        <li><h3>Notifications and battery</h3><p>The PC's notifications can show in the headset (off until you turn them on). The tray shows the headset battery, and the PC warns you at 15 %.</p></li>
         <li><h3>Paired and encrypted</h3><p>A PC streams nothing to a headset it has not been paired with. Pairing starts only after you confirm it in the headset and type a 6-digit code.</p></li>
       </ul>
     </div>
@@ -212,6 +239,20 @@ cd prostir-*/
       </div>
 
       <div class="steps">
+        <div id="usb" style="grid-column: 1 / -1">
+          <h3>Connect with a USB cable</h3>
+          <p class="note">A cable helps on networks that keep devices apart (hotels, offices, some mesh routers), keeps the Wi-Fi free and gives the steadiest picture.</p>
+          <ol>
+            <li>Set up developer mode and <code>adb</code> as in the headset steps above, and allow USB debugging in the headset ("Always allow from this computer"). <code>adb devices</code> must list the headset as <code>device</code>; if it says <code>unauthorized</code>, plug the cable in again and answer in the headset.</li>
+            <li>Use a USB-C cable that carries data, not a charge-only one. A USB 3 port is best; USB 2 is enough for three monitors at the normal quality.</li>
+            <li>Start Prostir on the PC, or leave it running. Every few seconds it looks for headsets on USB and runs <code>adb reverse</code> for them.</li>
+            <li>Open Prostir in the headset. It tries the cable before Wi-Fi, and the menu says "Connected to PC (USB)". Pairing is the same as over Wi-Fi, once per PC.</li>
+          </ol>
+          <p class="note">Unplug the cable and the headset goes back to Wi-Fi by itself. <code class="nw">prostir --no-adb</code> stops the PC from touching adb. A laptop port usually charges the headset slower than it drains, so for long sessions charge it beforehand or use a powered hub.</p>
+        </div>
+      </div>
+
+      <div class="steps">
         <div id="update">
           <h3>Update</h3>
           <ul>
@@ -252,6 +293,7 @@ cd prostir-*/
             <li>On Hyprland, a bar with a tray for Prostir's menu (Waybar with its <code>tray</code> module), and a notification daemon such as mako, dunst or swaync.</li>
             <li>A firewall, if you have one, must allow TCP 47830 and UDP 47831. See <a href="#help">Help</a>.</li>
             <li>For USB: <code>adb</code> on the PC.</li>
+            <li>For screenshots: <code>spectacle</code> on KDE, <code>grim</code> on Hyprland.</li>
           </ul>
         </div>
         <div>
@@ -282,7 +324,7 @@ sudo firewall-cmd --reload</code></pre>
         </div>
         <div>
           <h3>The headset does not find the PC</h3>
-          <p>Both must be on the same network, and the network must not isolate its devices from each other, as guest networks often do. Type the PC's IP address on the keypad in the headset menu, or connect with the cable (needs adb).</p>
+          <p>Both must be on the same network, and the network must not isolate its devices from each other, as guest networks often do. Type the PC's IP address on the keypad in the headset menu, or <a href="#usb">connect with the cable</a> (needs adb).</p>
           <p>If the PC is behind a firewall, check the ports above too.</p>
         </div>
         <div>

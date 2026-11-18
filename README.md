@@ -583,7 +583,7 @@ monitors, and the app itself renders only the hands.
 like a headset, pairs, and saves the video and sound it receives, to check the PC side
 without a headset.
 `cargo run -p prostir-client --example panel_preview -- menu.png` renders the headset
-menu to a PNG (`TAB=profiles|look|sound`, `LANG_UI=en`), and
+menu to a PNG (`TAB=monitors|look|controls|sound|language|pc|help`, `LANG_UI=en`, `WRIST=1`), and
 `--example sky_preview -- DIR` renders the panoramas.
 
 ## Similar projects

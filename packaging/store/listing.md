@@ -26,12 +26,23 @@ for lying down, flat or curved. The laptop's own screen can hang under the main 
 Text stays sharp: the video goes straight into the headset's compositor layers instead
 of a flat window, and the PC encodes it on the GPU.
 
+A single window can leave the desktop too: detach the PC's active window and it floats
+as a panel of its own, closer than the monitors.
+
 - Profiles for work, cinema and lying down, switched in one press
-- Focus mode dims every monitor except the one with the mouse
+- Detach up to three PC windows into floating panels; move the active window to the
+  monitor in front of you; save a screenshot of that monitor on the PC
+- Monitors can follow your head; turn your left palm to your face for a wrist menu
+- Focus mode dims every monitor except the one with the mouse; "Where is the mouse?"
+  shows the pointer with rings, and on Hyprland the mouse can follow your gaze
 - PC sound in the headset; PC apps hear the headset microphone while they record, and a
   switch in the headset menu turns the microphone off
 - Touch the menu with a finger; resize a monitor with both hands
-- A window onto your real keyboard through the passthrough cameras
+- A window onto your real keyboard through the passthrough cameras; your room as the
+  background, dimmed if you like
+- Video quality, encoder and codec set from the headset; a 72 Hz mode for longer battery
+  life
+- Optional PC notifications in the headset and rest reminders, off until you turn them on
 - Over your local Wi-Fi network; encrypted, and paired with your PC once
 - English and Ukrainian
 
@@ -64,12 +75,24 @@ Plasma або Hyprland). Це справжні виходи ПК: перенос
 Текст чіткий: відео йде просто в шари компоновника шолома, а не в пласке вікно, а ПК
 кодує його відеокартою.
 
+З робочого столу можна винести й окреме вікно: відкріпіть активне вікно ПК, і воно
+висітиме власною панеллю, ближче за монітори.
+
 - Профілі для роботи, кіно й лежачи, одним натиском
-- Режим фокусу притемнює всі монітори, крім того, де миша
+- До трьох вікон ПК окремими панелями; активне вікно на монітор перед вами одним
+  натиском; знімок цього монітора зберігається на ПК
+- Монітори можуть іти слідом за головою; поверніть ліву долоню до обличчя, і з'явиться
+  меню на зап'ясті
+- Режим фокусу притемнює всі монітори, крім того, де миша; «Де миша?» показує
+  вказівник кільцями, а в Hyprland миша може йти за поглядом
 - Звук ПК у шоломі; програми на ПК чують мікрофон шолома, поки записують, а перемикач
   у меню шолома вимикає мікрофон
 - Меню, якого можна торкатися пальцем; розмір монітора двома руками
-- Вікно на справжню клавіатуру через камери шолома
+- Вікно на справжню клавіатуру через камери шолома; ваша кімната як фон, за бажання
+  притемнена
+- Якість відео, кодування й кодек прямо з шолома; режим 72 Hz, щоб заряду вистачало
+  довше
+- Сповіщення ПК у шоломі й нагадування про відпочинок, вимкнені, доки ви їх не ввімкнете
 - Через вашу локальну мережу Wi-Fi; шифрування й одноразове сполучення з ПК
 - Українська й англійська
 
@@ -110,10 +133,11 @@ USUAN1700010)
 
 - **Microphone (RECORD_AUDIO):** the headset microphone becomes a microphone on the
   user's own PC. It records only while a PC app is recording and the microphone switch
-  in the headset menu (Sound and language) is on, and the sound goes only to that PC,
+  in the headset menu (Quick, or Settings → Sound) is on, and the sound goes only to that PC,
   encrypted. The PC can ask for the microphone but cannot turn the switch on.
 - **Hand tracking:** pointing, pinching and touching the menu; drawing the hands.
-- **Passthrough (no camera images):** the room background and the keyboard window. The
+- **Passthrough (no camera images):** the room backgrounds (plain and dimmed) and the
+  keyboard window. The
   system composites the cameras; the app never receives images.
 - **Network (INTERNET, Wi-Fi state):** finding and talking to the user's PC on the local
   network.
@@ -160,9 +184,13 @@ Steps:
 3. The PC appears in the list. Select it and confirm "Pair with <PC name>?".
 4. The headset shows a 6-digit code. Type it into the dialog that opens on the PC.
 5. Three monitors appear around you. Open the menu (☰ or X on the left controller) and
-   try the tabs: Monitors (add, remove, layout, curve), Profiles (Work, Cinema, Lying
-   down), Look (backgrounds, hands, focus mode), Sound and language (microphone switch,
-   language).
+   try the tabs: Quick (the Work, Cinema and Lying down profiles, and tiles such as
+   focus, PC sound, microphone, detach window and screenshot), Monitors (add, remove,
+   layout, curve, follow my head, save as profile) and Settings with its parts Look
+   (backgrounds, focus mode, keyboard window, rest reminders), Controls (hands, menu
+   size, wrist menu, display rate), Sound (where PC sound plays, microphone), Language,
+   PC (video quality, encoder, codec, notifications, paired PCs) and Help. With hand
+   tracking, turn the left palm to your face to see the wrist menu.
 6. Put a window on a virtual monitor from the PC; take the headset off and on again
    (streaming pauses and resumes).
 
