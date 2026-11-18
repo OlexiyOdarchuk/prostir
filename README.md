@@ -51,12 +51,12 @@ hit one.
 
 <table>
   <tr>
-    <td><img src="docs/menu-monitors.png" alt="Menu, Monitors tab: monitor list, add a monitor, layout, curve and mode"></td>
-    <td><img src="docs/menu-profiles.png" alt="Menu, Profiles tab: Work, Cinema and Lying down"></td>
+    <td><img src="docs/menu-quick.png" alt="Menu, Quick tab: profiles and tiles for focus, cinema, PC sound, microphone, detaching a window and a screenshot"></td>
+    <td><img src="docs/menu-monitors.png" alt="Menu, Monitors tab: monitor list with where each stands, adding a monitor, layout, curve, mode and follow my head"></td>
   </tr>
   <tr>
-    <td><img src="docs/menu-look.png" alt="Menu, Look tab: background, hands and focus"></td>
-    <td><img src="docs/menu-sound.png" alt="Menu, Sound and language tab"></td>
+    <td><img src="docs/menu-look.png" alt="Menu, Settings, Look: background, focus, keyboard window and rest reminders"></td>
+    <td><img src="docs/menu-pc.png" alt="Menu, Settings, PC: video quality, encoder, codec, sharper text, notifications and paired PCs"></td>
   </tr>
 </table>
 
@@ -85,7 +85,7 @@ you close the lid.
 
 Profiles switch the whole setup at once. Out of the box there is "Work" (three 1440p
 monitors and the laptop screen), "Cinema" (one 4K screen, big and far away, the rest
-hidden) and "Lying down" (two monitors overhead). Save your own setup into any of them.
+hidden) and "Lying down" (two monitors overhead). Save your own setup into any of them (Monitors → Save as profile).
 Monitors that are the same size in both profiles stay, so their windows do not move.
 In cinema mode you pick which monitor becomes the big screen.
 
@@ -93,7 +93,7 @@ Focus mode dims every monitor except the one with the mouse.
 
 PC sound plays in the headset, and the headset microphone becomes the PC's microphone.
 The headset only records while some app on the PC is actually listening, and only
-while the microphone switch in the headset menu (Sound and language) is on. The PC can
+while the microphone switch in the headset menu (Quick, or Settings → Sound) is on. The PC can
 ask for the microphone, but the switch in the headset decides.
 
 When you take the headset off, the PC stops encoding right away. After 10 seconds it
@@ -106,6 +106,24 @@ keyboard) and, if you want, used for pointing: pinch to click, pinch and hold to
 With your hands in view, the menu opens within arm's reach and works like a
 touchscreen. A keyboard window can show your real desk through a rectangle you place
 over the keyboard, on any background.
+
+A single window can also leave the desktop: "Detach window" gives the PC's active
+window an output of its own, its size, and the headset shows it as a floating panel
+without a frame, closer to you than the monitors. Up to three, since the headset has
+only so many video decoders. Close the window and the panel goes. "Window here" moves
+the active window to the monitor in front of you, and a screenshot of that monitor
+lands in `~/Pictures/Prostir`.
+
+The arrangement can follow your head: turn or move away and, once you have clearly
+looked elsewhere, the monitors glide after you. On Hyprland the mouse can follow your
+gaze, jumping to the monitor you look at, and "Where is the mouse?" shows it with
+rings.
+
+Turn your left palm to your face and a small menu appears by the wrist: bring
+everything in front of you, focus, cinema, where is the mouse, screenshot, the main
+menu. The PC's notifications can show in the headset, and reminders can ask you to
+rest your eyes every 20 minutes or take a break every hour. All of these are off
+until you turn them on.
 
 The headset and the PC speak Ukrainian or English. The headset follows the PC's
 language unless you pick one in the menu.
@@ -135,7 +153,7 @@ has not been paired with.
   `x264enc` plugin from gst-plugins-ugly. See [NVIDIA and CPU encoding](#nvidia-and-cpu-encoding).
 - On KDE, `kscreen-doctor`, which comes with Plasma. Optional: `qdbus6` for matching
   wallpapers, `adb` for USB, and one of `kdialog`, `zenity`, `fuzzel`, `wofi` or `rofi`
-  for the pairing dialog.
+  for the pairing dialog. Screenshots use `spectacle` on KDE and `grim` on Hyprland.
 - On Hyprland, a bar with a tray (Waybar with the `tray` module) for the menu, and a
   notification daemon (mako, dunst, swaync) for messages. See [Hyprland](#hyprland).
 
@@ -276,51 +294,95 @@ headset to come back before the windows move back to the laptop.
 ### Wi-Fi or USB
 
 Wi-Fi works for everyone: the PC and the headset only need to be on the same network,
-and the network must let devices talk to each other. USB needs developer mode on the
-headset and `adb` on the PC. Prostir then runs `adb reverse` by itself when the
-headset is plugged in (`--no-adb` turns that off). A cable helps on networks that
-isolate clients and keeps the Wi-Fi free. Installs from the Meta Horizon Store, once
-Prostir is there, will use Wi-Fi only.
+and the network must let devices talk to each other. A USB cable is the other way. It
+helps on networks that keep devices apart (hotels, offices, some mesh routers), keeps
+the Wi-Fi free and gives the steadiest picture. It needs developer mode on the headset
+and `adb` on the PC. Installs from the Meta Horizon Store, once Prostir is there, will
+use Wi-Fi only.
+
+### Connect with a USB cable
+
+1. Turn on developer mode for the headset: in the Meta Horizon app on your phone, open
+   Devices → your headset → Headset settings → Developer mode.
+2. Install `adb` on the PC: `sudo pacman -S android-tools` (Arch),
+   `sudo apt install adb` (Debian, Ubuntu) or `sudo dnf install android-tools`
+   (Fedora).
+3. Connect the headset to the PC with a USB-C cable that carries data (not a
+   charge-only one). A USB 3 port is best; USB 2 is enough for three monitors at the
+   normal quality.
+4. Put the headset on. It asks "Allow USB debugging?": tick "Always allow from this
+   computer" and allow.
+5. Check that `adb devices` lists the headset as `device`. If it says `unauthorized`,
+   unplug, plug in again and answer the question in the headset.
+6. Start Prostir on the PC (or leave it running). Every few seconds it looks for
+   headsets on USB and runs `adb reverse tcp:47830 tcp:47830` for each, so the headset
+   reaches the PC at 127.0.0.1.
+7. Open Prostir in the headset. It tries the cable before Wi-Fi, and the menu says
+   "Connected to PC (USB)". Pairing is the same as over Wi-Fi, once per PC.
+
+Unplug the cable and the headset goes back to Wi-Fi by itself. `prostir --no-adb`
+stops the PC from touching `adb`. A laptop port usually charges the headset slower
+than it drains while you work, so for long sessions keep it charged beforehand or use
+a powered hub.
 
 ### Controls
 
-| | Controller | Hands (menu → Look → Hands → Show and use) |
+| | Controller | Hands (menu → Settings → Controls → Hands → Show and use) |
 |---|---|---|
-| Open the menu | ☰ or X on the left controller, or the round ☰ button under the main monitor | pinch the ☰ button |
+| Open the menu | ☰ or X on the left controller, or the round ☰ button under the main monitor | the system menu gesture (pinch with the left palm towards you), or "Menu" on the wrist menu |
+| Wrist menu | | turn the left palm to your face; press with the right index finger |
 | Press a button in the menu | trigger | touch it with a finger, or pinch from afar |
-| Move the menu | hold grip and point | touch an empty spot with a finger and drag |
 | Click on a monitor | trigger | pinch |
-| Move a monitor or the menu | hold grip and point | pinch and hold for about 0.3 s |
+| Move a monitor | point at it, then press the trigger on the bar that appears under it, or hold grip anywhere on it | pinch the bar under it, or pinch and hold anywhere on it for about 0.3 s |
+| Move the menu | hold grip and point | touch an empty spot with a finger and drag |
 | Nearer or farther | thumbstick up or down while holding | move your hand away or closer |
 | Bigger or smaller | thumbstick left or right while holding, or hold it with both controllers and move them apart or together | hold it with both hands and move them apart or together |
 | Line the monitors up | A | menu → Monitors → Layout |
-| Bring everything in front of you | menu → Monitors → Bring everything in front of me | same |
+| Bring everything in front of you | menu → Quick → In front of me | same, or the wrist menu |
 
-With hands in view, the menu opens within arm's reach so you can touch it. A dot shows
-where your finger is; pull the finger back to press the next button.
+With hands in view, the menu opens within arm's reach so you can touch it. A light
+shows where your finger is about to touch; pull the finger back to press the next
+button. Left-handed? Settings → Controls → Wrist menu → Right wrist puts the wrist menu
+on the right hand, pressed with the left.
 
 ### Menu
 
+**Quick** opens first: the three profiles (Work, Cinema, Lying down) and big tiles for
+what you switch every day. In front of me, focus, cinema, the keyboard window, PC
+sound, microphone, detach window, window here and screenshot. What is on is lit.
+
 **Monitors.** Add a monitor (1920×1080, 2560×1440, 3840×2160, 3440×1440 or
 1440×2560), remove one, make one primary, move it left or right in the row, and show
-or hide the laptop screen. Below that: layout, curve, and the desk or cinema mode.
+or hide the laptop screen. Each one is labelled with where it stands (left, middle,
+right, above, below). Detached windows are listed too, with a button to close them.
+Then the layout (around me, wall, lying down), the curve, desk or cinema mode, follow
+my head, the cinema screen, and "Save as profile".
 
-**Profiles.** Switch to a profile, or save the current setup into it.
+**Settings**, in parts:
 
-**Look.** Background, hands and focus mode. For your own background, copy an
-equirectangular `background.jpg` or `background.png` to
-`/sdcard/Android/data/dev.prostir.client/files/` on the headset.
-
-**Sound, language.** Where PC sound plays, which microphone the PC uses, and the
-interface language.
+- **Look**: background (black, the room, the room dimmed, a panorama or your own
+  photo), focus mode, the keyboard window, rest reminders. For your own background,
+  copy an equirectangular `background.jpg` or `background.png` to
+  `/sdcard/Android/data/dev.prostir.client/files/` on the headset.
+- **Controls**: hands, mouse follows the gaze (where the PC allows it), menu size,
+  which wrist has the wrist menu, and the headset display rate (90 Hz, or 72 Hz to
+  save battery: the video is 60 frames a second either way).
+- **Sound**: where PC sound plays and which microphone the PC uses.
+- **Language**: like the PC, Ukrainian or English.
+- **PC**: video quality (15, 30 or 50 Mbit/s per monitor), encoding on the graphics
+  card or the processor, HEVC or H.264, sharper text, the PC's notifications in the
+  headset, and the PCs this headset is paired with, each of which you can forget.
+  The PC applies quality and sharper text at once; another codec restarts the encoders
+  in a second, and the monitors and windows stay. The PC remembers these choices.
+- **Help**: the controls, the version, and the first-run tips again.
 
 ### Tray on the PC
 
-The tray shows whether the headset is connected and how many monitors there are. From
-it you can set the video quality (15, 30 or 50 Mbit/s per monitor, applied right away),
-turn on sharper text (a slower encoder preset: clearer small text at the same bitrate
-for about 2 ms more per frame), start Prostir with the session (KDE), turn the usage
-counter on or off, forget paired headsets, and quit.
+The tray shows whether the headset is connected, how many monitors there are and the
+headset's battery; when it drops to 15 % the PC shows a notification. From the tray
+you can bring the monitors in front of you, set the video quality and sharper text
+(the same settings as in the headset menu), start Prostir with the session (KDE), turn
+the usage counter on or off, forget paired headsets, and quit.
 
 ### Command line
 
@@ -330,7 +392,8 @@ prostir [--monitor WxH[@scale]]... [--codec h265|h264] [--bitrate MBPS] [--softw
 ```
 
 Without `--monitor`, Prostir brings back the monitors from the last session. They are
-stored in `~/.config/prostir/monitors.txt`.
+stored in `~/.config/prostir/monitors.txt`, together with the choices from the headset
+menu's PC settings. `--codec` and `--software` on the command line win over those.
 
 ## Update and uninstall
 
@@ -371,17 +434,20 @@ connection; when the two are too far apart, the headset says which side to updat
 
 ## Performance and battery
 
-Numbers from my laptop with three 2560×1440 monitors and the laptop screen in the
-headset:
+Numbers from my laptop (Intel graphics) with three 2560×1440 monitors and the laptop
+screen in the headset:
 
-- The PC uses about 2 % of one CPU core and 250 MB of RAM. The GPU's video engine does
-  the encoding, and only when a screen changes. CPU encoding (x264) uses much more.
+- The PC uses about 2 % of one CPU core. Memory depends on the codec, because Intel's
+  driver reserves a lot for each HEVC encoder: about 340 MB with HEVC, about 120 MB with
+  H.264 (Settings → PC → Codec). Waiting for the headset, Prostir takes about 16 MB,
+  and it returns the memory after a session. CPU encoding (x264) uses much more CPU.
 - On the network, each monitor uses up to the chosen bitrate while its picture changes
   and almost nothing while it is still. Sound adds 1.5 Mbit/s.
-- On the headset, every monitor needs one hardware decoder (idle while the picture is
-  still) and one compositor layer per frame. Fewer or smaller monitors, the black
-  background and hidden hands save the most battery. The room background keeps the
-  passthrough cameras on.
+- On the headset, the app itself uses about 40 % of one CPU core while streaming
+  (decryption runs on the ARMv8 crypto instructions). Every monitor needs one hardware
+  decoder (idle while the picture is still) and one compositor layer per frame.
+  Fewer or smaller monitors, the black background, hidden hands and the 72 Hz display
+  rate save the most battery. The room backgrounds keep the passthrough cameras on.
 
 ## Security
 
@@ -396,10 +462,16 @@ man in the middle. After failed attempts the PC waits longer and longer before i
 accepts the next one, so the code cannot be guessed by trying.
 
 The PC keeps the keys of paired headsets in `~/.config/prostir/paired_headsets`; the
-tray item "Forget paired headsets" clears it. The headset keeps its keys inside the app.
+tray item "Forget paired headsets" clears it. The headset keeps its keys inside the app
+and lists the paired PCs in Settings → PC, where you can forget any of them.
 
 The headset sends microphone sound only while its own microphone switch is on (menu,
-Sound and language). The PC can ask for the microphone, but cannot turn the switch on.
+Quick or Settings → Sound). The PC can ask for the microphone, but cannot turn the switch on.
+
+With "PC notifications in the headset" on, the PC reads the notifications other apps
+send on the session bus and passes their app name, title and text to the headset over
+the same encrypted connection. It stops reading them when you turn it off or the
+headset disconnects.
 
 Official builds count how many PCs use Prostir: once a day, when a headset connects,
 the PC sends one request to GoatCounter with only the date in it (and `/install` the
