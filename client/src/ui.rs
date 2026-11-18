@@ -2646,16 +2646,16 @@ fn build_controls(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32
         lx,
         lw,
         &mut y,
-        l.t("Меню на зап'ясті", "Wrist menu"),
+        l.t("Меню на долоні", "Palm menu"),
         vec![
             (
-                l.t("На лівій руці", "Left wrist"),
+                l.t("На лівій руці", "Left hand"),
                 Action::LeftHanded(false),
                 !st.left_handed,
                 true,
             ),
             (
-                l.t("На правій руці", "Right wrist"),
+                l.t("На правій руці", "Right hand"),
                 Action::LeftHanded(true),
                 st.left_handed,
                 true,

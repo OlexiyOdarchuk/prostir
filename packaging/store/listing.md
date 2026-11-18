@@ -20,8 +20,11 @@ them, keep a panel or workspaces there. The mouse moves from one monitor to the 
 you, sideways and up or down.
 
 Add, remove and arrange monitors from the headset: 1080p, 1440p, 4K, ultrawide or
-portrait, up to six. Line them up on an arc, in a grid, in a column or above your head
-for lying down, flat or curved. The laptop's own screen can hang under the main monitor.
+portrait, up to six. Start around you, on a wall or above your head for lying down,
+flat or curved, then grab any monitor and put it where you like. Let one go almost
+against another and it sticks edge to edge; the A button closes the seams in your own
+arrangement. The PC arranges its desktop the way you see it, and the laptop's own
+screen is part of the arrangement too.
 
 Text stays sharp: the video goes straight into the headset's compositor layers instead
 of a flat window, and the PC encodes it on the GPU.
@@ -32,11 +35,13 @@ as a panel of its own, closer than the monitors.
 - Profiles for work, cinema and lying down, switched in one press
 - Detach up to three PC windows into floating panels; move the active window to the
   monitor in front of you; save a screenshot of that monitor on the PC
-- Monitors can follow your head; turn your left palm to your face for a wrist menu
+- Monitors can follow your head; hold an open palm to your face for a round menu on it
+- Move one monitor or the whole arrangement at once
 - Focus mode dims every monitor except the one with the mouse; "Where is the mouse?"
   shows the pointer with rings, and on Hyprland the mouse can follow your gaze
 - PC sound in the headset; PC apps hear the headset microphone while they record, and a
   switch in the headset menu turns the microphone off
+- Optional sound from the screen: it comes from the monitor whose window is playing it
 - Touch the menu with a finger; resize a monitor with both hands
 - A window onto your real keyboard through the passthrough cameras; your room as the
   background, dimmed if you like
@@ -47,9 +52,9 @@ as a panel of its own, closer than the monitors.
 - English and Ukrainian
 
 Requirements: a PC with KDE Plasma 6 or Hyprland on Wayland on the same network, and the
-free Prostir app for the PC from prostir.ishawyha.dev. Intel or AMD graphics encode in
-hardware; with other graphics the PC encodes on the CPU. Prostir is free software
-(GPL-3.0-or-later).
+free Prostir app for the PC from prostir.ishawyha.dev. The PC encodes on the GPU where
+it can (tested on Intel; AMD should work; NVIDIA is experimental) and on the CPU
+otherwise. Prostir is free software (GPL-3.0-or-later).
 
 ## Українською
 
@@ -69,8 +74,12 @@ Plasma або Hyprland). Це справжні виходи ПК: перенос
 вбік і вгору чи вниз.
 
 Додавайте, прибирайте й розставляйте монітори прямо з шолома: 1080p, 1440p, 4K, широкі
-чи портретні, до шести. Дугою, сіткою, стовпчиком або над головою, щоб лежати; пласкі чи
-вигнуті. Екран самого ноутбука може висіти під головним монітором.
+чи портретні, до шести. Спершу поставте їх навколо себе, на стіну чи над головою, щоб
+дивитися лежачи, пласкими чи вигнутими, а далі беріть будь-який монітор і ставте, куди
+хочете. Відпустіть
+один майже впритул до іншого, і він прилипне край до краю; кнопка A прибирає шви у
+вашій розстановці. ПК розставляє робочий стіл так, як ви його бачите, а екран самого
+ноутбука теж частина розстановки.
 
 Текст чіткий: відео йде просто в шари компоновника шолома, а не в пласке вікно, а ПК
 кодує його відеокартою.
@@ -81,12 +90,14 @@ Plasma або Hyprland). Це справжні виходи ПК: перенос
 - Профілі для роботи, кіно й лежачи, одним натиском
 - До трьох вікон ПК окремими панелями; активне вікно на монітор перед вами одним
   натиском; знімок цього монітора зберігається на ПК
-- Монітори можуть іти слідом за головою; поверніть ліву долоню до обличчя, і з'явиться
-  меню на зап'ясті
+- Монітори можуть іти слідом за головою; потримайте розкриту долоню до обличчя, і на
+  ній з'явиться кругле меню
+- Переносьте один монітор або всю розстановку разом
 - Режим фокусу притемнює всі монітори, крім того, де миша; «Де миша?» показує
   вказівник кільцями, а в Hyprland миша може йти за поглядом
 - Звук ПК у шоломі; програми на ПК чують мікрофон шолома, поки записують, а перемикач
   у меню шолома вимикає мікрофон
+- За бажанням звук з боку екрана: він лунає з того монітора, де вікно, яке його грає
 - Меню, якого можна торкатися пальцем; розмір монітора двома руками
 - Вікно на справжню клавіатуру через камери шолома; ваша кімната як фон, за бажання
   притемнена
@@ -97,8 +108,9 @@ Plasma або Hyprland). Це справжні виходи ПК: перенос
 - Українська й англійська
 
 Вимоги: ПК з KDE Plasma 6 або Hyprland на Wayland у тій самій мережі й безкоштовна
-програма Prostir для ПК з prostir.ishawyha.dev. Графіка Intel чи AMD кодує апаратно; з
-іншою графікою ПК кодує процесором. Prostir є вільною програмою (GPL-3.0-or-later).
+програма Prostir для ПК з prostir.ishawyha.dev. ПК кодує відеокартою, де може
+(перевірено на Intel; AMD має працювати; NVIDIA експериментально), а інакше
+процесором. Prostir є вільною програмою (GPL-3.0-or-later).
 
 ## Trailer
 
@@ -183,21 +195,24 @@ Steps:
    requirements and "Looking for PCs on the network".
 3. The PC appears in the list. Select it and confirm "Pair with <PC name>?".
 4. The headset shows a 6-digit code. Type it into the dialog that opens on the PC.
-5. Three monitors appear around you. Open the menu (☰ or X on the left controller) and
-   try the tabs: Quick (the Work, Cinema and Lying down profiles, and tiles such as
-   focus, PC sound, microphone, detach window and screenshot), Monitors (add, remove,
-   layout, curve, follow my head, save as profile) and Settings with its parts Look
-   (backgrounds, focus mode, keyboard window, rest reminders), Controls (hands, menu
-   size, wrist menu, display rate), Sound (where PC sound plays, microphone), Language,
-   PC (video quality, encoder, codec, notifications, paired PCs) and Help. With hand
-   tracking, turn the left palm to your face to see the wrist menu.
+5. Three monitors appear around you. Point at one, hold the grip button and move it;
+   press A to line them up again. Open the menu (☰ or X on the left controller) and try the
+   tabs: Quick (the Work, Cinema and Lying down profiles, and tiles such as in front of
+   me, focus, cinema, PC sound, microphone, detach window and screenshot), Monitors (a
+   map of the monitors to pick one, make primary, remove, add, line up, layout, curve,
+   follow my head, stick together, drag one or all, save as profile) and Settings with
+   its parts Look (backgrounds, focus mode, keyboard window, rest reminders), Controls
+   (hands, menu size, which hand has the palm menu, display rate), Sound (where PC
+   sound plays, microphone, sound from the screen), Language, PC (video quality,
+   encoder, codec, notifications, paired PCs) and Help. With hand tracking, hold an
+   open left palm towards your face for a quarter of a second to see the round palm
+   menu, and press it with the right index finger.
 6. Put a window on a virtual monitor from the PC; take the headset off and on again
    (streaming pauses and resumes).
 
-If you cannot set up such a PC, a video of the whole flow (pairing, monitors, menu,
-hands, microphone) is at https://prostir.ishawyha.dev/demo.mp4.
-
-TODO before submitting: record and upload that video; the link is a placeholder.
+If you cannot set up such a PC, the trailer attached to this submission shows Prostir
+in use with a real PC: monitors around the user, windows moving between them, the menu
+and hands. A short clip is also at https://prostir.ishawyha.dev/demo.mp4.
 
 ## End-user license (to do)
 

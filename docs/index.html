@@ -104,7 +104,7 @@
         <div class="copy">
           <h3>Real monitors, not pictures of windows</h3>
           <p>Each one is an output of the desktop: in KDE's System Settings → Display, in <code>hyprctl monitors</code> on Hyprland. Drag windows onto it, maximize them, put a panel or workspaces there.</p>
-          <p>Lift a monitor above another in the headset and the desktop puts it above too, so the mouse goes up where you look.</p>
+          <p>The desktop places each monitor against its neighbour on the side where they meet in the headset, with the same offset along that edge. The mouse crosses where you see them meet, sideways or up and down.</p>
         </div>
         <img src="headset.jpg" width="1920" height="1080" loading="lazy" alt="A capture from the headset: three virtual monitors around the user, KDE's display settings on the right listing them as Prostir outputs, and the laptop screen below the main monitor">
       </div>
@@ -112,10 +112,10 @@
       <div class="band flip reveal">
         <div class="copy">
           <h3>Touch the menu</h3>
-          <p>With your hands in view, the menu opens within reach and works like a touchscreen. Add a 1080p, 1440p, 4K, ultrawide or portrait monitor; move it, make it primary, curve the row.</p>
+          <p>With your hands in view, the menu opens within reach and works like a touchscreen. Add a 1080p, 1440p, 4K, ultrawide or portrait monitor, pick one on the map of your monitors to make it primary or remove it, and curve them.</p>
           <p>Turn on "Follow my head" and the monitors glide after you once you have clearly looked elsewhere.</p>
         </div>
-        <img src="menu-monitors.png" width="1280" height="960" loading="lazy" alt="The headset menu, Monitors tab: the monitor list, the laptop screen, saving a profile, sizes to add, layout, curve, mode, follow my head and the cinema screen">
+        <img src="menu-monitors.png" width="1280" height="960" loading="lazy" alt="The headset menu, Monitors tab: a map of the monitors as seen from where you sit with the picked one and its buttons, the laptop screen, Line up, saving a profile, sizes to add, layout, curve, follow my head, stick together, drag one or all, and the cinema screen">
       </div>
 
       <div class="band stat reveal">
@@ -171,15 +171,18 @@
       </div>
 
       <ul class="points reveal">
-        <li><h3>The laptop screen too</h3><p>It hangs under the main monitor without a seam and disappears when you close the lid.</p></li>
+        <li><h3>Line up and stick together</h3><p>Put monitors where you like. Let one go almost against another and it sticks edge to edge. The A button closes the seams in your own arrangement: a monitor beside curves around you, one above tilts towards you like a laptop lid.</p></li>
+        <li><h3>Move them all at once</h3><p>With Drag set to All together, grabbing any monitor moves, turns and scales the whole arrangement as one piece.</p></li>
+        <li><h3>The laptop screen too</h3><p>It is part of the arrangement: wherever you put it, the PC puts it there too, so the mouse crosses where you see them meet. It disappears when you close the lid.</p></li>
         <li><h3>Focus mode</h3><p>Every monitor except the one with the mouse gets darker.</p></li>
         <li><h3>Sound and microphone</h3><p>PC sound plays in the headset, and PC apps hear the headset microphone while they record. The microphone switch in the headset menu turns that off.</p></li>
+        <li><h3>Sound from the screen</h3><p>If you turn it on, the sound comes from the side of the monitor whose window is playing it, and stays there as you turn your head.</p></li>
         <li><h3>Headset off, desk back</h3><p>After 10 seconds off your head, windows, panel and sound return to the laptop.</p></li>
         <li><h3>Keyboard window</h3><p>A rectangle over the real keyboard shows the desk through the cameras.</p></li>
-        <li><h3>Detach a window</h3><p>The PC's active window gets an output of its own and floats as a panel without a frame, closer than the monitors. Up to three at a time. "Attach" under it puts the window back where it was.</p></li>
+        <li><h3>Detach a window</h3><p>The PC's active window gets an output of its own and floats as a panel without a frame, closer than the monitors. Up to three at a time. "Attach" under it puts the window back on its monitor, out of full screen.</p></li>
         <li><h3>Window here, screenshot</h3><p>Move the active window to the monitor in front of you, or save a screenshot of that monitor to <code>~/Pictures/Prostir</code>.</p></li>
         <li><h3>Where is the mouse?</h3><p>Rings show the mouse pointer, on KDE and on Hyprland. On Hyprland the mouse can also follow your gaze.</p></li>
-        <li><h3>Wrist menu</h3><p>Turn your left palm to your face: in front of me, focus, cinema, where is the mouse, screenshot and the main menu. It can go on the right wrist instead.</p></li>
+        <li><h3>Palm menu</h3><p>Hold an open palm towards your face and a round menu appears on it: in front of me, focus, cinema, where is the mouse, screenshot, line up and the main menu. Press it with the other hand. Left or right hand, as you choose.</p></li>
         <li><h3>Notifications and battery</h3><p>The PC's notifications can show in the headset (off until you turn them on). The tray shows the headset battery, and the PC warns you at 15 %.</p></li>
         <li><h3>Paired and encrypted</h3><p>A PC streams nothing to a headset it has not been paired with. Pairing starts only after you confirm it in the headset and type a 6-digit code.</p></li>
       </ul>
@@ -287,8 +290,9 @@ cd prostir-*/
             <li>KDE Plasma 6 or Hyprland, on Wayland. X11 sessions are not supported.</li>
             <li>GNOME is not supported yet. <a href="https://github.com/OlexiyOdarchuk/prostir/issues/1">Want it? Vote with a 👍 on GitHub.</a></li>
             <li>PipeWire with <code>pw-cli</code> and <code>pw-loopback</code>, and GStreamer 1.22 or newer with its PipeWire and PulseAudio plugins.</li>
-            <li>For encoding on the GPU: Intel or AMD graphics with VA-API H.264 or HEVC encoding, and the GStreamer <code>va</code> plugin: <code>gst-plugin-va</code> on Arch, part of gst-plugins-bad elsewhere.</li>
-            <li>Without that, for example on NVIDIA, Prostir encodes on the CPU with x264, which needs <code>x264enc</code> from gst-plugins-ugly. See <a href="#help">Help</a>.</li>
+            <li>For encoding on the GPU: VA-API H.264 or HEVC encoding and the GStreamer <code>va</code> plugin (<code>gst-plugin-va</code> on Arch, part of gst-plugins-bad elsewhere). Tested on Intel; AMD through Mesa should work but is untested.</li>
+            <li>NVIDIA: NVENC through the GStreamer <code>nvcodec</code> plugin, experimental and untested.</li>
+            <li>Without a GPU encoder, Prostir encodes on the CPU with x264, which works everywhere and needs <code>x264enc</code> from gst-plugins-ugly. See <a href="#help">Help</a>.</li>
             <li>For pairing, one of <code>kdialog</code>, <code>zenity</code>, <code>fuzzel</code>, <code>wofi</code> or <code>rofi</code> to show the code dialog.</li>
             <li>On Hyprland, a bar with a tray for Prostir's menu (Waybar with its <code>tray</code> module), and a notification daemon such as mako, dunst or swaync.</li>
             <li>A firewall, if you have one, must allow TCP 47830 and UDP 47831. See <a href="#help">Help</a>.</li>
@@ -329,7 +333,7 @@ sudo firewall-cmd --reload</code></pre>
         </div>
         <div>
           <h3>NVIDIA, or the headset says an encoder is missing</h3>
-          <p>Prostir encodes on the GPU through VA-API. When that is not available, it switches to the CPU and encodes with x264 by itself. This happens on NVIDIA, without the GStreamer <code>va</code> plugin, and with the Mesa that Fedora and openSUSE ship, which leaves out H.264 and HEVC encoding.</p>
+          <p>Prostir encodes on the GPU through VA-API, or on NVIDIA through NVENC (the GStreamer <code>nvcodec</code> plugin, experimental and untested). When neither is available, it switches to the CPU and encodes with x264 by itself. This happens without the GStreamer <code>va</code> plugin, when NVENC does not work, and with the Mesa that Fedora and openSUSE ship, which leaves out H.264 and HEVC encoding.</p>
           <p>The CPU path needs <code>x264enc</code>: <code>gst-plugins-ugly</code> on Arch, <code>gstreamer1.0-plugins-ugly</code> on Debian and Ubuntu, <code>gstreamer1-plugins-ugly</code> from RPM Fusion on Fedora, <code>gstreamer-plugins-ugly</code> from Packman on openSUSE. If neither path works, the headset shows what is missing. <code class="nw">prostir --software</code> always encodes on the CPU.</p>
         </div>
         <div>

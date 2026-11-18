@@ -4,77 +4,86 @@
 
 First public version.
 
-- Virtual KDE Plasma monitors (KWin `stream_virtual_output`) streamed to a Meta Quest 3,
-  hardware HEVC/H.264 via VA-API on the PC, MediaCodec on the headset.
-- Monitors shown as OpenXR compositor layers (quad or cylinder) with supersampling.
-- Add, remove, reorder and pick the primary monitor from the headset; KDE's layout
-  follows the order in the headset.
-- Layouts: arc, grid, column, overhead; flat, gently or strongly curved monitors.
-- Mirror of the laptop screen under the main monitor, following the lid.
-- Backgrounds: black, room (passthrough), night, sunset, space, aurora, own picture.
-- Tracked hands shown, optional hand pointing (pinch, pinch-and-hold to drag).
-- Discovery over Wi-Fi, USB via `adb reverse`, PC list and IP keypad in the headset.
-- Tray icon on the PC: status, video quality, autostart, forget paired headsets, quit.
-- Encrypted connections (Noise XX) and one-time pairing with a 6-digit code (SPAKE2),
-  shown on either side.
-- Profiles: Work, Cinema and Lying down, each with its own monitors, laptop screen,
-  layout, background and mode; any of them can be overwritten with the current setup.
-- Cinema mode: only the primary monitor, big and further away.
-- Focus mode: monitors without the mouse get darker.
-- PC sound in the headset and the headset microphone on the PC (the headset records
-  only while a PC app listens).
-- Taking the headset off pauses streaming; after 10 s the virtual monitors go away
-  until it is worn again. A headset that vanishes is noticed within about 10 s.
+### Monitors
+
+- Virtual monitors that are real outputs of the desktop: KWin virtual outputs on KDE
+  Plasma 6, headless outputs captured with wlr-screencopy straight into GPU buffers on
+  Hyprland. Windows, panels and the mouse treat them like plugged-in screens.
+- Up to six, at 1920×1080, 2560×1440, 3840×2160, 3440×1440 or 1440×2560, added,
+  removed and made primary from the headset, on a map of the monitors as seen from
+  where you sit.
+- Shown as OpenXR compositor layers, flat or curved, so text stays sharp.
+- Layouts: Around me, Wall and Lying down. Move, turn, bring nearer and resize any
+  monitor with a controller or your hands, one at a time or all together.
+- Line up (the A button, the Monitors tab or the palm menu) closes the seams in your
+  own arrangement: neighbours join edge to edge, curving around you at the sides and
+  tilting towards you above or below. Monitors put clearly apart stay.
+- Stick together: a monitor let go almost against another joins it edge to edge; the
+  edge lights up while you drag.
+- The desktop is arranged the way you see it, so the mouse crosses where the monitors
+  meet in the headset, sideways and up or down.
+- The laptop screen in the headset, as part of the arrangement; it hides when the lid
+  is closed.
+- Profiles Work, Cinema and Lying down, each of which can be overwritten with your own
+  setup. Monitors of the same size stay when you switch, so their windows do not move.
+- Cinema mode (one big screen, and you pick which), focus mode (other monitors dim) and
+  follow my head.
+- Detach up to three PC windows into floating panels and attach them back; move the
+  active window to the monitor in front of you; save a screenshot of that monitor to
+  `~/Pictures/Prostir`.
+
+### In the headset
+
+- A menu with Quick, Monitors and Settings tabs, which you can touch with a finger when
+  your hands are in view.
+- A round palm menu: hold an open palm to your face for In front, Focus, Cinema,
+  Mouse?, Screenshot, Line up and Menu. Left or right hand.
+- Hands shown, and if you like used for pointing: pinch to click, pinch and hold to
+  drag.
+- Backgrounds: black, your room through the passthrough cameras (plain or dimmed),
+  four built-in panoramas or a picture of your own. A keyboard window shows the real
+  desk.
+- "Where is the mouse?" shows the pointer with rings; on Hyprland the mouse can follow
+  your gaze.
+- Optional PC notifications in the headset and rest reminders; a 72 Hz display rate to
+  save battery.
+- First-run tips, and a start screen that explains where to get the PC part.
 - Ukrainian and English, in the headset and on the PC.
-- The headset menu is split into tabs: Monitors, Profiles, Look, Sound and language.
-- With hands in view, the menu opens within arm's reach and works like a touchscreen;
-  touch an empty spot to drag it.
-- Keyboard window: the real desk seen through a rectangle placed over the keyboard.
-- First-run tips in the headset.
-- Tray: sharper text (slower encoder preset, about 2 ms more per frame).
-- Cinema mode lets you pick the monitor; by default the largest landscape one.
-- The laptop screen meets the monitor above it without a seam, flat or curved.
-- Hand input works even when the Quest is slow to switch from controllers to hands.
-- Monitors fade in when they appear and glide to their new places instead of jumping.
-- Resize a monitor with both hands (or both controllers): hold it with two and move them
-  apart or together.
-- Menu → Monitors → "Bring everything in front of me" lays everything out where you look.
-- The version is shown in the tray, in the headset menu and in the logs; the APK takes
-  it from Cargo.toml.
-- Fixed: after switching profiles, the Plasma panel could stay on the former primary
-  monitor; Prostir now checks Plasma's screen order and corrects it.
-- Fixed: touching the menu could also trigger a pinch while pulling the hand back,
-  pressing a second button.
-- Official builds count how many PCs use Prostir: one anonymous request a day with only
-  the date in it; off in the tray or with `PROSTIR_NO_COUNT=1`.
-- Website with downloads and the privacy policy: prostir.ishawyha.dev.
-- KDE arranges the monitors in rows the way they stand in the headset, so the mouse
-  crosses up and down too.
-- A start screen in the headset explains where to get the PC part.
+
+### Sound
+
+- PC sound plays in the headset, and the headset microphone becomes the PC's
+  microphone. The headset records only while a PC app listens and the microphone switch
+  in the headset is on.
+- Optional sound from the screen: the sound comes from the side of the monitor whose
+  window is playing it.
+
+### PC
+
+- Encoding on the GPU through VA-API (tested on Intel; AMD should work but is
+  untested) or NVENC on NVIDIA (experimental and untested), and on the CPU with x264
+  everywhere else. HEVC or H.264, video quality and sharper text, set from the headset
+  or the tray.
+- Tray icon: connection status, headset battery with a warning at 15 %, monitors in
+  front of you, video quality, autostart (KDE), the usage counter, forgetting paired headsets.
+- Taking the headset off pauses streaming; after 10 s the virtual monitors go away and
+  windows, the panel, sound and microphone return to the laptop until you put it on
+  again.
 - When the headset and the PC run versions that cannot talk, both say which one to
-  update: a page in the headset, a notification on the PC.
-- Hyprland: headless outputs captured with wlr-screencopy straight into GPU buffers,
-  the layout set with monitor rules (Lua or `hyprland.conf`), focus mode from the
-  focused monitor. GNOME is next if people want it (issue #1).
-- The pairing code can be typed into fuzzel, wofi or rofi when neither kdialog nor
-  zenity is installed.
-- Packages: `prostir-bin` on the AUR, plus a `.deb` and an `.rpm` (Fedora) in every
-  release. They pull in the VA encoder plugin (`gst-plugin-va` on Arch), `pactl` and the
-  PipeWire pieces, and recommend the x264 plugin for CPU encoding. The packaged program
-  is stripped of debug info (about 9 MB instead of 48 MB).
-- Every release ships `THIRD-PARTY-LICENSES.txt` with the licenses of the bundled Rust
-  crates, the Noto Sans font and the Khronos OpenXR loader; the APK carries it, the GPL
-  text and the exception under `assets/licenses/`. The `.rpm` now includes the GPL text.
-- `install.sh`: messages in English, a warning when `~/.local/bin` is not on `PATH`, the
-  Hyprland autostart and permission lines with the full path, and `--uninstall --purge`
-  to remove the settings too.
-- README: requirements per distribution (Fedora and openSUSE codecs, NVIDIA and CPU
-  encoding), firewall ports, Hyprland setup, Wi-Fi or USB, updating and uninstalling,
-  and a FAQ.
-- Pairing asks for confirmation in the headset first, and the PC slows down repeated
+  update.
+- Packages: `prostir-bin` on the AUR, a `.deb` and an `.rpm` (Fedora), and a tarball with
+  `install.sh` (with `--autostart` and `--uninstall --purge`). Every release ships
+  `THIRD-PARTY-LICENSES.txt`.
+- Official builds count how many PCs use Prostir: one anonymous request a day with only
+  the date in it, announced on the first start; off in the tray or with
+  `PROSTIR_NO_COUNT=1`. Builds from source never count.
+
+### Connection and security
+
+- The headset finds the PC over Wi-Fi by itself, or you pick it from a list or type its
+  IP address. In developer mode a USB cable works too (`adb reverse`).
+- Encrypted connections (Noise XX) and one-time pairing with a 6-digit code (SPAKE2),
+  confirmed in the headset first and typed on either side. The PC slows down repeated
   failed attempts.
-- Without a working VA-API encoder (NVIDIA, missing plugin or driver), the PC encodes
-  with x264 by itself; if that is missing too, the headset says what to install.
-- The usage counter announces itself with a notification on the first start and sends
-  its first count no earlier than the next day.
-- The headset's microphone switch has the final say over the microphone.
+- The headset lists the paired PCs, and you can forget any of them.
+- Website with downloads and the privacy policy: prostir.ishawyha.dev.

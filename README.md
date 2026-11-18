@@ -52,7 +52,7 @@ hit one.
 <table>
   <tr>
     <td><img src="docs/menu-quick.png" alt="Menu, Quick tab: profiles and tiles for focus, cinema, PC sound, microphone, detaching a window and a screenshot"></td>
-    <td><img src="docs/menu-monitors.png" alt="Menu, Monitors tab: monitor list with where each stands, adding a monitor, layout, curve, mode and follow my head"></td>
+    <td><img src="docs/menu-monitors.png" alt="Menu, Monitors tab: a map of the monitors as seen from where you sit with the picked one and its buttons, the laptop screen, Line up, save as profile, adding a monitor, layout, curve, follow my head, stick together, drag one or all, and the cinema screen"></td>
   </tr>
   <tr>
     <td><img src="docs/menu-look.png" alt="Menu, Settings, Look: background, focus, keyboard window and rest reminders"></td>
@@ -64,24 +64,39 @@ hit one.
 
 ## What it does
 
-You add, remove and reorder monitors from inside the headset: 1080p, 1440p, 4K,
-ultrawide or portrait, up to six. The desktop rearranges its displays to match the
-order you see, so the mouse always leaves one screen where the next one begins. In KDE
-the monitor in the middle is the primary one and gets the Plasma panel.
+You add and remove monitors from inside the headset: 1080p, 1440p, 4K, ultrawide or
+portrait, up to six. The desktop arranges its displays the way you see them: each
+monitor sits against its neighbour on the side where they meet in the headset, with
+the same offset along that edge. So the mouse leaves one screen where the next one
+begins, sideways or up and down, even with a portrait monitor in the middle and its
+neighbours higher or lower. In KDE the primary monitor gets the Plasma panel.
 
 Text stays sharp because the video goes straight into the Quest compositor's own
 layers (`XR_KHR_android_surface_swapchain`) instead of a flat window inside an app.
-The PC encodes with the GPU's video engine (VA-API HEVC on Intel or AMD) and the Quest
-decodes in hardware. On my setup, an encoded frame takes about 14 ms over Wi-Fi to
-reach the headset display (network, decoding and showing it). That is not the whole
-delay from screen to eye: capturing and encoding the screen add a few milliseconds
-before it.
+The PC encodes with the GPU's video engine and the Quest decodes in hardware. I test on
+Intel graphics (VA-API) every day; AMD through VA-API and Mesa should work but is
+untested, and NVIDIA through NVENC is experimental and untested. Without a GPU encoder,
+Prostir encodes on the CPU with x264, which works everywhere. On my setup, an encoded
+frame takes about 14 ms over Wi-Fi to reach the headset display (network, decoding and
+showing it). That is not the whole delay from screen to eye: capturing and encoding
+the screen add a few milliseconds before it.
 
-Monitors can sit on an arc, in a grid, in a column, or above your head for lying down.
-They can be flat or curved, and on an arc they touch edge to edge, so three of them
-read as one wide screen. The laptop's own screen can hang below the main monitor
-without a seam, so you can see it without taking the headset off. It disappears when
-you close the lid.
+Three layouts get you started: around you, on a wall, or above your head for lying
+down, with flat or curved monitors. From there, grab any monitor and put it where you
+like. Let go of one almost against another, at about the same distance, and it sticks
+to it edge to edge; while you drag, the edge it will stick to lights up (Monitors →
+Stick together). The A button (Line up) takes the seams out of your own arrangement
+without rebuilding it: neighbours within a monitor's width are joined edge to edge,
+like on a hinge. One beside another curves around you, one above or below tilts
+towards you like a laptop lid, and monitors you put clearly apart stay where they are.
+With Monitors → Drag → All together, grabbing any monitor moves, turns, brings nearer
+and scales the whole arrangement as one piece.
+
+The laptop's own screen is part of the arrangement too, so you can see it without
+taking the headset off. It starts under the main monitor without a seam; wherever you
+put it, the PC puts it there as well, and the mouse crosses where you see them meet.
+Line up and Stick together treat it like any other monitor (on the Wall layout, Line
+up puts it back under the main monitor). It disappears when you close the lid.
 
 Profiles switch the whole setup at once. Out of the box there is "Work" (three 1440p
 monitors and the laptop screen), "Cinema" (one 4K screen, big and far away, the rest
@@ -95,6 +110,11 @@ PC sound plays in the headset, and the headset microphone becomes the PC's micro
 The headset only records while some app on the PC is actually listening, and only
 while the microphone switch in the headset menu (Quick, or Settings → Sound) is on. The PC can
 ask for the microphone, but the switch in the headset decides.
+
+With Settings → Sound → Sound from the screen (off by default), the sound comes from
+the side of the monitor whose window is playing it, and stays there as you turn your
+head. The PC finds the app that is playing through PipeWire and its window through
+Hyprland or KWin. The whole mix moves, not each app on its own.
 
 When you take the headset off, the PC stops encoding right away. After 10 seconds it
 removes the virtual monitors, so windows, the panel, sound and microphone go back to
@@ -111,8 +131,8 @@ A single window can also leave the desktop: "Detach window" gives the PC's activ
 window an output of its own, its size, and the headset shows it as a floating panel
 without a frame, closer to you than the monitors. Up to three, since the headset has
 only so many video decoders. "Attach" under the panel (it shows while you point at
-it) puts the window back on the monitor it came from; closing the window removes the
-panel too. "Window here" moves
+it) puts the window back on the monitor it came from, out of full screen; closing the
+window removes the panel too. "Window here" moves
 the active window to the monitor in front of you, and a screenshot of that monitor
 lands in `~/Pictures/Prostir`.
 
@@ -121,11 +141,16 @@ looked elsewhere, the monitors glide after you. On Hyprland the mouse can follow
 gaze, jumping to the monitor you look at, and "Where is the mouse?" shows it with
 rings.
 
-Turn your left palm to your face and a small menu appears by the wrist: bring
-everything in front of you, focus, cinema, where is the mouse, screenshot, the main
-menu. The PC's notifications can show in the headset, and reminders can ask you to
-rest your eyes every 20 minutes or take a break every hour. All of these are off
-until you turn them on.
+With your hands shown, hold your left palm open towards your face for a quarter of a
+second and a round menu appears on it: In front, Focus, Cinema, Mouse?, Screenshot and
+Line up around Menu in the middle. Press a sector with the other hand's index finger,
+or point at it. The hand holding the menu is not drawn over it, and a hand reaching
+for a menu turns see-through, so it does not hide the buttons. "In front" turns the
+whole arrangement so the primary monitor is straight ahead.
+
+The PC's notifications can show in the headset, and reminders can ask you to rest
+your eyes every 20 minutes or take a break every hour. Both are off until you turn
+them on.
 
 The headset and the PC speak Ukrainian or English. The headset follows the PC's
 language unless you pick one in the menu.
@@ -150,9 +175,11 @@ has not been paired with.
   `pactl`.
 - GStreamer 1.22 or newer with the `va` plugin (hardware encoding), `h264parse` and
   `h265parse`, and the PipeWire and PulseAudio plugins.
-- For hardware encoding, a GPU with a VA-API H.265 or H.264 encoder (Intel, AMD) and
-  its VA driver. Without one, Prostir encodes on the CPU with x264, which needs the
-  `x264enc` plugin from gst-plugins-ugly. See [NVIDIA and CPU encoding](#nvidia-and-cpu-encoding).
+- For hardware encoding, a GPU with a VA-API H.265 or H.264 encoder and its VA driver:
+  Intel is tested, AMD should work but is untested. NVIDIA goes through NVENC
+  (GStreamer's `nvcodec` plugin), which is experimental and untested. Without a GPU
+  encoder, Prostir encodes on the CPU with x264, which needs the `x264enc` plugin from
+  gst-plugins-ugly. See [NVIDIA and CPU encoding](#nvidia-and-cpu-encoding).
 - On KDE, `kscreen-doctor`, which comes with Plasma. Optional: `qdbus6` for matching
   wallpapers, `adb` for USB, and one of `kdialog`, `zenity`, `fuzzel`, `wofi` or `rofi`
   for the pairing dialog. Screenshots use `spectacle` on KDE and `grim` on Hyprland.
@@ -186,11 +213,15 @@ HEVC when encoding works. Without it, Prostir falls back to the CPU.
 
 ### NVIDIA and CPU encoding
 
-When no VA-API encoder works (NVIDIA cards, a missing `gst-plugin-va` or VA driver,
-Fedora or openSUSE Mesa without the codecs), Prostir switches to CPU encoding with x264
-by itself. That needs `x264enc` (gst-plugins-ugly) and costs CPU time and some latency,
-so fewer or smaller monitors help. If neither works, the headset says what is missing
-instead of retrying. `--software` forces CPU encoding even when a GPU encoder exists.
+Prostir tries VA-API first, then NVENC through GStreamer's `nvcodec` plugin (part of
+gst-plugins-bad), which needs NVIDIA's own driver. The NVENC path is experimental and
+has not been tested on real NVIDIA hardware yet; reports are welcome. When no GPU
+encoder works (a missing `gst-plugin-va`, VA driver or `nvcodec`, Fedora or openSUSE
+Mesa without the codecs), Prostir switches to CPU encoding with x264 by itself. That
+needs `x264enc` (gst-plugins-ugly), works on any PC and costs CPU time and some
+latency, so fewer or smaller monitors help. If nothing works, the headset says what is
+missing instead of retrying. `--software` forces CPU encoding even when a GPU encoder
+exists.
 
 ## Install
 
@@ -331,21 +362,22 @@ a powered hub.
 
 | | Controller | Hands (menu → Settings → Controls → Hands → Show and use) |
 |---|---|---|
-| Open the menu | ☰ or X on the left controller, or the round ☰ button under the main monitor | the system menu gesture (pinch with the left palm towards you), or "Menu" on the wrist menu |
-| Wrist menu | | turn the left palm to your face; press with the right index finger |
+| Open the menu | ☰ or X on the left controller, or the round ☰ button under the main monitor | the system menu gesture (pinch with the left palm towards you), or Menu in the middle of the palm menu |
+| Palm menu | | hold the open left palm towards your face; press with the right index finger, or point at it |
 | Press a button in the menu | trigger | touch it with a finger, or pinch from afar |
 | Click on a monitor | trigger | pinch |
 | Move a monitor | hold grip and point | pinch and hold anywhere on it for about 0.3 s |
+| Move all monitors as one | Monitors → Drag → All together, then move any monitor | same |
 | Put a detached window back | point at it and press "Attach" under it | same, with a pinch |
 | Move the menu | hold grip and point | touch an empty spot with a finger and drag |
 | Nearer or farther | thumbstick up or down while holding | move your hand away or closer |
 | Bigger or smaller | thumbstick left or right while holding, or hold it with both controllers and move them apart or together | hold it with both hands and move them apart or together |
-| Line the monitors up | A | menu → Monitors → Layout |
-| Bring everything in front of you | menu → Quick → In front of me | same, or the wrist menu |
+| Line the monitors up | A, or menu → Monitors → Line up | Line up on the palm menu, or menu → Monitors → Line up |
+| Primary monitor straight ahead | menu → Quick → In front of me | same, or In front on the palm menu |
 
 With hands in view, the menu opens within arm's reach so you can touch it. A light
 shows where your finger is about to touch; pull the finger back to press the next
-button. Left-handed? Settings → Controls → Wrist menu → Right wrist puts the wrist menu
+button. Left-handed? Settings → Controls → Palm menu → Right hand puts the palm menu
 on the right hand, pressed with the left.
 
 ### Menu
@@ -354,12 +386,20 @@ on the right hand, pressed with the left.
 what you switch every day. In front of me, focus, cinema, the keyboard window, PC
 sound, microphone, detach window, window here and screenshot. What is on is lit.
 
-**Monitors.** Add a monitor (1920×1080, 2560×1440, 3840×2160, 3440×1440 or
-1440×2560), remove one, make one primary, move it left or right in the row, and show
-or hide the laptop screen. Each one is labelled with where it stands (left, middle,
-right, above, below). Detached windows are listed too, with a button to close them.
-Then the layout (around me, wall, lying down), the curve, desk or cinema mode, follow
-my head, the cinema screen, and "Save as profile".
+**Monitors** starts with a map of your monitors as seen from where you sit, the laptop
+screen fainter. Press a monitor to pick it: under the map are its number, size and
+where it stands (left, middle, right, above, below), "Make primary" and × to remove
+it. Detached windows are listed too, with a button to close them. Then the laptop
+screen (shown or hidden), "Line up: close the seams (A button)" and "Save as profile".
+Next to them: add a monitor (1920×1080, 2560×1440, 3840×2160, 3440×1440 or
+1440×2560), the layout (around me, wall, lying down), the curve, follow my head, stick
+together, drag (one monitor or all together) and the cinema screen. Cinema itself is
+a tile in Quick and a sector of the palm menu.
+
+Line up keeps your own arrangement and only closes the seams. On the Wall layout it
+keeps everything in one plane; in Lying down and in cinema it rebuilds the preset.
+Stick together works on the Wall layout too, in the wall's plane, but not in Lying
+down or cinema, and not while dragging all together.
 
 **Settings**, in parts:
 
@@ -368,9 +408,10 @@ my head, the cinema screen, and "Save as profile".
   copy an equirectangular `background.jpg` or `background.png` to
   `/sdcard/Android/data/dev.prostir.client/files/` on the headset.
 - **Controls**: hands, mouse follows the gaze (where the PC allows it), menu size,
-  which wrist has the wrist menu, and the headset display rate (90 Hz, or 72 Hz to
-  save battery: the video is 60 frames a second either way).
-- **Sound**: where PC sound plays and which microphone the PC uses.
+  which hand gets the palm menu (Palm menu: left or right hand), and the headset display
+  rate (90 Hz, or 72 Hz to save battery: the video is 60 frames a second either way).
+- **Sound**: where PC sound plays, which microphone the PC uses, and sound from the
+  screen.
 - **Language**: like the PC, Ukrainian or English.
 - **PC**: video quality (15, 30 or 50 Mbit/s per monitor), encoding on the graphics
   card or the processor, HEVC or H.264, sharper text, the PC's notifications in the
@@ -427,9 +468,10 @@ connection; when the two are too far apart, the headset says which side to updat
   add a 👍 to [issue #1](https://github.com/OlexiyOdarchuk/prostir/issues/1). X11 sessions are not supported.
 - Hyprland has no primary monitor, so "Make primary" there only picks the monitor the
   headset puts in front of you.
-- Hardware encoding needs VA-API, which means Intel or AMD graphics. NVIDIA cards do not
-  offer VA-API encoding, so Prostir encodes on the CPU there, which costs CPU time and
-  some latency.
+- Hardware encoding is tested only on Intel graphics (VA-API). AMD through VA-API and
+  Mesa should work but is untested; NVIDIA through NVENC is experimental and untested.
+  Where neither works, Prostir encodes on the CPU, which costs CPU time and some
+  latency.
 - Tested on Quest 3. Quest 3S should behave the same; Quest 2 and Pro are untested.
 - Not in the Meta Horizon Store yet: you install it in developer mode with `adb`, and
   the Quest lists it under Unknown sources by its package name, `dev.prostir.client`.
@@ -511,8 +553,10 @@ distribution (on Arch, `gst-plugin-va`), or `gst-plugins-ugly` for CPU encoding.
 Fedora and openSUSE with AMD graphics, see the codec note under
 [Requirements](#requirements).
 
-**I have an NVIDIA card.** Prostir encodes on the CPU with x264 there, by itself. Install
-gst-plugins-ugly. See [NVIDIA and CPU encoding](#nvidia-and-cpu-encoding).
+**I have an NVIDIA card.** Prostir tries NVENC through GStreamer's `nvcodec` plugin;
+this is experimental and untested. If it does not work, Prostir encodes on the CPU with
+x264 by itself, so install gst-plugins-ugly too. See
+[NVIDIA and CPU encoding](#nvidia-and-cpu-encoding).
 
 **No pairing dialog opens on the PC.** Install `zenity` or `kdialog`, or have `fuzzel`,
 `wofi` or `rofi` installed. Or press the button under the code in the headset to do it
@@ -548,7 +592,7 @@ layers Prostir draws with. Switch the capture format in the Quest camera setting
 ```mermaid
 flowchart LR
   subgraph PC["PC · KDE Plasma or Hyprland"]
-    KWin["KWin virtual outputs<br/>(zkde_screencast)"] --> PW[PipeWire] --> Enc["VA-API HEVC encoder"]
+    KWin["KWin virtual outputs<br/>(zkde_screencast)"] --> PW[PipeWire] --> Enc["Encoder<br/>(VA-API, NVENC or x264)"]
     Hypr["Hyprland headless outputs<br/>(wlr-screencopy, dmabuf)"] --> Enc
     Snd["Virtual sound card"] --> Net
     Enc --> Net(("encrypted TCP"))
@@ -578,8 +622,10 @@ so nothing passes through the CPU.
 Besides streaming, the PC side arranges the outputs in KDE with `kscreen-doctor`,
 copies the wallpaper to every monitor through Plasma's scripting API, mirrors the
 laptop screen with `stream_output`, and asks KWin which output has the mouse for focus
-mode. The Quest app is native OpenXR written in Rust; the compositor draws the
-monitors, and the app itself renders only the hands.
+mode. For sound from the screen it checks every second and a half which app is
+playing (PipeWire streams carry its process id) and where its window is (Hyprland's
+client list, or a KWin script). The Quest app is native OpenXR written in Rust; the
+compositor draws the monitors, and the app itself renders only the hands.
 
 `cargo test` runs the protocol, layout, profile and menu tests on the PC.
 `cargo run -p prostir-host --bin prostir-probe -- [HOST:PORT] [SECONDS] [DIR]` connects
