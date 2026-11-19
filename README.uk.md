@@ -655,7 +655,7 @@ VA-API читає напряму, тож через процесор нічог�
 `cargo test` запускає тести протоколу, розкладок, профілів і меню на ПК.
 `cargo run -p prostir-client --example panel_preview -- menu.png` рендерить меню шолома
 в PNG (`TAB=monitors|look|controls|sound|language|pc|help`, `LANG_UI=en`, `WRIST=1`), а `--example sky_preview -- DIR`
-рендерить панорами. `cargo run -p prostir-host --bin prostir-probe -- [HOST:PORT]
+рендерить панорами. `cargo run -p prostir-testkit --bin prostir-probe -- [HOST:PORT]
 [SECONDS] [DIR]` підключається як шолом, сполучається і зберігає отримані відео й звук,
 щоб перевірити ПК без шолома.
 

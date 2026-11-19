@@ -71,6 +71,8 @@ rustPlatform.buildRustPackage {
       (root + "/proto")
       (root + "/host")
       (root + "/client")
+      # A workspace member (the fake headset for tests): cargo needs it present.
+      (root + "/testkit")
       (root + "/packaging/prostir.desktop")
       (root + "/packaging/prostir.svg")
     ];

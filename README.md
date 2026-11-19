@@ -657,7 +657,7 @@ client list, or a KWin script). The Quest app is native OpenXR written in Rust; 
 compositor draws the monitors, and the app itself renders only the hands.
 
 `cargo test` runs the protocol, layout, profile and menu tests on the PC.
-`cargo run -p prostir-host --bin prostir-probe -- [HOST:PORT] [SECONDS] [DIR]` connects
+`cargo run -p prostir-testkit --bin prostir-probe -- [HOST:PORT] [SECONDS] [DIR]` connects
 like a headset, pairs, and saves the video and sound it receives, to check the PC side
 without a headset.
 `cargo run -p prostir-client --example panel_preview -- menu.png` renders the headset

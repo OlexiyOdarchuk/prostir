@@ -1853,6 +1853,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "prostir-testkit"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "prostir-proto",
+]
+
+[[package]]
 name = "pxfm"
 version = "0.1.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"

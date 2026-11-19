@@ -13,12 +13,6 @@ description = "Prostir host: virtual KDE Plasma 6 and Hyprland monitors streamed
 name = "prostir"
 path = "src/main.rs"
 
-# Development tool: connects like a headset and saves what the PC sends.
-# Not part of releases.
-[[bin]]
-name = "prostir-probe"
-path = "src/bin/probe.rs"
-
 [dependencies]
 prostir-proto = { path = "../proto" }
 anyhow = "1"

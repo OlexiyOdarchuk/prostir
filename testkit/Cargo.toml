@@ -1,0 +1,21 @@
+[package]
+name = "prostir-testkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "A fake Prostir headset for tests and for checking the PC app by hand"
+# Development tool only: not part of any release.
+publish = false
+
+# Connects like a headset and saves what the PC sends.
+[[bin]]
+name = "prostir-probe"
+path = "src/bin/probe.rs"
+
+[dependencies]
+prostir-proto = { path = "../proto" }
+anyhow = "1"
