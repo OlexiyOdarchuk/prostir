@@ -114,6 +114,8 @@ pub struct View {
     pub primary: Option<u8>,
     /// How the PC encodes and what it could encode with.
     pub pc_settings: Option<(PcSettings, u8)>,
+    /// How many times the PC sent them, to tell an answer from what it said before.
+    pub pc_settings_count: u32,
     pub audio_wanted: Option<bool>,
     pub mic_wanted: Option<bool>,
     pub mirror_wanted: Option<bool>,
@@ -176,7 +178,8 @@ impl View {
             HostMsg::Order { ids } => self.order = ids.clone(),
             HostMsg::PrimaryChanged { id } => self.primary = Some(*id),
             HostMsg::PcSettings { settings, encoders } => {
-                self.pc_settings = Some((*settings, *encoders))
+                self.pc_settings = Some((*settings, *encoders));
+                self.pc_settings_count += 1;
             }
             HostMsg::AudioWanted { enabled } => self.audio_wanted = Some(*enabled),
             HostMsg::MicWanted { enabled } => self.mic_wanted = Some(*enabled),
