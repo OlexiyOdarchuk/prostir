@@ -502,12 +502,7 @@ impl Scene {
             return;
         }
         // The laptop screen too: the PC puts it where it stands here.
-        let rows = layout::rows_by_position(
-            &self.placements,
-            &self.layout_sizes(),
-            self.center,
-            self.settings.preset,
-        );
+        let rows = layout::layout_rows(&self.seen(), self.primary);
         if rows.is_empty() || self.sent_layout.as_ref() == Some(&rows) {
             self.pending_layout = None;
             return;
@@ -805,10 +800,20 @@ impl Scene {
         )
     }
 
-    /// The monitors on the map: as the desktop has them, not as seen from where the
-    /// head happens to be (see `layout::desktop_spots`).
+    /// The monitors on the map: as the PC lays its desktop out from the rows it gets
+    /// (see `layout::desktop_spots`).
     fn map_spots(&self) -> HashMap<u8, [f32; 4]> {
-        layout::desktop_spots(&self.placements, &self.layout_sizes(), self.primary)
+        layout::desktop_spots(&self.seen(), self.primary)
+    }
+
+    /// The monitors and the laptop screen as seen from where the arrangement faces.
+    fn seen(&self) -> Vec<layout::Seen> {
+        layout::seen(
+            &self.placements,
+            &self.layout_sizes(),
+            self.center,
+            self.settings.preset,
+        )
     }
 
     fn place_of(&self, id: u8) -> ui::Place {
@@ -1065,9 +1070,9 @@ impl Scene {
         self.send_layout();
     }
 
-    /// The A button: lines up what the user arranged by hand (see `layout::tidy`)
-    /// instead of replacing it with the preset. Cinema and lying down (monitors over
-    /// the head) still rebuild their own arrangement.
+    /// The A button: lines up what the user arranged by hand, row by row (see
+    /// `layout::tidy`), instead of replacing it with the preset. Cinema and lying down
+    /// (monitors over the head) still rebuild their own arrangement.
     fn tidy_up(&mut self) {
         if self.settings.cinema
             || self.settings.preset == crate::settings::Preset::Overhead
@@ -1090,12 +1095,11 @@ impl Scene {
             }
             t
         } else {
-            // One surface out of the user's own arrangement, the laptop screen part of
-            // it like any monitor.
-            layout::snap(
+            // Every row on its own, side by side on its circle; rows do not merge.
+            layout::tidy(
                 &self.placements,
                 &self.layout_sizes(),
-                self.center.0,
+                self.center,
                 self.primary,
             )
         };

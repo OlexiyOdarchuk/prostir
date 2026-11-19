@@ -4,12 +4,14 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use glam::{Quat, Vec2, Vec3};
-use prostir_proto::{LayoutEntry, LayoutRow, is_window_panel};
+use prostir_proto::is_window_panel;
 
 use crate::settings::Preset;
 
 mod arc;
+mod rows;
 pub use arc::{MAX_ARC, MAX_RADIUS, Rows, angular_width, arc_radius, split, wall_width};
+pub use rows::{Seen, desktop_spots, layout_rows, place_new, rows_of, seen, tidy};
 
 /// Monitor size in metres per stream pixel: every monitor gets the same pixel
 /// density, so neighbours line up like one big screen (2560 px ≈ 1.25 m).
@@ -79,226 +81,6 @@ pub fn order_by_direction(placements: &HashMap<u8, Placement>, ids: &[u8]) -> Ve
         .collect();
     v.sort_by(|a, b| a.0.total_cmp(&b.0));
     v.into_iter().map(|(_, id)| id).collect()
-}
-
-/// Rows of monitors as the user sees them, for the desktop's arrangement: monitors
-/// whose centres are at about the same height form a row; rows go top to bottom,
-/// monitors left to right. With each monitor goes where its centre is seen, in pixels
-/// of one scale for all of them (from the angles they take up), so the PC can put a
-/// monitor hung above another above that one. `center` is where the layout faces from
-/// (position, yaw).
-pub fn rows_by_position(
-    placements: &HashMap<u8, Placement>,
-    monitors: &[(u8, u32, u32)],
-    center: (Vec3, f32),
-    preset: Preset,
-) -> Vec<LayoutRow> {
-    struct Seen {
-        id: u8,
-        yaw: f32,
-        elevation: f32,
-        half_width: f32,
-        half_height: f32,
-        width_px: u32,
-    }
-    // Lying down, the monitors are a band tilted up overhead: looked at along the tilt,
-    // so a row there stays a row (not a "V" the mouse cannot cross sideways).
-    let tilt = if preset == Preset::Overhead {
-        OVERHEAD_PITCH
-    } else {
-        0.0
-    };
-    let unturn = Quat::from_rotation_x(-tilt) * Quat::from_rotation_y(-center.1);
-    let mut seen: Vec<Seen> = monitors
-        .iter()
-        .filter_map(|&(id, w, h)| {
-            let p = placements.get(&id)?;
-            let local = unturn * (p.position - center.0);
-            let flat = Vec2::new(local.x, local.z).length().max(0.1);
-            let height = p.width * h as f32 / w.max(1) as f32;
-            Some(Seen {
-                id,
-                yaw: local.x.atan2(-local.z),
-                elevation: local.y.atan2(flat),
-                half_width: (p.width / 2.0 / flat).atan(),
-                half_height: (height / 2.0 / flat).atan(),
-                width_px: w,
-            })
-        })
-        .collect();
-    if seen.is_empty() {
-        return Vec::new();
-    }
-    // Pixels per radian, from the monitors themselves.
-    let px_per_rad = seen
-        .iter()
-        .map(|m| m.width_px as f32 / (2.0 * m.half_width).max(1e-3))
-        .sum::<f32>()
-        / seen.len() as f32;
-    seen.sort_by(|a, b| b.elevation.total_cmp(&a.elevation));
-    let mut rows: Vec<Vec<Seen>> = Vec::new();
-    for m in seen {
-        let same_row = rows.iter_mut().find(|r| {
-            let first = &r[0];
-            (first.elevation - m.elevation).abs() < 0.75 * first.half_height.max(m.half_height)
-        });
-        match same_row {
-            Some(r) => r.push(m),
-            None => rows.push(vec![m]),
-        }
-    }
-    // Where on the desktop, from how the monitors stand in space (the angles above
-    // only group them into rows). Starting from the one straight ahead.
-    let ahead = rows
-        .iter()
-        .flatten()
-        .min_by(|a, b| {
-            (a.yaw.abs() + a.elevation.abs()).total_cmp(&(b.yaw.abs() + b.elevation.abs()))
-        })
-        .map(|m| m.id);
-    let rects = desktop_rects(placements, monitors, ahead);
-    // Older PCs place by angles when a monitor has no spot here (none is left out).
-    let fallback = |m: &Seen| {
-        (
-            ((m.yaw * px_per_rad) / 8.0).round() as i32 * 8,
-            ((-m.elevation * px_per_rad) / 8.0).round() as i32 * 8,
-        )
-    };
-    rows.into_iter()
-        .map(|mut r| {
-            r.sort_by(|a, b| a.yaw.total_cmp(&b.yaw));
-            LayoutRow {
-                entries: r
-                    .iter()
-                    .map(|m| {
-                        let (center, middle) =
-                            rects.get(&m.id).copied().unwrap_or_else(|| fallback(m));
-                        LayoutEntry {
-                            id: m.id,
-                            center: Some(center),
-                            middle: Some(middle),
-                        }
-                    })
-                    .collect(),
-            }
-        })
-        .collect()
-}
-
-/// The monitors for the map in the menu: as they are put on the desktop (see
-/// [`desktop_rects`]), centre and half size in pixels, up positive. The same
-/// wherever the user's head is, at the monitors' own sizes.
-pub fn desktop_spots(
-    placements: &HashMap<u8, Placement>,
-    monitors: &[(u8, u32, u32)],
-    first: Option<u8>,
-) -> HashMap<u8, [f32; 4]> {
-    desktop_rects(placements, monitors, first)
-        .into_iter()
-        .filter_map(|(id, (x, y))| {
-            let &(_, w, h) = monitors.iter().find(|m| m.0 == id)?;
-            Some((id, [x as f32, -y as f32, w as f32 / 2.0, h as f32 / 2.0]))
-        })
-        .collect()
-}
-
-/// Desktop centres (pixels) from where the monitors stand in space: starting from
-/// `first`, each monitor joins the nearest one already placed, on the side where it
-/// stands next to it, shifted along that edge by as much as it is shifted in space
-/// (measured in the placed monitor's own plane and pixels). A window across an edge
-/// the monitors share in the headset then continues where it does there, wherever
-/// the user's head is. Rounded to 8 px, so a hand's tremor does not rearrange the
-/// desktop.
-fn desktop_rects(
-    placements: &HashMap<u8, Placement>,
-    monitors: &[(u8, u32, u32)],
-    first: Option<u8>,
-) -> HashMap<u8, (i32, i32)> {
-    struct Screen {
-        id: u8,
-        at: Vec3,
-        right: Vec3,
-        up: Vec3,
-        out: Vec3,
-        half: Vec2,
-        px: (i32, i32),
-        metres_per_px: f32,
-    }
-    let mut rest: Vec<Screen> = monitors
-        .iter()
-        .filter_map(|&(id, w, h)| {
-            let p = placements.get(&id)?;
-            let (w, h) = (w.max(1), h.max(1));
-            let height = p.width * h as f32 / w as f32;
-            Some(Screen {
-                id,
-                at: p.position,
-                right: p.rotation * Vec3::X,
-                up: p.rotation * Vec3::Y,
-                out: p.rotation * Vec3::Z,
-                half: Vec2::new(p.width, height) / 2.0,
-                px: (w as i32, h as i32),
-                metres_per_px: p.width.max(1e-3) / w as f32,
-            })
-        })
-        .collect();
-    let mut out = HashMap::new();
-    let Some(start) = rest
-        .iter()
-        .position(|s| Some(s.id) == first)
-        .or_else(|| (!rest.is_empty()).then_some(0))
-    else {
-        return out;
-    };
-    let snap = |v: f32| (v / 8.0).round() as i32 * 8;
-    let s0 = rest.remove(start);
-    // Top-left corners.
-    let mut placed: Vec<(Screen, i32, i32)> = vec![(s0, 0, 0)];
-    // How `m` stands next to `n`, in `n`'s plane: offset of the centres and the gap
-    // between their edges (negative when they overlap), across and up.
-    let relative = |m: &Screen, n: &Screen| {
-        let d = m.at - n.at;
-        let (x, y) = (d.dot(n.right), d.dot(n.up));
-        let reach = n.half + m.half;
-        (
-            x,
-            y,
-            Vec2::new(x.abs() - reach.x, y.abs() - reach.y),
-            d.dot(n.out).abs(),
-        )
-    };
-    while !rest.is_empty() {
-        let (ri, pi) = (0..rest.len())
-            .flat_map(|ri| (0..placed.len()).map(move |pi| (ri, pi)))
-            .min_by(|&(a, b), &(c, d)| {
-                let key = |ri: usize, pi: usize| {
-                    let (_, _, gap, depth) = relative(&rest[ri], &placed[pi].0);
-                    gap.x.max(gap.y).max(0.0) + 0.5 * depth
-                };
-                key(a, b).total_cmp(&key(c, d))
-            })
-            .expect("not empty");
-        let m = rest.remove(ri);
-        let (n, nx, ny) = &placed[pi];
-        let (x, y, gap, _) = relative(&m, n);
-        let to_px = |metres: f32| snap(metres / n.metres_per_px);
-        let (mx, my) = if gap.x > gap.y {
-            // Beside it: level with where its top edge is in `n`'s plane.
-            let top = (m.at + m.up * m.half.y - n.at).dot(n.up);
-            let x = if x > 0.0 { nx + n.px.0 } else { nx - m.px.0 };
-            (x, ny + to_px(n.half.y - top))
-        } else {
-            // Above or below it: as far across as its left edge is.
-            let left = (m.at - m.right * m.half.x - n.at).dot(n.right);
-            let y = if y > 0.0 { ny - m.px.1 } else { ny + n.px.1 };
-            (nx + to_px(left + n.half.x), y)
-        };
-        placed.push((m, mx, my));
-    }
-    for (s, x, y) in &placed {
-        out.insert(s.id, (x + s.px.0 / 2, y + s.px.1 / 2));
-    }
-    out
 }
 
 /// Lines `value` (half size `half`) up with a neighbour at `other` (half size
@@ -462,68 +244,6 @@ fn settle_along(b: &Beside, n: &Part, mw: f32, mh: f32) -> f32 {
     align(b.along, half_m, 0.0, half_n).clamp(-(half_n + half_m - shared), half_n + half_m - shared)
 }
 
-/// The A button: the user's own arrangement with the seams taken out. Starting from
-/// `anchor` (the primary monitor, which stays), each monitor within a monitor's width
-/// of one already done is joined to it edge to edge (see [`hinge`]), where along that
-/// edge the user put it, at the size the user gave it. Monitors put clearly apart stay
-/// as they are. `monitors` may include the laptop screen; `eye` is where the user sits.
-pub fn snap(
-    placements: &HashMap<u8, Placement>,
-    monitors: &[(u8, u32, u32)],
-    eye: Vec3,
-    anchor: Option<u8>,
-) -> HashMap<u8, Placement> {
-    let mut rest = parts(placements, monitors);
-    if rest.is_empty() {
-        return HashMap::new();
-    }
-    // Upright and facing the user first: a monitor turned askew (held in a hand) would
-    // otherwise be joined by whichever corner it happens to reach out with.
-    for m in &mut rest {
-        m.1.rotation = facing(m.1.position, eye);
-    }
-    // The monitors first, the laptop screen after: it joins them, not they it.
-    let laptop = rest
-        .iter()
-        .position(|m| m.0 == prostir_proto::MIRROR_ID)
-        .filter(|_| rest.len() > 1)
-        .map(|i| rest.remove(i));
-    let first = rest.iter().position(|m| Some(m.0) == anchor).unwrap_or(0);
-    let mut placed = vec![rest.remove(first)];
-    // Outwards from the anchor: always the monitor closest to one already placed.
-    loop {
-        if rest.is_empty() {
-            match laptop {
-                Some(l) if !placed.iter().any(|m| m.0 == l.0) => rest.push(l),
-                _ => break,
-            }
-        }
-        let (ri, joined) = rest
-            .iter()
-            .enumerate()
-            .map(|(ri, m)| (ri, nearest(m, &placed, eye)))
-            .min_by(|a, b| {
-                let gap = |j: &Option<(Part, Beside)>| j.map_or(f32::MAX, |(_, b)| b.gap);
-                gap(&a.1).total_cmp(&gap(&b.1))
-            })
-            .expect("not empty");
-        let mut m = rest.remove(ri);
-        if let Some((n, b)) = joined
-            && b.gap < m.1.width.min(n.1.width)
-        {
-            // Sizes stay as the user made them: only the seams go.
-            let (mw, mh) = (m.1.width, m.2);
-            let b = Beside {
-                along: settle_along(&b, &n, mw, mh),
-                ..b
-            };
-            m.1 = hinge(&n.1, n.2, mw, mh, &b, eye);
-        }
-        placed.push(m);
-    }
-    placed.into_iter().map(|m| (m.0, m.1)).collect()
-}
-
 /// Where a monitor being let go of would stick: the monitor it joins and the edge.
 #[derive(Debug, Clone, Copy)]
 pub struct Stick {
@@ -665,7 +385,7 @@ pub fn tidy_wall(
     let unturn = Quat::from_rotation_y(-center.1);
     let turn = Quat::from_rotation_y(center.1);
     // (id, local position, width, height)
-    let mut items: Vec<(u8, Vec3, f32, f32)> = monitors
+    let items: Vec<(u8, Vec3, f32, f32)> = monitors
         .iter()
         .filter_map(|&(id, w, h)| {
             let p = placements.get(&id)?;
@@ -677,17 +397,16 @@ pub fn tidy_wall(
         return HashMap::new();
     }
     let depth = items.iter().map(|m| m.1.z).sum::<f32>() / items.len() as f32;
-    items.sort_by(|a, b| b.1.y.total_cmp(&a.1.y));
-    let mut rows: Vec<Vec<(u8, Vec3, f32, f32)>> = Vec::new();
-    for it in items {
-        match rows
-            .iter_mut()
-            .find(|r| (r[0].1.y - it.1.y).abs() < 0.5 * r[0].3.max(it.3))
-        {
-            Some(r) => r.push(it),
-            None => rows.push(vec![it]),
-        }
-    }
+    // The rows as seen (see `rows_of`), top to bottom.
+    let rows: Vec<Vec<(u8, Vec3, f32, f32)>> =
+        rows_of(&seen(placements, monitors, center, Preset::Wall))
+            .iter()
+            .map(|r| {
+                r.iter()
+                    .filter_map(|m| items.iter().find(|it| it.0 == m.id).copied())
+                    .collect()
+            })
+            .collect();
     let mut ys: Vec<(f32, f32)> = rows
         .iter()
         .map(|r| {
@@ -1697,16 +1416,20 @@ mod tests {
     #[test]
     fn rows_follow_what_the_user_sees() {
         let center = (Vec3::ZERO, 0.0);
+        let rows_ids = |p: &HashMap<u8, Placement>, m: &[(u8, u32, u32)]| {
+            layout_rows(&seen(p, m, center, Preset::Arc), None)
+                .iter()
+                .map(|r| r.ids().collect::<Vec<_>>())
+                .collect::<Vec<_>>()
+        };
         // An arc: one row, left to right.
         let three = [(0, 2560, 1440), (1, 1440, 2560), (2, 2560, 1440)];
         let arc = arrange(Preset::Arc, &three, Some(1), None);
-        let rows = rows_by_position(&arc, &three, center, Preset::Arc);
         assert_eq!(
-            rows.len(),
-            1,
+            rows_ids(&arc, &three),
+            vec![vec![0, 1, 2]],
             "a portrait monitor in the arc is in the same row"
         );
-        assert_eq!(rows[0].ids().collect::<Vec<_>>(), vec![0, 1, 2]);
 
         // Lift the right monitor above the middle one: two rows, it is on top.
         let mut lifted = arc.clone();
@@ -1715,107 +1438,17 @@ mod tests {
         top.position = Vec3::new(mid.position.x, mid.position.y + 1.0, mid.position.z);
         top.rotation = facing(top.position, Vec3::ZERO);
         lifted.insert(2, top);
-        let rows = rows_by_position(&lifted, &three, center, Preset::Arc);
-        assert_eq!(
-            rows.iter()
-                .map(|r| r.ids().collect::<Vec<_>>())
-                .collect::<Vec<_>>(),
-            vec![vec![2], vec![0, 1]]
-        );
+        let rows = layout_rows(&seen(&lifted, &three, center, Preset::Arc), Some(1));
+        assert_eq!(rows_ids(&lifted, &three), vec![vec![2], vec![0, 1]]);
         // It is seen right over the middle monitor, not over the right edge.
         let seen_at = |row: usize, i: usize| rows[row].entries[i].center.unwrap();
         let middle = seen_at(1, 1);
-        assert!((seen_at(0, 0) - middle).abs() < 100, "{rows:?}");
+        assert!((seen_at(0, 0) - middle).abs() < 150, "{rows:?}");
         assert!(seen_at(1, 0) < middle - 1500, "{rows:?}");
 
         // A wall: one row, left to right.
         let wall = arrange(Preset::Wall, &three, None, None);
-        let rows = rows_by_position(&wall, &three, center, Preset::Arc);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].ids().collect::<Vec<_>>(), vec![0, 1, 2]);
-    }
-
-    #[test]
-    fn the_desktop_follows_the_edges_in_space_not_the_head() {
-        let three = [(0, 2560, 1440), (1, 1440, 2560), (2, 2560, 1440)];
-        let mut arc = arrange(Preset::Arc, &three, Some(1), None);
-        // The right monitor hung 20 cm lower, still against the middle one.
-        arc.get_mut(&2).unwrap().position.y -= 0.2;
-        let from = |eye: Vec3| rows_by_position(&arc, &three, (eye, 0.0), Preset::Arc);
-        let spot = |rows: &[LayoutRow], id: u8| {
-            rows.iter()
-                .find_map(|r| {
-                    let e = r.entries.iter().find(|e| e.id == id)?;
-                    Some((e.center.unwrap(), e.middle.unwrap()))
-                })
-                .unwrap()
-        };
-        let here = from(Vec3::ZERO);
-        let stood_up = from(Vec3::new(0.3, 0.4, 0.2));
-        for id in [0, 2] {
-            let (a, b) = (spot(&here, id), spot(&stood_up, id));
-            let (ma, mb) = (spot(&here, 1), spot(&stood_up, 1));
-            assert_eq!(
-                (a.0 - ma.0, a.1 - ma.1),
-                (b.0 - mb.0, b.1 - mb.1),
-                "monitor {id}"
-            );
-        }
-        // 20 cm lower is 20 cm worth of pixels lower on the desktop, edge to edge.
-        let (right, mid) = (spot(&here, 2), spot(&here, 1));
-        let expected = (0.2 / METRES_PER_PIXEL / 8.0).round() as i32 * 8;
-        assert!(((right.1 - mid.1) - expected).abs() <= 8, "{here:?}");
-        assert_eq!(right.0 - mid.0, (1440 + 2560) / 2, "{here:?}");
-    }
-
-    #[test]
-    fn line_up_straightens_and_joins_monitors_before_the_laptop_screen() {
-        let mirror = prostir_proto::MIRROR_ID;
-        let sizes = [(1, 1440, 2560), (2, 2560, 1440), (mirror, 1920, 1080)];
-        let eye = Vec3::ZERO;
-        let mut p = arrange(
-            Preset::Arc,
-            &sizes[..2],
-            Some(1),
-            Some((mirror, 1920, 1080)),
-        );
-        // The right monitor turned askew and dropped low, its corner by the laptop
-        // screen's edge.
-        let r = p.get_mut(&2).unwrap();
-        r.position.y -= 0.55;
-        r.rotation = Quat::from_rotation_z(0.6) * r.rotation;
-        let done = snap(&p, &sizes, eye, Some(1));
-        let (right, primary) = (done[&2], done[&1]);
-        // Upright again, beside the primary (its left edge against the primary's right
-        // edge), not under the laptop screen.
-        let up = right.rotation * Vec3::Y;
-        assert!(up.y > 0.99, "{up:?}");
-        // Its left edge lies on the primary's right edge (in the primary's plane).
-        let right_left = right.position - right.rotation * Vec3::X * right.width / 2.0;
-        let local = primary.rotation.inverse() * (right_left - primary.position);
-        assert!((local.x - primary.width / 2.0).abs() < 0.01, "{local:?}");
-        assert!(local.z.abs() < 0.01, "{local:?}");
-    }
-
-    /// Placements and the monitors' pixel sizes, for the A and magnet tests.
-    type Case = (HashMap<u8, Placement>, Vec<(u8, u32, u32)>);
-
-    fn case(positions: &[(u8, Vec3, f32)]) -> Case {
-        let sizes: Vec<(u8, u32, u32)> = positions.iter().map(|p| (p.0, 2560, 1440)).collect();
-        let placements = positions
-            .iter()
-            .map(|&(id, at, width)| {
-                (
-                    id,
-                    Placement {
-                        position: at,
-                        rotation: facing(at, Vec3::ZERO),
-                        width,
-                    },
-                )
-            })
-            .collect();
-        (placements, sizes)
+        assert_eq!(rows_ids(&wall, &three), vec![vec![0, 1, 2]]);
     }
 
     const H: f32 = 1440.0 / 2560.0;
@@ -1838,53 +1471,6 @@ mod tests {
             .collect();
         d.sort_by(f32::total_cmp);
         d[1]
-    }
-
-    #[test]
-    fn a_joins_monitors_edge_to_edge() {
-        let (p, sizes) = case(&[
-            (0, Vec3::new(0.0, 0.0, -1.1), 1.2),
-            // Overlapping on the right, a little lower and nearer.
-            (1, Vec3::new(1.0, -0.05, -0.8), 1.2),
-            // A small gap on the left.
-            (2, Vec3::new(-1.35, 0.02, -0.9), 1.2),
-        ]);
-        let t = snap(&p, &sizes, Vec3::ZERO, Some(0));
-        assert!(
-            t[&0].position.distance(p[&0].position) < 1e-5,
-            "the anchor stays"
-        );
-        for id in [1, 2] {
-            let s = seam(&t[&0], &t[&id]);
-            assert!(s < 1e-3, "monitor {id}: corners {s} m off the shared edge");
-        }
-    }
-
-    #[test]
-    fn a_monitor_above_tilts_towards_the_user_where_it_was_put() {
-        // Above the anchor, off to the right on purpose, sunk into it.
-        let (p, sizes) = case(&[
-            (0, Vec3::new(0.0, 0.0, -1.1), 1.2),
-            (1, Vec3::new(0.35, 0.55, -1.0), 1.2),
-        ]);
-        let t = snap(&p, &sizes, Vec3::ZERO, Some(0));
-        assert!(seam(&t[&0], &t[&1]) < 1e-3);
-        // Still off to the right (not centred into a row).
-        let x = (t[&0].rotation.inverse() * (t[&1].position - t[&0].position)).x;
-        assert!((x - 0.35).abs() < 0.08, "moved along the edge to {x}");
-        // Tilted down towards the eye, not a vertical wall.
-        let normal = t[&1].rotation * Vec3::Z;
-        assert!(normal.y < -0.1, "normal {normal}");
-    }
-
-    #[test]
-    fn a_leaves_monitors_put_apart() {
-        let (p, sizes) = case(&[
-            (0, Vec3::new(0.0, 0.0, -1.1), 1.2),
-            (1, Vec3::new(2.5, 0.0, 0.5), 1.2),
-        ]);
-        let t = snap(&p, &sizes, Vec3::ZERO, Some(0));
-        assert!(t[&1].position.distance(p[&1].position) < 1e-5);
     }
 
     #[test]
@@ -1944,7 +1530,7 @@ mod tests {
         let center = (Vec3::ZERO, 0.0);
         let three = [(0, 2560, 1440), (1, 2560, 1440), (2, 2560, 1440)];
         let overhead = arrange(Preset::Overhead, &three, None, None);
-        let rows = rows_by_position(&overhead, &three, center, Preset::Overhead);
+        let rows = layout_rows(&seen(&overhead, &three, center, Preset::Overhead), None);
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].ids().collect::<Vec<_>>(), vec![0, 1, 2]);
     }

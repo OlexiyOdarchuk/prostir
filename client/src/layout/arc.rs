@@ -22,6 +22,9 @@ pub const MAX_ARC: f32 = 210.0 * std::f32::consts::PI / 180.0;
 pub const MAX_RADIUS: f32 = 1.5;
 /// Most rows a preset makes; more monitors than that only move further away.
 const MAX_ROWS: usize = 3;
+/// The most of the circle one monitor takes: a very wide one moves away rather than
+/// wrap around the head.
+const MAX_ONE: f32 = 120.0 * std::f32::consts::PI / 180.0;
 
 /// The widest row of a wall: what spans 150 degrees seen from [`RADIUS`] away.
 pub fn wall_width() -> f32 {
@@ -35,17 +38,19 @@ pub fn angular_width(width: f32, radius: f32) -> f32 {
 }
 
 /// The smallest circle, not nearer than [`RADIUS`], on which monitors `widths` wide
-/// take at most [`MAX_ARC`] side by side.
+/// take at most [`MAX_ARC`] side by side, and none more than a third of it.
 pub fn arc_radius(widths: &[f32]) -> f32 {
     let arc = |r: f32| widths.iter().map(|w| angular_width(*w, r)).sum::<f32>();
     let widest = widths.iter().copied().fold(0.0, f32::max);
-    if widest / 2.0 <= RADIUS && arc(RADIUS) <= MAX_ARC {
-        return RADIUS;
+    // Where the widest takes MAX_ONE.
+    let nearest = RADIUS.max(widest / 2.0 / (MAX_ONE / 2.0).sin());
+    if arc(nearest) <= MAX_ARC {
+        return nearest;
     }
     // x <= asin x <= pi x / 2 bounds the sum by sum / R and pi sum / 2R.
     let sum: f32 = widths.iter().sum();
-    let mut lo = (sum / MAX_ARC).max(widest / 2.0);
-    let mut hi = (std::f32::consts::FRAC_PI_2 * sum / MAX_ARC).max(widest / 2.0);
+    let mut lo = (sum / MAX_ARC).max(nearest);
+    let mut hi = (std::f32::consts::FRAC_PI_2 * sum / MAX_ARC).max(nearest);
     for _ in 0..40 {
         let mid = (lo + hi) / 2.0;
         if arc(mid) <= MAX_ARC {
@@ -54,7 +59,7 @@ pub fn arc_radius(widths: &[f32]) -> f32 {
             lo = mid;
         }
     }
-    hi.max(RADIUS)
+    hi
 }
 
 /// Monitors split into rows: ranges of the order they were given in, which of them

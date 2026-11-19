@@ -20,6 +20,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 prostir-proto = { path = "../proto" }
+prostir-layout = { path = "../layout" }
 glam = "0.30"
 log = "0.4"
 tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
