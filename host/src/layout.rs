@@ -15,12 +15,13 @@ pub struct Seat {
     pub h: i32,
 }
 
-/// A [`Seat`] with its centre worked out.
+/// A [`Seat`] with its centre worked out, and its middle known (`i32`) or maybe not
+/// (`Option<i32>`).
 #[derive(Debug, Clone, Copy)]
-struct Seen {
+struct Seen<M> {
     id: u8,
     center: i32,
-    middle: i32,
+    middle: M,
     w: i32,
     h: i32,
 }
@@ -34,7 +35,7 @@ struct Seen {
 pub fn arrange_free(seats: &[Seat], main: u8) -> Option<Vec<(u8, i32, i32)>> {
     const REACH: i32 = 200;
     const LINE_UP: i32 = 24;
-    let mut rest: Vec<Seen> = seats
+    let mut rest: Vec<Seen<i32>> = seats
         .iter()
         .map(|m| {
             Some(Seen {
@@ -47,8 +48,8 @@ pub fn arrange_free(seats: &[Seat], main: u8) -> Option<Vec<(u8, i32, i32)>> {
         })
         .collect::<Option<_>>()?;
     // As seen: top-left and size.
-    let seen = |m: &Seen| (m.center - m.w / 2, m.middle - m.h / 2);
-    let gaps = |a: &Seen, b: &Seen| {
+    let seen = |m: &Seen<i32>| (m.center - m.w / 2, m.middle - m.h / 2);
+    let gaps = |a: &Seen<i32>, b: &Seen<i32>| {
         let ((ax, ay), (bx, by)) = (seen(a), seen(b));
         (
             (ax - (bx + b.w)).max(bx - (ax + a.w)),
@@ -64,8 +65,8 @@ pub fn arrange_free(seats: &[Seat], main: u8) -> Option<Vec<(u8, i32, i32)>> {
     };
     let m0 = rest.remove(first);
     let (x0, y0) = seen(&m0);
-    let mut placed: Vec<(Seen, i32, i32)> = vec![(m0, x0, y0)];
-    let overlaps = |placed: &[(Seen, i32, i32)], m: &Seen, x: i32, y: i32| {
+    let mut placed: Vec<(Seen<i32>, i32, i32)> = vec![(m0, x0, y0)];
+    let overlaps = |placed: &[(Seen<i32>, i32, i32)], m: &Seen<i32>, x: i32, y: i32| {
         placed
             .iter()
             .find(|(n, nx, ny)| x < nx + n.w && *nx < x + m.w && y < ny + n.h && *ny < y + m.h)
@@ -158,15 +159,11 @@ pub fn arrange(rows: &[Vec<Seat>], main: u8) -> Vec<(u8, i32, i32)> {
     else {
         return Vec::new();
     };
-    // Heights as seen when all are known (a portrait monitor's top lined up with its
-    // neighbour's stays so), else centred in the row; every monitor still overlaps the
-    // one before it enough for the mouse to cross. Other rows go by their centres.
-    let seen = rows[main_row].iter().all(|m| m.middle.is_some());
     // Unknown centres: right after the previous monitor of the row.
-    let rows: Vec<Vec<Seen>> = rows
+    let rows: Vec<Vec<Seen<Option<i32>>>> = rows
         .iter()
         .map(|r| {
-            let mut out: Vec<Seen> = Vec::with_capacity(r.len());
+            let mut out: Vec<Seen<Option<i32>>> = Vec::with_capacity(r.len());
             for m in r.iter() {
                 let center = m
                     .center
@@ -174,8 +171,7 @@ pub fn arrange(rows: &[Vec<Seat>], main: u8) -> Vec<(u8, i32, i32)> {
                 out.push(Seen {
                     id: m.id,
                     center,
-                    // Read only where `seen` says every one is known.
-                    middle: m.middle.unwrap_or(0),
+                    middle: m.middle,
                     w: m.w,
                     h: m.h,
                 });
@@ -185,15 +181,18 @@ pub fn arrange(rows: &[Vec<Seat>], main: u8) -> Vec<(u8, i32, i32)> {
         })
         .collect();
     // Placed so far: (seat, x, y).
-    let mut placed: Vec<(Seen, i32, i32)> = Vec::new();
+    let mut placed: Vec<(Seen<Option<i32>>, i32, i32)> = Vec::new();
     let tallest = rows[main_row].iter().map(|m| m.h).max().unwrap_or(0);
+    // Heights as seen when all are known (a portrait monitor's top lined up with its
+    // neighbour's stays so), else centred in the row; every monitor still overlaps the
+    // one before it enough for the mouse to cross. Other rows go by their centres.
+    let middles: Option<Vec<i32>> = rows[main_row].iter().map(|m| m.middle).collect();
     let mut x = 0;
     let mut previous: Option<(i32, i32)> = None; // (y, h)
-    for m in &rows[main_row] {
-        let mut y = if seen {
-            m.middle - m.h / 2
-        } else {
-            (tallest - m.h) / 2
+    for (i, m) in rows[main_row].iter().enumerate() {
+        let mut y = match &middles {
+            Some(middles) => middles[i] - m.h / 2,
+            None => (tallest - m.h) / 2,
         };
         if let Some((py, ph)) = previous {
             const REACH: i32 = 200;
@@ -211,14 +210,14 @@ pub fn arrange(rows: &[Vec<Seat>], main: u8) -> Vec<(u8, i32, i32)> {
         .collect();
     for (r, next_to) in order {
         let above = r < next_to;
-        let neighbours: Vec<(Seen, i32, i32)> = placed
+        let neighbours: Vec<(Seen<Option<i32>>, i32, i32)> = placed
             .iter()
             .copied()
             .filter(|(m, _, _)| rows[next_to].iter().any(|n| n.id == m.id))
             .collect();
-        let mut row: Vec<(Seen, i32)> = Vec::new();
+        let mut row: Vec<(Seen<Option<i32>>, i32)> = Vec::new();
         for m in &rows[r] {
-            let overlap = |a: &Seen| {
+            let overlap = |a: &Seen<Option<i32>>| {
                 (m.center + m.w / 2).min(a.center + a.w / 2)
                     - (m.center - m.w / 2).max(a.center - a.w / 2)
             };
@@ -264,7 +263,7 @@ pub fn arrange(rows: &[Vec<Seat>], main: u8) -> Vec<(u8, i32, i32)> {
         }
         for (m, x) in row {
             // Touch the nearest monitors under (or over) it, overlapping none.
-            let below: Vec<&(Seen, i32, i32)> = placed
+            let below: Vec<&(Seen<Option<i32>>, i32, i32)> = placed
                 .iter()
                 .filter(|(n, nx, _)| x < nx + n.w && *nx < x + m.w)
                 .collect();
