@@ -158,7 +158,8 @@ fn monitors_are_added_and_removed() {
 
 /// Taken off for a moment, the monitors pause and come back; for longer than 10 s, the
 /// PC gives the desktop back and makes them anew when the headset returns. Meanwhile
-/// the PC logs its numbers for each stream.
+/// the PC logs its numbers for each stream. A moving screen, so a pause that still
+/// sends frames shows (a still screen coming back is the next test).
 #[test]
 fn taking_the_headset_off_pauses_and_then_ends_the_session() {
     let options = Options {
@@ -198,6 +199,27 @@ fn taking_the_headset_off_pauses_and_then_ends_the_session() {
     back.wait(START, "every monitor showing", View::all_monitors_show)
         .unwrap();
     assert_eq!(pc.count_log("fake desktop: created Fake-1 "), 2);
+}
+
+/// Put on again after a moment, a still screen shows on every monitor again though
+/// nothing on it changed: the PC starts each stream over once. Before 0.1.1 the
+/// picture in the headset stayed frozen.
+#[test]
+fn a_still_screen_shows_again_after_putting_the_headset_on() {
+    let (_dir, mut pc, _keys, mut headset) = session("still", &Options::default());
+    headset.send(&ClientMsg::Presence { worn: false }).unwrap();
+    pc.wait_log(SOON, "paused: headset not worn or gone");
+    headset.take_for(Duration::from_secs(1)).unwrap();
+    headset.reset_counts();
+    let before = pc.source_starts();
+    headset.send(&ClientMsg::Presence { worn: true }).unwrap();
+    headset
+        .wait(SOON, "pictures after putting it on", |v| {
+            v.streams.len() == 2 && v.streams.values().all(|s| s.has_picture())
+        })
+        .unwrap();
+    headset.take_for(Duration::from_secs(1)).unwrap();
+    assert_started_once(&before, &pc.source_starts());
 }
 
 /// The monitors kept after the headset left send their picture to the headset that
