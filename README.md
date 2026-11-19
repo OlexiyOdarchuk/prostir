@@ -9,7 +9,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/OlexiyOdarchuk/prostir/actions/workflows/ci.yml"><img src="https://github.com/OlexiyOdarchuk/prostir/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/OlexiyOdarchuk/prostir/actions/workflows/ci-pc.yml"><img src="https://github.com/OlexiyOdarchuk/prostir/actions/workflows/ci-pc.yml/badge.svg" alt="CI PC"></a>
+  <a href="https://github.com/OlexiyOdarchuk/prostir/actions/workflows/ci-headset.yml"><img src="https://github.com/OlexiyOdarchuk/prostir/actions/workflows/ci-headset.yml/badge.svg" alt="CI headset"></a>
   <a href="https://github.com/OlexiyOdarchuk/prostir/releases"><img src="https://img.shields.io/github/v/release/OlexiyOdarchuk/prostir?include_prereleases&label=release" alt="Release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--or--later-blue" alt="License: GPL-3.0-or-later"></a>
   <img src="https://img.shields.io/badge/KDE%20Plasma%206%20%C2%B7%20Hyprland-Wayland-1d99f3" alt="KDE Plasma 6 and Hyprland, Wayland">
