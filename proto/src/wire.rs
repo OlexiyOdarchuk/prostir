@@ -82,7 +82,12 @@ impl<'a> Reader<'a> {
 
     /// The next `N` bytes.
     pub fn array<const N: usize>(&mut self) -> Result<[u8; N], WireError> {
-        Ok(self.take(N)?.try_into().expect("take gives N bytes"))
+        let (head, tail) = self
+            .buf
+            .split_first_chunk::<N>()
+            .ok_or(WireError::Truncated)?;
+        self.buf = tail;
+        Ok(*head)
     }
 
     /// Everything that is left.

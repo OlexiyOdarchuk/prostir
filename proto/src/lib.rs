@@ -379,17 +379,35 @@ fn unsendable(e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Err
     io::Error::new(io::ErrorKind::InvalidInput, e)
 }
 
-fn write_frame(w: &mut impl Write, tag: u8, parts: &[&[u8]]) -> io::Result<()> {
-    let len: usize = parts.iter().map(|p| p.len()).sum();
+/// The 5 bytes before a payload of `len` bytes.
+fn header(tag: u8, len: usize) -> io::Result<[u8; 5]> {
     let len = u32::try_from(len).map_err(|_| unsendable("message too large"))?;
     let mut header = [0u8; 5];
     header[0] = tag;
     header[1..].copy_from_slice(&len.to_le_bytes());
-    w.write_all(&header)?;
+    Ok(header)
+}
+
+/// A media message: its header, then its parts as they are (no copy of the data).
+fn write_media(w: &mut impl Write, tag: u8, parts: &[&[u8]]) -> io::Result<()> {
+    w.write_all(&header(tag, parts.iter().map(|p| p.len()).sum())?)?;
     for p in parts {
         w.write_all(p)?;
     }
     Ok(())
+}
+
+/// Any other message, header and payload in one buffer and one write.
+fn write_fields(
+    w: &mut impl Write,
+    tag: u8,
+    put: impl FnOnce(&mut Vec<u8>) -> Result<(), WireError>,
+) -> io::Result<()> {
+    let mut out = vec![0u8; 5];
+    put(&mut out).map_err(unsendable)?;
+    let head = header(tag, out.len() - 5)?;
+    out[..5].copy_from_slice(&head);
+    w.write_all(&out)
 }
 
 /// The tag and payload length of the next message.
@@ -431,18 +449,14 @@ impl HostMsg {
                 pts_us,
                 data,
             } => {
-                let mut head = Vec::with_capacity(FRAME_HEAD);
-                id.put(&mut head).map_err(unsendable)?;
-                keyframe.put(&mut head).map_err(unsendable)?;
-                pts_us.put(&mut head).map_err(unsendable)?;
-                write_frame(w, tag::FRAME, &[&head, data])
+                let mut head = [0u8; FRAME_HEAD];
+                head[0] = *id;
+                head[1] = u8::from(*keyframe);
+                head[2..].copy_from_slice(&pts_us.to_le_bytes());
+                write_media(w, tag::FRAME, &[&head, data])
             }
-            HostMsg::Audio { pcm } => write_frame(w, tag::AUDIO, &[pcm]),
-            _ => {
-                let mut payload = Vec::new();
-                self.put_fields(&mut payload).map_err(unsendable)?;
-                write_frame(w, self.wire_tag(), &[&payload])
-            }
+            HostMsg::Audio { pcm } => write_media(w, tag::AUDIO, &[pcm]),
+            _ => write_fields(w, self.wire_tag(), |out| self.put_fields(out)),
         }
     }
 
@@ -505,12 +519,8 @@ impl HostMsg {
 impl ClientMsg {
     pub fn write(&self, w: &mut impl Write) -> io::Result<()> {
         match self {
-            ClientMsg::Mic { pcm } => write_frame(w, tag::MIC, &[pcm]),
-            _ => {
-                let mut payload = Vec::new();
-                self.put_fields(&mut payload).map_err(unsendable)?;
-                write_frame(w, self.wire_tag(), &[&payload])
-            }
+            ClientMsg::Mic { pcm } => write_media(w, tag::MIC, &[pcm]),
+            _ => write_fields(w, self.wire_tag(), |out| self.put_fields(out)),
         }
     }
 
