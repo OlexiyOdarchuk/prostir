@@ -185,6 +185,7 @@ pub fn accept(
         Some(ClientMsg::Hello { version, min, app })
             if !prostir_proto::compatible(version, min) =>
         {
+            let app = peer_version(&app);
             incompatible(&mut writer, min > PROTOCOL_VERSION, &app)?;
             bail!("headset speaks protocol v{version} (app {app}), PC v{PROTOCOL_VERSION}")
         }
@@ -359,17 +360,10 @@ fn obtain_code(headset_shows: bool, tray: Option<&tray::Handle>) -> Result<Strin
 /// which side needs the update.
 fn incompatible(writer: &mut SecureWriter, pc_too_old: bool, headset_app: &str) -> Result<()> {
     let ours = env!("CARGO_PKG_VERSION");
-    // Comes from a peer that has not proved anything yet: only a version-like string
-    // goes into the notification.
-    let headset_app: String = headset_app
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || ".+-".contains(*c))
-        .take(24)
-        .collect();
     let headset_app = if headset_app.is_empty() {
         t("старіша", "older")
     } else {
-        headset_app.as_str()
+        headset_app
     };
     let (title, body) = if pc_too_old {
         (
@@ -416,6 +410,15 @@ fn incompatible(writer: &mut SecureWriter, pc_too_old: bool, headset_app: &str) 
         notify(title, &body);
     }
     Ok(())
+}
+
+/// The app version a peer that has not proved anything yet says it has, as it may go
+/// into the log or a notification: version-like characters only, and short.
+fn peer_version(app: &str) -> String {
+    app.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || ".+-".contains(*c))
+        .take(24)
+        .collect()
 }
 
 fn refuse(writer: &mut SecureWriter, why: &str) -> Result<bool> {
@@ -667,6 +670,16 @@ mod tests {
         assert!(refused.is_err(), "no pairing and no session");
         assert_told_to_update(&msgs);
         assert!(pc.security.trusted.is_empty());
+    }
+
+    #[test]
+    fn a_peer_version_is_short_and_plain() {
+        assert_eq!(peer_version("0.2.0-beta+1"), "0.2.0-beta+1");
+        assert_eq!(
+            peer_version("1.0\n\u{1b}[31mfake log line"),
+            "1.031mfakelogline"
+        );
+        assert_eq!(peer_version(&"9".repeat(60_000)).len(), 24);
     }
 
     /// Three wrong codes are free; after that every attempt waits longer, up to 15 min.
