@@ -46,8 +46,8 @@ Contents:
 | Discovery | UDP broadcast to port `47831` (`DISCOVERY_PORT`) |
 | Sessions | One at a time |
 
-The connection is plain TCP carrying an encrypted byte stream (see
-[Security](#2-security)). There are two ways to reach the host:
+The connection is plain TCP carrying encrypted records (see [Security](#2-security)
+and [Framing](#3-framing)). There are two ways to reach the host:
 
 - **Wi-Fi or Ethernet**: the client connects to the host's address on the local network.
 - **USB**: the host keeps `adb reverse tcp:47830 tcp:47830` set up for every headset
@@ -229,8 +229,11 @@ headset's `PairMsg` (sent right after `PairBegin`), so the next `PairBegin` can 
 the same connection.
 
 Client (implementation-defined, `client/src/net.rs`): read timeout 10 s, 300 s while
-pairing; at most 3 attempts per connection, after which it stops and asks the user
-again; it waits up to 300 s for the user to type a code shown by the host.
+pairing; each write at most 5 s; at most 3 attempts per connection, after which it
+stops and asks the user again; it waits up to 300 s for the user to type a code shown
+by the host, looking at the connection every half second meanwhile.
+
+For the timeouts in the session see [End of session](#end-of-session).
 
 ### What is encrypted
 
@@ -336,7 +339,7 @@ the headset once it has read it.
 ```
 
 - `tag`: which message (see [Message reference](#5-message-reference)). Host→client tags
-  are 1 to 24, client→host tags 101 to 127.
+  are 1 to 27, client→host tags 101 to 130.
 - `length`: payload length in bytes, **little-endian**, at most the limit above.
 
 ### Encoding
@@ -497,24 +500,55 @@ if the headset is not worn. `SetLayout` follows once the monitors are placed and
 arrangement has held still for 800 ms. Everything else is sent when the user does
 something.
 
+Both sides send `Ping{seq}` every second once the session is open (the host from
+`Opened` on, the client from reading it), with `seq` counting up from 0, and answer a
+`Ping` at once with a `Pong` carrying its `seq`. A peer must answer pings; it may send
+its own at another rate or not at all, but then the other side sees silence (below)
+when nothing else flows. The current apps answer from their reading thread, so the
+round trip measures the network and not a busy main loop, and log it every 10 s.
+
 The host ignores (and logs) known client messages that have no meaning in the session,
 such as `Open` or `PairBegin`. The client ignores host pairing messages, `Welcome`,
 `Opened` and `Incompatible` in the session.
 
 ### End of session
 
-Either side closes the TCP connection. Implementation-defined details of the current
-apps:
+A side that ends a session on purpose sends `Goodbye{reason}` in the control lane,
+after the control messages it still had to send and instead of any more sound or
+video, and then sends nothing more. The other side closes the connection once it read
+it. The side that said goodbye stops sending (a TCP half close) but still reads and
+drops what arrives, until the other side closed the connection or for a short while
+(1 s in the current apps), and then closes too: closing with unread data would reset
+the connection, which can throw away the goodbye on its way (over `adb reverse` it
+does). A reason a reader does not know reads as `0`.
 
+| Code | From the host | From the headset |
+|---:|---|---|
+| `0` | Other | Other |
+| `1` | The PC app is closing (tray, signal, the PC shutting down) | The headset app is closing |
+| `2` | The headset was not worn for a while; it may connect again once it is worn | The user chose another PC |
+| `3` | The PC forgot this headset (the tray's "Forget paired headsets"): pair again | The user forgot this PC in the headset |
+| `4` | A new connection of this headset replaced this one | |
+| `5` | The monitors or encoders stopped; an `Error` with a text came first | |
+
+What the current client shows: "The PC app was closed" for `1`, the pairing offer
+for `3` ("The PC no longer knows this headset"), "The PC ended the connection" for
+`0` and unknown codes, and nothing for `2`, `4` and `5` (whose `Error` it showed
+already). The current host logs the headset's reason; its monitors stay for
+`--linger` as after any session.
+
+Without a goodbye, implementation-defined details of the current apps:
+
+- Both: no record at all for 5 s ends the session (the other side pings every
+  second, so only a dead link or a stopped peer is that quiet). The client then shows
+  "No connection to the PC" and looks for the PC again.
+- Both: a write blocked for 5 s ends the session.
 - Host: TCP keepalive (idle 4 s, interval 2 s, 3 probes) and `TCP_USER_TIMEOUT` 10 s
-  notice a headset that vanished; a write blocked for 5 s also ends the session (on
-  both sides).
-- Host: a headset reported as not worn (`Presence{0}`) for 10 s ends the session; the
-  host then removes its virtual monitors until the headset connects again.
+  also notice a headset that vanished, already while pairing.
+- Host: a headset reported as not worn (`Presence{0}`) for 10 s ends the session (with
+  goodbye `2`); the host then removes its virtual monitors until the headset connects
+  again.
 - Host: after a session it keeps the virtual monitors for 30 s (`--linger`).
-- Client: no data for 10 s ends the session. In normal operation the host never stays
-  silent that long while streaming, because the capture repeats the last picture every
-  500 ms when nothing on screen changes.
 
 ### Forward compatibility
 
@@ -565,6 +599,9 @@ Payload notation: fields in order, `name:type`, with the types of
 | 22 | `Abilities` | `bits:u8` | What the PC can do beyond the basics. Bit `1` (`MOVE_MOUSE`): it can move the mouse, so `MouseTo` works. |
 | 23 | `SoundFrom` | `id:opt<u8>` | The window playing sound is on stream `id`; none if not known. Sent only while `SetSoundFromScreen` is on, when it changes. |
 | 24 | `Opened` | (empty) | The answer to `Open` from a trusted headset: the session started. |
+| 25 | `Ping` | `seq:u32` | Sent every second in the session; answer with `Pong{seq}` at once. |
+| 26 | `Pong` | `seq:u32` | The answer to the headset's `Ping{seq}`. |
+| 27 | `Goodbye` | `reason:u8` | The host ends the session on purpose, for `reason` (see [End of session](#end-of-session)); nothing follows. |
 
 ### Headset → host
 
@@ -597,8 +634,11 @@ Payload notation: fields in order, `name:type`, with the types of
 | 125 | `SetNotifications` | `enabled:bool` | Pass the PC's desktop notifications to the headset as `Notice`. |
 | 126 | `SetSoundFromScreen` | `enabled:bool` | Report which stream the sound comes from (`SoundFrom`). |
 | 127 | `Open` | (empty) | Start the session, once the headset trusts the host. Answered with `Opened` or `PairingRequired`. |
+| 128 | `Ping` | `seq:u32` | Sent every second in the session; answer with `Pong{seq}` at once. |
+| 129 | `Pong` | `seq:u32` | The answer to the host's `Ping{seq}`. |
+| 130 | `Goodbye` | `reason:u8` | The headset ends the session on purpose, for `reason`; nothing follows. |
 
-Tags 0, 25 to 100 and 128 to 255 are unused.
+Tags 0, 28 to 100 and 131 to 255 are unused.
 
 Host behaviour for monitor requests (implementation-defined): at most 6 monitors; sizes
 from 320×240 to 7680×4320; the last monitor cannot be removed; at most 3 window panels.
@@ -620,8 +660,10 @@ The host sends `StreamStart` before the first `Frame` of a stream on this connec
 It sends it again for the same id when the encoded size changes, when the codec changes
 (after `SetPcSettings`), and for every stream at the start of each session. A client
 that gets `StreamStart` for an id it already has replaces that stream (new decoder,
-new size). Video frames of that stream still waiting on the host are discarded when
-`StreamStart` or `StreamEnd` is queued, so no frame of the old configuration follows.
+new size). `StreamStart` and `StreamEnd` go in the lane of their stream, so they never
+overtake a frame of the old configuration that is on its way already. Video frames of
+that stream still waiting on the host are discarded when `StreamStart` or `StreamEnd`
+is queued, so no other frame of the old configuration follows.
 
 The first `Frame` after a `StreamStart` is a keyframe.
 
@@ -654,20 +696,36 @@ The first `Frame` after a `StreamStart` is a keyframe.
 
 ### When frames are late
 
-The host sends from one outbox per connection, in strict priority:
+The host picks every packet it sends (implementation-defined, `host/src/outbox.rs`),
+in strict priority:
 
-1. control messages (everything except `Audio` and `Frame`), in order;
-2. sound (`Audio`), at most 8 slices waiting; the oldest is dropped when a newer one
-   arrives;
-3. video (`Frame`).
+1. control messages (everything except `Audio`, `Frame`, `StreamStart` and
+   `StreamEnd`), in order, in lane `0`; never dropped, but over 4 MiB of them waiting
+   means the headset reads nothing, and the session ends;
+2. sound (`Audio`), in lane `1`, at most 8 slices waiting; the oldest is dropped when a
+   newer one arrives;
+3. video, each stream in a lane of its own (`2 + id`), the streams taking turns a
+   packet each.
+
+A message it started is always finished; one of a higher class goes between its
+packets. So sound waits behind at most one packet (16 KiB) of a big keyframe, and one
+stream's keyframe does not hold up the others.
 
 A non-key video frame that has waited more than 120 ms is not sent. The host then
 drops every later frame of that stream until the next keyframe (a decoder cannot use
 them without the lost one) and asks its encoder for a keyframe, at most every 300 ms.
-Keyframes are never dropped for being late. If more than 16 MiB of video is waiting,
-new non-key frames are refused the same way. Other streams are not affected. These
-values are implementation-defined; the rule a client can rely on is that **after a gap
-in a stream, the next frame it gets for that stream is a keyframe**.
+Keyframes are never dropped for being late, and a keyframe queued drops the frames of
+its stream still waiting before it (it replaces them). If more than 16 MiB of video is
+waiting, new non-key frames are refused the same way. Other streams are not affected.
+
+The host also paces the connection (`SO_MAX_PACING_RATE`): it sends at most 1.5 times
+what its encoders make plus 4 Mbit/s, and never less than 20 Mbit/s, so a keyframe
+does not land in the Wi-Fi access point's queue all at once with sound stuck behind
+it, where nothing can overtake it any more. It keeps little unsent data in the kernel
+(`TCP_NOTSENT_LOWAT` 32 KiB) for the same reason.
+
+These values are implementation-defined; the rule a client can rely on is that
+**after a gap in a stream, the next frame it gets for that stream is a keyframe**.
 
 ### Sound and microphone
 
@@ -680,6 +738,10 @@ There is no header or timestamp: each message is a whole number of sample frames
 be played in arrival order. Slices are 10 ms in the current apps (1920 bytes of PC
 sound, 960 bytes of microphone), but the size is implementation-defined and a receiver
 must accept any length.
+
+The current client sends control messages first, then microphone sound and
+`FrameShown` in a lane of their own; while the network is stuck it drops those beyond
+about 2.5 s waiting, and never a control message.
 
 PC sound flows while the headset is worn and `AudioWanted` is on. The microphone:
 `SetMic{1}` tells the host to offer the headset microphone as a PC input; the host sends

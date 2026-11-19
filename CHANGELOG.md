@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.2.0 (not released yet)
+
+### Sound, menu and video while the picture changes a lot
+
+- Sound, the microphone, focus and the menu's answers no longer wait while the PC sends
+  a big frame. Frames go out in pieces of 16 KiB, and whatever is more urgent goes
+  between them; the monitors take turns, so one monitor's keyframe no longer holds up
+  the others. The PC also spreads what it sends over time instead of pushing a whole
+  keyframe into the Wi-Fi router's queue at once. On a 100 Mbit/s link with keyframes
+  on three monitors together, sound now arrives within about 10 ms and never later
+  than 11 ms (before: 26 to 32 ms, and up to 90 ms), without the clicks of pauses over
+  30 ms (13 to 23 in 15 s before).
+- A frame that waits too long is still dropped, and a new keyframe now also drops the
+  older frames of its monitor still waiting, so a slow moment costs less.
+
+### Connection
+
+- A dropped connection, a PC gone to sleep or a headset switched off is noticed within
+  5 s on both sides (it took about 10 s).
+- The headset says why a session ended: "The PC app was closed", "The PC ended the
+  connection", or "No connection to the PC" when it fell silent. It looks for the PC
+  again as before.
+- "Forget paired headsets" in the PC tray ends the session of the forgotten headset at
+  once; the headset then offers to pair again.
+- Leaving a PC in the headset (another PC, forgetting it, closing the app) tells the
+  PC why, and the PC writes it in its log. Both sides log the round trip of the
+  connection every 10 s.
+
 ## 0.1.1 (2026-11-19)
 
 Fixes for things that came up in the first days of use. Update both the PC part and
