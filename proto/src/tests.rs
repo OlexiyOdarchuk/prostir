@@ -42,6 +42,11 @@ fn read_client(bytes: &[u8]) -> io::Result<ClientMsg> {
     Ok(msg)
 }
 
+/// The decoding error inside an io::Error, if it is one.
+fn wire_error(e: &io::Error) -> Option<&WireError> {
+    e.get_ref()?.downcast_ref()
+}
+
 fn settings() -> PcSettings {
     PcSettings {
         quality: 30,
@@ -395,6 +400,24 @@ fn lists_cannot_hold_more_than_there_can_be() {
     let mut payload = Vec::new();
     wire::Limited::put(&vec![row.clone(), row], &mut payload, 16);
     assert!(read_client(&framed(117, &payload)).is_err());
+    // A monitor in two places.
+    let entry = |id| LayoutEntry {
+        id,
+        center: None,
+        middle: None,
+    };
+    let twice = ClientMsg::SetLayout {
+        rows: vec![
+            LayoutRow {
+                entries: vec![entry(0), entry(1)],
+            },
+            LayoutRow {
+                entries: vec![entry(1)],
+            },
+        ],
+    };
+    let err = read_client(&client_bytes(&twice)).unwrap_err();
+    assert_eq!(wire_error(&err), Some(&WireError::Repeated(1)));
     // A name longer than a name may be.
     let mut payload = vec![1, 65, 0];
     payload.extend(std::iter::repeat_n(b'a', 65));

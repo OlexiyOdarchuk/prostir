@@ -632,7 +632,8 @@ entry:     id:u8, center:opt<i32>, middle:opt<i32>
 
 Rows go from top to bottom, entries in a row from left to right. An empty list means no
 rows. A `SetLayout` may hold at most 16 rows and at most 16 monitors in all its rows
-together; a reader rejects a larger one as invalid, and the connection ends.
+together, and lists each monitor once; a reader rejects any other as invalid, and the
+connection ends.
 
 - `id`: a monitor id, or `100` for the mirror if the headset placed it. Window panels
   are not part of the layout.

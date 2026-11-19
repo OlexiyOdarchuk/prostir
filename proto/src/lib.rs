@@ -314,7 +314,8 @@ wire_enum! {
         },
         /// How the monitors stand around the user, for the desktop's arrangement: rows
         /// from top to bottom, with where each monitor is seen (see [`LayoutRow`]); the
-        /// PC lays its outputs out to match. At most 16 monitors in all rows together.
+        /// PC lays its outputs out to match. At most 16 monitors in all rows together,
+        /// each of them once.
         117 => SetLayout {
             #[wire(max = MAX_LAYOUT_ENTRIES)]
             rows: Vec<LayoutRow>,
@@ -530,12 +531,20 @@ impl ClientMsg {
         })?;
         r.finish()?;
         if let ClientMsg::SetLayout { rows } = &msg {
+            // Each monitor once, so the order the PC makes from it fits in a message.
             let len = rows.iter().map(|r| r.entries.len()).sum();
             if len > MAX_LAYOUT_ENTRIES {
                 return Err(WireError::TooLong {
                     len,
                     max: MAX_LAYOUT_ENTRIES,
                 });
+            }
+            let mut seen = Vec::with_capacity(len);
+            for id in rows.iter().flat_map(LayoutRow::ids) {
+                if seen.contains(&id) {
+                    return Err(WireError::Repeated(id));
+                }
+                seen.push(id);
             }
         }
         Ok(msg)

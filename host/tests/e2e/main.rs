@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use pc::{Options, Pc, TestDir};
-use prostir_proto::{ClientMsg, Codec, PcSettings, encoders};
+use prostir_proto::{ClientMsg, Codec, LayoutEntry, LayoutRow, PcSettings, encoders};
 use prostir_testkit::{ConnectError, FakeHeadset, Keys, View};
 
 /// Long enough for a slow CI machine to start GStreamer and the encoders.
@@ -136,6 +136,34 @@ fn a_headset_that_forgot_the_pc_pairs_again() {
     headset
         .wait(START, "every monitor showing", View::all_monitors_show)
         .unwrap();
+}
+
+/// A layout that lists one monitor many times is not a layout: the PC ends the session
+/// instead of taking it in (it once turned into an order longer than a message may
+/// hold, which stopped the PC from sending anything), and the headset connects again
+/// to the same two monitors.
+#[test]
+fn a_layout_with_a_repeated_monitor_is_refused() {
+    let (_dir, pc, mut keys, mut headset) = session("repeated", &Options::default());
+    let first = headset.view().order[0];
+    let entry = LayoutEntry {
+        id: first,
+        center: None,
+        middle: None,
+    };
+    headset
+        .send(&ClientMsg::SetLayout {
+            rows: vec![LayoutRow {
+                entries: vec![entry; 16],
+            }],
+        })
+        .unwrap();
+    headset.wait_closed(SOON).unwrap();
+    let mut back = connect(&pc, &mut keys);
+    back.wait(START, "every monitor showing", View::all_monitors_show)
+        .unwrap();
+    assert_eq!(back.view().order.len(), 2);
+    assert_eq!(pc.count_log("panicked"), 0, "no thread of the PC app died");
 }
 
 #[test]

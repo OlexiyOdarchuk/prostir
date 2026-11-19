@@ -33,6 +33,8 @@ pub enum WireError {
     TooLong { len: usize, max: usize },
     /// A tag that no variant of `what` has.
     UnknownTag { what: &'static str, tag: u8 },
+    /// An id listed twice where each may be listed once.
+    Repeated(u8),
 }
 
 impl fmt::Display for WireError {
@@ -44,6 +46,7 @@ impl fmt::Display for WireError {
             Self::BadUtf8 => write!(f, "text is not UTF-8"),
             Self::TooLong { len, max } => write!(f, "{len} items where at most {max} fit"),
             Self::UnknownTag { what, tag } => write!(f, "unknown {what} {tag}"),
+            Self::Repeated(id) => write!(f, "{id} listed twice"),
         }
     }
 }
