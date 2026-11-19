@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use prostir_proto::secure::{SecureReader, SecureWriter};
 use prostir_proto::{ClientMsg, Codec, HostMsg};
 
@@ -653,6 +653,10 @@ fn main() -> Result<()> {
                 let (reader, writer) =
                     match pairing::accept(&stream, &mut control.security, control.tray.as_ref()) {
                         Ok(halves) => halves,
+                        Err(e) if e.is::<pairing::TurnedAwayAgain>() => {
+                            debug!("rejected connection from {addr}: {e:#}");
+                            continue;
+                        }
                         Err(e) => {
                             warn!("rejected connection from {addr}: {e:#}");
                             continue;

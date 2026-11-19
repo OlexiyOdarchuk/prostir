@@ -1,15 +1,15 @@
 //! Encrypted connections and pairing on the PC side.
 
 use crate::i18n::t;
-use std::io::{BufReader, Write};
-use std::net::TcpStream;
+use std::io::{BufReader, Read, Write};
+use std::net::{Shutdown, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use log::{info, warn};
+use log::{debug, info, warn};
 use prostir_proto::secure::{
     self, Identity, Pairing, SecureReader, SecureWriter, TrustStore, confirmation, tags_match,
 };
@@ -186,15 +186,23 @@ pub fn accept(
             if !prostir_proto::compatible(version, min) =>
         {
             let app = peer_version(&app);
-            incompatible(&mut writer, min > PROTOCOL_VERSION, &app)?;
-            bail!("headset speaks protocol v{version} (app {app}), PC v{PROTOCOL_VERSION}")
+            let first = incompatible(&mut writer, min > PROTOCOL_VERSION, &app)?;
+            close_gently(stream);
+            return Err(turned_away(
+                first,
+                format!("headset speaks protocol v{version} (app {app}), PC v{PROTOCOL_VERSION}"),
+            ));
         }
         Some(ClientMsg::Hello { .. }) => {}
         // Only headsets from before protocol 2 (0.1) start with anything else: they
         // could ask to pair before saying hello.
         _ => {
-            incompatible(&mut writer, false, "0.1.x")?;
-            bail!("headset from before protocol {PROTOCOL_VERSION}: no hello first")
+            let first = incompatible(&mut writer, false, "0.1.x")?;
+            close_gently(stream);
+            return Err(turned_away(
+                first,
+                format!("headset from before protocol {PROTOCOL_VERSION}: no hello first"),
+            ));
         }
     }
     HostMsg::Welcome {
@@ -356,9 +364,50 @@ fn obtain_code(headset_shows: bool, tray: Option<&tray::Handle>) -> Result<Strin
     Ok(code)
 }
 
+/// A headset turned away for its version again: a 0.1 headset that is not paired yet
+/// tries every few hundred milliseconds for minutes, and it was logged and shown once.
+#[derive(Debug)]
+pub struct TurnedAwayAgain(String);
+
+impl std::fmt::Display for TurnedAwayAgain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for TurnedAwayAgain {}
+
+fn turned_away(first: bool, why: String) -> anyhow::Error {
+    if first {
+        anyhow::anyhow!(why)
+    } else {
+        TurnedAwayAgain(why).into()
+    }
+}
+
+/// Lets the headset read what was sent before the connection closes. Closing with
+/// unread data from the peer resets the connection, which can throw away what was
+/// sent (over `adb reverse` it does): so the sending half closes first, and what the
+/// headset still sends is read and dropped for a moment.
+fn close_gently(stream: &TcpStream) {
+    let _ = stream.shutdown(Shutdown::Write);
+    let until = Instant::now() + Duration::from_millis(500);
+    let mut buf = [0u8; 4096];
+    let mut s = stream;
+    while let Some(left) = until.checked_duration_since(Instant::now()) {
+        if left.is_zero() || stream.set_read_timeout(Some(left)).is_err() {
+            break;
+        }
+        match s.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+    }
+}
+
 /// The headset speaks another protocol: tell both the headset and the person at the PC
-/// which side needs the update.
-fn incompatible(writer: &mut SecureWriter, pc_too_old: bool, headset_app: &str) -> Result<()> {
+/// which side needs the update. `false` when this was logged and shown a moment ago.
+fn incompatible(writer: &mut SecureWriter, pc_too_old: bool, headset_app: &str) -> Result<bool> {
     let ours = env!("CARGO_PKG_VERSION");
     let headset_app = if headset_app.is_empty() {
         t("старіша", "older")
@@ -384,7 +433,6 @@ fn incompatible(writer: &mut SecureWriter, pc_too_old: bool, headset_app: &str) 
             ),
         )
     };
-    warn!("{title}: {body}");
     // Headsets from before `Incompatible` existed still show this text.
     HostMsg::Error {
         text: format!("{title}. {body}"),
@@ -404,12 +452,16 @@ fn incompatible(writer: &mut SecureWriter, pc_too_old: bool, headset_app: &str) 
     let quiet = told
         .1
         .is_some_and(|t| t.elapsed() < Duration::from_secs(600));
-    if !quiet && !told.0.iter().any(|t| t == headset_app) {
+    let first = !quiet && !told.0.iter().any(|t| t == headset_app);
+    if first {
         told.0.push(headset_app.to_owned());
         told.1 = Some(Instant::now());
+        warn!("{title}: {body}");
         notify(title, &body);
+    } else {
+        debug!("{title}: {body}");
     }
-    Ok(())
+    Ok(first)
 }
 
 /// The app version a peer that has not proved anything yet says it has, as it may go
@@ -661,9 +713,13 @@ mod tests {
     fn a_protocol_1_pairing_request_is_told_to_update() {
         let mut pc = TestPc::new("v1pair");
         let (refused, msgs) = connect(&mut pc, |mut r, mut w, _, _| {
-            // PairBegin as 0.1.1 sends it: the headset shows the code, then its name.
+            // PairBegin as 0.1.1 sends it: the headset shows the code, then its name;
+            // right after it, its 33-byte SPAKE2 message, which the PC never reads.
             let mut begin = vec![109, 11, 0, 0, 0, 1];
             begin.extend_from_slice(b"Meta Quest");
+            let (_, msg) = Pairing::start("123456");
+            begin.extend_from_slice(&[110, 33, 0, 0, 0]);
+            begin.extend_from_slice(&msg);
             w.write_all(&begin).unwrap();
             read_as_v1(&mut r)
         });
