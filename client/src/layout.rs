@@ -16,7 +16,7 @@ pub const RADIUS: f32 = 1.1;
 /// The main row sits a little below eye height.
 const EYE_DROP: f32 = 0.08;
 /// How far up the "overhead" layout is tilted, for lying down.
-const OVERHEAD_PITCH: f32 = 0.95;
+pub const OVERHEAD_PITCH: f32 = 0.95;
 /// The laptop mirror is shown at most this wide.
 const MIRROR_MAX_WIDTH: f32 = 1.0;
 

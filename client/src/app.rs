@@ -686,11 +686,26 @@ impl Scene {
 
     /// Monitor `id` as seen from where the user sits, for the menu's map: centre
     /// (right, up) and half size, in radians.
+    /// Where the map looks from, and how to turn the room so it looks straight ahead:
+    /// the eyes now, facing the arrangement; lying down, along the band tilted up
+    /// overhead (seen from below, right over the head, left and right would make no
+    /// sense), as the desktop does it.
+    fn map_view(&self) -> (Vec3, glam::Quat) {
+        let tilt = if self.settings.preset == crate::settings::Preset::Overhead {
+            layout::OVERHEAD_PITCH
+        } else {
+            0.0
+        };
+        (
+            self.view_eye.unwrap_or(self.center.0),
+            glam::Quat::from_rotation_x(-tilt) * glam::Quat::from_rotation_y(-self.center.1),
+        )
+    }
+
     fn seen_of(&self, id: u8) -> Option<[f32; 4]> {
         let p = self.placements.get(&id)?;
-        let eye = self.view_eye.unwrap_or(self.center.0);
-        let yaw = self.center.1;
-        let d = glam::Quat::from_rotation_y(-yaw) * (p.position - eye);
+        let (eye, unturn) = self.map_view();
+        let d = unturn * (p.position - eye);
         let distance = d.length().max(0.3);
         // Coarse (about a tenth of a degree): the menu redraws whenever its picture
         // changes, and a monitor being moved changes this every frame.
@@ -709,10 +724,8 @@ impl Scene {
         let Some(p) = self.placements.get(&id) else {
             return ui::Place::Unknown;
         };
-        let center = self.view_eye.unwrap_or(self.center.0);
-        let yaw = self.center.1;
-        let to = p.position - center;
-        let local = glam::Quat::from_rotation_y(-yaw) * to;
+        let (eye, unturn) = self.map_view();
+        let local = unturn * (p.position - eye);
         let side = local.x.atan2(-local.z);
         let up = local.y.atan2(Vec2::new(local.x, local.z).length());
         if up > 0.35 {
