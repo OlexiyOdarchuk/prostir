@@ -1672,6 +1672,11 @@ impl Displays {
 
     /// Remembers the set for the next session.
     pub fn save(&self) {
+        // Left without monitors (none could stream again), the set saved before stays
+        // for the next start.
+        if self.monitors.is_empty() {
+            return;
+        }
         self.saved().save();
     }
 
