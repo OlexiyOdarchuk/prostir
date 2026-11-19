@@ -8,6 +8,9 @@
 //! - after that only a changed picture, so an encoder that is paused and resumed
 //!   without starting over gets nothing on a still screen;
 //! - a change while nobody reads is not queued: the next read gets the newest picture.
+//!
+//! Every start is logged (`fake screen NAME: started`), so a test sees how often the
+//! core started a stream over.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, LazyLock, Mutex};
@@ -216,6 +219,7 @@ mod imp {
                 sent: None,
                 flushing: false,
             };
+            log::info!("fake screen {name}: started");
             Ok(())
         }
 

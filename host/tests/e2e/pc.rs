@@ -1,6 +1,7 @@
 //! The PC app under test: the `prostir` binary built with the fake desktop, started in
 //! a directory of its own (settings, keys, runtime files), on a port the system picks.
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -178,6 +179,21 @@ impl Pc {
             .iter()
             .filter(|l| l.contains(needle))
             .count()
+    }
+
+    /// How many times the picture source of each fake monitor started so far, by
+    /// output name: each start sends the current picture.
+    pub fn source_starts(&self) -> BTreeMap<String, usize> {
+        let mut starts = BTreeMap::new();
+        for line in self.log.lock().unwrap().iter() {
+            if let Some(name) = line
+                .split_once("fake screen ")
+                .and_then(|(_, rest)| rest.strip_suffix(": started"))
+            {
+                *starts.entry(name.to_owned()).or_default() += 1;
+            }
+        }
+        starts
     }
 
     /// Asks the PC app to quit as a user would (SIGTERM) and checks that it does.

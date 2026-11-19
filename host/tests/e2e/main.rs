@@ -5,6 +5,7 @@
 
 mod pc;
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use pc::{Options, Pc, TestDir};
@@ -18,6 +19,17 @@ const SOON: Duration = Duration::from_secs(10);
 
 /// Two small monitors, so the CPU encoder keeps up anywhere.
 const TWO_MONITORS: &str = "row\n640x360\n480x272\nmirror off\n";
+
+/// Every fake monitor's source started exactly once more between `before` and `after`
+/// (see [`Pc::source_starts`]).
+fn assert_started_once(before: &BTreeMap<String, usize>, after: &BTreeMap<String, usize>) {
+    assert!(!before.is_empty(), "no monitor source started");
+    let once: BTreeMap<String, usize> = before.iter().map(|(k, n)| (k.clone(), n + 1)).collect();
+    assert_eq!(
+        after, &once,
+        "each monitor's stream starts over exactly once"
+    );
+}
 
 fn connect(pc: &Pc, keys: &mut Keys) -> FakeHeadset {
     FakeHeadset::connect(pc.addr, keys, None).unwrap_or_else(|e| panic!("connecting: {e}"))
@@ -190,16 +202,22 @@ fn taking_the_headset_off_pauses_and_then_ends_the_session() {
 
 /// The monitors kept after the headset left send their picture to the headset that
 /// comes back, though the (still) screen has not changed: the PC starts their streams
-/// over. Before 0.1.1 the headset got no monitors at all.
+/// over, once each, with the headset there to get the picture. Before 0.1.1 the
+/// headset got no monitors at all; in 0.1.1 at first each stream started over twice,
+/// once before the headset was attached.
 #[test]
 fn monitors_kept_after_a_disconnect_show_again() {
     let (_dir, mut pc, mut keys, headset) = session("linger", &Options::default());
     headset.disconnect();
     pc.wait_log(SOON, "keeping virtual monitors for 30 s");
+    let before = pc.source_starts();
     let mut back = connect(&pc, &mut keys);
     back.wait(SOON, "every kept monitor showing", View::all_monitors_show)
         .unwrap();
     assert_eq!(back.view().order.len(), 2);
+    // Time for a late second start to show in the log.
+    back.take_for(Duration::from_secs(1)).unwrap();
+    assert_started_once(&before, &pc.source_starts());
     // The same monitors, not new ones.
     assert_eq!(pc.count_log("fake desktop: created"), 2);
     assert_eq!(pc.count_log("fake desktop: removed"), 0);
