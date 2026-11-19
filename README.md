@@ -391,8 +391,8 @@ a powered hub.
 | Move a monitor | hold grip and point | pinch and hold anywhere on it for about 0.3 s |
 | Move all monitors as one | Monitors → Drag → All together, then move any monitor | same |
 | Put a detached window back | point at it and press "Attach" under it | same, with a pinch |
-| Move the menu | hold grip and point | touch an empty spot with a finger and drag |
-| Nearer or farther | thumbstick up or down while holding | move your hand away or closer |
+| Move the menu | hold grip and point | pinch and hold anywhere on it (on a button too) for about 0.3 s, or touch an empty spot with a finger and drag |
+| Nearer or farther | thumbstick up or down while holding | move your hand away or closer (within reach it follows your hand) |
 | Bigger or smaller | thumbstick left or right while holding, or hold it with both controllers and move them apart or together | hold it with both hands and move them apart or together |
 | Line the monitors up | A, or menu → Monitors → Line up | Line up on the palm menu, or menu → Monitors → Line up |
 | Primary monitor straight ahead | menu → Quick → In front of me | same, or In front on the palm menu |

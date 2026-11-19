@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.1.1 (2026-11-19)
+
+Fixes for things that came up in the first days of use. Update both the PC part and
+the headset app.
+
+### Monitors and windows
+
+- Take the headset off and put it on again, or let it reconnect after a short drop,
+  and the monitors show their picture straight away. On KDE the picture used to stay
+  frozen, or the monitors did not come back until the headset app was restarted.
+- Windows that cross from one monitor to the next continue where they do in the
+  headset. The desktop is now arranged from where the monitors' edges meet in space,
+  so it no longer depends on where your head was when the arrangement was centred.
+- Line up (the A button) stands every monitor upright again and joins the laptop
+  screen after the monitors, so a monitor never ends up hanging off the laptop screen
+  instead of beside the main one.
+- Moving all monitors together keeps the arrangement in one piece while it moves.
+- The map in the Monitors tab shows the monitors as the desktop has them, each at its
+  own size.
+
+### In the headset
+
+- Monitors stay visible under the Meta system menu instead of going dark.
+- The app no longer closes when you come back to the headset, and it connects again
+  after Horizon OS restarts it.
+- With hands: a quick pinch on a menu button presses it when you let go; pinch and
+  hold takes the menu, on a button too. Something taken within reach follows your
+  hand, so you can pull it closer.
+
+### PC
+
+- The PC part is split into a shared core and a Linux layer, the groundwork for
+  GNOME and other systems. Nothing changes in use.
+- The AUR package is published automatically, and release builds retry downloading
+  the OpenXR loader.
+
 ## 0.1.0 (2026-11-18)
 
 First public version.
