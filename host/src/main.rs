@@ -20,7 +20,7 @@ use clap::Parser;
 use log::{debug, error, info, warn};
 use prostir_proto::link::{Closer, Link, Via};
 use prostir_proto::packet::{self, FRAGMENT, lane};
-use prostir_proto::{ClientMsg, Codec, HostMsg};
+use prostir_proto::{ClientMsg, Codec, HeadsetGoodbye, HostMsg, PcGoodbye};
 
 use displays::{Displays, SavedMonitors};
 use encoder::EncoderConfig;
@@ -98,11 +98,13 @@ struct Control {
 }
 
 impl Control {
-    /// Applies tray commands; returns `true` when asked to quit.
-    fn poll(&mut self, displays: Option<&mut Displays>) -> bool {
+    /// Applies tray commands; returns why a session must end, if it must (quitting,
+    /// or the paired headsets forgotten).
+    fn poll(&mut self, displays: Option<&mut Displays>) -> Option<PcGoodbye> {
         if platform::quit_requested() {
             self.quit = true;
         }
+        let mut forgot = false;
         let mut displays = displays;
         while let Ok(cmd) = self.commands.try_recv() {
             match cmd {
@@ -144,11 +146,16 @@ impl Control {
                     if let Err(e) = self.security.trusted.clear() {
                         warn!("cannot forget headsets: {e}");
                     }
+                    forgot = true;
                 }
                 TrayCommand::Quit => self.quit = true,
             }
         }
-        self.quit
+        if self.quit {
+            Some(PcGoodbye::Quit)
+        } else {
+            forgot.then_some(PcGoodbye::Forgotten)
+        }
     }
 
     /// Shows the current state in the tray (only when it changed).
@@ -176,15 +183,31 @@ fn store(change: impl FnOnce(&mut SavedMonitors)) {
 
 /// Ends the session once the writer thread stops, however it stops: the outbox takes
 /// nothing more and the connection closes, so the reader and the headset notice at once.
+/// After a goodbye the connection stays open for the session loop to close.
 struct EndSession {
     outbox: Arc<outbox::Outbox>,
-    closer: Closer,
+    closer: Option<Closer>,
 }
 
 impl Drop for EndSession {
     fn drop(&mut self) {
         self.outbox.close();
-        self.closer.close();
+        if let Some(closer) = &self.closer {
+            closer.close();
+        }
+    }
+}
+
+/// After a goodbye, how long the headset has to read it and close the connection.
+const GOODBYE_WAIT: Duration = Duration::from_secs(1);
+
+/// What the headset's goodbye means, for the log.
+fn headset_left(reason: u8) -> &'static str {
+    match HeadsetGoodbye::from_code(reason) {
+        HeadsetGoodbye::Quit => "the headset app was closed",
+        HeadsetGoodbye::OtherPc => "the headset chose another PC",
+        HeadsetGoodbye::Forgotten => "the headset forgot this PC",
+        HeadsetGoodbye::Other => "the headset ended the session",
     }
 }
 
@@ -225,9 +248,9 @@ fn serve_client(
         std::thread::Builder::new()
             .name("net-writer".into())
             .spawn(move || {
-                let _end = EndSession {
+                let mut end = EndSession {
                     outbox: outbox.clone(),
-                    closer,
+                    closer: Some(closer),
                 };
                 // The only one sending: it takes packet after packet, most important first.
                 let mut lanes = outbox::Lanes::default();
@@ -236,6 +259,12 @@ fn serve_client(
                         info!("connection closed while sending: {e}");
                         return;
                     }
+                }
+                // After the goodbye nothing more goes out, but what the headset sends
+                // until it closes the connection is still read (see `close_gently`).
+                if outbox.said_goodbye() {
+                    let _ = sender.finish();
+                    end.closer = None;
                 }
             })?
     };
@@ -304,7 +333,7 @@ fn serve_client(
     let mut sound_from = None;
     let mut focus = None;
     let mut next_focus = Instant::now();
-    let result = loop {
+    let (result, goodbye) = loop {
         if Instant::now() >= next_focus {
             next_focus = Instant::now() + Duration::from_millis(150);
             let id = active_output
@@ -325,17 +354,26 @@ fn serve_client(
         }
         if Instant::now() >= next_tick {
             next_tick = Instant::now() + Duration::from_millis(500);
-            if control.poll(Some(displays)) {
-                break Ok(());
+            if let Some(reason) = control.poll(Some(displays)) {
+                break (Ok(()), Some(reason));
             }
             control.show(Some(via), Some(displays));
             displays.tick();
             if displays.taken_off_for() >= Some(TAKEN_OFF_GRACE) {
                 info!("headset taken off");
-                break Ok(());
+                break (Ok(()), Some(PcGoodbye::TakenOff));
             }
             if !displays.healthy() {
-                break Err(anyhow::anyhow!("virtual monitor or encoder stopped"));
+                report(
+                    displays,
+                    i18n::t(
+                        "На ПК зупинився віртуальний монітор або кодувальник",
+                        "A virtual monitor or encoder stopped on the PC",
+                    )
+                    .into(),
+                );
+                let failed = anyhow::anyhow!("virtual monitor or encoder stopped");
+                break (Err(failed), Some(PcGoodbye::Failed));
             }
         }
         let wait = next_tick
@@ -474,23 +512,42 @@ fn serve_client(
                 control.sharp = now.sharp;
                 tray::set_encoding(control.tray.as_ref(), control.bitrate, control.sharp);
             }
+            Ok(Ok(ClientMsg::Goodbye { reason })) => {
+                info!("{}", headset_left(reason));
+                break (Ok(()), None);
+            }
             Ok(Ok(other)) => warn!("ignoring {other:?}"),
-            Ok(Err(e)) if e.kind() == ErrorKind::UnexpectedEof => break Ok(()),
+            Ok(Err(e)) if e.kind() == ErrorKind::UnexpectedEof => break (Ok(()), None),
             Ok(Err(e)) if e.kind() == ErrorKind::TimedOut => {
-                break Err(anyhow::anyhow!(
+                let silence = anyhow::anyhow!(
                     "silence: nothing from the headset for {} s",
                     SILENCE.as_secs()
-                ));
+                );
+                break (Err(silence), None);
             }
-            Ok(Err(e)) => break Err(e.into()),
+            Ok(Err(e)) => break (Err(e.into()), None),
             Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => break Ok(()),
+            Err(RecvTimeoutError::Disconnected) => break (Ok(()), None),
         }
     };
     displays.set_streaming(false);
     tray::set_battery(control.tray.as_ref(), None);
     displays.router.detach();
-    outbox.close();
+    match goodbye {
+        Some(reason) => {
+            info!("saying goodbye to the headset ({reason:?})");
+            outbox.say_goodbye(reason);
+            // The headset closes once it read the goodbye; until then what it sends is
+            // read and dropped, so a reset cannot throw the goodbye away.
+            let until = Instant::now() + GOODBYE_WAIT;
+            while let Some(left) = until.checked_duration_since(Instant::now()) {
+                if !matches!(msg_rx.recv_timeout(left), Ok(Ok(_))) {
+                    break;
+                }
+            }
+        }
+        None => outbox.close(),
+    }
     closer.close();
     let _ = writer_thread.join();
     result
@@ -707,11 +764,16 @@ fn main() -> Result<()> {
                             let why = HostMsg::Error {
                                 text: format!("{e:#}"),
                             };
-                            if let Ok(why) = why.encode() {
-                                let tx = &mut *conn.link.sender;
-                                let _ = packet::send_whole(tx, lane::CONTROL, why, FRAGMENT);
+                            let goodbye = HostMsg::Goodbye {
+                                reason: PcGoodbye::Failed.code(),
+                            };
+                            for msg in [why, goodbye] {
+                                if let Ok(msg) = msg.encode() {
+                                    let tx = &mut *conn.link.sender;
+                                    let _ = packet::send_whole(tx, lane::CONTROL, msg, FRAGMENT);
+                                }
                             }
-                            conn.link.closer.close();
+                            pairing::close_gently(&mut conn.link);
                             continue;
                         }
                     }

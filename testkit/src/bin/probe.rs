@@ -166,6 +166,12 @@ fn main() -> Result<()> {
                 println!("PC encodes: {settings:?}, can use {encoders:#05b}")
             }
             HostMsg::Ping { .. } | HostMsg::Pong { .. } => {}
+            HostMsg::Goodbye { reason } => {
+                println!(
+                    "PC ends the session: {:?}",
+                    prostir_proto::PcGoodbye::from_code(reason)
+                )
+            }
             HostMsg::Incompatible { .. }
             | HostMsg::PairingRequired
             | HostMsg::PairMsg { .. }

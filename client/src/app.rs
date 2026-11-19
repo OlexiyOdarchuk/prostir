@@ -371,7 +371,7 @@ struct Scene {
     pc: Option<(prostir_proto::PcSettings, u8)>,
     /// An unknown PC waiting for "Pair" or "Not now" (survives the disconnect that
     /// follows the question).
-    pair_offer: Option<(String, bool)>,
+    pair_offer: Option<(String, crate::ui::OfferWhy)>,
     steering: net::Steering,
     /// When the connection was lost (or the app started without one).
     offline_since: Option<Instant>,
@@ -2852,6 +2852,27 @@ fn run(app: &AndroidApp) -> Result<()> {
     Ok(())
 }
 
+/// What to tell the user about a connection that ended; nothing where there is
+/// nothing to say (the headset was off the head, or the PC already said why).
+fn disconnect_text(l: Lang, why: net::Disconnect) -> Option<&'static str> {
+    use prostir_proto::PcGoodbye;
+    Some(match why {
+        net::Disconnect::Goodbye(PcGoodbye::Quit) => {
+            l.t("Програму на ПК закрито", "The PC app was closed")
+        }
+        net::Disconnect::Goodbye(PcGoodbye::Forgotten) => l.t(
+            "ПК більше не знає цей шолом. Сполучіть знову",
+            "The PC no longer knows this headset. Pair them again",
+        ),
+        net::Disconnect::Goodbye(PcGoodbye::Other) => {
+            l.t("ПК завершив з'єднання", "The PC ended the connection")
+        }
+        net::Disconnect::Silence => l.t("Немає зв'язку з ПК", "No connection to the PC"),
+        net::Disconnect::Goodbye(PcGoodbye::TakenOff | PcGoodbye::Replaced | PcGoodbye::Failed)
+        | net::Disconnect::Closed => return None,
+    })
+}
+
 fn handle_net_event(
     scene: &mut Scene,
     session: &xr::Session<Gfx>,
@@ -2925,20 +2946,23 @@ fn handle_net_event(
             }
         }
         NetEvent::Paired => scene.pairing = None,
-        NetEvent::PairOffer { host, failed } => {
+        NetEvent::PairOffer { host, why } => {
             scene.pairing = None;
-            scene.pair_offer = Some((host, failed));
+            scene.pair_offer = Some((host, why));
         }
         NetEvent::Incompatible { pc_newer, pc_app } => {
             warn!("the PC runs Prostir {pc_app}: versions differ");
             scene.update_needed = Some((pc_newer, pc_app));
         }
-        NetEvent::Disconnected => {
+        NetEvent::Disconnected { why } => {
             scene.offline_since = Some(Instant::now());
             scene.pairing = None;
             scene.host = None;
             scene.pc = None;
             scene.feedback = None;
+            if let Some(text) = disconnect_text(scene.lang(), why) {
+                scene.show_toast(text.into());
+            }
         }
         NetEvent::PrimaryChanged(id) => {
             info!("primary monitor: Prostir-{}", id + 1);
@@ -3326,7 +3350,7 @@ fn handle_action(
                         scene.steering.trust_changed();
                         // Connected to it: leave, and do not come back on our own.
                         if scene.host.as_deref() == Some(name.as_str()) {
-                            scene.steering.change_host();
+                            scene.steering.forget_current();
                         }
                     }
                     Err(e) => scene.show_error(format!("{e}")),

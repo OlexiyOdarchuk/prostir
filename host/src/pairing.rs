@@ -426,7 +426,7 @@ fn turned_away(first: bool, why: String) -> anyhow::Error {
 /// unread data from the peer resets the connection, which can throw away what was
 /// sent (over `adb reverse` it does): so the sending half closes first, and what the
 /// headset still sends is read and dropped for a moment.
-fn close_gently(link: &mut Link) {
+pub fn close_gently(link: &mut Link) {
     let _ = link.sender.finish();
     let until = Instant::now() + Duration::from_millis(500);
     while let Some(left) = until.checked_duration_since(Instant::now()) {

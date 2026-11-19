@@ -3,6 +3,7 @@
 //! `cargo test -p prostir-host --features fake-desktop --test e2e`). Needs GStreamer
 //! with x264enc (plugins-ugly), h264parse (plugins-bad) and the base plugins.
 
+mod goodbye;
 mod link;
 mod pc;
 
@@ -16,7 +17,7 @@ use prostir_testkit::{ConnectError, FakeHeadset, Keys, View};
 /// Long enough for a slow CI machine to start GStreamer and the encoders.
 pub const START: Duration = Duration::from_secs(30);
 /// A change asked for by the headset shows within this.
-const SOON: Duration = Duration::from_secs(10);
+pub const SOON: Duration = Duration::from_secs(10);
 
 /// Two small monitors, so the CPU encoder keeps up anywhere.
 const TWO_MONITORS: &str = "row\n640x360\n480x272\nmirror off\n";
@@ -38,7 +39,7 @@ pub fn connect(pc: &Pc, keys: &mut Keys) -> FakeHeadset {
 
 /// A started PC app and a headset it already trusts, connected and showing every
 /// monitor.
-fn session(name: &str, options: &Options) -> (TestDir, Pc, Keys, FakeHeadset) {
+pub fn session(name: &str, options: &Options) -> (TestDir, Pc, Keys, FakeHeadset) {
     let dir = TestDir::new(name);
     dir.save_monitors(TWO_MONITORS);
     let mut keys = dir.pair();
@@ -272,9 +273,19 @@ fn taking_the_headset_off_pauses_and_then_ends_the_session() {
         .unwrap_or(0);
     assert!(reports > 0, "the headset reported shown frames: {line}");
     pc.wait_log(Duration::from_secs(1), "sound: sent");
+    // Pings both ways: the round trip in the log.
+    let line = pc.wait_log(Duration::from_secs(1), "link: round trip");
+    assert!(line.contains("p50"), "{line}");
+    headset.take_for(Duration::from_secs(1)).unwrap();
+    assert!(headset.view().pings > 5, "the PC pings every second");
+    assert!(!headset.view().round_trips.is_empty(), "and answers");
     // Off for good: the session ends, and the monitors go.
     headset.send(&ClientMsg::Presence { worn: false }).unwrap();
     headset.wait_closed(Duration::from_secs(15)).unwrap();
+    assert_eq!(
+        headset.view().goodbye,
+        Some(prostir_proto::PcGoodbye::TakenOff.code())
+    );
     pc.wait_log(
         SOON,
         "removing virtual monitors until the headset is worn again",

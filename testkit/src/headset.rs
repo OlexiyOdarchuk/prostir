@@ -24,6 +24,8 @@ const REPLY: Duration = Duration::from_secs(10);
 const PAIRING: Duration = Duration::from_secs(300);
 /// The headset pings the PC this often in a session, like the Quest app.
 const PING_EVERY: Duration = Duration::from_secs(1);
+/// After a goodbye, how long the PC has to close the connection.
+const GOODBYE_WAIT: Duration = Duration::from_secs(1);
 
 /// A headset's long-term key and the PCs it trusts, kept in a directory.
 pub struct Keys {
@@ -142,6 +144,8 @@ pub struct View {
     pub notices: Vec<String>,
     /// Pings from the PC (each answered at once).
     pub pings: u32,
+    /// The PC ended the session on purpose, with this reason code.
+    pub goodbye: Option<u8>,
     /// Round trips of this headset's pings, as their pongs came.
     pub round_trips: Vec<Duration>,
     pub messages: u64,
@@ -222,6 +226,7 @@ impl View {
             HostMsg::Error { text } => self.errors.push(text.clone()),
             HostMsg::Notice { text } => self.notices.push(text.clone()),
             HostMsg::Ping { .. } => self.pings += 1,
+            HostMsg::Goodbye { reason } => self.goodbye = Some(*reason),
             _ => {}
         }
         self.round_trips.extend(arrived.round_trip);
@@ -409,6 +414,22 @@ impl FakeHeadset {
     /// Hangs up, as a headset that lost the network would.
     pub fn disconnect(self) {
         self.closer.close();
+    }
+
+    /// Leaves as the Quest app does: a goodbye saying `reason`, nothing after it, and
+    /// the connection closed once the PC closed it (or after `GOODBYE_WAIT`).
+    pub fn leave(mut self, reason: prostir_proto::HeadsetGoodbye) -> Result<()> {
+        {
+            let mut w = self.writer.lock().unwrap();
+            send(
+                &mut **w,
+                ClientMsg::Goodbye {
+                    reason: reason.code(),
+                },
+            )?;
+            w.finish()?;
+        }
+        self.wait_closed(GOODBYE_WAIT)
     }
 }
 

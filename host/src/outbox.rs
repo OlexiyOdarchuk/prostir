@@ -28,7 +28,7 @@ use log::{info, warn};
 use prostir_proto::link::RecordSender;
 use prostir_proto::packet::{Encoded, FRAGMENT, Outgoing, lane};
 use prostir_proto::stats::{Histogram, Pings, per_minute};
-use prostir_proto::{HostMsg, MIRROR_ID};
+use prostir_proto::{HostMsg, MIRROR_ID, PcGoodbye};
 
 /// Sound queued at most: 8 slices of 10 ms. Older slices make room for newer ones.
 const MAX_AUDIO: usize = 8;
@@ -160,6 +160,8 @@ struct State {
     pings: Pings,
     /// When the next ping is due (from the writer's first look on).
     next_ping: Option<Instant>,
+    /// A goodbye is queued: control messages go out up to it, nothing else does.
+    leaving: bool,
     closed: bool,
 }
 
@@ -244,7 +246,7 @@ impl Outbox {
             _ => None,
         };
         let mut s = self.lock();
-        if s.closed {
+        if s.closed || s.leaving {
             return false;
         }
         let Some(msg) = encode(msg) else {
@@ -282,7 +284,7 @@ impl Outbox {
     /// Queues a slice of sound; the oldest goes when too many wait.
     pub fn audio(&self, msg: HostMsg) {
         let mut s = self.lock();
-        if s.closed {
+        if s.closed || s.leaving {
             return;
         }
         let Some(msg) = encode(msg) else {
@@ -302,7 +304,7 @@ impl Outbox {
     /// waiting.
     pub fn video(&self, id: u8, keyframe: bool, msg: HostMsg) -> bool {
         let mut s = self.lock();
-        if s.closed {
+        if s.closed || s.leaving {
             return false;
         }
         let Some(msg) = encode(msg) else {
@@ -365,6 +367,31 @@ impl Outbox {
         std::mem::take(&mut self.lock().dropped)
     }
 
+    /// Ends the session on purpose: the control messages waiting go out, then a
+    /// goodbye saying `reason`, and nothing else (sound and video are dropped).
+    pub fn say_goodbye(&self, reason: PcGoodbye) {
+        let mut s = self.lock();
+        if s.closed || s.leaving {
+            return;
+        }
+        s.audio.clear();
+        s.streams.clear();
+        s.video_bytes = 0;
+        if let Some(goodbye) = encode(HostMsg::Goodbye {
+            reason: reason.code(),
+        }) {
+            s.control_bytes += goodbye.len();
+            s.control.push_back(goodbye);
+        }
+        s.leaving = true;
+        self.ready.notify_all();
+    }
+
+    /// The writer sent the goodbye, or will once it sent what it started.
+    pub fn said_goodbye(&self) -> bool {
+        self.lock().leaving
+    }
+
     /// The session is over: nothing more is taken or sent.
     pub fn close(&self) {
         let mut s = self.lock();
@@ -388,6 +415,10 @@ impl Outbox {
             if s.closed {
                 return None;
             }
+            if s.leaving {
+                // Up to the goodbye, then done.
+                return s.pick_control(lanes);
+            }
             let now = Instant::now();
             let ping_at = *s.next_ping.get_or_insert(now + PING_EVERY);
             if now >= ping_at {
@@ -410,7 +441,11 @@ impl Outbox {
     #[cfg(test)]
     fn try_next(&self, lanes: &mut Lanes) -> Option<Pick> {
         let mut s = self.lock();
-        if s.closed { None } else { s.pick(lanes) }
+        match (s.closed, s.leaving) {
+            (true, _) => None,
+            (false, true) => s.pick_control(lanes),
+            (false, false) => s.pick(lanes),
+        }
     }
 
     /// Everything waiting, sent and read back as the headset would: for tests.
@@ -449,14 +484,8 @@ impl State {
         if std::mem::take(&mut self.pace_changed) {
             return Some(Pick::Pace(self.pace));
         }
-        if lanes.control.is_none()
-            && let Some(msg) = self.control.pop_front()
-        {
-            self.control_bytes -= msg.len();
-            lanes.control = Some(Outgoing::new(lane::CONTROL, msg));
-        }
-        if lanes.control.is_some() {
-            return Some(Pick::Control);
+        if let Some(pick) = self.pick_control(lanes) {
+            return Some(pick);
         }
         if lanes.sound.is_none()
             && let Some((queued, msg)) = self.audio.pop_front()
@@ -476,6 +505,17 @@ impl State {
         turn.copied()
             .find(|&id| lanes.video.contains_key(&id) || self.start_video(id, lanes))
             .map(Pick::Video)
+    }
+
+    /// The control lane, if it has something to send.
+    fn pick_control(&mut self, lanes: &mut Lanes) -> Option<Pick> {
+        if lanes.control.is_none()
+            && let Some(msg) = self.control.pop_front()
+        {
+            self.control_bytes -= msg.len();
+            lanes.control = Some(Outgoing::new(lane::CONTROL, msg));
+        }
+        lanes.control.is_some().then_some(Pick::Control)
     }
 
     /// Moves the next message of stream `id` worth sending into its lane; `false`
@@ -831,6 +871,28 @@ pub(crate) mod tests {
         };
         o.pong(seq);
         assert_eq!(o.take_stats().round_trip.count(), 1);
+    }
+
+    /// A goodbye follows the control messages waiting; sound and video are dropped, a
+    /// frame half sent stays half sent, and nothing is taken after it.
+    #[test]
+    fn a_goodbye_is_the_last_thing_sent() {
+        let o = Outbox::default();
+        let (mut lanes, mut out) = (Lanes::default(), Capture::default());
+        assert!(o.video(1, true, frame(1, true, 3 * FRAGMENT)));
+        send(&o, &mut lanes, &mut out, 1);
+        o.audio(HostMsg::Audio { pcm: vec![1] });
+        o.control(HostMsg::Recenter);
+        o.say_goodbye(PcGoodbye::TakenOff);
+        assert!(!o.control(HostMsg::Recenter), "nothing after the goodbye");
+        assert!(!o.video(1, true, frame(1, true, 1)));
+        send(&o, &mut lanes, &mut out, 100);
+        assert_eq!(
+            out.messages(),
+            [HostMsg::Recenter, HostMsg::Goodbye { reason: 2 }]
+        );
+        assert!(o.said_goodbye());
+        assert_eq!(o.next(&mut lanes), None, "done, without waiting");
     }
 
     /// A message that cannot be sent ends the session, and nothing else is sent.

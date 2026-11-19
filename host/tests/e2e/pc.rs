@@ -106,6 +106,8 @@ pub struct Pc {
     child: Child,
     pub addr: SocketAddr,
     log: Arc<Mutex<Vec<String>>>,
+    /// Its `XDG_RUNTIME_DIR`.
+    run_dir: PathBuf,
 }
 
 impl Pc {
@@ -166,6 +168,7 @@ impl Pc {
             child,
             addr: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
             log,
+            run_dir: root.join("run"),
         };
         let line = pc.wait_log(Duration::from_secs(30), "waiting for the headset on port");
         let port = line.rsplit(' ').next().unwrap().parse().unwrap();
@@ -214,6 +217,11 @@ impl Pc {
             }
         }
         starts
+    }
+
+    /// Clicks `item` in the PC app's tray (`forget`, `recenter`, `quit`).
+    pub fn tray(&self, item: &str) {
+        std::fs::write(self.run_dir.join("fake-tray"), format!("{item}\n")).unwrap();
     }
 
     /// Asks the PC app to quit as a user would (SIGTERM) and checks that it does.

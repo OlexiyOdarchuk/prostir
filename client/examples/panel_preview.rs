@@ -4,7 +4,7 @@
 
 use prostir::i18n::Lang;
 use prostir::settings::Settings;
-use prostir::ui::{MonitorEntry, PairingView, Panel, Section, Tab, UiState};
+use prostir::ui::{MonitorEntry, OfferWhy, PairingView, Panel, Section, Tab, UiState};
 
 fn questmon_pairing(mode: &str) -> PairingView {
     PairingView {
@@ -60,9 +60,14 @@ fn main() {
             },
             7,
         )),
-        pair_offer: std::env::var("OFFER")
-            .ok()
-            .map(|v| ("workstation 192.168.1.10".into(), v == "failed")),
+        pair_offer: std::env::var("OFFER").ok().map(|v| {
+            let why = match v.as_str() {
+                "failed" => OfferWhy::WrongCodes,
+                "forgotten" => OfferWhy::Forgotten,
+                _ => OfferWhy::New,
+            };
+            ("workstation 192.168.1.10".into(), why)
+        }),
         pairing: std::env::var("PAIR")
             .ok()
             .map(|mode| questmon_pairing(&mode)),

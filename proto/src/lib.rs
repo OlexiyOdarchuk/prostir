@@ -72,6 +72,69 @@ pub mod abilities {
     pub const MOVE_MOUSE: u8 = 1;
 }
 
+/// Why the PC ends a session ([`HostMsg::Goodbye`]). A code a reader does not know
+/// reads as [`PcGoodbye::Other`], so a new reason needs no new protocol version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PcGoodbye {
+    Other = 0,
+    /// The PC app is closing (from its tray, a signal, the PC shutting down).
+    Quit = 1,
+    /// The headset was not worn for a while: the desktop goes back to the laptop. It
+    /// connects again once it is worn.
+    TakenOff = 2,
+    /// The PC forgot this headset ("Forget paired headsets"): it has to pair again.
+    Forgotten = 3,
+    /// A new connection of this headset took the place of this one.
+    Replaced = 4,
+    /// The monitors or encoders stopped working; an [`HostMsg::Error`] said why.
+    Failed = 5,
+}
+
+impl PcGoodbye {
+    pub fn code(self) -> u8 {
+        self as u8
+    }
+
+    pub fn from_code(code: u8) -> Self {
+        match code {
+            1 => Self::Quit,
+            2 => Self::TakenOff,
+            3 => Self::Forgotten,
+            4 => Self::Replaced,
+            5 => Self::Failed,
+            _ => Self::Other,
+        }
+    }
+}
+
+/// Why the headset ends a session ([`ClientMsg::Goodbye`]); unknown codes read as
+/// [`HeadsetGoodbye::Other`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeadsetGoodbye {
+    Other = 0,
+    /// The headset app is closing.
+    Quit = 1,
+    /// The user chose another PC.
+    OtherPc = 2,
+    /// The user forgot this PC in the headset.
+    Forgotten = 3,
+}
+
+impl HeadsetGoodbye {
+    pub fn code(self) -> u8 {
+        self as u8
+    }
+
+    pub fn from_code(code: u8) -> Self {
+        match code {
+            1 => Self::Quit,
+            2 => Self::OtherPc,
+            3 => Self::Forgotten,
+            _ => Self::Other,
+        }
+    }
+}
+
 /// Most virtual monitors a PC makes: more streams than this overwhelm the headset's
 /// hardware decoders.
 pub const MAX_MONITORS: usize = 6;
@@ -277,6 +340,9 @@ wire_enum! {
         25 => Ping { seq: u32 },
         /// The answer to [`ClientMsg::Ping`] with its `seq`.
         26 => Pong { seq: u32 },
+        /// The PC closes the session on purpose, for `reason` (a [`PcGoodbye`] code);
+        /// the connection closes after it.
+        27 => Goodbye { reason: u8 },
         /// Whether the codes matched: the PC's confirmation tag if they did.
         11 => PairResult { tag: Option<[u8; secure::CONFIRM_LEN]> },
     }
@@ -376,6 +442,9 @@ wire_enum! {
         128 => Ping { seq: u32 },
         /// The answer to [`HostMsg::Ping`] with its `seq`.
         129 => Pong { seq: u32 },
+        /// The headset closes the session on purpose, for `reason` (a
+        /// [`HeadsetGoodbye`] code); the connection closes after it.
+        130 => Goodbye { reason: u8 },
     }
 }
 

@@ -13,10 +13,10 @@ use std::io;
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use prostir_proto::ClientMsg;
 use prostir_proto::link::RecordSender;
 use prostir_proto::packet::{Encoded, FRAGMENT, Outgoing, lane};
 use prostir_proto::stats::{Histogram, Pings};
+use prostir_proto::{ClientMsg, HeadsetGoodbye};
 
 /// About 2.5 s of microphone sound: more than that waiting means the network is stuck.
 pub const MAX_LOSSY: usize = 256;
@@ -37,6 +37,8 @@ struct State {
     /// When the next ping is due; `None` until the session is open.
     next_ping: Option<Instant>,
     round_trip: Histogram,
+    /// A goodbye is queued: control messages go out up to it, nothing else does.
+    leaving: bool,
     closed: bool,
 }
 
@@ -83,7 +85,7 @@ impl Outbox {
         let is_lossy = lossy(&msg);
         let msg = msg.encode()?;
         let mut s = self.state.lock().unwrap();
-        if s.closed {
+        if s.closed || s.leaving {
             return Err(io::ErrorKind::BrokenPipe.into());
         }
         if is_lossy {
@@ -118,6 +120,30 @@ impl Outbox {
         std::mem::take(&mut self.state.lock().unwrap().round_trip)
     }
 
+    /// Ends the session on purpose: the control messages waiting go out, then a
+    /// goodbye saying `reason`, and nothing else.
+    pub fn say_goodbye(&self, reason: HeadsetGoodbye) {
+        let mut s = self.state.lock().unwrap();
+        if s.closed || s.leaving {
+            return;
+        }
+        s.lossy.clear();
+        if let Ok(goodbye) = (ClientMsg::Goodbye {
+            reason: reason.code(),
+        })
+        .encode()
+        {
+            s.control.push_back(goodbye);
+        }
+        s.leaving = true;
+        self.ready.notify_all();
+    }
+
+    /// The writer sent the goodbye.
+    pub fn said_goodbye(&self) -> bool {
+        self.state.lock().unwrap().leaving
+    }
+
     /// The session is over: nothing more is taken or sent.
     pub fn close(&self) {
         let mut s = self.state.lock().unwrap();
@@ -134,6 +160,10 @@ impl Outbox {
         loop {
             if s.closed {
                 return None;
+            }
+            if s.leaving {
+                // Up to the goodbye, then done.
+                return s.pick_control(lanes);
             }
             let now = Instant::now();
             if let Some(at) = s.next_ping
@@ -160,14 +190,18 @@ impl Outbox {
 }
 
 impl State {
-    fn pick(&mut self, lanes: &mut Lanes) -> Option<Pick> {
+    fn pick_control(&mut self, lanes: &mut Lanes) -> Option<Pick> {
         if lanes.control.is_none()
             && let Some(msg) = self.control.pop_front()
         {
             lanes.control = Some(Outgoing::new(lane::CONTROL, msg));
         }
-        if lanes.control.is_some() {
-            return Some(Pick::Control);
+        lanes.control.is_some().then_some(Pick::Control)
+    }
+
+    fn pick(&mut self, lanes: &mut Lanes) -> Option<Pick> {
+        if let Some(pick) = self.pick_control(lanes) {
+            return Some(pick);
         }
         if lanes.lossy.is_none()
             && let Some(msg) = self.lossy.pop_front()
@@ -270,6 +304,25 @@ mod tests {
         let start = Instant::now();
         assert_eq!(o.next(&mut lanes), Some(Pick::Control));
         assert!(start.elapsed() >= PING_EVERY - Duration::from_millis(50));
+    }
+
+    /// A goodbye goes after the control messages waiting, and nothing after it.
+    #[test]
+    fn a_goodbye_is_the_last_thing_sent() {
+        let o = Outbox::default();
+        o.push(ClientMsg::Mic { pcm: vec![1; 960] }).unwrap();
+        o.push(ClientMsg::SetMic { enabled: false }).unwrap();
+        o.say_goodbye(HeadsetGoodbye::OtherPc);
+        assert!(o.push(ClientMsg::Open).is_err());
+        assert_eq!(
+            sent(&o),
+            [
+                (lane::CONTROL, ClientMsg::SetMic { enabled: false }),
+                (lane::CONTROL, ClientMsg::Goodbye { reason: 2 }),
+            ]
+        );
+        assert!(o.said_goodbye());
+        assert_eq!(o.next(&mut Lanes::default()), None, "done, without waiting");
     }
 
     #[test]

@@ -69,13 +69,24 @@ pub struct PairingView {
     pub failed: bool,
 }
 
+/// Why the headset asks whether to pair with a PC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OfferWhy {
+    /// A PC this headset has not paired with.
+    New,
+    /// The last pairing stopped after several wrong codes.
+    WrongCodes,
+    /// The PC forgot this headset and ended the session.
+    Forgotten,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct UiState {
     pub pairing: Option<PairingView>,
     /// A PC that announces itself but does not accept the connection (a firewall).
     pub unreachable: Option<String>,
-    /// An unknown PC: (its name, the last pairing stopped after wrong codes).
-    pub pair_offer: Option<(String, bool)>,
+    /// A PC to pair with: its name, and why the headset asks.
+    pub pair_offer: Option<(String, OfferWhy)>,
     /// Name of the connected PC, `None` while searching.
     pub host: Option<String>,
     /// PCs seen on the network while not connected: (name, address).
@@ -759,8 +770,8 @@ impl Panel {
 
         let (lx, lw) = (44.0, 580.0);
         let (rx, rw) = (680.0, 556.0);
-        if let Some((host, failed)) = &s.pair_offer {
-            build_pair_offer(l, &mut items, lx, lw, host, *failed);
+        if let Some((host, why)) = &s.pair_offer {
+            build_pair_offer(l, &mut items, lx, lw, host, *why);
             return items;
         }
         if let Some(p) = &s.pairing {
@@ -2034,16 +2045,20 @@ fn build_look(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, rx: f32, rw:
     );
 }
 
-/// A PC this headset has not paired with: pair only if the user says so.
-fn build_pair_offer(l: Lang, items: &mut Vec<Item>, x: f32, w: f32, host: &str, failed: bool) {
+/// A PC to pair with (a new one, or one that forgot this headset): pair only if the
+/// user says so.
+fn build_pair_offer(l: Lang, items: &mut Vec<Item>, x: f32, w: f32, host: &str, why: OfferWhy) {
     let mut y = 180.0;
-    let title = if failed {
-        l.t(
+    let title = match why {
+        OfferWhy::New => l.t("Новий ПК", "A new PC"),
+        OfferWhy::WrongCodes => l.t(
             "Код не підійшов кілька разів",
             "The code did not match several times",
-        )
-    } else {
-        l.t("Новий ПК", "A new PC")
+        ),
+        OfferWhy::Forgotten => l.t(
+            "ПК більше не знає цей шолом",
+            "The PC no longer knows this headset",
+        ),
     };
     items.push(text(x, y, 34.0, true, TEXT, title));
     y += 60.0;
@@ -2065,10 +2080,10 @@ fn build_pair_offer(l: Lang, items: &mut Vec<Item>, x: f32, w: f32, host: &str, 
     }
     y += 20.0;
     let half = (w - 12.0) / 2.0;
-    let pair = if failed {
-        l.t("Спробувати ще", "Try again")
-    } else {
-        l.t("Сполучити", "Pair")
+    let pair = match why {
+        OfferWhy::New => l.t("Сполучити", "Pair"),
+        OfferWhy::WrongCodes => l.t("Спробувати ще", "Try again"),
+        OfferWhy::Forgotten => l.t("Сполучити знову", "Pair again"),
     };
     items.push(button(
         rect(x, y, half, 56.0),
@@ -3415,13 +3430,13 @@ mod tests {
                     .collect();
                 states.push(st);
             }
-            for failed in [false, true] {
+            for why in [OfferWhy::New, OfferWhy::WrongCodes, OfferWhy::Forgotten] {
                 let mut offer = sample_state();
                 offer.lang = lang;
                 offer.host = None;
                 offer.pair_offer = Some((
                     "a-very-long-pc-name.example.lan 192.168.100.200".into(),
-                    failed,
+                    why,
                 ));
                 states.push(offer);
             }

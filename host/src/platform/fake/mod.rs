@@ -12,8 +12,9 @@
 //! - Sound is silence, 10 ms at a time, each slice starting with the time it was
 //!   made (see [`audio`]), so a fake headset can tell how late it arrives; the
 //!   microphone goes nowhere.
-//! - No windows, no mouse, no screenshots, no tray, no notifications, and no outside
-//!   programs are run ([`run`] says none is installed).
+//! - No windows, no mouse, no screenshots, no notifications, and no outside programs
+//!   are run ([`run`] says none is installed). The tray is a file a test writes menu
+//!   items to (see [`tray`]).
 //! - The network is the real one: the connection to the headset is set up as on any
 //!   Linux PC (`platform/net.rs`), so the tests measure what a user gets.
 //! - It runs only when asked to with `PROSTIR_FAKE_DESKTOP=1`, and its settings live
@@ -288,16 +289,47 @@ pub mod notifications {
     }
 }
 
-/// There is no tray.
+/// A tray without an icon: a test "clicks" its items by writing their names, one a
+/// line, to `$XDG_RUNTIME_DIR/fake-tray` (`forget`, `recenter`, `quit`), which is read
+/// and removed a few times a second.
 pub mod tray {
+    use std::path::PathBuf;
     use std::sync::mpsc::Sender;
+    use std::time::Duration;
 
     use crate::platform::{TrayCommand, TrayStatus};
 
     pub struct Handle;
 
-    pub fn spawn(_commands: Sender<TrayCommand>, _bitrate: u32, _sharp: bool) -> Option<Handle> {
-        None
+    pub fn spawn(commands: Sender<TrayCommand>, _bitrate: u32, _sharp: bool) -> Option<Handle> {
+        let path = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR")?).join("fake-tray");
+        let watched = std::thread::Builder::new()
+            .name("fake-tray".into())
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(Duration::from_millis(100));
+                    let Ok(text) = std::fs::read_to_string(&path) else {
+                        continue;
+                    };
+                    let _ = std::fs::remove_file(&path);
+                    for item in text.lines() {
+                        let command = match item.trim() {
+                            "forget" => TrayCommand::ForgetHeadsets,
+                            "recenter" => TrayCommand::Recenter,
+                            "quit" => TrayCommand::Quit,
+                            other => {
+                                log::warn!("fake tray: no item {other:?}");
+                                continue;
+                            }
+                        };
+                        log::info!("fake tray: {item}");
+                        if commands.send(command).is_err() {
+                            return;
+                        }
+                    }
+                }
+            });
+        watched.ok().map(|_| Handle)
     }
 
     pub fn set_status(_handle: Option<&Handle>, _status: TrayStatus) {}

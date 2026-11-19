@@ -129,6 +129,7 @@ pub(crate) fn host_samples() -> Vec<HostMsg> {
         HostMsg::PairResult { tag: None },
         HostMsg::Ping { seq: 7 },
         HostMsg::Pong { seq: u32::MAX },
+        HostMsg::Goodbye { reason: 3 },
     ]
 }
 
@@ -219,6 +220,7 @@ pub(crate) fn client_samples() -> Vec<ClientMsg> {
         ClientMsg::PairConfirm { tag: [9; 32] },
         ClientMsg::Ping { seq: 0 },
         ClientMsg::Pong { seq: 3 },
+        ClientMsg::Goodbye { reason: 1 },
     ]
 }
 
@@ -535,6 +537,36 @@ fn skips_unknown_messages() {
     // An unknown message cut off is an error, not a skip past the end.
     let err = HostMsg::read(&mut framed(250, &[1, 2, 3])[..6].as_ref()).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+}
+
+/// A goodbye with a reason this build does not know reads as "other": new reasons
+/// need no new protocol version.
+#[test]
+fn goodbye_reasons_round_trip_and_unknown_ones_read_as_other() {
+    for r in [
+        PcGoodbye::Other,
+        PcGoodbye::Quit,
+        PcGoodbye::TakenOff,
+        PcGoodbye::Forgotten,
+        PcGoodbye::Replaced,
+        PcGoodbye::Failed,
+    ] {
+        assert_eq!(PcGoodbye::from_code(r.code()), r);
+    }
+    for r in [
+        HeadsetGoodbye::Other,
+        HeadsetGoodbye::Quit,
+        HeadsetGoodbye::OtherPc,
+        HeadsetGoodbye::Forgotten,
+    ] {
+        assert_eq!(HeadsetGoodbye::from_code(r.code()), r);
+    }
+    let unknown = read_host(&framed(27, &[200])).unwrap();
+    assert_eq!(unknown, HostMsg::Goodbye { reason: 200 });
+    assert_eq!(PcGoodbye::from_code(200), PcGoodbye::Other);
+    assert_eq!(HeadsetGoodbye::from_code(9), HeadsetGoodbye::Other);
+    assert_eq!((PcGoodbye::Quit.code(), PcGoodbye::Failed.code()), (1, 5));
+    assert_eq!(HeadsetGoodbye::Forgotten.code(), 3);
 }
 
 #[test]

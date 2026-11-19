@@ -15,9 +15,14 @@ use prostir_proto::link::{Closer, Link, PeerInfo, RecordReceiver, RecordSender};
 use prostir_proto::packet::Assembler;
 use prostir_proto::secure::{self, Identity, Pairing, TrustStore, confirmation, tags_match};
 use prostir_proto::stats::{Gaps, Period};
-use prostir_proto::{ClientMsg, Codec, HostMsg, PROTOCOL_VERSION};
+use prostir_proto::{ClientMsg, Codec, HeadsetGoodbye, HostMsg, PROTOCOL_VERSION, PcGoodbye};
 
 use crate::outbox::{Lanes, Outbox};
+use crate::ui::OfferWhy;
+
+/// After a goodbye, how long the PC has to read it and close the connection before
+/// this side does.
+const GOODBYE_WAIT: Duration = Duration::from_secs(1);
 
 /// While the user types a code, the connection is looked at this often.
 const LOOK_EVERY: Duration = Duration::from_millis(500);
@@ -88,8 +93,20 @@ impl Feedback {
                         return;
                     }
                 }
+                // After the goodbye nothing more goes out; the PC closes the connection
+                // once it read it, and what it sends meanwhile is still read, so a reset
+                // cannot throw the goodbye away. If it does not close, this side does.
+                if queued.said_goodbye() {
+                    let _ = sender.finish();
+                    std::thread::sleep(GOODBYE_WAIT);
+                }
             })?;
         Ok(Self { outbox })
+    }
+
+    /// Ends the session on purpose, telling the PC why.
+    fn goodbye(&self, reason: HeadsetGoodbye) {
+        self.outbox.say_goodbye(reason);
     }
 
     /// Queues a message. While the network is stuck, microphone sound and frame
@@ -178,15 +195,28 @@ pub enum NetEvent {
     /// wrong codes).
     PairOffer {
         host: String,
-        failed: bool,
+        why: OfferWhy,
     },
     Paired,
-    Disconnected,
+    Disconnected {
+        why: Disconnect,
+    },
     /// The PC speaks another protocol version: `pc_newer` says which side to update.
     Incompatible {
         pc_newer: bool,
         pc_app: String,
     },
+}
+
+/// Why a connection ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Disconnect {
+    /// The PC ended the session and said why.
+    Goodbye(PcGoodbye),
+    /// Nothing came from the PC for a while: Wi-Fi gone, or the PC asleep.
+    Silence,
+    /// The connection closed (or never opened a session), without a word.
+    Closed,
 }
 
 /// Where to look for the PC, and this headset's keys.
@@ -236,6 +266,18 @@ type PeerKey = [u8; 32];
 struct Current {
     addr: SocketAddr,
     closer: Closer,
+    /// Once the session is open: messages to the PC, for a goodbye.
+    feedback: Option<Feedback>,
+}
+
+impl Current {
+    /// Leaves the PC: with a goodbye once the session is open, else by closing.
+    fn leave(&self, reason: HeadsetGoodbye) {
+        match &self.feedback {
+            Some(f) => f.goodbye(reason),
+            None => self.closer.close(),
+        }
+    }
 }
 
 /// How long a "Pair" answer holds for reconnecting and typing the code.
@@ -256,19 +298,36 @@ impl Steering {
         if let Some(cur) = &s.current
             && cur.addr != addr
         {
-            cur.closer.close();
+            cur.leave(HeadsetGoodbye::OtherPc);
         }
     }
 
     /// Disconnects and waits for the user to pick a PC in the menu.
     pub fn change_host(&self) {
+        self.leave(HeadsetGoodbye::OtherPc);
+    }
+
+    /// The PC in use was forgotten in the menu: leaves it, telling it so, and does not
+    /// come back on its own.
+    pub fn forget_current(&self) {
+        self.leave(HeadsetGoodbye::Forgotten);
+    }
+
+    fn leave(&self, reason: HeadsetGoodbye) {
         let mut s = self.lock();
         s.choice = None;
         s.picking = true;
         if let Some(cur) = s.current.take() {
-            cur.closer.close();
+            cur.leave(reason);
         }
         self.0.1.notify_all();
+    }
+
+    /// The session with the PC at `addr` is open: leaving it from now on says goodbye.
+    fn opened(&self, addr: SocketAddr, feedback: &Feedback) {
+        if let Some(cur) = self.lock().current.as_mut().filter(|c| c.addr == addr) {
+            cur.feedback = Some(feedback.clone());
+        }
     }
 
     /// A PC was forgotten in the menu: the next connection reads the trust file again.
@@ -299,7 +358,7 @@ impl Steering {
         let mut s = self.lock();
         s.quit = true;
         if let Some(cur) = &s.current {
-            cur.closer.close();
+            cur.leave(HeadsetGoodbye::Quit);
         }
         self.0.1.notify_all();
     }
@@ -438,7 +497,7 @@ pub fn spawn(events: Sender<NetEvent>, discovery: Discovery, steering: Steering)
                     let name = peer.and_then(|p| finder.name_of(p));
                     steering.lock().current = current(&stream);
                     let mut ended = Ended::default();
-                    match run_session(
+                    let outcome = run_session(
                         stream,
                         &events,
                         name,
@@ -446,7 +505,20 @@ pub fn spawn(events: Sender<NetEvent>, discovery: Discovery, steering: Steering)
                         &identity,
                         &mut trusted,
                         &mut ended,
-                    ) {
+                    );
+                    let why = match (&outcome, ended.goodbye) {
+                        (_, Some(reason)) => Disconnect::Goodbye(reason),
+                        (Err(e), None)
+                            if ended.opened && e.kind() == std::io::ErrorKind::TimedOut =>
+                        {
+                            Disconnect::Silence
+                        }
+                        _ => Disconnect::Closed,
+                    };
+                    match outcome {
+                        Ok(()) if ended.goodbye.is_some() => {
+                            info!("host {peer:?} ended the session: {why:?}")
+                        }
                         Ok(()) => info!("host {peer:?} closed the connection"),
                         Err(e) => warn!("connection to {peer:?} lost: {e}"),
                     }
@@ -458,7 +530,7 @@ pub fn spawn(events: Sender<NetEvent>, discovery: Discovery, steering: Steering)
                         let _ = std::fs::write(&discovery.last_host_file, p.to_string());
                     }
                     steering.lock().current = None;
-                    if events.send(NetEvent::Disconnected).is_err() || steering.quitting() {
+                    if events.send(NetEvent::Disconnected { why }).is_err() || steering.quitting() {
                         info!("network stopped");
                         return;
                     }
@@ -484,7 +556,11 @@ fn current(stream: &TcpStream) -> Option<Current> {
     let closer = Closer::new(move || {
         let _ = socket.shutdown(Shutdown::Both);
     });
-    Some(Current { addr, closer })
+    Some(Current {
+        addr,
+        closer,
+        feedback: None,
+    })
 }
 
 /// The PC's name with its address, so a look-alike name from the network stands out.
@@ -726,7 +802,7 @@ impl Session<'_> {
         self.steering.offer(self.peer.key, addr);
         let _ = self.events.send(NetEvent::PairOffer {
             host: offer_label(self.host, addr),
-            failed: false,
+            why: OfferWhy::New,
         });
         Err(std::io::Error::other(
             "waiting for the user to approve pairing",
@@ -820,7 +896,7 @@ impl Session<'_> {
         self.steering.offer(self.peer.key, addr);
         let _ = self.events.send(NetEvent::PairOffer {
             host: offer_label(self.host, addr),
-            failed: true,
+            why: OfferWhy::WrongCodes,
         });
         Err(std::io::Error::other("pairing stopped after wrong codes"))
     }
@@ -841,6 +917,8 @@ struct Ended {
     /// When the PC last sent an error: right before it hung up means it cannot
     /// serve the headset right now.
     refused: Option<Instant>,
+    /// The PC ended the session on purpose, for this reason.
+    goodbye: Option<PcGoodbye>,
 }
 
 fn run_session(
@@ -936,6 +1014,7 @@ fn run_session(
     // Both sides ping every second: a few seconds of silence is a dead link.
     receiver.set_idle_limit(Some(SILENCE));
     feedback.start_pings();
+    steering.opened(addr, &feedback);
     let _ = events.send(NetEvent::Connected {
         addr,
         name,
@@ -1100,6 +1179,20 @@ fn run_session(
             // Answered at once, from here: the round trip is the network's.
             HostMsg::Ping { seq } => feedback.send(ClientMsg::Pong { seq })?,
             HostMsg::Pong { seq } => feedback.outbox.pong(seq),
+            HostMsg::Goodbye { reason } => {
+                let reason = PcGoodbye::from_code(reason);
+                ended.goodbye = Some(reason);
+                // It no longer trusts this headset: ask the user before pairing again,
+                // and connect to nothing meanwhile.
+                if reason == PcGoodbye::Forgotten {
+                    steering.offer(peer.key, addr);
+                    let _ = events.send(NetEvent::PairOffer {
+                        host: offer_label(&host, addr),
+                        why: OfferWhy::Forgotten,
+                    });
+                }
+                break Ok(());
+            }
             // Only before the session: ignored in it.
             HostMsg::Welcome { .. }
             | HostMsg::Opened

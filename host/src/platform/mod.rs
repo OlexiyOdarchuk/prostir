@@ -134,7 +134,7 @@ pub struct ActiveWindow {
 /// What the tray asks the main loop to do.
 #[cfg_attr(
     feature = "fake-desktop",
-    expect(dead_code, reason = "the fake desktop has no tray")
+    expect(dead_code, reason = "the fake tray has only some of the items")
 )]
 pub enum TrayCommand {
     SetBitrate(u32),
