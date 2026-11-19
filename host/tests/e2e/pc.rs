@@ -106,6 +106,7 @@ impl Pc {
             .env("XDG_CONFIG_HOME", root.join("config"))
             .env("XDG_RUNTIME_DIR", root.join("run"))
             .env("HOME", root.join("home"))
+            .env("PROSTIR_FAKE_DESKTOP", "1")
             .env("PROSTIR_NO_COUNT", "1")
             .env("PROSTIR_FAKE_FPS", options.fps.to_string())
             .env("LANGUAGE", "en")

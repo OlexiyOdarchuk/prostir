@@ -11,8 +11,9 @@
 //! - Sound is silence, 10 ms at a time; the microphone goes nowhere.
 //! - No windows, no mouse, no screenshots, no tray, no notifications, and no outside
 //!   programs are run ([`run`] says none is installed).
-//! - Settings live in `$XDG_CONFIG_HOME` only, which must be set: it never falls back
-//!   to the user's own `~/.config`.
+//! - It runs only when asked to with `PROSTIR_FAKE_DESKTOP=1`, and its settings live
+//!   in `$XDG_CONFIG_HOME` only, which must be set: a fake build started by mistake
+//!   never falls back to the user's own `~/.config`.
 //! - The person at the PC types the pairing code in `PROSTIR_FAKE_TYPED_CODE`, if
 //!   set; otherwise there is no dialog to type it in.
 //!
@@ -33,16 +34,29 @@ use anyhow::{Context, Result};
 
 pub use desktop::{FakeDesktop as Desktop, FakeOutput as Output};
 
-/// Where per-user settings go: `$XDG_CONFIG_HOME` and nowhere else.
+/// The fake desktop was asked for: `PROSTIR_FAKE_DESKTOP=1`, as the tests set it.
+fn asked_for() -> bool {
+    std::env::var_os("PROSTIR_FAKE_DESKTOP").is_some_and(|v| v == "1")
+}
+
+/// Where per-user settings go: `$XDG_CONFIG_HOME` and nowhere else, and only when the
+/// fake desktop was asked for.
 pub fn config_home() -> Option<PathBuf> {
+    if !asked_for() {
+        return None;
+    }
     std::env::var_os("XDG_CONFIG_HOME")
         .filter(|d| !d.is_empty())
         .map(PathBuf::from)
 }
 
-/// One fake PC per settings directory; refuses to start without one, so a test never
-/// touches the real settings.
+/// One fake PC per settings directory; refuses to start unless asked for and given
+/// one, so neither a test nor a fake build started by mistake touches the real settings.
 pub fn single_instance() -> Result<std::fs::File> {
+    anyhow::ensure!(
+        asked_for(),
+        "this build has a fake desktop for tests; it runs only with PROSTIR_FAKE_DESKTOP=1"
+    );
     let dir = config_home().context(
         "the fake desktop needs XDG_CONFIG_HOME set to a directory of its own (a test's)",
     )?;
