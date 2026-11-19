@@ -602,6 +602,36 @@ impl Scene {
         }
     }
 
+    /// Turns cinema mode on or off. The one place that switches it: the desk layout is
+    /// saved before the cinema view replaces it (follow mode may have moved it), and
+    /// comes back from disk after, window panels staying where they are.
+    fn set_cinema(&mut self, on: bool) {
+        if on == self.settings.cinema {
+            return;
+        }
+        if on {
+            self.save_layout();
+            self.settings.cinema = true;
+            self.arrange_all();
+            return;
+        }
+        self.settings.cinema = false;
+        let panels: Vec<(u8, Placement)> = self
+            .placements
+            .iter()
+            .filter(|(id, _)| is_window_panel(**id))
+            .map(|(id, p)| (*id, *p))
+            .collect();
+        self.placements = self.desk.load().into_iter().chain(panels).collect();
+        if self
+            .monitors
+            .keys()
+            .any(|id| !self.placements.contains_key(id))
+        {
+            self.arrange_all();
+        }
+    }
+
     /// Cinema mode with no view yet (started in cinema, or switched to a PC in it):
     /// built once every monitor the PC has is here, so the chosen screen is among
     /// them. A view that exists, moved by hand perhaps, is left alone.
@@ -3078,32 +3108,8 @@ fn handle_action(
             }
         }
         Action::Cinema(on) => {
-            if on && !scene.settings.cinema {
-                // The desk layout as it is now (follow mode may have moved it), to come
-                // back to.
-                scene.save_layout();
-            }
-            scene.settings.cinema = on;
+            scene.set_cinema(on);
             scene.settings.save(settings_path);
-            if on {
-                scene.arrange_all();
-            } else {
-                // Back to the desk layout as it was saved; window panels stay put.
-                let panels: Vec<(u8, Placement)> = scene
-                    .placements
-                    .iter()
-                    .filter(|(id, _)| is_window_panel(**id))
-                    .map(|(id, p)| (*id, *p))
-                    .collect();
-                scene.placements = scene.desk.load().into_iter().chain(panels).collect();
-                if scene
-                    .monitors
-                    .keys()
-                    .any(|id| !scene.placements.contains_key(id))
-                {
-                    scene.arrange_all();
-                }
-            }
         }
         Action::KeyboardWindow(on) => {
             scene.settings.keyboard_window = on;
@@ -3277,8 +3283,8 @@ fn handle_action(
             s.preset = p.settings.preset;
             s.curve = p.settings.curve;
             s.background = p.settings.background;
-            s.cinema = p.settings.cinema;
             s.cinema_screen = p.settings.cinema_screen;
+            scene.set_cinema(p.settings.cinema);
             scene.settings.save(settings_path);
             set_passthrough(scene, passthrough);
             scene.active_profile = Some(i);
