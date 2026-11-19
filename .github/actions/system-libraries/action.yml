@@ -1,0 +1,33 @@
+name: System libraries
+description: Installs Ubuntu packages, from mirrors tried in turn.
+
+inputs:
+  packages:
+    description: Packages to install, separated by spaces.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+      run: |
+        # Ubuntu's servers go down now and then (on 2026-11-19 archive.ubuntu.com,
+        # security.ubuntu.com and the runner's regional mirror all stopped answering
+        # while Azure's mirror kept working). apt takes every file from the first
+        # mirror on this list that answers, the security updates too, and gives up on
+        # a silent one quickly.
+        printf '%s\n' \
+          http://azure.archive.ubuntu.com/ubuntu/ \
+          http://archive.ubuntu.com/ubuntu/ \
+          | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+        for sources in /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list; do
+          if [ -f "$sources" ]; then
+            sudo sed -i -E 's#https?://(archive|security)\.ubuntu\.com/ubuntu/?#mirror+file:/etc/apt/apt-mirrors.txt#g' "$sources"
+          fi
+        done
+        apt="sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10"
+        $apt update
+        # shellcheck disable=SC2086 # one word per package
+        $apt install -y --no-install-recommends $PACKAGES

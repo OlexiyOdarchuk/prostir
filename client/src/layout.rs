@@ -1179,24 +1179,66 @@ pub struct Desk {
     path: PathBuf,
 }
 
+/// A stream's size in pixels, width then height.
+pub type PixelSize = (u32, u32);
+
+/// The desk arrangement as `layout.txt` keeps it.
+#[derive(Default)]
+pub struct Arrangement {
+    pub placements: HashMap<u8, Placement>,
+    /// The stream size each placement was made for. Files from 0.1.0 have none.
+    pub sizes: HashMap<u8, PixelSize>,
+    /// The eye and the yaw the arrangement was laid out around. Files from 0.1.0 have
+    /// none.
+    pub center: Option<(Vec3, f32)>,
+}
+
 impl Desk {
     pub fn new(path: PathBuf) -> Self {
         Self { path }
     }
 
     /// The saved arrangement. Window panels are placed afresh when they appear.
-    pub fn load(&self) -> HashMap<u8, Placement> {
-        load(&self.path)
-            .into_iter()
-            .filter(|(id, _)| !is_window_panel(*id))
-            .collect()
+    pub fn load(&self) -> Arrangement {
+        let Ok(text) = std::fs::read_to_string(&self.path) else {
+            return Arrangement::default();
+        };
+        let mut saved = Arrangement::default();
+        for line in text.lines() {
+            if let Some(center) = parse_center(line) {
+                saved.center = Some(center);
+            } else if let Some((id, p, size)) = parse_placement(line)
+                && !is_window_panel(id)
+            {
+                saved.placements.insert(id, p);
+                if let Some(size) = size {
+                    saved.sizes.insert(id, size);
+                }
+            }
+        }
+        saved
     }
 
-    /// Keeps `placements` as the desk arrangement, unless they are the cinema view.
-    pub fn save(&self, placements: &HashMap<u8, Placement>, cinema: bool) {
-        if !cinema {
-            save(&self.path, placements);
+    /// Keeps `placements` (made for the stream `sizes`, around `center`) as the desk
+    /// arrangement, unless they are the cinema view.
+    pub fn save(
+        &self,
+        placements: &HashMap<u8, Placement>,
+        sizes: &HashMap<u8, PixelSize>,
+        center: (Vec3, f32),
+        cinema: bool,
+    ) {
+        if cinema {
+            return;
         }
+        let (eye, yaw) = center;
+        let mut text = format!("center {} {} {} {yaw}\n", eye.x, eye.y, eye.z);
+        let mut ids: Vec<_> = placements.keys().copied().collect();
+        ids.sort();
+        for id in ids {
+            text += &placement_line(id, &placements[&id], sizes.get(&id).copied());
+        }
+        write(&self.path, &text);
     }
 }
 
@@ -1205,25 +1247,8 @@ pub fn load(path: &Path) -> HashMap<u8, Placement> {
         return HashMap::new();
     };
     text.lines()
-        .filter_map(|line| {
-            let v: Vec<f32> = line
-                .split_whitespace()
-                .filter_map(|s| s.parse().ok())
-                .collect();
-            if v.len() != 9 {
-                return None;
-            }
-            let rotation = Quat::from_xyzw(v[4], v[5], v[6], v[7]).normalize();
-            Some((
-                v[0] as u8,
-                Placement {
-                    position: Vec3::new(v[1], v[2], v[3]),
-                    rotation,
-                    width: v[8],
-                },
-            ))
-        })
-        .filter(|(_, p)| p.position.is_finite() && p.rotation.is_finite() && p.width.is_finite())
+        .filter_map(parse_placement)
+        .map(|(id, p, _)| (id, p))
         .collect()
 }
 
@@ -1232,18 +1257,97 @@ pub fn save(path: &Path, placements: &HashMap<u8, Placement>) {
     ids.sort();
     let text: String = ids
         .iter()
-        .map(|id| {
-            let p = &placements[id];
-            let (pos, q) = (p.position, p.rotation);
-            format!(
-                "{id} {} {} {} {} {} {} {} {}\n",
-                pos.x, pos.y, pos.z, q.x, q.y, q.z, q.w, p.width
-            )
-        })
+        .map(|id| placement_line(*id, &placements[id], None))
         .collect();
+    write(path, &text);
+}
+
+fn write(path: &Path, text: &str) {
     if let Err(e) = prostir_proto::secure::write_atomic(path, text.as_bytes()) {
         log::warn!("cannot save layout to {}: {e}", path.display());
     }
+}
+
+/// `id x y z qx qy qz qw width`, then the stream size it was placed for (`2560x1440`)
+/// when known. Older readers skip the size: it is not a number.
+fn placement_line(id: u8, p: &Placement, size: Option<PixelSize>) -> String {
+    let (pos, q) = (p.position, p.rotation);
+    let size = size.map_or(String::new(), |(w, h)| format!(" {w}x{h}"));
+    format!(
+        "{id} {} {} {} {} {} {} {} {}{size}\n",
+        pos.x, pos.y, pos.z, q.x, q.y, q.z, q.w, p.width
+    )
+}
+
+fn parse_placement(line: &str) -> Option<(u8, Placement, Option<PixelSize>)> {
+    let mut words = line.split_whitespace();
+    let id: u8 = words.next()?.parse().ok()?;
+    let v: Vec<f32> = words
+        .by_ref()
+        .take(8)
+        .map(|w| w.parse().ok())
+        .collect::<Option<_>>()?;
+    if v.len() != 8 {
+        return None;
+    }
+    let size = match words.next() {
+        None => None,
+        Some(w) => {
+            let (w, h) = w.split_once('x')?;
+            Some((w.parse().ok()?, h.parse().ok()?))
+        }
+    };
+    if words.next().is_some() {
+        return None;
+    }
+    let p = Placement {
+        position: Vec3::new(v[0], v[1], v[2]),
+        rotation: Quat::from_xyzw(v[3], v[4], v[5], v[6]).normalize(),
+        width: v[7],
+    };
+    (p.position.is_finite() && p.rotation.is_finite() && p.width.is_finite())
+        .then_some((id, p, size))
+}
+
+/// `center x y z yaw`: where the arrangement was laid out around.
+fn parse_center(line: &str) -> Option<(Vec3, f32)> {
+    let rest = line.strip_prefix("center ")?;
+    let v: Vec<f32> = rest
+        .split_whitespace()
+        .map(|w| w.parse().ok())
+        .collect::<Option<_>>()?;
+    let [x, y, z, yaw] = v[..] else {
+        return None;
+    };
+    let eye = Vec3::new(x, y, z);
+    (eye.is_finite() && yaw.is_finite()).then_some((eye, yaw))
+}
+
+/// `p` for a stream now `now` pixels in size instead of `was`: the same size of a
+/// pixel, centred where it was. A monitor that comes back with another resolution
+/// under the same number (a profile, a rotated monitor) would otherwise keep its old
+/// width in metres and look bigger or smaller than its neighbours.
+pub fn refit(p: Placement, was: PixelSize, now: PixelSize) -> Placement {
+    if was.0 == 0 || was == now {
+        return p;
+    }
+    Placement {
+        width: p.width * now.0 as f32 / was.0 as f32,
+        ..p
+    }
+}
+
+/// Which way an arrangement faces from `eye`: the mean direction of its monitors, in
+/// the yaw convention of `center` (0 is -Z, positive turns towards -X).
+pub fn facing_yaw(placements: &HashMap<u8, Placement>, eye: Vec3) -> Option<f32> {
+    let (sin, cos) = placements
+        .values()
+        .map(|p| {
+            let d = p.position - eye;
+            (-d.x).atan2(-d.z)
+        })
+        .fold((0.0f32, 0.0f32), |(s, c), a| (s + a.sin(), c + a.cos()));
+    (sin.abs() > 1e-6 || cos.abs() > 1e-6).then(|| sin.atan2(cos))
 }
 
 #[cfg(test)]
@@ -1746,19 +1850,26 @@ mod tests {
         assert!(gap.abs() < 1e-4, "gap {gap}");
     }
 
+    fn temp_desk(name: &str) -> (PathBuf, Desk) {
+        let dir = std::env::temp_dir().join(format!("prostir-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let desk = Desk::new(dir.join("layout.txt"));
+        (dir, desk)
+    }
+
     /// The cinema view never replaces the desk arrangement: leaving cinema finds the
     /// monitors where the user put them.
     #[test]
     fn cinema_view_keeps_the_desk_arrangement() {
-        let dir = std::env::temp_dir().join(format!("prostir-desk-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let desk = Desk::new(dir.join("layout.txt"));
+        let (dir, desk) = temp_desk("desk");
         let two = [(0, 2560, 1440), (1, 1920, 1080)];
+        let sizes = HashMap::from([(0, (2560, 1440)), (1, (1920, 1080))]);
+        let center = (Vec3::ZERO, 0.0);
         let mut arranged = arrange(Preset::Arc, &two, Some(0), None);
         arranged.get_mut(&1).unwrap().position += Vec3::new(0.1, 0.3, 0.0);
-        desk.save(&arranged, false);
-        desk.save(&cinema(&two, None), true);
-        let kept = desk.load();
+        desk.save(&arranged, &sizes, center, false);
+        desk.save(&cinema(&two, None), &sizes, center, true);
+        let kept = desk.load().placements;
         assert_eq!(kept.len(), 2);
         for (id, p) in &arranged {
             assert!(kept[id].position.distance(p.position) < 1e-5);
@@ -1766,8 +1877,93 @@ mod tests {
         // Window panels are placed afresh, not kept.
         let mut with_panel = arranged.clone();
         with_panel.insert(prostir_proto::WINDOW_IDS.start, arranged[&0]);
-        desk.save(&with_panel, false);
-        assert_eq!(desk.load().len(), 2);
+        desk.save(&with_panel, &sizes, center, false);
+        assert_eq!(desk.load().placements.len(), 2);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The stream sizes and the way the arrangement faces come back as saved.
+    #[test]
+    fn desk_keeps_sizes_and_center() {
+        let (dir, desk) = temp_desk("desk-sizes");
+        let two = [(0, 2560, 1440), (1, 1440, 2560)];
+        let arranged = arrange(Preset::Arc, &two, Some(0), None);
+        let sizes = HashMap::from([(0, (2560, 1440)), (1, (1440, 2560))]);
+        let center = (Vec3::new(0.1, 0.0, -0.2), 0.7);
+        desk.save(&arranged, &sizes, center, false);
+        let saved = desk.load();
+        assert_eq!(saved.sizes, sizes);
+        let (eye, yaw) = saved.center.unwrap();
+        assert!(eye.distance(center.0) < 1e-6 && (yaw - center.1).abs() < 1e-6);
+        assert_eq!(saved.placements.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file written by 0.1.0 (no sizes, no center) still reads; and a 0.1.0 reader,
+    /// which keeps lines of exactly nine numbers, still reads ours.
+    #[test]
+    fn desk_reads_and_is_read_by_0_1_0() {
+        let (dir, desk) = temp_desk("desk-old");
+        std::fs::write(
+            dir.join("layout.txt"),
+            "0 -0.5 -0.08 -0.9 0 0.2 0 0.98 1.38\n1 0.5 -0.08 -0.9 0 -0.2 0 0.98 1.03\n",
+        )
+        .unwrap();
+        let saved = desk.load();
+        assert_eq!(saved.placements.len(), 2);
+        assert!(saved.sizes.is_empty() && saved.center.is_none());
+        assert!((saved.placements[&1].width - 1.03).abs() < 1e-6);
+
+        let sizes = HashMap::from([(0, (2560, 1440))]);
+        desk.save(&saved.placements, &sizes, (Vec3::ZERO, 0.3), false);
+        let text = std::fs::read_to_string(dir.join("layout.txt")).unwrap();
+        let old_reader = |line: &str| {
+            line.split_whitespace()
+                .filter_map(|w| w.parse::<f32>().ok())
+                .count()
+                == 9
+        };
+        assert_eq!(text.lines().filter(|l| old_reader(l)).count(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A monitor that comes back with another resolution keeps the size of a pixel.
+    #[test]
+    fn refit_keeps_the_size_of_a_pixel() {
+        let landscape = arrange(Preset::Arc, &[(0, 2560, 1440)], Some(0), None)[&0];
+        let rotated = refit(landscape, (2560, 1440), (1440, 2560));
+        let density = |p: &Placement, w: u32| p.width / w as f32;
+        assert!((density(&rotated, 1440) - density(&landscape, 2560)).abs() < 1e-9);
+        assert_eq!(rotated.position, landscape.position);
+        let unchanged = refit(landscape, (2560, 1440), (2560, 1440));
+        assert_eq!(unchanged.width, landscape.width);
+    }
+
+    /// An arrangement laid out facing `yaw` reads back as facing `yaw`.
+    #[test]
+    fn facing_yaw_of_an_arrangement() {
+        let row = arrange(
+            Preset::Arc,
+            &[(0, 2560, 1440), (1, 2560, 1440), (2, 2560, 1440)],
+            Some(1),
+            None,
+        );
+        let yaw = 0.8f32;
+        let turn = Quat::from_rotation_y(yaw);
+        let turned: HashMap<u8, Placement> = row
+            .iter()
+            .map(|(id, p)| {
+                (
+                    *id,
+                    Placement {
+                        position: turn * p.position,
+                        rotation: turn * p.rotation,
+                        width: p.width,
+                    },
+                )
+            })
+            .collect();
+        let got = facing_yaw(&turned, Vec3::ZERO).unwrap();
+        assert!((got - yaw).abs() < 1e-4, "got {got}");
     }
 }

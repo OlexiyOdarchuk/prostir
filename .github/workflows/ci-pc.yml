@@ -12,6 +12,7 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/ci-pc.yml"
+      - ".github/actions/**"
   pull_request:
     paths:
       - "host/**"
@@ -21,6 +22,7 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/ci-pc.yml"
+      - ".github/actions/**"
   workflow_dispatch:
 
 permissions:
@@ -40,17 +42,14 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - name: System libraries
-        run: |
-          # The runner image's package lists are usually fresh enough: update them
-          # only when installing without that fails (it is the slow, flaky part).
-          apt="sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
-          # Plugins for the end-to-end tests: the runner has no graphics card, so they
-          # encode with x264 (plugins-ugly); h264parse comes from plugins-bad.
-          pkgs="libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev pkg-config \
-            gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
-            gstreamer1.0-plugins-ugly"
-          $apt install -y --no-install-recommends $pkgs || { $apt update && $apt install -y --no-install-recommends $pkgs; }
+      # Plugins for the end-to-end tests: the runner has no graphics card, so they encode
+      # with x264 (plugins-ugly); h264parse comes from plugins-bad.
+      - uses: ./.github/actions/system-libraries
+        with:
+          packages: >-
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev pkg-config
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
+            gstreamer1.0-plugins-ugly
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch
         with:
           toolchain: stable
