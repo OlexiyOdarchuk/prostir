@@ -1357,44 +1357,15 @@ impl Displays {
         Ok(())
     }
 
-    /// The headset's rows, kept in step with the monitors: gone ones dropped, new ones
-    /// (not placed by the headset yet) at the end of the bottom row.
+    /// The headset's rows, kept in step with the monitors (see [`rows_in_step`]).
     fn effective_rows(&self) -> Vec<LayoutRow> {
-        let mut rows: Vec<LayoutRow> = self
-            .rows
-            .iter()
-            .map(|r| LayoutRow {
-                // The laptop screen too, where the headset put it (while it shows).
-                entries: r
-                    .entries
-                    .iter()
-                    .filter(|e| {
-                        self.monitors.contains_key(&e.id)
-                            || (e.id == MIRROR_ID && self.mirror.is_some())
-                    })
-                    .copied()
-                    .collect(),
-            })
-            .filter(|r| !r.entries.is_empty())
-            .collect();
-        let placed: Vec<u8> = rows.iter().flat_map(LayoutRow::ids).collect();
-        let missing: Vec<LayoutEntry> = self
-            .order
-            .iter()
-            .filter(|id| !placed.contains(id) && self.monitors.contains_key(id))
-            .map(|&id| LayoutEntry {
-                id,
-                center: None,
-                middle: None,
-            })
-            .collect();
-        if !missing.is_empty() {
-            match rows.last_mut() {
-                Some(last) => last.entries.extend(missing),
-                None => rows.push(LayoutRow { entries: missing }),
-            }
-        }
-        rows
+        rows_in_step(
+            &self.rows,
+            &self.order,
+            |id| self.monitors.contains_key(&id),
+            // The laptop screen too, where the headset put it (while it shows).
+            |id| id == MIRROR_ID && self.mirror.is_some(),
+        )
     }
 
     /// Arranges the desktop's outputs in the rows the headset shows them in.
@@ -1729,6 +1700,55 @@ impl Displays {
     }
 }
 
+/// `rows` kept in step with the outputs: only monitors (`monitor`) and other outputs
+/// that show (`shown`) stay, each in the first place it is listed in, and monitors of
+/// `order` not placed yet go to the end of the bottom row. So every monitor is listed
+/// exactly once.
+fn rows_in_step(
+    rows: &[LayoutRow],
+    order: &[u8],
+    monitor: impl Fn(u8) -> bool,
+    shown: impl Fn(u8) -> bool,
+) -> Vec<LayoutRow> {
+    let mut placed: Vec<u8> = Vec::new();
+    let mut kept: Vec<LayoutRow> = rows
+        .iter()
+        .map(|r| LayoutRow {
+            entries: r
+                .entries
+                .iter()
+                .filter(|e| {
+                    let new = (monitor(e.id) || shown(e.id)) && !placed.contains(&e.id);
+                    if new {
+                        placed.push(e.id);
+                    }
+                    new
+                })
+                .copied()
+                .collect(),
+        })
+        .filter(|r| !r.entries.is_empty())
+        .collect();
+    let mut missing = Vec::new();
+    for &id in order {
+        if monitor(id) && !placed.contains(&id) {
+            placed.push(id);
+            missing.push(LayoutEntry {
+                id,
+                center: None,
+                middle: None,
+            });
+        }
+    }
+    if !missing.is_empty() {
+        match kept.last_mut() {
+            Some(last) => last.entries.extend(missing),
+            None => kept.push(LayoutRow { entries: missing }),
+        }
+    }
+    kept
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1808,6 +1828,35 @@ mod tests {
             height: h.parse().map_err(|_| "height")?,
             scale: 1.0,
         })
+    }
+
+    /// Every monitor is in the rows once, in the first place listed: an order made
+    /// from them never repeats one (or grows past what a message holds).
+    #[test]
+    fn rows_list_each_monitor_once() {
+        let at = |id, center| LayoutEntry {
+            id,
+            center: Some(center),
+            middle: None,
+        };
+        let rows = vec![
+            LayoutRow {
+                entries: vec![at(0, -100), at(0, 0), at(MIRROR_ID, 50)],
+            },
+            LayoutRow {
+                entries: vec![at(1, 10), at(0, 20), at(9, 30)],
+            },
+        ];
+        let monitor = |id| id < 3;
+        let kept = rows_in_step(&rows, &[2, 0, 1, 2], monitor, |id| id == MIRROR_ID);
+        let ids: Vec<Vec<u8>> = kept.iter().map(|r| r.ids().collect()).collect();
+        assert_eq!(ids, vec![vec![0, MIRROR_ID], vec![1, 2]]);
+        assert_eq!(kept[0].entries[0], at(0, -100), "the first place counts");
+        let many = vec![LayoutRow {
+            entries: vec![at(0, 0); 16],
+        }];
+        let kept = rows_in_step(&many, &[0, 1], monitor, |_| false);
+        assert_eq!(kept[0].ids().collect::<Vec<_>>(), vec![0, 1]);
     }
 
     /// Where the headset showed each monitor, across and up and down, survives a
