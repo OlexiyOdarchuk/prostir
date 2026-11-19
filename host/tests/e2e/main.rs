@@ -207,49 +207,54 @@ fn monitors_kept_after_a_disconnect_show_again() {
 
 /// Another codec from the headset menu restarts every stream with what the PC really
 /// encodes with now: H.265 where the graphics card can, else the CPU's H.264 again.
+/// Asking for what is in use already changes nothing.
 #[test]
 fn a_codec_switch_restarts_every_stream() {
     let (_dir, _pc, _keys, mut headset) = session("codec", &Options::default());
-    let switch = |headset: &mut FakeHeadset, codec, software| {
-        let started: Vec<(u8, u32)> = headset
-            .view()
-            .streams
-            .iter()
-            .map(|(id, s)| (*id, s.starts))
-            .collect();
+    let starts = |headset: &FakeHeadset| -> Vec<(u8, u32)> {
+        let streams = &headset.view().streams;
+        streams.iter().map(|(id, s)| (*id, s.starts)).collect()
+    };
+    let ask = |headset: &mut FakeHeadset, codec, software| {
+        let settings = PcSettings {
+            quality: 8,
+            codec,
+            software,
+            sharp: false,
+        };
         headset
-            .send(&ClientMsg::SetPcSettings {
-                settings: PcSettings {
-                    quality: 8,
-                    codec,
-                    software,
-                    sharp: false,
-                },
-            })
+            .send(&ClientMsg::SetPcSettings { settings })
             .unwrap();
+    };
+    let restarted = |headset: &mut FakeHeadset, before: &[(u8, u32)]| {
         headset
-            .wait(
-                SOON,
-                "the new settings and every stream started over",
-                |v| {
-                    let Some((now, _)) = v.pc_settings else {
-                        return false;
-                    };
-                    started.iter().all(|(id, before)| {
-                        v.streams.get(id).is_some_and(|s| {
-                            s.starts > *before && s.codec == now.codec && s.has_picture()
-                        })
-                    })
-                },
-            )
+            .wait(SOON, "every stream started over with the new codec", |v| {
+                let Some((now, _)) = v.pc_settings else {
+                    return false;
+                };
+                before.iter().all(|(id, n)| {
+                    v.streams
+                        .get(id)
+                        .is_some_and(|s| s.starts > *n && s.codec == now.codec && s.has_picture())
+                })
+            })
             .unwrap();
         headset.view().pc_settings.unwrap().0
     };
-    let gpu = switch(&mut headset, Codec::H265, false);
+
+    let before = starts(&headset);
+    ask(&mut headset, Codec::H265, false);
+    let gpu = restarted(&mut headset, &before);
     eprintln!("asked for H.265 on the graphics card, got {gpu:?}");
-    if !gpu.software {
+    let before = starts(&headset);
+    ask(&mut headset, Codec::H264, true);
+    if gpu.software {
+        // No graphics card encoder (CI): still the CPU's H.264, nothing to restart.
+        headset.take_for(Duration::from_secs(2)).unwrap();
+        assert_eq!(starts(&headset), before);
+    } else {
         assert_eq!(gpu.codec, Codec::H265);
+        let cpu = restarted(&mut headset, &before);
+        assert_eq!((cpu.codec, cpu.software), (Codec::H264, true));
     }
-    let cpu = switch(&mut headset, Codec::H264, true);
-    assert_eq!((cpu.codec, cpu.software), (Codec::H264, true));
 }

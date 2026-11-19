@@ -29,7 +29,9 @@ jobs:
         run: |
           sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
           sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y --no-install-recommends \
-            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev pkg-config
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev pkg-config \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-ugly
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch
         with:
           toolchain: stable
@@ -38,6 +40,13 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      # The PC app with the fake desktop, driven by a fake headset (host/tests/e2e). The
+      # runner has no graphics card: it encodes with x264 (plugins-ugly), h264parse
+      # comes from plugins-bad.
+      - name: Clippy with the fake desktop
+        run: cargo clippy -p prostir-host --features fake-desktop --all-targets -- -D warnings
+      - name: End-to-end tests
+        run: cargo e2e
       # Fails when a dependency ships no license text we can put in the release.
       - name: Third-party licenses
         run: python3 scripts/third-party-licenses.py -o "$RUNNER_TEMP/THIRD-PARTY-LICENSES.txt"
