@@ -48,6 +48,9 @@ drm-fourcc = "2.2.0"
 serde_json = "1.0.154"
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 
+[dev-dependencies]
+prostir-testkit = { path = "../testkit" }
+
 # Packages built in the release workflow: `cargo deb -p prostir-host` and
 # `cargo generate-rpm -p host`, after scripts/package-release.sh (which writes
 # build/THIRD-PARTY-LICENSES.txt) and `strip --strip-debug target/release/prostir`.
@@ -57,9 +60,6 @@ wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 # fallback (NVIDIA, or no VA encoder), pipewiresrc, pulsesrc/pulsesink, h264parse and
 # h265parse; pw-cli and pw-loopback; pactl; kscreen-doctor and qdbus6 on KDE Plasma;
 # grim for screenshots on Hyprland (optional).
-[dev-dependencies]
-prostir-testkit = { path = "../testkit" }
-
 [package.metadata.deb]
 name = "prostir"
 maintainer = "Prostir contributors <https://github.com/OlexiyOdarchuk/prostir>"
