@@ -8,6 +8,7 @@ mod outbox;
 mod pacing;
 mod pairing;
 mod platform;
+mod screen;
 mod usage;
 
 use std::io::ErrorKind;
@@ -27,6 +28,7 @@ use displays::{Displays, SavedMonitors};
 use encoder::EncoderConfig;
 use platform::MonitorSpec;
 use platform::{TrayCommand, TrayStatus, focus, notifications, sound_source, tray};
+use screen::ScreenId;
 
 #[derive(Parser, Debug)]
 #[command(about = "Virtual monitors for KDE Plasma and Hyprland, streamed to a Meta Quest 3")]
@@ -370,11 +372,11 @@ fn serve_client(
 
     displays.router.attach(outbox.clone());
     if let Some(id) = displays.primary() {
-        displays.router.send(HostMsg::PrimaryChanged { id });
+        displays
+            .router
+            .send(HostMsg::PrimaryChanged { id: id.wire() });
     }
-    displays.router.send(HostMsg::Order {
-        ids: displays.order().to_vec(),
-    });
+    displays.send_order();
     displays.router.send(HostMsg::MirrorWanted {
         enabled: displays.mirror_wanted(),
     });
@@ -407,7 +409,8 @@ fn serve_client(
             next_focus = Instant::now() + Duration::from_millis(150);
             let id = active_output
                 .get()
-                .and_then(|name| displays.id_of_output(&name));
+                .and_then(|name| displays.id_of_output(&name))
+                .map(ScreenId::wire);
             if focus != Some(id) {
                 focus = Some(id);
                 displays.router.send(HostMsg::Focus { id });
@@ -416,7 +419,8 @@ fn serve_client(
                 let id = w.output().and_then(|name| displays.id_of_output(&name));
                 if sound_from != Some(id) {
                     sound_from = Some(id);
-                    info!("sound comes from monitor {id:?}");
+                    info!("sound comes from {id:?}");
+                    let id = id.map(ScreenId::wire);
                     displays.router.send(HostMsg::SoundFrom { id });
                 }
             }
@@ -449,8 +453,12 @@ fn serve_client(
             .min(next_focus)
             .saturating_duration_since(Instant::now());
         match msg_rx.recv_timeout(wait) {
-            Ok(Ok(ClientMsg::RequestKeyframe { id })) => displays.force_keyframe(id),
-            Ok(Ok(ClientMsg::FrameShown { id, pts_us })) => displays.router.frame_shown(id, pts_us),
+            Ok(Ok(ClientMsg::RequestKeyframe { id })) => {
+                displays.force_keyframe(ScreenId::from_wire(id));
+            }
+            Ok(Ok(ClientMsg::FrameShown { id, pts_us })) => {
+                displays.router.frame_shown(ScreenId::from_wire(id), pts_us);
+            }
             Ok(Ok(ClientMsg::AddMonitor { width, height })) => {
                 let spec = MonitorSpec {
                     width,
@@ -459,7 +467,7 @@ fn serve_client(
                 };
                 match displays.add(spec) {
                     Ok(id) => {
-                        info!("headset added Prostir-{}", u32::from(id) + 1);
+                        info!("headset added {id}");
                         displays.force_keyframe(id);
                         displays.save();
                         displays.sync_wallpapers();
@@ -467,22 +475,24 @@ fn serve_client(
                     Err(e) => report(displays, format!("{e:#}")),
                 }
             }
-            Ok(Ok(ClientMsg::RemoveMonitor { id })) if prostir_proto::is_window_panel(id) => {
-                displays.close_window_panel(id);
-            }
-            Ok(Ok(ClientMsg::RemoveMonitor { id })) => match displays.remove(id) {
-                Ok(()) => {
-                    info!("headset removed Prostir-{}", u32::from(id) + 1);
-                    displays.save();
+            Ok(Ok(ClientMsg::RemoveMonitor { id })) => {
+                match displays.remove(ScreenId::from_wire(id)) {
+                    Ok(()) => {
+                        info!("headset removed {}", ScreenId::from_wire(id));
+                        displays.save();
+                    }
+                    Err(e) => report(displays, format!("{e:#}")),
                 }
-                Err(e) => report(displays, format!("{e:#}")),
-            },
-            Ok(Ok(ClientMsg::SetOrder { ids })) => match displays.set_order(&ids) {
-                Ok(()) => displays.save(),
-                Err(e) => report(displays, format!("{e:#}")),
-            },
+            }
+            Ok(Ok(ClientMsg::SetOrder { ids })) => {
+                let ids: Vec<ScreenId> = ids.into_iter().map(ScreenId::from_wire).collect();
+                match displays.set_order(&ids) {
+                    Ok(()) => displays.save(),
+                    Err(e) => report(displays, format!("{e:#}")),
+                }
+            }
             Ok(Ok(ClientMsg::SetLayout { rows })) => {
-                displays.set_layout(rows);
+                displays.set_layout(&rows);
                 displays.save();
             }
             Ok(Ok(ClientMsg::SetMonitors { sizes, primary })) => {
@@ -490,9 +500,7 @@ fn serve_client(
                     Ok(()) => info!("headset switched to {} monitor(s)", sizes.len()),
                     Err(e) => report(displays, format!("{e:#}")),
                 }
-                for id in displays.order().to_vec() {
-                    displays.force_keyframe(id);
-                }
+                displays.force_keyframes();
                 displays.save();
                 displays.sync_wallpapers();
             }
@@ -511,10 +519,8 @@ fn serve_client(
                 displays.save();
             }
             Ok(Ok(ClientMsg::SetPrimary { id })) => {
-                info!(
-                    "headset made Prostir-{} the primary monitor",
-                    u32::from(id) + 1
-                );
+                let id = ScreenId::from_wire(id);
+                info!("headset made {id} the primary monitor");
                 displays.set_primary(id);
                 displays.save();
                 displays.sync_wallpapers();
@@ -525,20 +531,22 @@ fn serve_client(
                 }
             }
             Ok(Ok(ClientMsg::WindowHere { id })) => {
-                if let Err(e) = displays.window_here(id) {
+                if let Err(e) = displays.window_here(ScreenId::from_wire(id)) {
                     report(displays, format!("{e:#}"));
                 }
             }
-            Ok(Ok(ClientMsg::Screenshot { id })) => match displays.screenshot(id) {
-                Ok(path) => displays.router.send(HostMsg::Notice {
-                    text: format!(
-                        "{} {}",
-                        i18n::t("Знімок збережено:", "Screenshot saved:"),
-                        home_relative(&path)
-                    ),
-                }),
-                Err(e) => report(displays, format!("{e:#}")),
-            },
+            Ok(Ok(ClientMsg::Screenshot { id })) => {
+                match displays.screenshot(ScreenId::from_wire(id)) {
+                    Ok(path) => displays.router.send(HostMsg::Notice {
+                        text: format!(
+                            "{} {}",
+                            i18n::t("Знімок збережено:", "Screenshot saved:"),
+                            home_relative(&path)
+                        ),
+                    }),
+                    Err(e) => report(displays, format!("{e:#}")),
+                }
+            }
             Ok(Ok(ClientMsg::SetNotifications { enabled })) => {
                 notifications = if enabled {
                     notifications.or_else(|| {
@@ -559,10 +567,13 @@ fn serve_client(
             }
             Ok(Ok(ClientMsg::FindMouse)) => {
                 if let Some((id, x, y)) = displays.find_mouse() {
+                    let id = id.wire();
                     displays.router.send(HostMsg::MouseAt { id, x, y });
                 }
             }
-            Ok(Ok(ClientMsg::MouseTo { id, x, y })) => displays.mouse_to(id, x, y),
+            Ok(Ok(ClientMsg::MouseTo { id, x, y })) => {
+                displays.mouse_to(ScreenId::from_wire(id), x, y);
+            }
             Ok(Ok(ClientMsg::Battery { percent, charging })) => {
                 tray::set_battery(control.tray.as_ref(), Some((percent, charging)));
                 // Once per session, when it gets low.
