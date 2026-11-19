@@ -24,6 +24,10 @@ the headset app.
   screen over it. Started in cinema mode, the app shows the cinema screen.
 - After the PC part restarts, the desktop is arranged the way the monitors stood in
   the headset straight away, above and below included.
+- A monitor that comes back with another resolution (a profile, a rotated monitor)
+  keeps the same size of text as its neighbours, instead of the width the old
+  resolution had. After a restart, "left", "middle" and "right" in the menu match
+  where the monitors stand.
 
 ### In the headset
 

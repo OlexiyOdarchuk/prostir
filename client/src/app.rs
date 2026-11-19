@@ -449,6 +449,9 @@ struct Scene {
     relayout_until: Option<Instant>,
     /// The desk arrangement on disk; see `save_layout`.
     desk: layout::Desk,
+    /// The stream size each desk placement was made for (see `fit_to_stream`). Not
+    /// kept for the cinema view.
+    placed_for: HashMap<u8, layout::PixelSize>,
     settings_path: PathBuf,
 }
 
@@ -616,13 +619,8 @@ impl Scene {
             return;
         }
         self.settings.cinema = false;
-        let panels: Vec<(u8, Placement)> = self
-            .placements
-            .iter()
-            .filter(|(id, _)| is_window_panel(**id))
-            .map(|(id, p)| (*id, *p))
-            .collect();
-        self.placements = self.desk.load().into_iter().chain(panels).collect();
+        let saved = self.desk.load();
+        self.adopt_desk(saved);
         if self
             .monitors
             .keys()
@@ -652,7 +650,53 @@ impl Scene {
     /// Saves the arrangement as the desk layout. In cinema mode `placements` is the
     /// cinema view, which is not saved: the desk layout stays as the user left it.
     fn save_layout(&self) {
-        self.desk.save(&self.placements, self.settings.cinema);
+        self.desk.save(
+            &self.placements,
+            &self.placed_for,
+            self.center,
+            self.settings.cinema,
+        );
+    }
+
+    /// Takes `saved` as the desk arrangement. Window panels stay where they are; a
+    /// monitor whose stream changed size since keeps the size of its pixels; layouts
+    /// keep facing the way this one was laid out (from a 0.1.0 file, which does not
+    /// say, the way its monitors face).
+    fn adopt_desk(&mut self, saved: layout::Arrangement) {
+        self.placements.retain(|id, _| is_window_panel(*id));
+        self.placements.extend(saved.placements);
+        self.placed_for = saved.sizes;
+        let live: Vec<(u8, layout::PixelSize)> = self
+            .monitors
+            .iter()
+            .map(|(id, m)| (*id, (m.width_px, m.height_px)))
+            .collect();
+        for (id, size) in live {
+            if !is_window_panel(id) {
+                self.fit_to_stream(id, size);
+            }
+        }
+        self.center = saved.center.unwrap_or_else(|| {
+            let desk: HashMap<u8, Placement> = self
+                .placements
+                .iter()
+                .filter(|(id, _)| !is_window_panel(**id))
+                .map(|(id, p)| (*id, *p))
+                .collect();
+            (
+                Vec3::ZERO,
+                layout::facing_yaw(&desk, Vec3::ZERO).unwrap_or(0.0),
+            )
+        });
+    }
+
+    /// The desk placement of monitor `id` follows its stream, now `size` pixels: the
+    /// same size of a pixel as before (see `layout::refit`).
+    fn fit_to_stream(&mut self, id: u8, size: layout::PixelSize) {
+        if let (Some(p), Some(&was)) = (self.placements.get_mut(&id), self.placed_for.get(&id)) {
+            *p = layout::refit(*p, was, size);
+        }
+        self.placed_for.insert(id, size);
     }
 
     /// Lays everything out by the chosen preset.
@@ -1651,13 +1695,10 @@ fn run(app: &AndroidApp) -> Result<()> {
     let mut scene = Scene {
         monitors: HashMap::new(),
         order: Vec::new(),
-        // In cinema mode the view is built once the PC's monitors are here (see
-        // `build_cinema_view_if_due`); the desk layout stays on disk until cinema ends.
-        placements: if settings.cinema {
-            HashMap::new()
-        } else {
-            desk.load()
-        },
+        // Filled from the desk below; in cinema mode the view is built once the PC's
+        // monitors are here (see `build_cinema_view_if_due`) and the desk layout stays
+        // on disk until cinema ends.
+        placements: HashMap::new(),
         primary: None,
         mirror_wanted: true,
         audio_wanted: true,
@@ -1726,8 +1767,13 @@ fn run(app: &AndroidApp) -> Result<()> {
         active_profile: None,
         relayout_until: None,
         desk,
+        placed_for: HashMap::new(),
         settings_path,
     };
+    if !scene.settings.cinema {
+        let saved = scene.desk.load();
+        scene.adopt_desk(saved);
+    }
 
     let mut hold_since: [Option<Instant>; 2] = [None, None];
     // A hand's pinch on a menu button: clicked when let go, unless it was held long
@@ -2986,6 +3032,9 @@ fn handle_net_event(
                             swapchain,
                         },
                     );
+                    if !is_window_panel(id) && !scene.settings.cinema {
+                        scene.fit_to_stream(id, (width, height));
+                    }
                     if is_window_panel(id) {
                         if !scene.placements.contains_key(&id) {
                             scene.place_window_panel(id);
