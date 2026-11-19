@@ -1,25 +1,46 @@
 //! Wire protocol between the PC host and the Quest client.
 //!
-//! Every message is framed as `[tag: u8][len: u32 LE][payload: len bytes]`.
-//! The client connects over TCP (USB via `adb reverse`, or Wi-Fi after
-//! discovering the host through a UDP broadcast beacon).
+//! The client connects over TCP (USB via `adb reverse`, or Wi-Fi after discovering the
+//! host through a UDP broadcast beacon), and both sides run an encrypted handshake
+//! ([`secure`]). After it every message is framed as
+//! `[tag: u8][len: u32 LE][payload: len bytes]`. A payload is the message's fields
+//! encoded as [`wire`] describes, and must be read whole: bytes left over are an error.
+//! A message with a tag a reader does not know is skipped, so a newer peer can add
+//! messages without a new protocol version.
+//!
+//! # The version handshake (frozen)
+//!
+//! The headset's first message is [`ClientMsg::Hello`], before anything else (pairing
+//! too). The PC answers with [`HostMsg::Welcome`] when the versions fit, or with
+//! [`HostMsg::Error`] and [`HostMsg::Incompatible`] when they do not, and then closes
+//! the connection. These four messages keep the bytes they had in protocol 1 in every
+//! version, so any two versions can tell the user which side to update: the fixed
+//! fields, then a UTF-8 text running to the end of the payload. They must never
+//! change; what a new version needs goes into other messages.
+//!
+//! Only the media messages ([`HostMsg::Frame`], [`HostMsg::Audio`], [`ClientMsg::Mic`])
+//! end in bytes running to the end of the payload too. They are read and written by
+//! hand, so their data is never copied on the way.
 
 // Everything here parses data from the network: no unsafe code at all.
 #![forbid(unsafe_code)]
 
 pub mod secure;
 pub mod stats;
+pub mod wire;
 
 use std::io::{self, Read, Write};
 
+use wire::{Reader, Wire, WireError, wire_enum, wire_struct};
+
 pub const TCP_PORT: u16 = 47830;
 pub const DISCOVERY_PORT: u16 = 47831;
-/// Newest protocol this build speaks. Messages added later are skipped by older peers
-/// (see [`HostMsg::Unknown`]), so a new optional message does not need a new version.
-pub const PROTOCOL_VERSION: u32 = 1;
+/// Newest protocol this build speaks. Messages added later are skipped by older peers,
+/// so a new optional message does not need a new version.
+pub const PROTOCOL_VERSION: u32 = 2;
 /// Oldest peer protocol this build can still talk to. Raise it only for a change an
 /// older peer cannot just skip.
-pub const MIN_PROTOCOL: u32 = 1;
+pub const MIN_PROTOCOL: u32 = 2;
 
 /// Whether a peer that speaks `version` and still understands down to `min` can talk
 /// to this build.
@@ -31,58 +52,6 @@ pub const AUDIO_RATE: u32 = 48_000;
 pub const AUDIO_CHANNELS: u32 = 2;
 /// Headset microphone sent to the PC: interleaved signed 16-bit little-endian mono.
 pub const MIC_CHANNELS: u32 = 1;
-/// One row of monitors in [`ClientMsg::SetLayout`].
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct LayoutRow {
-    /// Monitor ids, left to right.
-    pub ids: Vec<u8>,
-    /// Where each monitor's centre is seen, left to right, in pixels of one scale
-    /// shared by all monitors ([`NEXT`]: just right of the previous one). The PC lines
-    /// monitors of other rows up with these, so one hung above another is above it on
-    /// the desktop too.
-    pub centers: Vec<i32>,
-    /// Where each monitor's centre is seen vertically, in the same pixels, downwards
-    /// ([`NEXT`]: not known, centred in the row). A portrait monitor whose top lines up
-    /// with a landscape one's stands that way on the desktop too.
-    pub middles: Vec<i32>,
-}
-
-/// How the PC encodes, changed from the headset menu ([`HostMsg::PcSettings`],
-/// [`ClientMsg::SetPcSettings`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PcSettings {
-    /// Bitrate per monitor, Mbit/s.
-    pub quality: u32,
-    pub codec: Codec,
-    /// Encode on the CPU (x264) instead of the graphics card.
-    pub software: bool,
-    /// Slower encoder preset for clearer small text.
-    pub sharp: bool,
-}
-
-impl PcSettings {
-    fn bytes(&self) -> [u8; 7] {
-        let q = self.quality.to_le_bytes();
-        [
-            q[0],
-            q[1],
-            q[2],
-            q[3],
-            self.codec as u8,
-            self.software as u8,
-            self.sharp as u8,
-        ]
-    }
-
-    fn read(c: &mut Cursor) -> io::Result<Self> {
-        Ok(Self {
-            quality: c.u32()?,
-            codec: Codec::from_u8(c.u8()?).unwrap_or(Codec::H265),
-            software: c.u8()? != 0,
-            sharp: c.u8()? != 0,
-        })
-    }
-}
 
 /// What the PC can encode with ([`HostMsg::PcSettings`]).
 pub mod encoders {
@@ -91,11 +60,6 @@ pub mod encoders {
     pub const CPU_H264: u8 = 4;
 }
 
-/// In [`LayoutRow::centers`]: no position, right after the previous monitor.
-pub const NEXT: i32 = i32::MIN;
-
-/// [`HostMsg::Focus`] when the mouse is on none of the streamed displays.
-pub const NO_FOCUS: u8 = 255;
 /// What the PC can do beyond the basics ([`HostMsg::Abilities`]).
 pub mod abilities {
     /// Move the mouse (to where the user looks).
@@ -123,13 +87,20 @@ const MAX_HOST_PAYLOAD: u32 = 64 * 1024 * 1024;
 /// this keeps what it can make the PC allocate small.
 const MAX_CLIENT_PAYLOAD: u32 = 64 * 1024;
 /// Most rows, or monitors in all rows, a layout may list (there are at most six
-/// monitors, a laptop screen and three window panels).
+/// monitors, a laptop screen and three window panels). Also the most monitors in an
+/// order or a set of monitors.
 const MAX_LAYOUT_ENTRIES: usize = 16;
+/// Longest name of a stream or a headset, in bytes.
+const MAX_NAME: usize = 64;
+/// Longest notice, in bytes (a desktop notification, or a path on the PC).
+const MAX_TEXT: usize = 8 * 1024;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Codec {
-    H264 = 0,
-    H265 = 1,
+wire_enum! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Codec {
+        0 => H264,
+        1 => H265,
+    }
 }
 
 impl Codec {
@@ -139,311 +110,267 @@ impl Codec {
             Codec::H265 => "video/hevc",
         }
     }
-    fn from_u8(v: u8) -> Option<Self> {
-        match v {
-            0 => Some(Codec::H264),
-            1 => Some(Codec::H265),
-            _ => None,
-        }
+}
+
+wire_struct! {
+    /// How the PC encodes, changed from the headset menu ([`HostMsg::PcSettings`],
+    /// [`ClientMsg::SetPcSettings`]).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct PcSettings {
+        /// Bitrate per monitor, Mbit/s.
+        pub quality: u32,
+        pub codec: Codec,
+        /// Encode on the CPU (x264) instead of the graphics card.
+        pub software: bool,
+        /// Slower encoder preset for clearer small text.
+        pub sharp: bool,
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum HostMsg {
-    /// Sent once after the handshake.
-    Welcome {
-        version: u32,
-        /// The PC's interface language (`uk`, `en`), which the headset follows by default.
-        language: String,
-    },
-    /// A virtual monitor appeared. `width`/`height` are in pixels.
-    StreamStart {
-        id: u8,
-        width: u32,
-        height: u32,
-        codec: Codec,
-        name: String,
-    },
-    /// One encoded access unit (Annex-B byte stream, parameter sets in-band on keyframes).
-    Frame {
-        id: u8,
-        pts_us: u64,
-        keyframe: bool,
-        data: Vec<u8>,
-    },
-    StreamEnd {
-        id: u8,
-    },
-    /// This monitor is KDE's primary one (the Plasma panel lives there).
-    PrimaryChanged {
-        id: u8,
-    },
-    /// Left-to-right order of the Quest monitors (as in KDE's layout).
-    Order {
-        ids: Vec<u8>,
-    },
-    /// Whether the physical display should be mirrored into the headset.
-    MirrorWanted {
-        enabled: bool,
-    },
-    /// Something the user asked for failed; shown in the headset menu.
-    Error {
-        text: String,
-    },
-    /// A slice of PC sound (see [`AUDIO_RATE`]).
-    Audio {
-        pcm: Vec<u8>,
-    },
-    /// Whether PC sound goes to the headset.
-    AudioWanted {
-        enabled: bool,
-    },
-    /// Whether the headset microphone should be the PC's microphone.
-    MicWanted {
-        enabled: bool,
-    },
-    /// A PC app is recording from the headset microphone right now: capture it.
-    MicActive {
-        active: bool,
-    },
-    /// The headset speaks another protocol version: one side has to be updated. Sent
-    /// instead of [`HostMsg::Welcome`]; the PC closes the connection after it.
-    Incompatible {
-        /// The PC's protocol version.
-        protocol: u32,
-        /// The PC app's version, e.g. `0.2.0`.
-        app: String,
-    },
-    /// Turn the monitors to face the user (asked for from the PC's tray).
-    Recenter,
-    /// Something done, to show briefly (not an error): "Saved to ~/Pictures/…".
-    Notice {
-        text: String,
-    },
-    /// Where the mouse is: monitor `id`, `x`/`y` across its image (0..=65535 from the
-    /// top left). The answer to [`ClientMsg::FindMouse`].
-    MouseAt {
-        id: u8,
-        x: u16,
-        y: u16,
-    },
-    /// What this PC can do (bits of [`abilities`]).
-    Abilities {
-        bits: u8,
-    },
-    /// The sound comes from the window on monitor `id` ([`NO_FOCUS`]: not known).
-    SoundFrom {
-        id: u8,
-    },
-    /// The PC's encoding settings and what it can encode with (bits of [`encoders`]).
-    PcSettings {
-        settings: PcSettings,
-        encoders: u8,
-    },
-    /// The monitor the mouse is on ([`NO_FOCUS`] if none of the streamed ones).
-    Focus {
-        id: u8,
-    },
-    /// The PC does not know this headset yet: pair first.
-    PairingRequired,
-    /// The PC's SPAKE2 message (see [`secure::Pairing`]).
-    PairMsg {
-        msg: Vec<u8>,
-    },
-    /// Whether the codes matched; on success `tag` proves it from the PC's side.
-    PairResult {
-        ok: bool,
-        tag: Vec<u8>,
-    },
-    /// A message from a newer PC that this build does not know; skipped.
-    Unknown {
-        tag: u8,
-    },
+wire_struct! {
+    /// One row of monitors in [`ClientMsg::SetLayout`].
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct LayoutRow {
+        /// Left to right.
+        #[wire(max = MAX_LAYOUT_ENTRIES)]
+        pub entries: Vec<LayoutEntry>,
+    }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum ClientMsg {
-    Hello {
-        /// Newest protocol the headset speaks ([`PROTOCOL_VERSION`]).
-        version: u32,
-        /// Oldest protocol it still understands ([`MIN_PROTOCOL`]).
-        min: u32,
-        /// The headset app's version (e.g. `0.2.0`), to say what to update.
-        app: String,
-    },
-    /// A message from a newer headset that this build does not know; skipped.
-    Unknown {
-        tag: u8,
-    },
-    RequestKeyframe {
-        id: u8,
-    },
-    /// The decoder handed the frame with this `pts_us` to the compositor.
-    FrameShown {
-        id: u8,
-        pts_us: u64,
-    },
-    /// Create another virtual monitor of this size in pixels.
-    AddMonitor {
-        width: u32,
-        height: u32,
-    },
-    RemoveMonitor {
-        id: u8,
-    },
-    /// New left-to-right order of the Quest monitors.
-    SetOrder {
-        ids: Vec<u8>,
-    },
-    /// Show or hide the mirror of the physical display.
-    SetMirror {
-        enabled: bool,
-    },
-    /// Make this monitor KDE's primary one.
-    SetPrimary {
-        id: u8,
-    },
-    /// Send PC sound to the headset (or keep it on the PC).
-    SetAudio {
-        enabled: bool,
-    },
-    /// Use the headset microphone as the PC's microphone.
-    SetMic {
-        enabled: bool,
-    },
-    /// A slice of headset microphone sound (see [`MIC_CHANNELS`]).
-    Mic {
-        pcm: Vec<u8>,
-    },
-    /// Switch to this set of monitors, left to right (a profile). Monitors whose size
-    /// already matches are kept, so their windows stay where they are.
-    SetMonitors {
-        sizes: Vec<(u32, u32)>,
-        /// Index into `sizes`.
-        primary: u8,
-    },
-    /// How the monitors stand around the user, for the desktop's arrangement: rows from
-    /// top to bottom, each left to right, with where each monitor is seen (see
-    /// [`LayoutRow`]); the PC lays its outputs out to match.
-    SetLayout {
-        rows: Vec<LayoutRow>,
-    },
-    /// Whether the headset is being worn; streaming pauses while it is not.
-    Presence {
-        worn: bool,
-    },
-    /// Change how the PC encodes (from the headset menu).
-    SetPcSettings {
-        settings: PcSettings,
-    },
-    /// The headset's battery, for the PC's tray.
-    Battery {
-        percent: u8,
-        charging: bool,
-    },
-    /// Put the PC's active window on a panel of its own (a small output its size).
-    DetachWindow,
-    /// Move the PC's active window to monitor `id` (the one the user looks at).
-    WindowHere {
-        id: u8,
-    },
-    /// Save a picture of monitor `id` on the PC.
-    Screenshot {
-        id: u8,
-    },
-    /// Where is the mouse? (answered with [`HostMsg::MouseAt`])
-    FindMouse,
-    /// Pass the PC's desktop notifications to the headset (as [`HostMsg::Notice`]).
-    SetNotifications {
-        enabled: bool,
-    },
-    /// Say which monitor the sound comes from ([`HostMsg::SoundFrom`]).
-    SetSoundFromScreen {
-        enabled: bool,
-    },
-    /// Put the mouse on monitor `id`, at `x`/`y` across its image (0..=65535).
-    MouseTo {
-        id: u8,
-        x: u16,
-        y: u16,
-    },
-    /// Start pairing. `headset_shows`: the headset displays the code and the PC asks
-    /// for it; otherwise the PC displays it and the headset asks.
-    PairBegin {
-        headset_shows: bool,
-        name: String,
-    },
-    /// The headset's SPAKE2 message.
-    PairMsg {
-        msg: Vec<u8>,
-    },
-    /// Proof that the headset derived the same pairing key.
-    PairConfirm {
-        tag: Vec<u8>,
-    },
+impl LayoutRow {
+    /// The monitor ids, left to right.
+    pub fn ids(&self) -> impl Iterator<Item = u8> + '_ {
+        self.entries.iter().map(|e| e.id)
+    }
 }
 
+wire_struct! {
+    /// A monitor in a [`LayoutRow`] and where its centre is seen, in pixels of one
+    /// scale shared by all monitors. The PC lines monitors of other rows up with
+    /// these, so one hung above another is above it on the desktop too.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct LayoutEntry {
+        pub id: u8,
+        /// Across, left to right (`None`: just right of the previous one).
+        pub center: Option<i32>,
+        /// Down (`None`: not known, centred in the row). A portrait monitor whose top
+        /// lines up with a landscape one's stands that way on the desktop too.
+        pub middle: Option<i32>,
+    }
+}
+
+wire_enum! {
+    message
+    /// From the PC to the headset.
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum HostMsg {
+        /// The versions fit: the answer to [`ClientMsg::Hello`]. Frozen (see the crate
+        /// root).
+        1 => Welcome {
+            /// The PC's [`PROTOCOL_VERSION`].
+            version: u32,
+            /// The PC's interface language (`uk`, `en`), which the headset follows by
+            /// default.
+            #[wire(rest)]
+            language: String,
+        },
+        /// The session started (the answer to [`ClientMsg::Open`] from a headset the
+        /// PC trusts). The PC's state follows.
+        24 => Opened,
+        /// A virtual monitor appeared. `width`/`height` are in pixels.
+        2 => StreamStart {
+            id: u8,
+            width: u32,
+            height: u32,
+            codec: Codec,
+            #[wire(max = MAX_NAME)]
+            name: String,
+        },
+        /// One encoded access unit (Annex-B byte stream, parameter sets in-band on
+        /// keyframes).
+        3 => Frame {
+            id: u8,
+            keyframe: bool,
+            pts_us: u64,
+            #[wire(rest)]
+            data: Vec<u8>,
+        },
+        4 => StreamEnd { id: u8 },
+        /// This monitor is KDE's primary one (the Plasma panel lives there).
+        5 => PrimaryChanged { id: u8 },
+        /// Left-to-right order of the Quest monitors (as in KDE's layout).
+        8 => Order {
+            #[wire(max = MAX_LAYOUT_ENTRIES)]
+            ids: Vec<u8>,
+        },
+        /// Whether the physical display should be mirrored into the headset.
+        7 => MirrorWanted { enabled: bool },
+        /// Something failed; shown in the headset menu. Frozen (see the crate root):
+        /// it also tells headsets older than [`HostMsg::Incompatible`] what to update.
+        6 => Error {
+            #[wire(rest)]
+            text: String,
+        },
+        /// A slice of PC sound (see [`AUDIO_RATE`]).
+        12 => Audio {
+            #[wire(rest)]
+            pcm: Vec<u8>,
+        },
+        /// Whether PC sound goes to the headset.
+        13 => AudioWanted { enabled: bool },
+        /// Whether the headset microphone should be the PC's microphone.
+        14 => MicWanted { enabled: bool },
+        /// A PC app is recording from the headset microphone right now: capture it.
+        15 => MicActive { active: bool },
+        /// The headset speaks another protocol version: one side has to be updated.
+        /// Sent instead of [`HostMsg::Welcome`], after an [`HostMsg::Error`] saying the
+        /// same; the PC closes the connection after it. Frozen (see the crate root).
+        17 => Incompatible {
+            /// The PC's protocol version.
+            protocol: u32,
+            /// The PC app's version, e.g. `0.2.0`.
+            #[wire(rest)]
+            app: String,
+        },
+        /// Turn the monitors to face the user (asked for from the PC's tray).
+        19 => Recenter,
+        /// Something done, to show briefly (not an error): "Saved to ~/Pictures/…".
+        20 => Notice {
+            #[wire(max = MAX_TEXT)]
+            text: String,
+        },
+        /// Where the mouse is: monitor `id`, `x`/`y` across its image (0..=65535 from
+        /// the top left). The answer to [`ClientMsg::FindMouse`].
+        21 => MouseAt { id: u8, x: u16, y: u16 },
+        /// What this PC can do (bits of [`abilities`]).
+        22 => Abilities { bits: u8 },
+        /// The sound comes from the window on monitor `id` (`None`: not known).
+        23 => SoundFrom { id: Option<u8> },
+        /// The PC's encoding settings and what it can encode with (bits of
+        /// [`encoders`]).
+        18 => PcSettings { settings: PcSettings, encoders: u8 },
+        /// The monitor the mouse is on (`None`: none of the streamed ones).
+        16 => Focus { id: Option<u8> },
+        /// The PC does not know this headset yet: pair first (the answer to
+        /// [`ClientMsg::Open`]).
+        9 => PairingRequired,
+        /// The PC's SPAKE2 message (see [`secure::Pairing`]).
+        10 => PairMsg { msg: [u8; secure::PAIR_MSG_LEN] },
+        /// Whether the codes matched: the PC's confirmation tag if they did.
+        11 => PairResult { tag: Option<[u8; secure::CONFIRM_LEN]> },
+    }
+}
+
+wire_enum! {
+    message
+    /// From the headset to the PC.
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum ClientMsg {
+        /// The first message of every connection. Frozen (see the crate root).
+        101 => Hello {
+            /// Newest protocol the headset speaks ([`PROTOCOL_VERSION`]).
+            version: u32,
+            /// Oldest protocol it still understands ([`MIN_PROTOCOL`]).
+            min: u32,
+            /// The headset app's version (e.g. `0.2.0`), to say what to update.
+            #[wire(rest)]
+            app: String,
+        },
+        /// Start the session, once the headset trusts the PC. Answered with
+        /// [`HostMsg::Opened`], or [`HostMsg::PairingRequired`].
+        127 => Open,
+        102 => RequestKeyframe { id: u8 },
+        /// The decoder handed the frame with this `pts_us` to the compositor.
+        103 => FrameShown { id: u8, pts_us: u64 },
+        /// Create another virtual monitor of this size in pixels.
+        104 => AddMonitor { width: u32, height: u32 },
+        105 => RemoveMonitor { id: u8 },
+        /// New left-to-right order of the Quest monitors.
+        108 => SetOrder {
+            #[wire(max = MAX_LAYOUT_ENTRIES)]
+            ids: Vec<u8>,
+        },
+        /// Show or hide the mirror of the physical display.
+        107 => SetMirror { enabled: bool },
+        /// Make this monitor KDE's primary one.
+        106 => SetPrimary { id: u8 },
+        /// Send PC sound to the headset (or keep it on the PC).
+        112 => SetAudio { enabled: bool },
+        /// Use the headset microphone as the PC's microphone.
+        113 => SetMic { enabled: bool },
+        /// A slice of headset microphone sound (see [`MIC_CHANNELS`]).
+        114 => Mic {
+            #[wire(rest)]
+            pcm: Vec<u8>,
+        },
+        /// Switch to this set of monitors, left to right (a profile). Monitors whose
+        /// size already matches are kept, so their windows stay where they are.
+        116 => SetMonitors {
+            /// Width and height in pixels.
+            #[wire(max = MAX_LAYOUT_ENTRIES)]
+            sizes: Vec<(u32, u32)>,
+            /// Index into `sizes`.
+            primary: u8,
+        },
+        /// How the monitors stand around the user, for the desktop's arrangement: rows
+        /// from top to bottom, with where each monitor is seen (see [`LayoutRow`]); the
+        /// PC lays its outputs out to match. At most 16 monitors in all rows together.
+        117 => SetLayout {
+            #[wire(max = MAX_LAYOUT_ENTRIES)]
+            rows: Vec<LayoutRow>,
+        },
+        /// Whether the headset is being worn; streaming pauses while it is not.
+        115 => Presence { worn: bool },
+        /// Change how the PC encodes (from the headset menu).
+        118 => SetPcSettings { settings: PcSettings },
+        /// The headset's battery, for the PC's tray.
+        119 => Battery { percent: u8, charging: bool },
+        /// Put the PC's active window on a panel of its own (a small output its size).
+        120 => DetachWindow,
+        /// Move the PC's active window to monitor `id` (the one the user looks at).
+        121 => WindowHere { id: u8 },
+        /// Save a picture of monitor `id` on the PC.
+        122 => Screenshot { id: u8 },
+        /// Where is the mouse? (answered with [`HostMsg::MouseAt`])
+        123 => FindMouse,
+        /// Pass the PC's desktop notifications to the headset (as [`HostMsg::Notice`]).
+        125 => SetNotifications { enabled: bool },
+        /// Say which monitor the sound comes from ([`HostMsg::SoundFrom`]).
+        126 => SetSoundFromScreen { enabled: bool },
+        /// Put the mouse on monitor `id`, at `x`/`y` across its image (0..=65535).
+        124 => MouseTo { id: u8, x: u16, y: u16 },
+        /// Start pairing. `headset_shows`: the headset displays the code and the PC
+        /// asks for it; otherwise the PC displays it and the headset asks.
+        109 => PairBegin {
+            headset_shows: bool,
+            #[wire(max = MAX_NAME)]
+            name: String,
+        },
+        /// The headset's SPAKE2 message.
+        110 => PairMsg { msg: [u8; secure::PAIR_MSG_LEN] },
+        /// Proof that the headset derived the same pairing key.
+        111 => PairConfirm { tag: [u8; secure::CONFIRM_LEN] },
+    }
+}
+
+/// Tags the code below needs by name (the tests check them against the
+/// declarations): the media messages, read and written by hand, and the hello.
 mod tag {
-    pub const WELCOME: u8 = 1;
-    pub const STREAM_START: u8 = 2;
     pub const FRAME: u8 = 3;
-    pub const STREAM_END: u8 = 4;
-    pub const PRIMARY_CHANGED: u8 = 5;
-    pub const ERROR: u8 = 6;
-    pub const MIRROR_WANTED: u8 = 7;
-    pub const ORDER: u8 = 8;
-    pub const PAIRING_REQUIRED: u8 = 9;
-    pub const PAIR_MSG_HOST: u8 = 10;
-    pub const PAIR_RESULT: u8 = 11;
     pub const AUDIO: u8 = 12;
-    pub const AUDIO_WANTED: u8 = 13;
-    pub const MIC_WANTED: u8 = 14;
-    pub const MIC_ACTIVE: u8 = 15;
-    pub const FOCUS: u8 = 16;
-    pub const INCOMPATIBLE: u8 = 17;
-    pub const PC_SETTINGS: u8 = 18;
-    pub const RECENTER: u8 = 19;
-    pub const NOTICE: u8 = 20;
-    pub const MOUSE_AT: u8 = 21;
-    pub const ABILITIES: u8 = 22;
-    pub const SOUND_FROM: u8 = 23;
-    pub const HELLO: u8 = 101;
-    pub const REQUEST_KEYFRAME: u8 = 102;
-    pub const FRAME_SHOWN: u8 = 103;
-    pub const ADD_MONITOR: u8 = 104;
-    pub const REMOVE_MONITOR: u8 = 105;
-    pub const SET_PRIMARY: u8 = 106;
-    pub const SET_MIRROR: u8 = 107;
-    pub const SET_ORDER: u8 = 108;
-    pub const PAIR_BEGIN: u8 = 109;
-    pub const PAIR_MSG_CLIENT: u8 = 110;
-    pub const PAIR_CONFIRM: u8 = 111;
-    pub const SET_AUDIO: u8 = 112;
-    pub const SET_MIC: u8 = 113;
     pub const MIC: u8 = 114;
-    pub const PRESENCE: u8 = 115;
-    pub const SET_MONITORS: u8 = 116;
-    pub const SET_LAYOUT: u8 = 117;
-    pub const SET_PC_SETTINGS: u8 = 118;
-    pub const BATTERY: u8 = 119;
-    pub const DETACH_WINDOW: u8 = 120;
-    pub const WINDOW_HERE: u8 = 121;
-    pub const SCREENSHOT: u8 = 122;
-    pub const FIND_MOUSE: u8 = 123;
-    pub const MOUSE_TO: u8 = 124;
-    pub const SET_NOTIFICATIONS: u8 = 125;
-    pub const SET_SOUND_FROM_SCREEN: u8 = 126;
+    pub const HELLO: u8 = 101;
 }
 
-fn invalid(msg: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, msg)
-}
+/// [`HostMsg::Frame`] before its data: id, keyframe, pts_us.
+const FRAME_HEAD: usize = 1 + 1 + 8;
 
-fn write_frame(w: &mut impl Write, t: u8, parts: &[&[u8]]) -> io::Result<()> {
+fn write_frame(w: &mut impl Write, tag: u8, parts: &[&[u8]]) -> io::Result<()> {
     let len: usize = parts.iter().map(|p| p.len()).sum();
-    let len = u32::try_from(len).map_err(|_| invalid("payload too large"))?;
+    let len = u32::try_from(len)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "message too large"))?;
     let mut header = [0u8; 5];
-    header[0] = t;
+    header[0] = tag;
     header[1..].copy_from_slice(&len.to_le_bytes());
     w.write_all(&header)?;
     for p in parts {
@@ -452,410 +379,166 @@ fn write_frame(w: &mut impl Write, t: u8, parts: &[&[u8]]) -> io::Result<()> {
     Ok(())
 }
 
-fn read_frame(r: &mut impl Read, max: u32) -> io::Result<(u8, Vec<u8>)> {
+/// The tag and payload length of the next message.
+fn read_header(r: &mut impl Read, max: u32) -> io::Result<(u8, usize)> {
     let mut header = [0u8; 5];
     r.read_exact(&mut header)?;
-    let [t, len @ ..] = header;
+    let [tag, len @ ..] = header;
     let len = u32::from_le_bytes(len);
     if len > max {
-        return Err(invalid("payload too large"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "message too large",
+        ));
     }
-    let mut payload = vec![0u8; len as usize];
-    r.read_exact(&mut payload)?;
-    Ok((t, payload))
+    Ok((tag, len as usize))
 }
 
-struct Cursor<'a>(&'a [u8]);
+fn read_bytes(r: &mut impl Read, len: usize) -> io::Result<Vec<u8>> {
+    let mut bytes = vec![0u8; len];
+    r.read_exact(&mut bytes)?;
+    Ok(bytes)
+}
 
-impl<'a> Cursor<'a> {
-    fn take(&mut self, n: usize) -> io::Result<&[u8]> {
-        if self.0.len() < n {
-            return Err(invalid("truncated message"));
-        }
-        let (a, b) = self.0.split_at(n);
-        self.0 = b;
-        Ok(a)
+/// Reads past a payload without keeping it.
+fn skip(r: &mut impl Read, len: usize) -> io::Result<()> {
+    let skipped = io::copy(&mut r.by_ref().take(len as u64), &mut io::sink())?;
+    if skipped < len as u64 {
+        return Err(io::ErrorKind::UnexpectedEof.into());
     }
-    fn u8(&mut self) -> io::Result<u8> {
-        Ok(self.take(1)?[0])
-    }
-    fn u16(&mut self) -> io::Result<u16> {
-        Ok(u16::from_le_bytes(
-            self.take(2)?.try_into().expect("take returns 2 bytes"),
-        ))
-    }
-    fn u32(&mut self) -> io::Result<u32> {
-        Ok(u32::from_le_bytes(
-            self.take(4)?.try_into().expect("take returns 4 bytes"),
-        ))
-    }
-    fn u64(&mut self) -> io::Result<u64> {
-        Ok(u64::from_le_bytes(
-            self.take(8)?.try_into().expect("take returns 8 bytes"),
-        ))
-    }
-    fn rest(self) -> &'a [u8] {
-        self.0
-    }
+    Ok(())
 }
 
 impl HostMsg {
     pub fn write(&self, w: &mut impl Write) -> io::Result<()> {
         match self {
-            // Never sent: only stands for what a newer peer sent.
-            HostMsg::Unknown { .. } => Ok(()),
-            HostMsg::Welcome { version, language } => write_frame(
-                w,
-                tag::WELCOME,
-                &[&version.to_le_bytes(), language.as_bytes()],
-            ),
-            HostMsg::StreamStart {
-                id,
-                width,
-                height,
-                codec,
-                name,
-            } => write_frame(
-                w,
-                tag::STREAM_START,
-                &[
-                    &[*id, *codec as u8],
-                    &width.to_le_bytes(),
-                    &height.to_le_bytes(),
-                    name.as_bytes(),
-                ],
-            ),
             HostMsg::Frame {
                 id,
-                pts_us,
                 keyframe,
+                pts_us,
                 data,
-            } => write_frame(
-                w,
-                tag::FRAME,
-                &[&[*id, *keyframe as u8], &pts_us.to_le_bytes(), data],
-            ),
-            HostMsg::StreamEnd { id } => write_frame(w, tag::STREAM_END, &[&[*id]]),
-            HostMsg::PrimaryChanged { id } => write_frame(w, tag::PRIMARY_CHANGED, &[&[*id]]),
-            HostMsg::Error { text } => write_frame(w, tag::ERROR, &[text.as_bytes()]),
-            HostMsg::Order { ids } => write_frame(w, tag::ORDER, &[ids]),
-            HostMsg::PairingRequired => write_frame(w, tag::PAIRING_REQUIRED, &[]),
+            } => {
+                let mut head = Vec::with_capacity(FRAME_HEAD);
+                id.put(&mut head);
+                keyframe.put(&mut head);
+                pts_us.put(&mut head);
+                write_frame(w, tag::FRAME, &[&head, data])
+            }
             HostMsg::Audio { pcm } => write_frame(w, tag::AUDIO, &[pcm]),
-            HostMsg::Focus { id } => write_frame(w, tag::FOCUS, &[&[*id]]),
-            HostMsg::PcSettings { settings, encoders } => {
-                write_frame(w, tag::PC_SETTINGS, &[&settings.bytes(), &[*encoders]])
-            }
-            HostMsg::Recenter => write_frame(w, tag::RECENTER, &[]),
-            HostMsg::Notice { text } => write_frame(w, tag::NOTICE, &[text.as_bytes()]),
-            HostMsg::MouseAt { id, x, y } => write_frame(
-                w,
-                tag::MOUSE_AT,
-                &[&[*id], &x.to_le_bytes(), &y.to_le_bytes()],
-            ),
-            HostMsg::Abilities { bits } => write_frame(w, tag::ABILITIES, &[&[*bits]]),
-            HostMsg::SoundFrom { id } => write_frame(w, tag::SOUND_FROM, &[&[*id]]),
-            HostMsg::Incompatible { protocol, app } => write_frame(
-                w,
-                tag::INCOMPATIBLE,
-                &[&protocol.to_le_bytes(), app.as_bytes()],
-            ),
-            HostMsg::MicWanted { enabled } => write_frame(w, tag::MIC_WANTED, &[&[*enabled as u8]]),
-            HostMsg::MicActive { active } => write_frame(w, tag::MIC_ACTIVE, &[&[*active as u8]]),
-            HostMsg::AudioWanted { enabled } => {
-                write_frame(w, tag::AUDIO_WANTED, &[&[*enabled as u8]])
-            }
-            HostMsg::PairMsg { msg } => write_frame(w, tag::PAIR_MSG_HOST, &[msg]),
-            HostMsg::PairResult { ok, tag } => {
-                write_frame(w, tag::PAIR_RESULT, &[&[*ok as u8], tag])
-            }
-            HostMsg::MirrorWanted { enabled } => {
-                write_frame(w, tag::MIRROR_WANTED, &[&[*enabled as u8]])
+            _ => {
+                let mut payload = Vec::new();
+                self.put_fields(&mut payload);
+                write_frame(w, self.wire_tag(), &[&payload])
             }
         }
     }
 
+    /// The next message this build knows; messages from a newer PC are skipped.
     pub fn read(r: &mut impl Read) -> io::Result<Self> {
-        let (t, payload) = read_frame(r, MAX_HOST_PAYLOAD)?;
-        let mut c = Cursor(&payload);
-        Ok(match t {
-            tag::WELCOME => HostMsg::Welcome {
-                version: c.u32()?,
-                language: String::from_utf8_lossy(c.rest()).into_owned(),
-            },
-            tag::STREAM_START => {
-                let id = c.u8()?;
-                // A codec from a newer PC: skip the stream, keep the connection.
-                let Some(codec) = Codec::from_u8(c.u8()?) else {
-                    return Ok(HostMsg::Unknown { tag: t });
-                };
-                let width = c.u32()?;
-                let height = c.u32()?;
-                let name = String::from_utf8_lossy(c.rest()).into_owned();
-                HostMsg::StreamStart {
-                    id,
-                    width,
-                    height,
-                    codec,
-                    name,
+        loop {
+            let (tag, len) = read_header(r, MAX_HOST_PAYLOAD)?;
+            match tag {
+                tag::FRAME => {
+                    if len < FRAME_HEAD {
+                        return Err(WireError::Truncated.into());
+                    }
+                    let mut head = [0u8; FRAME_HEAD];
+                    r.read_exact(&mut head)?;
+                    let mut h = Reader::new(&head);
+                    let (id, keyframe, pts_us) =
+                        (u8::get(&mut h)?, bool::get(&mut h)?, u64::get(&mut h)?);
+                    let data = read_bytes(r, len - FRAME_HEAD)?;
+                    return Ok(HostMsg::Frame {
+                        id,
+                        keyframe,
+                        pts_us,
+                        data,
+                    });
                 }
-            }
-            tag::FRAME => {
-                let id = c.u8()?;
-                let keyframe = c.u8()? != 0;
-                let pts_us = c.u64()?;
-                let data = c.rest().to_vec();
-                HostMsg::Frame {
-                    id,
-                    pts_us,
-                    keyframe,
-                    data,
+                tag::AUDIO => {
+                    return Ok(HostMsg::Audio {
+                        pcm: read_bytes(r, len)?,
+                    });
                 }
+                tag if Self::TAGS.contains(&tag) => {
+                    return Ok(Self::decode(tag, &read_bytes(r, len)?)?);
+                }
+                _ => skip(r, len)?,
             }
-            tag::STREAM_END => HostMsg::StreamEnd { id: c.u8()? },
-            tag::PRIMARY_CHANGED => HostMsg::PrimaryChanged { id: c.u8()? },
-            tag::PAIRING_REQUIRED => HostMsg::PairingRequired,
-            tag::FOCUS => HostMsg::Focus { id: c.u8()? },
-            tag::RECENTER => HostMsg::Recenter,
-            tag::MOUSE_AT => HostMsg::MouseAt {
-                id: c.u8()?,
-                x: c.u16()?,
-                y: c.u16()?,
-            },
-            tag::ABILITIES => HostMsg::Abilities { bits: c.u8()? },
-            tag::SOUND_FROM => HostMsg::SoundFrom { id: c.u8()? },
-            tag::NOTICE => HostMsg::Notice {
-                text: String::from_utf8_lossy(c.rest()).into_owned(),
-            },
-            tag::PC_SETTINGS => HostMsg::PcSettings {
-                settings: PcSettings::read(&mut c)?,
-                encoders: c.u8()?,
-            },
-            tag::INCOMPATIBLE => HostMsg::Incompatible {
-                protocol: c.u32()?,
-                app: String::from_utf8_lossy(c.rest()).into_owned(),
-            },
-            tag::MIC_WANTED => HostMsg::MicWanted {
-                enabled: c.u8()? != 0,
-            },
-            tag::MIC_ACTIVE => HostMsg::MicActive {
-                active: c.u8()? != 0,
-            },
-            tag::AUDIO => HostMsg::Audio {
-                pcm: c.rest().to_vec(),
-            },
-            tag::AUDIO_WANTED => HostMsg::AudioWanted {
-                enabled: c.u8()? != 0,
-            },
-            tag::PAIR_MSG_HOST => HostMsg::PairMsg {
-                msg: c.rest().to_vec(),
-            },
-            tag::PAIR_RESULT => HostMsg::PairResult {
-                ok: c.u8()? != 0,
-                tag: c.rest().to_vec(),
-            },
-            tag::ORDER => HostMsg::Order {
-                ids: c.rest().to_vec(),
-            },
-            tag::MIRROR_WANTED => HostMsg::MirrorWanted {
-                enabled: c.u8()? != 0,
-            },
-            tag::ERROR => HostMsg::Error {
-                text: String::from_utf8_lossy(c.rest()).into_owned(),
-            },
-            // Newer PCs may send messages this build does not know.
-            _ => HostMsg::Unknown { tag: t },
-        })
+        }
+    }
+
+    fn decode(tag: u8, payload: &[u8]) -> Result<Self, WireError> {
+        let mut r = Reader::new(payload);
+        let msg = Self::get_fields(tag, &mut r)?.ok_or(WireError::UnknownTag {
+            what: "HostMsg",
+            tag,
+        })?;
+        r.finish()?;
+        Ok(msg)
     }
 }
 
 impl ClientMsg {
     pub fn write(&self, w: &mut impl Write) -> io::Result<()> {
         match self {
-            ClientMsg::Hello { version, min, app } => write_frame(
-                w,
-                tag::HELLO,
-                &[&version.to_le_bytes(), &min.to_le_bytes(), app.as_bytes()],
-            ),
-            // Never sent: only stands for what a newer peer sent.
-            ClientMsg::Unknown { .. } => Ok(()),
-            ClientMsg::RequestKeyframe { id } => write_frame(w, tag::REQUEST_KEYFRAME, &[&[*id]]),
-            ClientMsg::FrameShown { id, pts_us } => {
-                write_frame(w, tag::FRAME_SHOWN, &[&[*id], &pts_us.to_le_bytes()])
-            }
-            ClientMsg::AddMonitor { width, height } => write_frame(
-                w,
-                tag::ADD_MONITOR,
-                &[&width.to_le_bytes(), &height.to_le_bytes()],
-            ),
-            ClientMsg::RemoveMonitor { id } => write_frame(w, tag::REMOVE_MONITOR, &[&[*id]]),
-            ClientMsg::SetPrimary { id } => write_frame(w, tag::SET_PRIMARY, &[&[*id]]),
-            ClientMsg::SetOrder { ids } => write_frame(w, tag::SET_ORDER, &[ids]),
-            ClientMsg::SetLayout { rows } => {
-                let mut body = Vec::new();
-                for row in rows {
-                    body.push(row.ids.len() as u8);
-                    for (i, id) in row.ids.iter().enumerate() {
-                        body.push(*id);
-                        let c = row.centers.get(i).copied().unwrap_or(NEXT);
-                        body.extend_from_slice(&c.to_le_bytes());
-                        let m = row.middles.get(i).copied().unwrap_or(NEXT);
-                        body.extend_from_slice(&m.to_le_bytes());
-                    }
-                }
-                write_frame(w, tag::SET_LAYOUT, &[&body])
-            }
-            ClientMsg::SetMonitors { sizes, primary } => {
-                let mut body = vec![*primary];
-                for (width, height) in sizes {
-                    body.extend_from_slice(&width.to_le_bytes());
-                    body.extend_from_slice(&height.to_le_bytes());
-                }
-                write_frame(w, tag::SET_MONITORS, &[&body])
-            }
-            ClientMsg::PairBegin {
-                headset_shows,
-                name,
-            } => write_frame(
-                w,
-                tag::PAIR_BEGIN,
-                &[&[*headset_shows as u8], name.as_bytes()],
-            ),
-            ClientMsg::PairMsg { msg } => write_frame(w, tag::PAIR_MSG_CLIENT, &[msg]),
-            ClientMsg::SetAudio { enabled } => write_frame(w, tag::SET_AUDIO, &[&[*enabled as u8]]),
-            ClientMsg::SetMic { enabled } => write_frame(w, tag::SET_MIC, &[&[*enabled as u8]]),
             ClientMsg::Mic { pcm } => write_frame(w, tag::MIC, &[pcm]),
-            ClientMsg::Presence { worn } => write_frame(w, tag::PRESENCE, &[&[*worn as u8]]),
-            ClientMsg::SetPcSettings { settings } => {
-                write_frame(w, tag::SET_PC_SETTINGS, &[&settings.bytes()])
-            }
-            ClientMsg::Battery { percent, charging } => {
-                write_frame(w, tag::BATTERY, &[&[*percent, *charging as u8]])
-            }
-            ClientMsg::DetachWindow => write_frame(w, tag::DETACH_WINDOW, &[]),
-            ClientMsg::WindowHere { id } => write_frame(w, tag::WINDOW_HERE, &[&[*id]]),
-            ClientMsg::Screenshot { id } => write_frame(w, tag::SCREENSHOT, &[&[*id]]),
-            ClientMsg::FindMouse => write_frame(w, tag::FIND_MOUSE, &[]),
-            ClientMsg::SetNotifications { enabled } => {
-                write_frame(w, tag::SET_NOTIFICATIONS, &[&[*enabled as u8]])
-            }
-            ClientMsg::SetSoundFromScreen { enabled } => {
-                write_frame(w, tag::SET_SOUND_FROM_SCREEN, &[&[*enabled as u8]])
-            }
-            ClientMsg::MouseTo { id, x, y } => write_frame(
-                w,
-                tag::MOUSE_TO,
-                &[&[*id], &x.to_le_bytes(), &y.to_le_bytes()],
-            ),
-            ClientMsg::PairConfirm { tag } => write_frame(w, tag::PAIR_CONFIRM, &[tag]),
-            ClientMsg::SetMirror { enabled } => {
-                write_frame(w, tag::SET_MIRROR, &[&[*enabled as u8]])
+            _ => {
+                let mut payload = Vec::new();
+                self.put_fields(&mut payload);
+                write_frame(w, self.wire_tag(), &[&payload])
             }
         }
     }
 
+    /// The first message of a connection, which every headset since protocol 2 makes
+    /// [`ClientMsg::Hello`]. Any other gives `None`, skipped unread: a headset from
+    /// before protocol 2 may ask to pair before saying hello, in messages this build
+    /// cannot read.
+    pub fn read_first(r: &mut impl Read) -> io::Result<Option<Self>> {
+        let (tag, len) = read_header(r, MAX_CLIENT_PAYLOAD)?;
+        if tag != tag::HELLO {
+            skip(r, len)?;
+            return Ok(None);
+        }
+        Ok(Some(Self::decode(tag, &read_bytes(r, len)?)?))
+    }
+
+    /// The next message this build knows; messages from a newer headset are skipped.
     pub fn read(r: &mut impl Read) -> io::Result<Self> {
-        let (t, payload) = read_frame(r, MAX_CLIENT_PAYLOAD)?;
-        let mut c = Cursor(&payload);
-        Ok(match t {
-            tag::HELLO => ClientMsg::Hello {
-                version: c.u32()?,
-                min: c.u32()?,
-                app: String::from_utf8_lossy(c.rest()).into_owned(),
-            },
-            tag::REQUEST_KEYFRAME => ClientMsg::RequestKeyframe { id: c.u8()? },
-            tag::FRAME_SHOWN => ClientMsg::FrameShown {
-                id: c.u8()?,
-                pts_us: c.u64()?,
-            },
-            tag::ADD_MONITOR => ClientMsg::AddMonitor {
-                width: c.u32()?,
-                height: c.u32()?,
-            },
-            tag::REMOVE_MONITOR => ClientMsg::RemoveMonitor { id: c.u8()? },
-            tag::SET_PRIMARY => ClientMsg::SetPrimary { id: c.u8()? },
-            tag::PAIR_BEGIN => ClientMsg::PairBegin {
-                headset_shows: c.u8()? != 0,
-                name: String::from_utf8_lossy(c.rest()).into_owned(),
-            },
-            tag::SET_MIC => ClientMsg::SetMic {
-                enabled: c.u8()? != 0,
-            },
-            tag::MIC => ClientMsg::Mic {
-                pcm: c.rest().to_vec(),
-            },
-            tag::PRESENCE => ClientMsg::Presence { worn: c.u8()? != 0 },
-            tag::DETACH_WINDOW => ClientMsg::DetachWindow,
-            tag::WINDOW_HERE => ClientMsg::WindowHere { id: c.u8()? },
-            tag::SCREENSHOT => ClientMsg::Screenshot { id: c.u8()? },
-            tag::FIND_MOUSE => ClientMsg::FindMouse,
-            tag::SET_NOTIFICATIONS => ClientMsg::SetNotifications {
-                enabled: c.u8()? != 0,
-            },
-            tag::SET_SOUND_FROM_SCREEN => ClientMsg::SetSoundFromScreen {
-                enabled: c.u8()? != 0,
-            },
-            tag::MOUSE_TO => ClientMsg::MouseTo {
-                id: c.u8()?,
-                x: c.u16()?,
-                y: c.u16()?,
-            },
-            tag::BATTERY => ClientMsg::Battery {
-                percent: c.u8()?,
-                charging: c.u8()? != 0,
-            },
-            tag::SET_PC_SETTINGS => ClientMsg::SetPcSettings {
-                settings: PcSettings::read(&mut c)?,
-            },
-            tag::SET_AUDIO => ClientMsg::SetAudio {
-                enabled: c.u8()? != 0,
-            },
-            tag::PAIR_MSG_CLIENT => ClientMsg::PairMsg {
-                msg: c.rest().to_vec(),
-            },
-            tag::PAIR_CONFIRM => ClientMsg::PairConfirm {
-                tag: c.rest().to_vec(),
-            },
-            tag::SET_LAYOUT => {
-                let mut rows = Vec::new();
-                let mut entries = 0;
-                while let Ok(n) = c.u8() {
-                    entries += usize::from(n);
-                    if rows.len() == MAX_LAYOUT_ENTRIES || entries > MAX_LAYOUT_ENTRIES {
-                        return Err(invalid("layout too large"));
-                    }
-                    let mut row = LayoutRow {
-                        ids: Vec::new(),
-                        centers: Vec::new(),
-                        middles: Vec::new(),
-                    };
-                    for _ in 0..n {
-                        row.ids.push(c.u8()?);
-                        row.centers.push(c.u32()? as i32);
-                        row.middles.push(c.u32()? as i32);
-                    }
-                    rows.push(row);
+        loop {
+            let (tag, len) = read_header(r, MAX_CLIENT_PAYLOAD)?;
+            match tag {
+                tag::MIC => {
+                    return Ok(ClientMsg::Mic {
+                        pcm: read_bytes(r, len)?,
+                    });
                 }
-                ClientMsg::SetLayout { rows }
-            }
-            tag::SET_MONITORS => {
-                let primary = c.u8()?;
-                let mut sizes = Vec::new();
-                while let (Ok(width), Ok(height)) = (c.u32(), c.u32()) {
-                    if sizes.len() == MAX_LAYOUT_ENTRIES {
-                        return Err(invalid("too many monitors"));
-                    }
-                    sizes.push((width, height));
+                tag if Self::TAGS.contains(&tag) => {
+                    return Ok(Self::decode(tag, &read_bytes(r, len)?)?);
                 }
-                ClientMsg::SetMonitors { sizes, primary }
+                _ => skip(r, len)?,
             }
-            tag::SET_ORDER => ClientMsg::SetOrder {
-                ids: c.rest().to_vec(),
-            },
-            tag::SET_MIRROR => ClientMsg::SetMirror {
-                enabled: c.u8()? != 0,
-            },
-            _ => ClientMsg::Unknown { tag: t },
-        })
+        }
+    }
+
+    fn decode(tag: u8, payload: &[u8]) -> Result<Self, WireError> {
+        let mut r = Reader::new(payload);
+        let msg = Self::get_fields(tag, &mut r)?.ok_or(WireError::UnknownTag {
+            what: "ClientMsg",
+            tag,
+        })?;
+        r.finish()?;
+        if let ClientMsg::SetLayout { rows } = &msg {
+            let len = rows.iter().map(|r| r.entries.len()).sum();
+            if len > MAX_LAYOUT_ENTRIES {
+                return Err(WireError::TooLong {
+                    len,
+                    max: MAX_LAYOUT_ENTRIES,
+                });
+            }
+        }
+        Ok(msg)
     }
 }
 
@@ -875,235 +558,4 @@ pub fn decode_beacon(buf: &[u8]) -> Option<(u16, String)> {
 }
 
 #[cfg(test)]
-mod limits {
-    use super::*;
-
-    #[test]
-    fn a_headset_message_cannot_be_huge() {
-        let mut big = vec![tag::SET_LAYOUT];
-        big.extend_from_slice(&(1u32 << 20).to_le_bytes());
-        big.extend(std::iter::repeat_n(0u8, 1 << 20));
-        assert!(ClientMsg::read(&mut big.as_slice()).is_err());
-    }
-
-    #[test]
-    fn a_layout_cannot_list_more_than_there_can_be() {
-        // 100 empty rows: small on the wire, but not a layout.
-        let mut msg = vec![tag::SET_LAYOUT];
-        msg.extend_from_slice(&100u32.to_le_bytes());
-        msg.extend(std::iter::repeat_n(0u8, 100));
-        assert!(ClientMsg::read(&mut msg.as_slice()).is_err());
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A message from a newer peer is skipped and the next one still reads.
-    #[test]
-    fn skips_unknown_messages() {
-        let mut buf = Vec::new();
-        write_frame(&mut buf, 250, &[&[1, 2, 3]]).unwrap();
-        HostMsg::Focus { id: 1 }.write(&mut buf).unwrap();
-        // A stream in a codec this build does not know.
-        write_frame(&mut buf, tag::STREAM_START, &[&[0, 9], &[0; 8], b"x"]).unwrap();
-        let mut r = buf.as_slice();
-        assert_eq!(
-            HostMsg::read(&mut r).unwrap(),
-            HostMsg::Unknown { tag: 250 }
-        );
-        assert_eq!(HostMsg::read(&mut r).unwrap(), HostMsg::Focus { id: 1 });
-        assert!(matches!(
-            HostMsg::read(&mut r).unwrap(),
-            HostMsg::Unknown { .. }
-        ));
-
-        let mut buf = Vec::new();
-        write_frame(&mut buf, 251, &[&[7; 10]]).unwrap();
-        ClientMsg::SetMic { enabled: true }.write(&mut buf).unwrap();
-        let mut r = buf.as_slice();
-        assert_eq!(
-            ClientMsg::read(&mut r).unwrap(),
-            ClientMsg::Unknown { tag: 251 }
-        );
-        assert_eq!(
-            ClientMsg::read(&mut r).unwrap(),
-            ClientMsg::SetMic { enabled: true }
-        );
-    }
-
-    #[test]
-    fn version_ranges() {
-        assert!(compatible(PROTOCOL_VERSION, MIN_PROTOCOL));
-        // A newer peer that still understands us.
-        assert!(compatible(PROTOCOL_VERSION + 3, PROTOCOL_VERSION));
-        // A newer peer that dropped what we speak.
-        assert!(!compatible(PROTOCOL_VERSION + 3, PROTOCOL_VERSION + 1));
-        // An older peer than we still support.
-        assert!(!compatible(MIN_PROTOCOL - 1, 0));
-    }
-
-    #[test]
-    fn roundtrip() {
-        let msgs = vec![
-            HostMsg::Welcome {
-                version: 1,
-                language: "uk".into(),
-            },
-            HostMsg::StreamStart {
-                id: 2,
-                width: 2560,
-                height: 1440,
-                codec: Codec::H265,
-                name: "Prostir-1".into(),
-            },
-            HostMsg::Frame {
-                id: 2,
-                pts_us: 123456789,
-                keyframe: true,
-                data: vec![0, 0, 0, 1, 0x40],
-            },
-            HostMsg::StreamEnd { id: 2 },
-            HostMsg::PrimaryChanged { id: 1 },
-            HostMsg::MirrorWanted { enabled: true },
-            HostMsg::Order { ids: vec![0, 3, 1] },
-            HostMsg::PairingRequired,
-            HostMsg::Audio {
-                pcm: vec![0, 1, 2, 3],
-            },
-            HostMsg::AudioWanted { enabled: false },
-            HostMsg::MicWanted { enabled: true },
-            HostMsg::MicActive { active: true },
-            HostMsg::Focus { id: 2 },
-            HostMsg::Recenter,
-            HostMsg::Notice {
-                text: "Збережено".into(),
-            },
-            HostMsg::MouseAt {
-                id: 1,
-                x: 65535,
-                y: 300,
-            },
-            HostMsg::Abilities { bits: 1 },
-            HostMsg::SoundFrom { id: 2 },
-            HostMsg::PcSettings {
-                settings: PcSettings {
-                    quality: 30,
-                    codec: Codec::H264,
-                    software: false,
-                    sharp: true,
-                },
-                encoders: encoders::GPU_H264 | encoders::GPU_H265,
-            },
-            HostMsg::Incompatible {
-                protocol: 10,
-                app: "0.3.0".into(),
-            },
-            HostMsg::PairMsg { msg: vec![4, 5] },
-            HostMsg::PairResult {
-                ok: true,
-                tag: vec![1; 32],
-            },
-            HostMsg::Error {
-                text: "Не вдалося".into(),
-            },
-        ];
-        let mut buf = Vec::new();
-        for m in &msgs {
-            m.write(&mut buf).unwrap();
-        }
-        let mut r = buf.as_slice();
-        for m in &msgs {
-            assert_eq!(&HostMsg::read(&mut r).unwrap(), m);
-        }
-
-        let mut buf = Vec::new();
-        ClientMsg::RequestKeyframe { id: 7 }
-            .write(&mut buf)
-            .unwrap();
-        assert_eq!(
-            ClientMsg::read(&mut buf.as_slice()).unwrap(),
-            ClientMsg::RequestKeyframe { id: 7 }
-        );
-
-        let mut buf = Vec::new();
-        let shown = ClientMsg::FrameShown {
-            id: 1,
-            pts_us: 3_600_000_000_123,
-        };
-        shown.write(&mut buf).unwrap();
-        assert_eq!(ClientMsg::read(&mut buf.as_slice()).unwrap(), shown);
-
-        for m in [
-            ClientMsg::AddMonitor {
-                width: 3440,
-                height: 1440,
-            },
-            ClientMsg::RemoveMonitor { id: 2 },
-            ClientMsg::SetPrimary { id: 1 },
-            ClientMsg::SetMirror { enabled: true },
-            ClientMsg::SetOrder { ids: vec![2, 0, 1] },
-            ClientMsg::SetMonitors {
-                sizes: vec![(2560, 1440), (1440, 2560)],
-                primary: 1,
-            },
-            ClientMsg::SetLayout {
-                rows: vec![
-                    LayoutRow {
-                        ids: vec![3],
-                        centers: vec![-1280],
-                        middles: vec![-1500],
-                    },
-                    LayoutRow {
-                        ids: vec![0, 1, 2],
-                        centers: vec![-2560, 0, NEXT],
-                        middles: vec![0, -400, NEXT],
-                    },
-                ],
-            },
-            ClientMsg::PairBegin {
-                headset_shows: true,
-                name: "Meta Quest 3".into(),
-            },
-            ClientMsg::PairMsg { msg: vec![1, 2, 3] },
-            ClientMsg::PairConfirm { tag: vec![9; 32] },
-            ClientMsg::SetAudio { enabled: true },
-            ClientMsg::SetMic { enabled: false },
-            ClientMsg::Mic {
-                pcm: vec![1, 0, 2, 0],
-            },
-            ClientMsg::Presence { worn: true },
-            ClientMsg::Battery {
-                percent: 72,
-                charging: true,
-            },
-            ClientMsg::DetachWindow,
-            ClientMsg::WindowHere { id: 1 },
-            ClientMsg::Screenshot { id: 0 },
-            ClientMsg::FindMouse,
-            ClientMsg::SetNotifications { enabled: true },
-            ClientMsg::SetSoundFromScreen { enabled: true },
-            ClientMsg::MouseTo {
-                id: 2,
-                x: 1,
-                y: 65535,
-            },
-            ClientMsg::SetPcSettings {
-                settings: PcSettings {
-                    quality: 50,
-                    codec: Codec::H265,
-                    software: true,
-                    sharp: false,
-                },
-            },
-        ] {
-            let mut buf = Vec::new();
-            m.write(&mut buf).unwrap();
-            assert_eq!(ClientMsg::read(&mut buf.as_slice()).unwrap(), m);
-        }
-
-        let b = encode_beacon(47830, "desk");
-        assert_eq!(decode_beacon(&b), Some((47830, "desk".into())));
-    }
-}
+mod tests;

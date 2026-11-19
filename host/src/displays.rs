@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use log::{debug, error, info, warn};
 use prostir_proto::stats::{Histogram, Period};
-use prostir_proto::{Codec, HostMsg, LayoutRow, MIRROR_ID, NEXT, PcSettings, WINDOW_IDS};
+use prostir_proto::{Codec, HostMsg, LayoutEntry, LayoutRow, MIRROR_ID, PcSettings, WINDOW_IDS};
 
 use crate::encoder::{Encoder, EncoderConfig, EncoderEvent};
 use crate::layout::{Seat, arrange, arrange_free, panel_size};
@@ -388,8 +388,8 @@ pub struct SavedMonitors {
     /// Encode on the CPU, chosen in the headset menu.
     pub software: bool,
     /// Rows from top to bottom, covering `specs` in order: where each monitor in it is
-    /// seen, (centre, middle) as in [`LayoutRow`] ([`NEXT`] if unknown). Empty: one row.
-    pub rows: Vec<Vec<(i32, i32)>>,
+    /// seen, (centre, middle) as in [`LayoutEntry`]. Empty: one row.
+    pub rows: Vec<Vec<(Option<i32>, Option<i32>)>>,
 }
 
 impl Default for SavedMonitors {
@@ -478,13 +478,11 @@ impl SavedMonitors {
             // 0.1.1 have no middle).
             let (spec, seen) = match line.split_once(" at ") {
                 Some((spec, at)) => {
-                    let mut v = at.split_whitespace().map(|v| v.parse().unwrap_or(NEXT));
-                    (
-                        spec.trim(),
-                        (v.next().unwrap_or(NEXT), v.next().unwrap_or(NEXT)),
-                    )
+                    // `next`: no centre, right after the previous monitor.
+                    let mut v = at.split_whitespace().map(|v| v.parse().ok());
+                    (spec.trim(), (v.next().flatten(), v.next().flatten()))
                 }
-                None => (line, (NEXT, NEXT)),
+                None => (line, (None, None)),
             };
             if let Ok(spec) = parse(spec) {
                 if star {
@@ -515,19 +513,15 @@ impl SavedMonitors {
             .rows
             .iter()
             .cloned()
-            .chain((rest > 0).then(|| vec![(NEXT, NEXT); rest]));
+            .chain((rest > 0).then(|| vec![(None, None); rest]));
         for row in rows {
             text.push_str("row\n");
             for ((center, middle), (i, spec)) in row.into_iter().zip(specs.by_ref()) {
                 text.push_str(&spec.to_string());
-                if center != NEXT || middle != NEXT {
-                    let center = if center == NEXT {
-                        "next".to_owned()
-                    } else {
-                        center.to_string()
-                    };
+                if center.is_some() || middle.is_some() {
+                    let center = center.map_or("next".to_owned(), |c| c.to_string());
                     text.push_str(&format!(" at {center}"));
-                    if middle != NEXT {
+                    if let Some(middle) = middle {
                         text.push_str(&format!(" {middle}"));
                     }
                 }
@@ -656,9 +650,11 @@ impl Displays {
             rest = tail;
             if !row.is_empty() {
                 displays.rows.push(LayoutRow {
-                    ids: row.to_vec(),
-                    centers: seen[..row.len()].iter().map(|s| s.0).collect(),
-                    middles: seen[..row.len()].iter().map(|s| s.1).collect(),
+                    entries: row
+                        .iter()
+                        .zip(seen)
+                        .map(|(&id, &(center, middle))| LayoutEntry { id, center, middle })
+                        .collect(),
                 });
             }
         }
@@ -1207,17 +1203,15 @@ impl Displays {
             .effective_rows()
             .into_iter()
             .map(|r| {
-                r.ids
+                r.entries
                     .iter()
-                    .zip(&r.centers)
-                    .zip(&r.middles)
-                    .filter_map(|((id, center), middle)| {
-                        let spec = self.monitors.get(id).map(|m| &m.spec);
-                        let (w, h) = size(names.get(id)?, spec)?;
+                    .filter_map(|e| {
+                        let spec = self.monitors.get(&e.id).map(|m| &m.spec);
+                        let (w, h) = size(names.get(&e.id)?, spec)?;
                         Some(Seat {
-                            id: *id,
-                            center: *center,
-                            middle: *middle,
+                            id: e.id,
+                            center: e.center,
+                            middle: e.middle,
                             w,
                             h,
                         })
@@ -1234,12 +1228,7 @@ impl Displays {
         // The headset said where each monitor is seen: the desktop follows that
         // directly. Older headsets (or a saved layout): rows.
         let seats: Vec<Seat> = rows.iter().flatten().copied().collect();
-        let arranged =
-            if !seats.is_empty() && seats.iter().all(|m| m.center != NEXT && m.middle != NEXT) {
-                arrange_free(&seats, main)
-            } else {
-                arrange(&rows, main)
-            };
+        let arranged = arrange_free(&seats, main).unwrap_or_else(|| arrange(&rows, main));
         for (id, x, y) in arranged {
             if let Some(seat) = rows.iter().flatten().find(|m| m.id == id) {
                 planned.push((id, names[&id].clone(), x, y, seat.w, seat.h));
@@ -1374,47 +1363,35 @@ impl Displays {
         let mut rows: Vec<LayoutRow> = self
             .rows
             .iter()
-            .map(|r| {
-                let mut row = LayoutRow {
-                    ids: Vec::new(),
-                    centers: Vec::new(),
-                    middles: Vec::new(),
-                };
-                let centers = r.centers.iter().chain(std::iter::repeat(&NEXT));
-                let middles = r.middles.iter().chain(std::iter::repeat(&NEXT));
-                for ((id, c), m) in r.ids.iter().zip(centers).zip(middles) {
-                    // The laptop screen too, where the headset put it (while it shows).
-                    if self.monitors.contains_key(id) || (*id == MIRROR_ID && self.mirror.is_some())
-                    {
-                        row.ids.push(*id);
-                        row.centers.push(*c);
-                        row.middles.push(*m);
-                    }
-                }
-                row
+            .map(|r| LayoutRow {
+                // The laptop screen too, where the headset put it (while it shows).
+                entries: r
+                    .entries
+                    .iter()
+                    .filter(|e| {
+                        self.monitors.contains_key(&e.id)
+                            || (e.id == MIRROR_ID && self.mirror.is_some())
+                    })
+                    .copied()
+                    .collect(),
             })
-            .filter(|r| !r.ids.is_empty())
+            .filter(|r| !r.entries.is_empty())
             .collect();
-        let placed: Vec<u8> = rows.iter().flat_map(|r| r.ids.clone()).collect();
-        let missing: Vec<u8> = self
+        let placed: Vec<u8> = rows.iter().flat_map(LayoutRow::ids).collect();
+        let missing: Vec<LayoutEntry> = self
             .order
             .iter()
-            .copied()
             .filter(|id| !placed.contains(id) && self.monitors.contains_key(id))
+            .map(|&id| LayoutEntry {
+                id,
+                center: None,
+                middle: None,
+            })
             .collect();
         if !missing.is_empty() {
-            let centers = vec![NEXT; missing.len()];
             match rows.last_mut() {
-                Some(last) => {
-                    last.ids.extend(missing);
-                    last.middles.extend(centers.iter().map(|_| NEXT));
-                    last.centers.extend(centers);
-                }
-                None => rows.push(LayoutRow {
-                    middles: vec![NEXT; missing.len()],
-                    ids: missing,
-                    centers,
-                }),
+                Some(last) => last.entries.extend(missing),
+                None => rows.push(LayoutRow { entries: missing }),
             }
         }
         rows
@@ -1424,37 +1401,32 @@ impl Displays {
     pub fn set_layout(&mut self, mut rows: Vec<LayoutRow>) {
         // Offsets are desktop pixels; anything this far out is nonsense (and would
         // overflow the arithmetic below).
-        for r in &mut rows {
-            for c in r.centers.iter_mut().chain(r.middles.iter_mut()) {
-                if *c != NEXT {
-                    *c = (*c).clamp(-100_000, 100_000);
-                }
+        for e in rows.iter_mut().flat_map(|r| &mut r.entries) {
+            for c in [&mut e.center, &mut e.middle].into_iter().flatten() {
+                *c = (*c).clamp(-100_000, 100_000);
             }
         }
         // The laptop screen's stream is cut for a moment whenever KDE rearranges its
         // outputs, and a headset that sends a layout meanwhile leaves it out. Its spot
         // is kept, or it would come back elsewhere, the headset would move it back, and
         // that would cut it again, round and round.
-        let has_mirror = |rows: &[LayoutRow]| rows.iter().any(|r| r.ids.contains(&MIRROR_ID));
+        let has_mirror = |rows: &[LayoutRow]| {
+            rows.iter()
+                .flat_map(LayoutRow::ids)
+                .any(|id| id == MIRROR_ID)
+        };
         if self.mirror_wanted && self.mirror.is_none() && !has_mirror(&rows) {
             for (i, old) in self.rows.iter().enumerate() {
-                let Some(k) = old.ids.iter().position(|id| *id == MIRROR_ID) else {
+                let Some(spot) = old.entries.iter().find(|e| e.id == MIRROR_ID) else {
                     continue;
                 };
-                let (center, middle) = (
-                    old.centers.get(k).copied().unwrap_or(NEXT),
-                    old.middles.get(k).copied().unwrap_or(NEXT),
-                );
                 let at = if i < rows.len() {
                     i
                 } else {
                     rows.push(LayoutRow::default());
                     rows.len() - 1
                 };
-                let row = &mut rows[at];
-                row.ids.push(MIRROR_ID);
-                row.centers.push(center);
-                row.middles.push(middle);
+                rows[at].entries.push(*spot);
                 break;
             }
         }
@@ -1462,7 +1434,7 @@ impl Displays {
         let rows = self.effective_rows();
         self.order = rows
             .iter()
-            .flat_map(|r| r.ids.clone())
+            .flat_map(LayoutRow::ids)
             .filter(|id| *id != MIRROR_ID)
             .collect();
         self.apply_layout();
@@ -1488,9 +1460,14 @@ impl Displays {
         self.order = ids.to_vec();
         // One row, in this order.
         self.rows = vec![LayoutRow {
-            ids: ids.to_vec(),
-            centers: vec![NEXT; ids.len()],
-            middles: vec![NEXT; ids.len()],
+            entries: ids
+                .iter()
+                .map(|&id| LayoutEntry {
+                    id,
+                    center: None,
+                    middle: None,
+                })
+                .collect(),
         }];
         self.apply_layout();
         self.router.send(HostMsg::Order {
@@ -1733,16 +1710,16 @@ impl Displays {
         };
         for row in self.effective_rows() {
             let mut seen = Vec::new();
-            for ((id, center), middle) in row.ids.iter().zip(&row.centers).zip(&row.middles) {
+            for e in &row.entries {
                 // The laptop screen is not part of the set.
-                let Some(m) = self.monitors.get(id) else {
+                let Some(m) = self.monitors.get(&e.id) else {
                     continue;
                 };
-                if self.primary == Some(*id) {
+                if self.primary == Some(e.id) {
                     saved.primary = Some(saved.specs.len());
                 }
                 saved.specs.push(m.spec.clone());
-                seen.push((*center, *middle));
+                seen.push((e.center, e.middle));
             }
             if !seen.is_empty() {
                 saved.rows.push(seen);
@@ -1840,7 +1817,7 @@ mod tests {
         let saved = SavedMonitors {
             specs: vec![spec("2560x1440").unwrap(), spec("1440x2560").unwrap()],
             primary: Some(1),
-            rows: vec![vec![(-1300, 200)], vec![(NEXT, -40)]],
+            rows: vec![vec![(Some(-1300), Some(200))], vec![(None, Some(-40))]],
             mic: false,
             bitrate: Some(40),
             codec: Some(Codec::H264),
@@ -1864,7 +1841,7 @@ mod tests {
         let saved = SavedMonitors::parse(old, spec);
         assert_eq!(saved.specs.len(), 2);
         assert_eq!(saved.primary, Some(0));
-        assert_eq!(saved.rows, vec![vec![(-1300, NEXT), (NEXT, NEXT)]]);
+        assert_eq!(saved.rows, vec![vec![(Some(-1300), None), (None, None)]]);
         assert!(!saved.mirror);
         // Before rows were saved at all: one row.
         let older = SavedMonitors::parse("2560x1440\n1920x1080\n", spec);

@@ -328,6 +328,11 @@ impl Write for SecureWriter {
     }
 }
 
+/// Bytes of a SPAKE2 message (Ed25519 group, symmetric: a marker byte and a point).
+pub const PAIR_MSG_LEN: usize = 33;
+/// Bytes of a pairing confirmation tag (HMAC-SHA256).
+pub const CONFIRM_LEN: usize = 32;
+
 /// A random 6-digit pairing code.
 pub fn pairing_code() -> String {
     let mut b = [0u8; 4];
@@ -340,12 +345,15 @@ pub struct Pairing(Spake2<Ed25519Group>);
 
 impl Pairing {
     /// Starts pairing with `code`; send the returned message to the other side.
-    pub fn start(code: &str) -> (Self, Vec<u8>) {
+    pub fn start(code: &str) -> (Self, [u8; PAIR_MSG_LEN]) {
         let digits: String = code.chars().filter(char::is_ascii_digit).collect();
         let (state, msg) = Spake2::<Ed25519Group>::start_symmetric(
             &Password::new(digits.as_bytes()),
             &SpakeId::new(b"prostir pairing v1"),
         );
+        let msg = msg
+            .try_into()
+            .expect("an Ed25519 SPAKE2 message is 33 bytes");
         (Self(state), msg)
     }
 
@@ -359,7 +367,7 @@ impl Pairing {
 }
 
 /// Tag proving knowledge of the pairing key, bound to this connection and to `role`.
-pub fn confirmation(key: &[u8], role: &str, peer: &Peer, own_key: &[u8; 32]) -> Vec<u8> {
+pub fn confirmation(key: &[u8], role: &str, peer: &Peer, own_key: &[u8; 32]) -> [u8; CONFIRM_LEN] {
     let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("any key length");
     mac.update(b"prostir confirm v1");
     mac.update(role.as_bytes());
@@ -372,7 +380,7 @@ pub fn confirmation(key: &[u8], role: &str, peer: &Peer, own_key: &[u8; 32]) -> 
     };
     mac.update(a);
     mac.update(b);
-    mac.finalize().into_bytes().to_vec()
+    mac.finalize().into_bytes().into()
 }
 
 /// Constant-time tag comparison.

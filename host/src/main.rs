@@ -17,9 +17,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use log::{debug, error, info, warn};
+use log::{error, info, warn};
 use prostir_proto::secure::{SecureReader, SecureWriter};
-use prostir_proto::{ClientMsg, Codec, HostMsg, NO_FOCUS};
+use prostir_proto::{ClientMsg, Codec, HostMsg};
 
 use displays::{Displays, SavedMonitors};
 use encoder::EncoderConfig;
@@ -266,20 +266,16 @@ fn serve_client(
             next_focus = Instant::now() + Duration::from_millis(150);
             let id = active_output
                 .get()
-                .and_then(|name| displays.id_of_output(&name))
-                .unwrap_or(NO_FOCUS);
+                .and_then(|name| displays.id_of_output(&name));
             if focus != Some(id) {
                 focus = Some(id);
                 displays.router.send(HostMsg::Focus { id });
             }
             if let Some(w) = &sound_source {
-                let id = w
-                    .output()
-                    .and_then(|name| displays.id_of_output(&name))
-                    .unwrap_or(NO_FOCUS);
+                let id = w.output().and_then(|name| displays.id_of_output(&name));
                 if sound_from != Some(id) {
                     sound_from = Some(id);
-                    info!("sound comes from monitor {id}");
+                    info!("sound comes from monitor {id:?}");
                     displays.router.send(HostMsg::SoundFrom { id });
                 }
             }
@@ -434,9 +430,6 @@ fn serve_client(
                 control.bitrate = now.quality;
                 control.sharp = now.sharp;
                 tray::set_encoding(control.tray.as_ref(), control.bitrate, control.sharp);
-            }
-            Ok(Ok(ClientMsg::Unknown { tag })) => {
-                debug!("skipping message {tag} from a newer headset")
             }
             Ok(Ok(other)) => warn!("ignoring {other:?}"),
             Ok(Err(e)) if e.kind() == ErrorKind::UnexpectedEof => break Ok(()),

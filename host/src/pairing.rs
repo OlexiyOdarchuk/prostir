@@ -24,7 +24,8 @@ const MAX_ATTEMPTS: u32 = 3;
 const FREE_FAILURES: u32 = 3;
 /// A code made on the PC stays the same for this long, however many attempts use it.
 const CODE_LIFETIME: Duration = Duration::from_secs(300);
-/// Encryption and hello must be done within this time, however slowly bytes trickle.
+/// Encryption, hello and opening the session must be done within this time, however
+/// slowly bytes trickle.
 const SETUP_TIME: Duration = Duration::from_secs(10);
 /// Time to read and type a code.
 const PAIRING_TIME: Duration = Duration::from_secs(300);
@@ -161,8 +162,8 @@ impl Security {
     }
 }
 
-/// Encrypts the connection, pairs the headset if it is new, and returns the
-/// encrypted halves once the headset is trusted and has said hello.
+/// Encrypts the connection, checks the versions, pairs the headset if either side asks,
+/// and returns the encrypted halves once the headset is trusted and opened the session.
 pub fn accept(
     stream: &TcpStream,
     security: &mut Security,
@@ -178,25 +179,40 @@ pub fn accept(
     let _clear_code = ClearTrayCode(tray);
     let (reader, mut writer, peer) = secure::handshake(stream, &security.identity, false)?;
     let mut reader = BufReader::new(reader);
+    // Versions first, before pairing: this exchange is the same in every version, so
+    // a headset of any version learns which side to update.
+    match ClientMsg::read_first(&mut reader)? {
+        Some(ClientMsg::Hello { version, min, app })
+            if !prostir_proto::compatible(version, min) =>
+        {
+            incompatible(&mut writer, min > PROTOCOL_VERSION, &app)?;
+            bail!("headset speaks protocol v{version} (app {app}), PC v{PROTOCOL_VERSION}")
+        }
+        Some(ClientMsg::Hello { .. }) => {}
+        // Only headsets from before protocol 2 (0.1) start with anything else: they
+        // could ask to pair before saying hello.
+        _ => {
+            incompatible(&mut writer, false, "0.1.x")?;
+            bail!("headset from before protocol {PROTOCOL_VERSION}: no hello first")
+        }
+    }
+    HostMsg::Welcome {
+        version: PROTOCOL_VERSION,
+        language: crate::i18n::code().into(),
+    }
+    .write(&mut writer)?;
+    writer.flush()?;
     let mut attempts = 0;
     loop {
         match ClientMsg::read(&mut reader)? {
-            ClientMsg::Hello { version, min, app } if !prostir_proto::compatible(version, min) => {
-                incompatible(&mut writer, min > PROTOCOL_VERSION, &app)?;
-                bail!("headset speaks protocol v{version} (app {app}), PC v{PROTOCOL_VERSION}")
-            }
-            ClientMsg::Hello { .. } if security.trusted.contains(&peer.key) => {
-                HostMsg::Welcome {
-                    version: PROTOCOL_VERSION,
-                    language: crate::i18n::code().into(),
-                }
-                .write(&mut writer)?;
+            ClientMsg::Open if security.trusted.contains(&peer.key) => {
+                HostMsg::Opened.write(&mut writer)?;
                 writer.flush()?;
                 stream.set_read_timeout(None)?;
                 drop(deadline);
                 return Ok((reader, writer));
             }
-            ClientMsg::Hello { .. } => {
+            ClientMsg::Open => {
                 info!(
                     "unknown headset {}: pairing needed",
                     secure::fingerprint(&peer.key)
@@ -301,9 +317,7 @@ pub fn accept(
                     }
                 }
             }
-            // Something a newer headset sends that this PC does not know yet.
-            ClientMsg::Unknown { .. } => {}
-            other => bail!("unexpected message before pairing: {}", brief(&other)),
+            other => bail!("unexpected message before the session: {}", brief(&other)),
         }
     }
 }
@@ -406,11 +420,7 @@ fn incompatible(writer: &mut SecureWriter, pc_too_old: bool, headset_app: &str) 
 
 fn refuse(writer: &mut SecureWriter, why: &str) -> Result<bool> {
     HostMsg::Error { text: why.into() }.write(writer)?;
-    HostMsg::PairResult {
-        ok: false,
-        tag: Vec::new(),
-    }
-    .write(writer)?;
+    HostMsg::PairResult { tag: None }.write(writer)?;
     writer.flush()?;
     Ok(false)
 }
@@ -452,12 +462,7 @@ fn pair(
     let own = &identity.public;
     let ok = tags_match(&tag, &confirmation(&key, "headset", peer, own));
     HostMsg::PairResult {
-        ok,
-        tag: if ok {
-            confirmation(&key, "pc", peer, own)
-        } else {
-            Vec::new()
-        },
+        tag: ok.then(|| confirmation(&key, "pc", peer, own)),
     }
     .write(writer)?;
     writer.flush()?;
@@ -487,11 +492,11 @@ mod tests {
         }
         .write(&mut w)
         .unwrap();
-        let HostMsg::PairResult { ok, tag } = HostMsg::read(&mut r).unwrap() else {
+        let HostMsg::PairResult { tag } = HostMsg::read(&mut r).unwrap() else {
             panic!("expected PairResult")
         };
         std::fs::remove_dir_all(dir).unwrap();
-        ok && tags_match(&tag, &confirmation(&key, "pc", &peer, &id.public))
+        tag.is_some_and(|tag| tags_match(&tag, &confirmation(&key, "pc", &peer, &id.public)))
     }
 
     fn run(pc_code: &'static str, headset_code: &'static str) -> (bool, bool) {
@@ -521,17 +526,93 @@ mod tests {
         assert_eq!(run("123456", "654321"), (false, false));
     }
 
+    /// A PC in a test: its keys in a directory of its own.
+    struct TestPc {
+        dir: PathBuf,
+        security: Security,
+    }
+
+    impl TestPc {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("prostir-{name}-p-{}", std::process::id()));
+            let security = Security {
+                identity: Identity::load_or_create(&dir.join("key")).unwrap(),
+                trusted: TrustStore::load(&dir.join("trusted")),
+            };
+            Self { dir, security }
+        }
+    }
+
+    impl Drop for TestPc {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// Runs `headset` against a PC that accepts one connection; what each side got.
+    fn connect<T: Send + 'static>(
+        pc: &mut TestPc,
+        headset: impl FnOnce(BufReader<SecureReader>, SecureWriter, secure::Peer, &Identity) -> T
+        + Send
+        + 'static,
+    ) -> (Result<()>, T) {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let name = pc
+            .dir
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .replace("-p-", "-h-");
+        let h = std::thread::spawn(move || {
+            let stream = TcpStream::connect(addr).unwrap();
+            let dir = std::env::temp_dir().join(name);
+            let id = Identity::load_or_create(&dir.join("key")).unwrap();
+            let (r, w, peer) = secure::handshake(&stream, &id, true).unwrap();
+            let got = headset(BufReader::new(r), w, peer, &id);
+            std::fs::remove_dir_all(dir).unwrap();
+            got
+        });
+        let (s, _) = l.accept().unwrap();
+        let accepted = accept(&s, &mut pc.security, None).map(|_| ());
+        // The headset reads until the PC hangs up.
+        let _ = s.shutdown(std::net::Shutdown::Both);
+        (accepted, h.join().unwrap())
+    }
+
+    /// The messages a headset of protocol 1 (0.1.x) reads, the way it reads them: tag,
+    /// length, payload.
+    fn read_as_v1(r: &mut impl std::io::Read) -> Vec<(u8, Vec<u8>)> {
+        let mut msgs = Vec::new();
+        let mut header = [0u8; 5];
+        while r.read_exact(&mut header).is_ok() {
+            let len = u32::from_le_bytes(header[1..].try_into().unwrap());
+            let mut payload = vec![0u8; len as usize];
+            r.read_exact(&mut payload).unwrap();
+            msgs.push((header[0], payload));
+        }
+        msgs
+    }
+
+    /// What a PC of protocol 1 or 2 tells a headset of protocol 1 that it turns away:
+    /// a text naming the side to update (tag 6), then the PC's protocol and app
+    /// version (tag 17), in the bytes protocol 1 reads.
+    fn assert_told_to_update(msgs: &[(u8, Vec<u8>)]) {
+        let [(6, text), (17, incompatible)] = msgs else {
+            panic!("expected an error and Incompatible, got {msgs:?}")
+        };
+        let text = String::from_utf8(text.clone()).unwrap();
+        assert!(text.contains("Prostir"), "{text}");
+        let mut expected = PROTOCOL_VERSION.to_le_bytes().to_vec();
+        expected.extend_from_slice(env!("CARGO_PKG_VERSION").as_bytes());
+        assert_eq!(incompatible, &expected);
+    }
+
     /// A headset from another protocol version learns which side to update.
     #[test]
     fn other_protocol_is_told_to_update() {
-        let l = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = l.local_addr().unwrap();
-        let h = std::thread::spawn(move || {
-            let stream = TcpStream::connect(addr).unwrap();
-            let dir = std::env::temp_dir().join(format!("prostir-ver-h-{}", std::process::id()));
-            let id = Identity::load_or_create(&dir.join("key")).unwrap();
-            let (r, mut w, _) = secure::handshake(&stream, &id, true).unwrap();
-            let mut r = BufReader::new(r);
+        let mut pc = TestPc::new("ver");
+        let (refused, (first, second)) = connect(&mut pc, |mut r, mut w, _, _| {
             ClientMsg::Hello {
                 version: PROTOCOL_VERSION + 1,
                 min: PROTOCOL_VERSION + 1,
@@ -539,21 +620,12 @@ mod tests {
             }
             .write(&mut w)
             .unwrap();
-            let first = HostMsg::read(&mut r).unwrap();
-            let second = HostMsg::read(&mut r).unwrap();
-            std::fs::remove_dir_all(dir).unwrap();
-            (first, second)
+            (
+                HostMsg::read(&mut r).unwrap(),
+                HostMsg::read(&mut r).unwrap(),
+            )
         });
-        let (s, _) = l.accept().unwrap();
-        let dir = std::env::temp_dir().join(format!("prostir-ver-p-{}", std::process::id()));
-        let mut security = Security {
-            identity: Identity::load_or_create(&dir.join("key")).unwrap(),
-            trusted: TrustStore::load(&dir.join("trusted")),
-        };
-        let refused = accept(&s, &mut security, None);
-        std::fs::remove_dir_all(dir).unwrap();
         assert!(refused.is_err(), "the session must not start");
-        let (first, second) = h.join().unwrap();
         // Older headsets show this text; it names the side to update.
         assert!(matches!(first, HostMsg::Error { ref text } if text.contains("Prostir")));
         assert_eq!(
@@ -563,6 +635,38 @@ mod tests {
                 app: env!("CARGO_PKG_VERSION").into(),
             }
         );
+    }
+
+    /// A 0.1 headset says hello in protocol 1 and is told to update, in bytes it reads.
+    #[test]
+    fn a_protocol_1_hello_is_told_to_update() {
+        let mut pc = TestPc::new("v1");
+        let (refused, msgs) = connect(&mut pc, |mut r, mut w, _, _| {
+            // Hello as 0.1.1 sends it: tag 101, length, version 1, min 1, its version.
+            let mut hello = vec![101, 13, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0];
+            hello.extend_from_slice(b"0.1.1");
+            w.write_all(&hello).unwrap();
+            read_as_v1(&mut r)
+        });
+        assert!(refused.is_err(), "the session must not start");
+        assert_told_to_update(&msgs);
+    }
+
+    /// A 0.1 headset that does not trust the PC yet asks to pair before saying hello:
+    /// it is told to update instead of pairing in a protocol it does not speak.
+    #[test]
+    fn a_protocol_1_pairing_request_is_told_to_update() {
+        let mut pc = TestPc::new("v1pair");
+        let (refused, msgs) = connect(&mut pc, |mut r, mut w, _, _| {
+            // PairBegin as 0.1.1 sends it: the headset shows the code, then its name.
+            let mut begin = vec![109, 11, 0, 0, 0, 1];
+            begin.extend_from_slice(b"Meta Quest");
+            w.write_all(&begin).unwrap();
+            read_as_v1(&mut r)
+        });
+        assert!(refused.is_err(), "no pairing and no session");
+        assert_told_to_update(&msgs);
+        assert!(pc.security.trusted.is_empty());
     }
 
     /// Three wrong codes are free; after that every attempt waits longer, up to 15 min.
@@ -594,20 +698,20 @@ mod tests {
     /// user types it in the headset, and the headset is trusted afterwards.
     #[test]
     fn code_shown_on_the_pc_pairs() {
-        let l = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = l.local_addr().unwrap();
-        let h = std::thread::spawn(move || {
-            let stream = TcpStream::connect(addr).unwrap();
-            let dir = std::env::temp_dir().join(format!("prostir-pcc-h-{}", std::process::id()));
-            let id = Identity::load_or_create(&dir.join("key")).unwrap();
-            let (r, mut w, peer) = secure::handshake(&stream, &id, true).unwrap();
-            let mut r = BufReader::new(r);
-            let hello = || ClientMsg::Hello {
+        let mut pc = TestPc::new("pcc");
+        let (accepted, (ok, opened)) = connect(&mut pc, |mut r, mut w, peer, id| {
+            ClientMsg::Hello {
                 version: PROTOCOL_VERSION,
                 min: prostir_proto::MIN_PROTOCOL,
                 app: "test".into(),
-            };
-            hello().write(&mut w).unwrap();
+            }
+            .write(&mut w)
+            .unwrap();
+            assert!(matches!(
+                HostMsg::read(&mut r).unwrap(),
+                HostMsg::Welcome { .. }
+            ));
+            ClientMsg::Open.write(&mut w).unwrap();
             assert_eq!(HostMsg::read(&mut r).unwrap(), HostMsg::PairingRequired);
             ClientMsg::PairBegin {
                 headset_shows: false,
@@ -628,27 +732,15 @@ mod tests {
             }
             .write(&mut w)
             .unwrap();
-            let HostMsg::PairResult { ok, .. } = HostMsg::read(&mut r).unwrap() else {
+            let HostMsg::PairResult { tag } = HostMsg::read(&mut r).unwrap() else {
                 panic!("expected PairResult")
             };
-            hello().write(&mut w).unwrap();
-            let welcome = HostMsg::read(&mut r).unwrap();
-            std::fs::remove_dir_all(dir).unwrap();
-            (ok, welcome)
+            ClientMsg::Open.write(&mut w).unwrap();
+            (tag.is_some(), HostMsg::read(&mut r).unwrap())
         });
-        let (s, _) = l.accept().unwrap();
-        let dir = std::env::temp_dir().join(format!("prostir-pcc-p-{}", std::process::id()));
-        let mut security = Security {
-            identity: Identity::load_or_create(&dir.join("key")).unwrap(),
-            trusted: TrustStore::load(&dir.join("trusted")),
-        };
-        let accepted = accept(&s, &mut security, None);
-        let trusted = security.trusted.len();
-        std::fs::remove_dir_all(dir).unwrap();
-        let (ok, welcome) = h.join().unwrap();
         assert!(ok, "the codes must match");
-        assert!(matches!(welcome, HostMsg::Welcome { .. }));
+        assert_eq!(opened, HostMsg::Opened);
         assert!(accepted.is_ok());
-        assert_eq!(trusted, 1);
+        assert_eq!(pc.security.trusted.len(), 1);
     }
 }

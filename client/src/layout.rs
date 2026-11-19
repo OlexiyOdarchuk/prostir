@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use glam::{Quat, Vec2, Vec3};
-use prostir_proto::{LayoutRow, is_window_panel};
+use prostir_proto::{LayoutEntry, LayoutRow, is_window_panel};
 
 use crate::settings::Preset;
 
@@ -167,14 +167,19 @@ pub fn rows_by_position(
     rows.into_iter()
         .map(|mut r| {
             r.sort_by(|a, b| a.yaw.total_cmp(&b.yaw));
-            let spots: Vec<(i32, i32)> = r
-                .iter()
-                .map(|m| rects.get(&m.id).copied().unwrap_or_else(|| fallback(m)))
-                .collect();
             LayoutRow {
-                ids: r.iter().map(|m| m.id).collect(),
-                centers: spots.iter().map(|s| s.0).collect(),
-                middles: spots.iter().map(|s| s.1).collect(),
+                entries: r
+                    .iter()
+                    .map(|m| {
+                        let (center, middle) =
+                            rects.get(&m.id).copied().unwrap_or_else(|| fallback(m));
+                        LayoutEntry {
+                            id: m.id,
+                            center: Some(center),
+                            middle: Some(middle),
+                        }
+                    })
+                    .collect(),
             }
         })
         .collect()
@@ -1483,7 +1488,7 @@ mod tests {
             1,
             "a portrait monitor in the arc is in the same row"
         );
-        assert_eq!(rows[0].ids, vec![0, 1, 2]);
+        assert_eq!(rows[0].ids().collect::<Vec<_>>(), vec![0, 1, 2]);
 
         // Lift the right monitor above the middle one: two rows, it is on top.
         let mut lifted = arc.clone();
@@ -1494,19 +1499,22 @@ mod tests {
         lifted.insert(2, top);
         let rows = rows_by_position(&lifted, &three, center, Preset::Arc);
         assert_eq!(
-            rows.iter().map(|r| r.ids.clone()).collect::<Vec<_>>(),
+            rows.iter()
+                .map(|r| r.ids().collect::<Vec<_>>())
+                .collect::<Vec<_>>(),
             vec![vec![2], vec![0, 1]]
         );
         // It is seen right over the middle monitor, not over the right edge.
-        let middle = rows[1].centers[1];
-        assert!((rows[0].centers[0] - middle).abs() < 100, "{rows:?}");
-        assert!(rows[1].centers[0] < middle - 1500, "{rows:?}");
+        let seen_at = |row: usize, i: usize| rows[row].entries[i].center.unwrap();
+        let middle = seen_at(1, 1);
+        assert!((seen_at(0, 0) - middle).abs() < 100, "{rows:?}");
+        assert!(seen_at(1, 0) < middle - 1500, "{rows:?}");
 
         // A wall: one row, left to right.
         let wall = arrange(Preset::Wall, &three, None, None);
         let rows = rows_by_position(&wall, &three, center, Preset::Arc);
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].ids, vec![0, 1, 2]);
+        assert_eq!(rows[0].ids().collect::<Vec<_>>(), vec![0, 1, 2]);
     }
 
     #[test]
@@ -1519,8 +1527,8 @@ mod tests {
         let spot = |rows: &[LayoutRow], id: u8| {
             rows.iter()
                 .find_map(|r| {
-                    let i = r.ids.iter().position(|&x| x == id)?;
-                    Some((r.centers[i], r.middles[i]))
+                    let e = r.entries.iter().find(|e| e.id == id)?;
+                    Some((e.center.unwrap(), e.middle.unwrap()))
                 })
                 .unwrap()
         };
@@ -1720,7 +1728,7 @@ mod tests {
         let overhead = arrange(Preset::Overhead, &three, None, None);
         let rows = rows_by_position(&overhead, &three, center, Preset::Overhead);
         assert_eq!(rows.len(), 1, "{rows:?}");
-        assert_eq!(rows[0].ids, vec![0, 1, 2]);
+        assert_eq!(rows[0].ids().collect::<Vec<_>>(), vec![0, 1, 2]);
     }
 
     /// A wall: A brings everything into one plane, facing one way, rows touching.

@@ -156,13 +156,12 @@ fn main() -> Result<()> {
             HostMsg::AudioWanted { enabled } => println!("sound to headset: {enabled}"),
             HostMsg::MicWanted { enabled } => println!("headset microphone wanted: {enabled}"),
             HostMsg::MicActive { active } => println!("PC is recording: {active}"),
-            HostMsg::Focus { id } => println!("mouse on: {id}"),
-            HostMsg::Unknown { tag } => println!("skipped message {tag} from a newer PC"),
+            HostMsg::Focus { id } => println!("mouse on: {id:?}"),
             HostMsg::Recenter => println!("PC asks to bring the monitors in front"),
             HostMsg::Notice { text } => println!("PC says: {text}"),
             HostMsg::MouseAt { id, x, y } => println!("mouse on {id} at {x},{y}"),
             HostMsg::Abilities { bits } => println!("PC abilities: {bits:#b}"),
-            HostMsg::SoundFrom { id } => println!("sound from monitor {id}"),
+            HostMsg::SoundFrom { id } => println!("sound from monitor {id:?}"),
             HostMsg::PcSettings { settings, encoders } => {
                 println!("PC encodes: {settings:?}, can use {encoders:#05b}")
             }
@@ -170,7 +169,8 @@ fn main() -> Result<()> {
             | HostMsg::PairingRequired
             | HostMsg::PairMsg { .. }
             | HostMsg::PairResult { .. }
-            | HostMsg::Welcome { .. } => {}
+            | HostMsg::Welcome { .. }
+            | HostMsg::Opened => {}
         }
     }
     let secs = start.elapsed().as_secs_f64();

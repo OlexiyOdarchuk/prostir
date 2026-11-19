@@ -219,9 +219,10 @@ pub struct FakeHeadset {
 }
 
 impl FakeHeadset {
-    /// Connects to the PC at `addr` and says hello. A PC that does not know this
-    /// headset yet is paired with the code `pairing` gives (shown by the headset,
-    /// typed on the PC); without it that is [`ConnectError::NotPaired`].
+    /// Connects to the PC at `addr`, says hello and opens the session. A PC this
+    /// headset does not know, or one that does not know this headset, is paired with
+    /// the code `pairing` gives (shown by the headset, typed on the PC); without it a
+    /// PC that does not know the headset is [`ConnectError::NotPaired`].
     pub fn connect(
         addr: SocketAddr,
         keys: &mut Keys,
@@ -235,24 +236,11 @@ impl FakeHeadset {
         stream.set_write_timeout(Some(REPLY))?;
         let (reader, mut w, peer) = secure::handshake(&stream, &keys.identity, true)?;
         let mut r = BufReader::new(reader);
-        if !keys.trusted.contains(&peer.key)
-            && let Some(code) = pairing.as_mut()
-        {
-            pair(&stream, &mut r, &mut w, &keys.identity, &peer, &code())?;
-            keys.trusted.add(peer.key, &addr.to_string())?;
-        }
+        // Versions first, before pairing.
         hello(&mut w)?;
         let (version, language) = loop {
             match HostMsg::read(&mut r)? {
                 HostMsg::Welcome { version, language } => break (version, language),
-                HostMsg::PairingRequired => {
-                    let Some(code) = pairing.as_mut() else {
-                        return Err(ConnectError::NotPaired);
-                    };
-                    pair(&stream, &mut r, &mut w, &keys.identity, &peer, &code())?;
-                    keys.trusted.add(peer.key, &addr.to_string())?;
-                    hello(&mut w)?;
-                }
                 HostMsg::Incompatible { protocol, app } => {
                     return Err(ConnectError::Incompatible { protocol, app });
                 }
@@ -261,6 +249,27 @@ impl FakeHeadset {
                 other => return Err(anyhow!("unexpected {other:?} before welcome").into()),
             }
         };
+        if !keys.trusted.contains(&peer.key)
+            && let Some(code) = pairing.as_mut()
+        {
+            pair(&stream, &mut r, &mut w, &keys.identity, &peer, &code())?;
+            keys.trusted.add(peer.key, &addr.to_string())?;
+        }
+        ClientMsg::Open.write(&mut w)?;
+        loop {
+            match HostMsg::read(&mut r)? {
+                HostMsg::Opened => break,
+                HostMsg::PairingRequired => {
+                    let Some(code) = pairing.as_mut() else {
+                        return Err(ConnectError::NotPaired);
+                    };
+                    pair(&stream, &mut r, &mut w, &keys.identity, &peer, &code())?;
+                    keys.trusted.add(peer.key, &addr.to_string())?;
+                    ClientMsg::Open.write(&mut w)?;
+                }
+                other => return Err(anyhow!("unexpected {other:?} before the session").into()),
+            }
+        }
         stream.set_read_timeout(None)?;
         let writer = Arc::new(Mutex::new(w));
         let incoming = spawn_reader(r, writer.clone())?;
@@ -467,7 +476,7 @@ fn exchange_codes(
     }
     .write(w)?;
     match HostMsg::read(r)? {
-        HostMsg::PairResult { ok: true, tag }
+        HostMsg::PairResult { tag: Some(tag) }
             if tags_match(&tag, &confirmation(&key, "pc", peer, &identity.public)) =>
         {
             Ok(())

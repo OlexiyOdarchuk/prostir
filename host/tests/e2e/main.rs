@@ -115,6 +115,29 @@ fn an_unknown_headset_must_pair_first() {
         .unwrap();
 }
 
+/// A headset that forgot the PC (the PC still trusts it) pairs again before the session
+/// starts: the versions come first, then pairing, then the session.
+#[test]
+fn a_headset_that_forgot_the_pc_pairs_again() {
+    let dir = TestDir::new("forgot");
+    dir.save_monitors(TWO_MONITORS);
+    let mut keys = dir.pair();
+    keys.trusted.clear().unwrap();
+    let pc = Pc::start(
+        &dir,
+        &Options {
+            typed_code: Some("161803".into()),
+            ..Options::default()
+        },
+    );
+    let mut headset = FakeHeadset::connect(pc.addr, &mut keys, Some(&mut || "161803".into()))
+        .unwrap_or_else(|e| panic!("pairing again: {e}"));
+    assert_eq!(keys.trusted.len(), 1, "the headset trusts the PC again");
+    headset
+        .wait(START, "every monitor showing", View::all_monitors_show)
+        .unwrap();
+}
+
 #[test]
 fn monitors_are_added_and_removed() {
     let (_dir, _pc, _keys, mut headset) = session("add-remove", &Options::default());

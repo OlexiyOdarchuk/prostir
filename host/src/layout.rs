@@ -1,20 +1,28 @@
 //! Where the monitors go on the desktop: positions worked out from where the headset
 //! shows them. Pure geometry, the same on every desktop.
 
-use prostir_proto::NEXT;
-
 use crate::platform::ActiveWindow;
 
 /// A monitor to arrange: id, where its centre is seen (in the headset's shared pixel
-/// scale, [`NEXT`] when unknown), width and height on the desktop.
+/// scale, if known), width and height on the desktop.
 #[derive(Debug, Clone, Copy)]
 pub struct Seat {
     pub id: u8,
-    pub center: i32,
-    /// Vertical centre as seen, downwards ([`NEXT`]: unknown).
-    pub middle: i32,
+    pub center: Option<i32>,
+    /// Vertical centre as seen, downwards.
+    pub middle: Option<i32>,
     pub w: i32,
     pub h: i32,
+}
+
+/// A [`Seat`] with its centre worked out.
+#[derive(Debug, Clone, Copy)]
+struct Seen {
+    id: u8,
+    center: i32,
+    middle: i32,
+    w: i32,
+    h: i32,
 }
 
 /// Desktop positions (top-left, logical pixels) when the headset said where each
@@ -22,31 +30,42 @@ pub struct Seat {
 /// `main`, each monitor joins the nearest one already placed on the side where they
 /// meet in the headset, touching it, with the offset along that edge as seen (lined
 /// up when within a few pixels), and always sharing enough of the edge for the mouse
-/// to cross. Nothing overlaps.
-pub fn arrange_free(seats: &[Seat], main: u8) -> Vec<(u8, i32, i32)> {
+/// to cross. Nothing overlaps. `None` unless every position is known.
+pub fn arrange_free(seats: &[Seat], main: u8) -> Option<Vec<(u8, i32, i32)>> {
     const REACH: i32 = 200;
     const LINE_UP: i32 = 24;
+    let mut rest: Vec<Seen> = seats
+        .iter()
+        .map(|m| {
+            Some(Seen {
+                id: m.id,
+                center: m.center?,
+                middle: m.middle?,
+                w: m.w,
+                h: m.h,
+            })
+        })
+        .collect::<Option<_>>()?;
     // As seen: top-left and size.
-    let seen = |m: &Seat| (m.center - m.w / 2, m.middle - m.h / 2);
-    let gaps = |a: &Seat, b: &Seat| {
+    let seen = |m: &Seen| (m.center - m.w / 2, m.middle - m.h / 2);
+    let gaps = |a: &Seen, b: &Seen| {
         let ((ax, ay), (bx, by)) = (seen(a), seen(b));
         (
             (ax - (bx + b.w)).max(bx - (ax + a.w)),
             (ay - (by + b.h)).max(by - (ay + a.h)),
         )
     };
-    let mut rest: Vec<Seat> = seats.to_vec();
     let Some(first) = rest
         .iter()
         .position(|m| m.id == main)
         .or_else(|| (!rest.is_empty()).then_some(0))
     else {
-        return Vec::new();
+        return Some(Vec::new());
     };
     let m0 = rest.remove(first);
     let (x0, y0) = seen(&m0);
-    let mut placed: Vec<(Seat, i32, i32)> = vec![(m0, x0, y0)];
-    let overlaps = |placed: &[(Seat, i32, i32)], m: &Seat, x: i32, y: i32| {
+    let mut placed: Vec<(Seen, i32, i32)> = vec![(m0, x0, y0)];
+    let overlaps = |placed: &[(Seen, i32, i32)], m: &Seen, x: i32, y: i32| {
         placed
             .iter()
             .find(|(n, nx, ny)| x < nx + n.w && *nx < x + m.w && y < ny + n.h && *ny < y + m.h)
@@ -117,10 +136,12 @@ pub fn arrange_free(seats: &[Seat], main: u8) -> Vec<(u8, i32, i32)> {
     }
     let min_x = placed.iter().map(|p| p.1).min().unwrap_or(0);
     let min_y = placed.iter().map(|p| p.2).min().unwrap_or(0);
-    placed
-        .into_iter()
-        .map(|(m, x, y)| (m.id, x - min_x, y - min_y))
-        .collect()
+    Some(
+        placed
+            .into_iter()
+            .map(|(m, x, y)| (m.id, x - min_x, y - min_y))
+            .collect(),
+    )
 }
 
 /// Desktop positions (top-left, logical pixels) for monitors in rows, top to bottom,
@@ -129,23 +150,7 @@ pub fn arrange_free(seats: &[Seat], main: u8) -> Vec<(u8, i32, i32)> {
 /// it that it overlaps most, and touches the monitors under (or over) it, so the mouse
 /// leaves one monitor where the eyes see the next. Nothing overlaps.
 pub fn arrange(rows: &[Vec<Seat>], main: u8) -> Vec<(u8, i32, i32)> {
-    // Unknown centres: right after the previous monitor of the row.
-    let rows: Vec<Vec<Seat>> = rows
-        .iter()
-        .filter(|r| !r.is_empty())
-        .map(|r| {
-            let mut out: Vec<Seat> = Vec::with_capacity(r.len());
-            for m in r {
-                let mut m = *m;
-                if m.center == NEXT {
-                    m.center = out.last().map_or(0, |p| p.center + p.w / 2 + m.w / 2);
-                }
-                out.push(m);
-            }
-            out.sort_by_key(|m| m.center);
-            out
-        })
-        .collect();
+    let rows: Vec<&Vec<Seat>> = rows.iter().filter(|r| !r.is_empty()).collect();
     let Some(main_row) = rows
         .iter()
         .position(|r| r.iter().any(|m| m.id == main))
@@ -153,13 +158,35 @@ pub fn arrange(rows: &[Vec<Seat>], main: u8) -> Vec<(u8, i32, i32)> {
     else {
         return Vec::new();
     };
-    // Placed so far: (seat, x, y).
-    let mut placed: Vec<(Seat, i32, i32)> = Vec::new();
-    let tallest = rows[main_row].iter().map(|m| m.h).max().unwrap_or(0);
-    // Heights as seen when known (a portrait monitor's top lined up with its
+    // Heights as seen when all are known (a portrait monitor's top lined up with its
     // neighbour's stays so), else centred in the row; every monitor still overlaps the
-    // one before it enough for the mouse to cross.
-    let seen = rows[main_row].iter().all(|m| m.middle != NEXT);
+    // one before it enough for the mouse to cross. Other rows go by their centres.
+    let seen = rows[main_row].iter().all(|m| m.middle.is_some());
+    // Unknown centres: right after the previous monitor of the row.
+    let rows: Vec<Vec<Seen>> = rows
+        .iter()
+        .map(|r| {
+            let mut out: Vec<Seen> = Vec::with_capacity(r.len());
+            for m in r.iter() {
+                let center = m
+                    .center
+                    .unwrap_or_else(|| out.last().map_or(0, |p| p.center + p.w / 2 + m.w / 2));
+                out.push(Seen {
+                    id: m.id,
+                    center,
+                    // Read only where `seen` says every one is known.
+                    middle: m.middle.unwrap_or(0),
+                    w: m.w,
+                    h: m.h,
+                });
+            }
+            out.sort_by_key(|m| m.center);
+            out
+        })
+        .collect();
+    // Placed so far: (seat, x, y).
+    let mut placed: Vec<(Seen, i32, i32)> = Vec::new();
+    let tallest = rows[main_row].iter().map(|m| m.h).max().unwrap_or(0);
     let mut x = 0;
     let mut previous: Option<(i32, i32)> = None; // (y, h)
     for m in &rows[main_row] {
@@ -184,14 +211,14 @@ pub fn arrange(rows: &[Vec<Seat>], main: u8) -> Vec<(u8, i32, i32)> {
         .collect();
     for (r, next_to) in order {
         let above = r < next_to;
-        let neighbours: Vec<(Seat, i32, i32)> = placed
+        let neighbours: Vec<(Seen, i32, i32)> = placed
             .iter()
             .copied()
             .filter(|(m, _, _)| rows[next_to].iter().any(|n| n.id == m.id))
             .collect();
-        let mut row: Vec<(Seat, i32)> = Vec::new();
+        let mut row: Vec<(Seen, i32)> = Vec::new();
         for m in &rows[r] {
-            let overlap = |a: &Seat| {
+            let overlap = |a: &Seen| {
                 (m.center + m.w / 2).min(a.center + a.w / 2)
                     - (m.center - m.w / 2).max(a.center - a.w / 2)
             };
@@ -237,7 +264,7 @@ pub fn arrange(rows: &[Vec<Seat>], main: u8) -> Vec<(u8, i32, i32)> {
         }
         for (m, x) in row {
             // Touch the nearest monitors under (or over) it, overlapping none.
-            let below: Vec<&(Seat, i32, i32)> = placed
+            let below: Vec<&(Seen, i32, i32)> = placed
                 .iter()
                 .filter(|(n, nx, _)| x < nx + n.w && *nx < x + m.w)
                 .collect();
@@ -293,8 +320,8 @@ mod tests {
         // A landscape left of a portrait, tops lined up as seen.
         let mut a = seat(0, -1280, 2560, 1440);
         let mut b = seat(1, 720, 1440, 2560);
-        a.middle = -560;
-        b.middle = 0;
+        a.middle = Some(-560);
+        b.middle = Some(0);
         let placed = arrange(&[vec![a, b]], 1);
         let y = |id: u8| placed.iter().find(|p| p.0 == id).unwrap().2;
         assert_eq!(y(0), y(1));
@@ -313,8 +340,8 @@ mod tests {
         // landscape on its right, lower down; the laptop screen under the primary.
         let at = |id, center, middle, w, h| Seat {
             id,
-            center,
-            middle,
+            center: Some(center),
+            middle: Some(middle),
             w,
             h,
         };
@@ -324,7 +351,7 @@ mod tests {
             at(2, 1950, 300, 2560, 1440),
             at(MIRROR_ID, 0, 1800, 1920, 1080),
         ];
-        let placed = arrange_free(&seats, 1);
+        let placed = arrange_free(&seats, 1).expect("every position known");
         let get = |id| *placed.iter().find(|p| p.0 == id).unwrap();
         let (_, x0, y0) = get(0);
         let (_, x1, y1) = get(1);
@@ -340,11 +367,11 @@ mod tests {
         assert!(xm < x1 + 1440 && xm + 1920 > x1);
     }
 
-    fn seat(id: u8, center: i32, w: i32, h: i32) -> Seat {
+    fn seat(id: u8, center: impl Into<Option<i32>>, w: i32, h: i32) -> Seat {
         Seat {
             id,
-            center,
-            middle: NEXT,
+            center: center.into(),
+            middle: None,
             w,
             h,
         }
@@ -434,9 +461,9 @@ mod tests {
     #[test]
     fn unknown_positions_line_up() {
         let rows = vec![vec![
-            seat(0, NEXT, 2560, 1440),
-            seat(1, NEXT, 1440, 2560),
-            seat(2, NEXT, 2560, 1440),
+            seat(0, None, 2560, 1440),
+            seat(1, None, 1440, 2560),
+            seat(2, None, 2560, 1440),
         ]];
         let placed = arrange(&rows, 1);
         assert_eq!(at(&placed, 0).0, 0);

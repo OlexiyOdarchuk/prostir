@@ -281,8 +281,8 @@ mod tests {
         let o = Outbox::default();
         assert!(o.video(0, true, 10, frame(0, true)));
         o.audio(HostMsg::Audio { pcm: vec![1] });
-        o.control(HostMsg::Focus { id: 0 });
-        assert_eq!(o.next(), Some(HostMsg::Focus { id: 0 }));
+        o.control(HostMsg::Focus { id: Some(0) });
+        assert_eq!(o.next(), Some(HostMsg::Focus { id: Some(0) }));
         assert_eq!(o.next(), Some(HostMsg::Audio { pcm: vec![1] }));
         assert_eq!(o.next(), Some(frame(0, true)));
     }

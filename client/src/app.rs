@@ -523,13 +523,17 @@ impl Scene {
         info!(
             "KDE arrangement: {}",
             rows.iter()
-                .map(|r| format!("{:?}@{:?}", r.ids, r.centers))
+                .map(|r| {
+                    let ids: Vec<u8> = r.ids().collect();
+                    let centers: Vec<Option<i32>> = r.entries.iter().map(|e| e.center).collect();
+                    format!("{ids:?}@{centers:?}")
+                })
                 .collect::<Vec<_>>()
                 .join(" / ")
         );
         self.order = rows
             .iter()
-            .flat_map(|r| r.ids.clone())
+            .flat_map(prostir_proto::LayoutRow::ids)
             .filter(|id| *id != MIRROR_ID)
             .collect();
         self.sent_layout = Some(rows.clone());

@@ -14,7 +14,7 @@ use prostir_proto::secure::{
     self, Identity, Pairing, SecureReader, SecureWriter, TrustStore, confirmation, tags_match,
 };
 use prostir_proto::stats::{Gaps, Period};
-use prostir_proto::{ClientMsg, Codec, HostMsg, NO_FOCUS, PROTOCOL_VERSION};
+use prostir_proto::{ClientMsg, Codec, HostMsg, PROTOCOL_VERSION};
 
 /// How often the session logs what it received.
 const REPORT_EVERY: Duration = Duration::from_secs(10);
@@ -458,7 +458,7 @@ pub fn spawn(events: Sender<NetEvent>, discovery: Discovery, steering: Steering)
                     }
                     // Remembered only once the PC proved it is a trusted one: a single
                     // connection to anything else must not redirect the next start.
-                    if ended.welcomed
+                    if ended.opened
                         && let Some(p) = peer.filter(|p| !p.ip().is_loopback())
                     {
                         let _ = std::fs::write(&discovery.last_host_file, p.to_string());
@@ -748,7 +748,6 @@ impl Session<'_> {
                             text.chars().filter(|c| !c.is_control()).take(160).collect();
                         let _ = self.events.send(NetEvent::HostError(text));
                     }
-                    HostMsg::Unknown { .. } => {}
                     other => return Err(std::io::Error::other(format!("unexpected {other:?}"))),
                 }
             };
@@ -762,7 +761,7 @@ impl Session<'_> {
                 tag: confirmation(&key, "headset", self.peer, own),
             })?;
             match HostMsg::read(self.reader)? {
-                HostMsg::PairResult { ok: true, tag }
+                HostMsg::PairResult { tag: Some(tag) }
                     if tags_match(&tag, &confirmation(&key, "pc", self.peer, own)) =>
                 {
                     trusted.add(self.peer.key, self.host)?;
@@ -780,7 +779,6 @@ impl Session<'_> {
                     warn!("pairing with {}: the codes did not match", self.host);
                     let _ = self.events.send(NetEvent::PairingFailed);
                 }
-                HostMsg::Unknown { .. } => {}
                 other => return Err(std::io::Error::other(format!("unexpected {other:?}"))),
             }
         }
@@ -806,7 +804,7 @@ struct StreamSlot {
 #[derive(Default)]
 struct Ended {
     /// The PC is trusted and the session started.
-    welcomed: bool,
+    opened: bool,
     /// When the PC last sent an error: right before it hung up means it cannot
     /// serve the headset right now.
     refused: Option<Instant>,
@@ -849,11 +847,8 @@ fn run_session(
         peer: &peer,
         host: &host,
     };
-    // A PC we have never paired with: pair only once the user said so in the menu,
-    // and never on our own (a hostile PC on the network could keep guessing codes).
-    if !trusted.contains(&peer.key) {
-        session.pair_if_approved(trusted)?;
-    }
+    // Versions first, before pairing: this exchange is the same in every version, so
+    // a PC of any version says which side to update.
     feedback.send(&ClientMsg::Hello {
         version: PROTOCOL_VERSION,
         min: prostir_proto::MIN_PROTOCOL,
@@ -862,14 +857,6 @@ fn run_session(
     let language = loop {
         match HostMsg::read(session.reader)? {
             HostMsg::Welcome { language, .. } => break crate::i18n::Lang::from_code(&language),
-            HostMsg::PairingRequired => {
-                session.pair_if_approved(trusted)?;
-                feedback.send(&ClientMsg::Hello {
-                    version: PROTOCOL_VERSION,
-                    min: prostir_proto::MIN_PROTOCOL,
-                    app: env!("CARGO_PKG_VERSION").into(),
-                })?;
-            }
             // The text is for headsets that predate `Incompatible`; this one shows a page.
             HostMsg::Error { .. } => {}
             HostMsg::Incompatible { protocol, app } => {
@@ -881,11 +868,26 @@ fn run_session(
                 std::thread::sleep(Duration::from_secs(10));
                 return Ok(());
             }
-            HostMsg::Unknown { .. } => {}
             other => return Err(std::io::Error::other(format!("unexpected {other:?}"))),
         }
     };
-    ended.welcomed = true;
+    // A PC we have never paired with: pair only once the user said so in the menu,
+    // and never on our own (a hostile PC on the network could keep guessing codes).
+    if !trusted.contains(&peer.key) {
+        session.pair_if_approved(trusted)?;
+    }
+    feedback.send(&ClientMsg::Open)?;
+    loop {
+        match HostMsg::read(session.reader)? {
+            HostMsg::Opened => break,
+            HostMsg::PairingRequired => {
+                session.pair_if_approved(trusted)?;
+                feedback.send(&ClientMsg::Open)?;
+            }
+            other => return Err(std::io::Error::other(format!("unexpected {other:?}"))),
+        }
+    }
+    ended.opened = true;
     // The host re-sends the last frame every 500 ms, so 10 s of silence means a dead link.
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     if let Ok(peer) = stream.peer_addr() {
@@ -1006,7 +1008,7 @@ fn run_session(
                 let _ = events.send(NetEvent::MirrorWanted(enabled));
             }
             HostMsg::Focus { id } => {
-                let _ = events.send(NetEvent::Focus((id != NO_FOCUS).then_some(id)));
+                let _ = events.send(NetEvent::Focus(id));
             }
             HostMsg::Order { ids } => {
                 let _ = events.send(NetEvent::Order(ids));
@@ -1045,13 +1047,13 @@ fn run_session(
                 let _ = events.send(NetEvent::Abilities(bits));
             }
             HostMsg::SoundFrom { id } => {
-                let _ = events.send(NetEvent::SoundFrom((id != NO_FOCUS).then_some(id)));
+                let _ = events.send(NetEvent::SoundFrom(id));
             }
             // The PC asks; the headset's own switch decides (checked below too).
             HostMsg::MicActive { active } => mic_asked = active,
-            // From a newer PC: skipped, the session goes on.
-            HostMsg::Unknown { .. }
-            | HostMsg::Welcome { .. }
+            // Only before the session: ignored in it.
+            HostMsg::Welcome { .. }
+            | HostMsg::Opened
             | HostMsg::Incompatible { .. }
             | HostMsg::PairingRequired
             | HostMsg::PairMsg { .. }
