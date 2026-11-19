@@ -19,6 +19,11 @@ impl ScreenId {
     /// The laptop screen (the physical display streamed as it is).
     pub const BUILTIN: Self = Self(MIRROR_ID as u32);
 
+    /// A virtual monitor's number as saved (`0..`).
+    pub fn saved(n: u32) -> Self {
+        Self(n)
+    }
+
     /// The number saved for it.
     pub fn number(self) -> u32 {
         self.0

@@ -9,6 +9,7 @@ mod pacing;
 mod pairing;
 mod platform;
 mod screen;
+mod store;
 mod usage;
 
 use std::io::ErrorKind;
@@ -24,11 +25,12 @@ use prostir_proto::link::{Closer, Link, Via};
 use prostir_proto::stats::Period;
 use prostir_proto::{ClientMsg, Codec, HeadsetGoodbye, HostMsg, PcGoodbye};
 
-use displays::{Displays, SavedMonitors};
+use displays::Displays;
 use encoder::EncoderConfig;
 use platform::MonitorSpec;
 use platform::{TrayCommand, TrayStatus, focus, notifications, sound_source, tray};
 use screen::ScreenId;
+use store::Store;
 
 #[derive(Parser, Debug)]
 #[command(about = "Virtual monitors for KDE Plasma and Hyprland, streamed to a Meta Quest 3")]
@@ -73,20 +75,7 @@ enum CodecArg {
 }
 
 fn parse_monitor(s: &str) -> Result<MonitorSpec, String> {
-    let (size, scale) = match s.split_once('@') {
-        Some((a, b)) => (a, b.parse::<f64>().map_err(|e| format!("bad scale: {e}"))?),
-        None => (s, 1.0),
-    };
-    let (w, h) = size.split_once(['x', 'X']).ok_or("expected WIDTHxHEIGHT")?;
-    let width: u32 = w.parse().map_err(|e| format!("bad width: {e}"))?;
-    let height: u32 = h.parse().map_err(|e| format!("bad height: {e}"))?;
-    let spec = MonitorSpec {
-        width,
-        height,
-        scale,
-    };
-    spec.validate().map_err(|e| e.to_string())?;
-    Ok(spec)
+    s.parse()
 }
 
 /// Tray icon and the commands it sends.
@@ -94,16 +83,16 @@ struct Control {
     tray: Option<tray::Handle>,
     security: pairing::Security,
     commands: Receiver<TrayCommand>,
-    bitrate: u32,
-    sharp: bool,
     quit: bool,
     shown: Option<TrayStatus>,
+    /// The settings the tray shows: quality, the text preset, the counter.
+    shown_settings: Option<(u32, bool, bool)>,
 }
 
 impl Control {
-    /// Applies tray commands; returns why a session must end, if it must (quitting,
-    /// or the paired headsets forgotten).
-    fn poll(&mut self, displays: Option<&mut Displays>) -> Option<PcGoodbye> {
+    /// Applies tray commands (through the store, then to the screens); returns why a
+    /// session must end, if it must (quitting, or the paired headsets forgotten).
+    fn poll(&mut self, store: &mut Store, displays: Option<&mut Displays>) -> Option<PcGoodbye> {
         if platform::quit_requested() {
             self.quit = true;
         }
@@ -113,29 +102,16 @@ impl Control {
             match cmd {
                 TrayCommand::SetBitrate(mbps) => {
                     info!("video quality: {mbps} Mbit/s per monitor");
-                    self.bitrate = mbps;
-                    match displays.as_deref_mut() {
-                        Some(d) => {
-                            d.set_bitrate(mbps);
-                            d.save();
-                            d.announce_pc_settings();
-                        }
-                        None => store(|s| s.bitrate = Some(mbps)),
-                    }
+                    store.set_bitrate(mbps);
                 }
                 TrayCommand::SetSharp(sharp) => {
                     info!("clearer text: {sharp}");
-                    self.sharp = sharp;
-                    match displays.as_deref_mut() {
-                        Some(d) => {
-                            d.set_sharp(sharp);
-                            d.save();
-                            d.announce_pc_settings();
-                        }
-                        None => store(|s| s.sharp = sharp),
-                    }
+                    store.change(|s| s.sharp = sharp);
                 }
-                TrayCommand::SetCounting(on) => usage::set_enabled(on),
+                TrayCommand::SetCounting(on) => {
+                    info!("counting this PC among users: {on}");
+                    store.change(|s| s.count = on);
+                }
                 TrayCommand::Recenter => {
                     if let Some(d) = displays.as_deref_mut() {
                         d.router.send(HostMsg::Recenter);
@@ -153,6 +129,10 @@ impl Control {
                 }
                 TrayCommand::Quit => self.quit = true,
             }
+            if let Some(d) = displays.as_deref_mut() {
+                d.apply(&store.wanted());
+                d.announce_pc_settings();
+            }
         }
         if self.quit {
             Some(PcGoodbye::Quit)
@@ -161,8 +141,8 @@ impl Control {
         }
     }
 
-    /// Shows the current state in the tray (only when it changed).
-    fn show(&mut self, via: Option<&'static str>, displays: Option<&Displays>) {
+    /// Shows the current state and settings in the tray (only what changed).
+    fn show(&mut self, via: Option<&'static str>, displays: Option<&Displays>, store: &Store) {
         let status = TrayStatus {
             connected: via,
             monitors: displays.map_or(0, Displays::monitor_count),
@@ -173,15 +153,21 @@ impl Control {
             tray::set_status(self.tray.as_ref(), status.clone());
             self.shown = Some(status);
         }
+        let wanted = store.wanted();
+        let settings = (wanted.bitrate, wanted.sharp, wanted.count);
+        if self.shown_settings != Some(settings) {
+            tray::set_settings(self.tray.as_ref(), settings.0, settings.1, settings.2);
+            self.shown_settings = Some(settings);
+        }
     }
 }
 
-/// Changes a saved choice while there are no monitors (with them, `Displays::save`
-/// keeps every choice).
-fn store(change: impl FnOnce(&mut SavedMonitors)) {
-    let mut saved = SavedMonitors::load(parse_monitor);
-    change(&mut saved);
-    saved.save();
+/// Keeps the set and its rows as they are now (`chosen`: the headset changed which
+/// monitors there are).
+fn keep_screens(store: &mut Store, displays: &Displays, chosen: bool) {
+    if let Some(set) = displays.saved_screens() {
+        store.set_screens(set, chosen);
+    }
 }
 
 /// Ends the session once the writer thread stops, however it stops: the outbox takes
@@ -242,6 +228,7 @@ fn serve_client(
     conn: pairing::Connection,
     displays: &mut Displays,
     control: &mut Control,
+    store: &mut Store,
 ) -> Result<()> {
     let pairing::Connection {
         link:
@@ -377,19 +364,10 @@ fn serve_client(
             .send(HostMsg::PrimaryChanged { id: id.wire() });
     }
     displays.send_order();
-    displays.router.send(HostMsg::MirrorWanted {
-        enabled: displays.mirror_wanted(),
-    });
-    displays.router.send(HostMsg::AudioWanted {
-        enabled: displays.audio_wanted(),
-    });
-    displays.router.send(HostMsg::MicWanted {
-        enabled: displays.mic_wanted(),
-    });
-    displays.announce_pc_settings();
+    displays.announce_settings();
     displays.headset_connected();
     displays.force_keyframes();
-    usage::headset_connected();
+    usage::headset_connected(store.wanted().count);
 
     // Housekeeping runs on a clock: the headset acknowledges every frame, so the
     // channel is rarely quiet long enough for a receive timeout.
@@ -405,6 +383,8 @@ fn serve_client(
     let mut focus = None;
     let mut next_focus = Instant::now();
     let (result, goodbye) = loop {
+        // What changed in the last pass goes to disk, off this thread.
+        store.flush();
         if Instant::now() >= next_focus {
             next_focus = Instant::now() + Duration::from_millis(150);
             let id = active_output
@@ -427,10 +407,10 @@ fn serve_client(
         }
         if Instant::now() >= next_tick {
             next_tick = Instant::now() + Duration::from_millis(500);
-            if let Some(reason) = control.poll(Some(displays)) {
+            if let Some(reason) = control.poll(store, Some(displays)) {
                 break (Ok(()), Some(reason));
             }
-            control.show(Some(via), Some(displays));
+            control.show(Some(via), Some(displays), store);
             displays.tick();
             if displays.taken_off_for() >= Some(TAKEN_OFF_GRACE) {
                 info!("headset taken off");
@@ -469,17 +449,19 @@ fn serve_client(
                     Ok(id) => {
                         info!("headset added {id}");
                         displays.force_keyframe(id);
-                        displays.save();
+                        keep_screens(store, displays, true);
                         displays.sync_wallpapers();
                     }
                     Err(e) => report(displays, format!("{e:#}")),
                 }
             }
             Ok(Ok(ClientMsg::RemoveMonitor { id })) => {
-                match displays.remove(ScreenId::from_wire(id)) {
+                let id = ScreenId::from_wire(id);
+                let monitor = displays.is_monitor(id);
+                match displays.remove(id) {
                     Ok(()) => {
-                        info!("headset removed {}", ScreenId::from_wire(id));
-                        displays.save();
+                        info!("headset removed {id}");
+                        keep_screens(store, displays, monitor);
                     }
                     Err(e) => report(displays, format!("{e:#}")),
                 }
@@ -487,13 +469,13 @@ fn serve_client(
             Ok(Ok(ClientMsg::SetOrder { ids })) => {
                 let ids: Vec<ScreenId> = ids.into_iter().map(ScreenId::from_wire).collect();
                 match displays.set_order(&ids) {
-                    Ok(()) => displays.save(),
+                    Ok(()) => keep_screens(store, displays, false),
                     Err(e) => report(displays, format!("{e:#}")),
                 }
             }
             Ok(Ok(ClientMsg::SetLayout { rows })) => {
                 displays.set_layout(&rows);
-                displays.save();
+                keep_screens(store, displays, false);
             }
             Ok(Ok(ClientMsg::SetMonitors { sizes, primary })) => {
                 match displays.set_monitors(&sizes, primary as usize) {
@@ -501,28 +483,28 @@ fn serve_client(
                     Err(e) => report(displays, format!("{e:#}")),
                 }
                 displays.force_keyframes();
-                displays.save();
+                keep_screens(store, displays, true);
                 displays.sync_wallpapers();
             }
             Ok(Ok(ClientMsg::Mic { pcm })) => displays.push_mic(pcm),
             Ok(Ok(ClientMsg::Presence { worn })) => displays.set_worn(worn),
             Ok(Ok(ClientMsg::SetMic { enabled })) => {
-                displays.set_mic_wanted(enabled);
-                displays.save();
+                store.change(|s| s.mic = enabled);
+                displays.apply(&store.wanted());
             }
             Ok(Ok(ClientMsg::SetAudio { enabled })) => {
-                displays.set_audio_wanted(enabled);
-                displays.save();
+                store.change(|s| s.audio = enabled);
+                displays.apply(&store.wanted());
             }
             Ok(Ok(ClientMsg::SetMirror { enabled })) => {
-                displays.set_mirror(enabled);
-                displays.save();
+                store.change(|s| s.mirror = enabled);
+                displays.apply(&store.wanted());
             }
             Ok(Ok(ClientMsg::SetPrimary { id })) => {
                 let id = ScreenId::from_wire(id);
                 info!("headset made {id} the primary monitor");
                 displays.set_primary(id);
-                displays.save();
+                keep_screens(store, displays, false);
                 displays.sync_wallpapers();
             }
             Ok(Ok(ClientMsg::DetachWindow)) => {
@@ -583,14 +565,18 @@ fn serve_client(
                 }
             }
             Ok(Ok(ClientMsg::SetPcSettings { settings })) => {
-                if let Err(e) = displays.set_pc_settings(settings) {
+                // Kept as asked: the codec stays chosen when another one encodes.
+                let quality = settings.quality.clamp(5, 100);
+                store.set_encoding(quality, settings.sharp, settings.codec, settings.software);
+                // Quality and clearer text apply even when the codec cannot change.
+                displays.apply(&store.wanted());
+                if let Err(e) = displays.encode_with(settings.codec, settings.software) {
                     report(displays, format!("{e:#}"));
                 }
-                // Quality and clearer text apply even when the codec cannot change.
-                let now = displays.pc_settings();
-                control.bitrate = now.quality;
-                control.sharp = now.sharp;
-                tray::set_encoding(control.tray.as_ref(), control.bitrate, control.sharp);
+                // A monitor whose stream could not start again is gone.
+                keep_screens(store, displays, false);
+                displays.announce_pc_settings();
+                control.show(Some(via), Some(displays), store);
             }
             Ok(Ok(ClientMsg::Goodbye { reason })) => {
                 info!("{}", headset_left(reason));
@@ -704,36 +690,17 @@ fn spawn_adb_reverse(port: u16) {
         });
 }
 
-fn create_displays(args: &Args, bitrate: u32, sharp: bool) -> Result<Displays> {
-    let mut saved = SavedMonitors::load(parse_monitor);
-    // The command line wins, then the headset menu's choice, then HEVC.
-    let prefer = match args.codec {
-        Some(CodecArg::H264) => Codec::H264,
-        Some(CodecArg::H265) => Codec::H265,
-        None => saved.codec.unwrap_or(Codec::H265),
-    };
-    let software = args.software || saved.software;
-    let (backend, codec) = encoder::pick(prefer, software)?;
+fn create_displays(args: &Args, store: &Store) -> Result<Displays> {
+    let wanted = store.wanted();
+    let (backend, codec) = encoder::pick(wanted.codec, wanted.software)?;
     info!("encoding with {backend:?} {codec:?}");
     let cfg = EncoderConfig {
         codec,
-        bitrate_kbps: bitrate * 1000,
+        bitrate_kbps: wanted.bitrate * 1000,
         backend,
-        sharp,
+        sharp: wanted.sharp,
     };
-    // Monitors from the command line replace the saved set and where it stood; the
-    // other choices (sound, microphone, mirror) stay as saved.
-    if !args.monitors.is_empty() {
-        saved.specs = args.monitors.clone();
-        saved.primary = None;
-        saved.rows = Vec::new();
-    }
-    if saved.specs.is_empty() {
-        saved.specs = vec![parse_monitor("2560x1440").expect("valid default")];
-    }
-    let displays = Displays::create(&saved, cfg, !args.keep_primary)?;
-    displays.save();
-    Ok(displays)
+    Displays::create(store.screens(), &wanted, cfg, !args.keep_primary)
 }
 
 /// `~/Pictures/…` rather than the full path, for showing.
@@ -763,9 +730,21 @@ fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse();
     let _instance = platform::single_instance()?;
+    // The command line holds for this run only.
+    let run = store::Run {
+        bitrate: args.bitrate,
+        codec: args.codec.map(|c| match c {
+            CodecArg::H264 => Codec::H264,
+            CodecArg::H265 => Codec::H265,
+        }),
+        software: args.software.then_some(true),
+        screens: None,
+    };
+    let mut store = Store::open(store::config_dir(), run);
+    store.start_with(&args.monitors);
     // The first start says that this build counts its users and how to turn it off,
     // a day before the first count.
-    usage::announce_once();
+    usage::announce_once(store.wanted().count);
     platform::quit_on_signals();
     // Monitors from a run that crashed: without the headset nobody sees their windows.
     platform::clean_up_after_crash();
@@ -787,27 +766,25 @@ fn main() -> Result<()> {
         spawn_adb_reverse(port);
     }
 
-    let saved = SavedMonitors::load(parse_monitor);
-    let bitrate = args.bitrate.or(saved.bitrate).unwrap_or(30);
-    let sharp = saved.sharp;
     let (command_tx, commands) = mpsc::channel();
     let mut control = Control {
         security: pairing::Security::load()?,
-        tray: tray::spawn(command_tx, bitrate, sharp),
+        tray: tray::spawn(command_tx),
         commands,
-        bitrate,
-        sharp,
         quit: false,
         shown: None,
+        shown_settings: None,
     };
-    control.show(None, None);
+    control.show(None, None, &store);
 
     let mut displays: Option<Displays> = None;
     let mut idle_since = Instant::now();
     loop {
+        store.flush();
         if control.quit {
             info!("quitting");
             drop(displays);
+            store.close();
             return Ok(());
         }
         match listener.accept() {
@@ -836,7 +813,7 @@ fn main() -> Result<()> {
                     displays = None;
                 }
                 if displays.is_none() {
-                    match create_displays(&args, control.bitrate, control.sharp) {
+                    match create_displays(&args, &store) {
                         Ok(d) => displays = Some(d),
                         Err(e) => {
                             error!("{e:#}");
@@ -853,6 +830,7 @@ fn main() -> Result<()> {
                     conn,
                     displays.as_mut().expect("made above if it was missing"),
                     &mut control,
+                    &mut store,
                 ) {
                     warn!("session ended: {e:#}");
                 } else {
@@ -869,16 +847,17 @@ fn main() -> Result<()> {
                     displays = None;
                     platform::give_memory_back();
                 }
-                control.show(None, displays.as_ref());
+                control.show(None, displays.as_ref(), &store);
                 if args.linger > 0 && displays.as_ref().is_some_and(|d| d.healthy()) {
                     info!("keeping virtual monitors for {} s", args.linger);
                 }
             }
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                control.poll(displays.as_mut());
+                control.poll(&mut store, displays.as_mut());
+                control.show(None, displays.as_ref(), &store);
                 if displays.is_some() && idle_since.elapsed() >= Duration::from_secs(args.linger) {
                     displays = None;
-                    control.show(None, None);
+                    control.show(None, None, &store);
                     platform::give_memory_back();
                 }
                 std::thread::sleep(Duration::from_millis(200));

@@ -2,7 +2,6 @@
 
 use crate::i18n::t;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -20,6 +19,7 @@ use crate::platform::audio::{AudioOut, MicIn};
 use crate::platform::windows;
 use crate::platform::{Desktop, DesktopBackend, Geometry, MonitorSpec, Output, OutputBackend};
 use crate::screen::{Screen, ScreenId, ScreenKind, wire_ids};
+use crate::store::{SavedScreens, Settings};
 
 /// Retry timing after failures: 2 s, then doubling up to 2 min.
 #[derive(Default)]
@@ -343,203 +343,6 @@ impl Router {
     }
 }
 
-/// Saved monitor set: `row` starts a row (top to bottom), then one
-/// `WIDTHxHEIGHT[@scale][ at CENTER[ MIDDLE]][ *]` per monitor, left to right: where
-/// the headset showed it (`next` for an unknown centre) and `*` for the primary one.
-/// Lines like `mirror on|off` keep the other choices.
-pub struct SavedMonitors {
-    pub specs: Vec<MonitorSpec>,
-    pub primary: Option<usize>,
-    pub mirror: bool,
-    /// PC sound goes to the headset while it is connected.
-    pub audio: bool,
-    /// The headset microphone is the PC's microphone while it is connected.
-    pub mic: bool,
-    /// Mbit/s per monitor, if chosen in the tray.
-    pub bitrate: Option<u32>,
-    /// Clearer-text encoder preset.
-    pub sharp: bool,
-    /// Codec chosen in the headset menu, if any.
-    pub codec: Option<Codec>,
-    /// Encode on the CPU, chosen in the headset menu.
-    pub software: bool,
-    /// Rows from top to bottom, covering `specs` in order: where each monitor in it is
-    /// seen, (centre, middle) as in [`LayoutEntry`]. Empty: one row.
-    pub rows: Vec<Vec<(Option<i32>, Option<i32>)>>,
-}
-
-impl Default for SavedMonitors {
-    fn default() -> Self {
-        Self {
-            specs: Vec::new(),
-            primary: None,
-            mirror: true,
-            audio: true,
-            mic: true,
-            bitrate: None,
-            sharp: false,
-            codec: None,
-            software: false,
-            rows: Vec::new(),
-        }
-    }
-}
-
-fn config_path() -> Option<PathBuf> {
-    let base = crate::platform::config_home()?;
-    let dir = base.join("prostir");
-    // Settings from before the rename.
-    let old = base.join("questmon");
-    if !dir.exists() && old.exists() {
-        let _ = std::fs::rename(&old, &dir);
-    }
-    Some(dir.join("monitors.txt"))
-}
-
-impl SavedMonitors {
-    /// What was saved last, with or without monitors; the defaults before the first
-    /// save.
-    pub fn load(parse: impl Fn(&str) -> Result<MonitorSpec, String>) -> Self {
-        config_path()
-            .and_then(|path| std::fs::read_to_string(path).ok())
-            .map(|text| Self::parse(&text, parse))
-            .unwrap_or_default()
-    }
-
-    fn parse(text: &str, parse: impl Fn(&str) -> Result<MonitorSpec, String>) -> Self {
-        let mut saved = Self::default();
-        let on = |v: &str| v.trim() == "on";
-        for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
-            if line == "row" || line.starts_with("row ") {
-                saved.rows.push(Vec::new());
-                continue;
-            }
-            if let Some(v) = line.strip_prefix("sharp ") {
-                saved.sharp = on(v);
-                continue;
-            }
-            if let Some(v) = line.strip_prefix("codec ") {
-                saved.codec = match v.trim() {
-                    "h264" => Some(Codec::H264),
-                    "h265" => Some(Codec::H265),
-                    _ => None,
-                };
-                continue;
-            }
-            if let Some(v) = line.strip_prefix("software ") {
-                saved.software = on(v);
-                continue;
-            }
-            if let Some(v) = line.strip_prefix("bitrate ") {
-                saved.bitrate = v.trim().parse().ok();
-                continue;
-            }
-            if let Some(v) = line.strip_prefix("mic ") {
-                saved.mic = v.trim() != "off";
-                continue;
-            }
-            if let Some(v) = line.strip_prefix("audio ") {
-                saved.audio = v.trim() != "off";
-                continue;
-            }
-            if let Some(v) = line.strip_prefix("mirror ") {
-                saved.mirror = v.trim() != "off";
-                continue;
-            }
-            let (line, star) = match line.strip_suffix('*') {
-                Some(s) => (s.trim(), true),
-                None => (line, false),
-            };
-            // `2560x1440 at -1300 200`: where the headset showed it (files from before
-            // 0.1.1 have no middle).
-            let (spec, seen) = match line.split_once(" at ") {
-                Some((spec, at)) => {
-                    // `next`: no centre, right after the previous monitor.
-                    let mut v = at.split_whitespace().map(|v| v.parse().ok());
-                    (spec.trim(), (v.next().flatten(), v.next().flatten()))
-                }
-                None => (line, (None, None)),
-            };
-            if let Ok(spec) = parse(spec) {
-                if star {
-                    saved.primary = Some(saved.specs.len());
-                }
-                if let Some(r) = saved.rows.last_mut() {
-                    r.push(seen);
-                }
-                saved.specs.push(spec);
-            }
-        }
-        saved
-    }
-
-    fn to_text(&self) -> String {
-        let on = |v: bool| if v { "on" } else { "off" };
-        let mut text = String::new();
-        let mut specs = self.specs.iter().enumerate();
-        // Monitors not in a row: one more row of them.
-        let rest = self.specs.len()
-            - self
-                .rows
-                .iter()
-                .map(Vec::len)
-                .sum::<usize>()
-                .min(self.specs.len());
-        let rows = self
-            .rows
-            .iter()
-            .cloned()
-            .chain((rest > 0).then(|| vec![(None, None); rest]));
-        for row in rows {
-            text.push_str("row\n");
-            for ((center, middle), (i, spec)) in row.into_iter().zip(specs.by_ref()) {
-                text.push_str(&spec.to_string());
-                if center.is_some() || middle.is_some() {
-                    let center = center.map_or("next".to_owned(), |c| c.to_string());
-                    text.push_str(&format!(" at {center}"));
-                    if let Some(middle) = middle {
-                        text.push_str(&format!(" {middle}"));
-                    }
-                }
-                if self.primary == Some(i) {
-                    text.push_str(" *");
-                }
-                text.push('\n');
-            }
-        }
-        text.push_str(&format!(
-            "mirror {}\naudio {}\nmic {}\n",
-            on(self.mirror),
-            on(self.audio),
-            on(self.mic)
-        ));
-        if let Some(mbps) = self.bitrate {
-            text.push_str(&format!("bitrate {mbps}\n"));
-        }
-        text.push_str(&format!("sharp {}\n", on(self.sharp)));
-        if let Some(codec) = self.codec {
-            let name = match codec {
-                Codec::H264 => "h264",
-                Codec::H265 => "h265",
-            };
-            text.push_str(&format!("codec {name}\n"));
-        }
-        text.push_str(&format!("software {}\n", on(self.software)));
-        text
-    }
-
-    pub fn save(&self) {
-        let Some(path) = config_path() else { return };
-        let result = path
-            .parent()
-            .map_or(Ok(()), std::fs::create_dir_all)
-            .and_then(|()| prostir_proto::secure::write_atomic(&path, self.to_text().as_bytes()));
-        if let Err(e) = result {
-            warn!("cannot save {}: {e}", path.display());
-        }
-    }
-}
-
 pub struct Displays {
     // Field order matters: streams close before the desktop connection.
     /// Every screen shown in the headset: virtual monitors, window panels, the laptop
@@ -553,13 +356,12 @@ pub struct Displays {
     order: Vec<ScreenId>,
     /// How the headset arranges the monitors in rows (see `effective_rows`).
     rows: Vec<Vec<desk::Entry<ScreenId>>>,
-    mirror_wanted: bool,
     mirror_retry: Instant,
+    /// The settings as last applied from the store (see [`Displays::apply`]).
+    settings: Settings,
     /// PC sound to the headset, while one is connected.
     audio: Option<AudioOut>,
-    audio_wanted: bool,
     mic: Option<MicIn>,
-    mic_wanted: bool,
     /// After a failed start, sound and microphone wait longer and longer before the
     /// next attempt (starting them blocks the session for up to 2 s).
     audio_retry: Backoff,
@@ -581,7 +383,14 @@ pub struct Displays {
 }
 
 impl Displays {
-    pub fn create(saved: &SavedMonitors, cfg: EncoderConfig, manage_primary: bool) -> Result<Self> {
+    /// The screens of `set`, each with its own number, streaming with `cfg`; sound,
+    /// microphone and the laptop screen as `settings` say.
+    pub fn create(
+        set: &SavedScreens,
+        settings: &Settings,
+        cfg: EncoderConfig,
+        manage_primary: bool,
+    ) -> Result<Self> {
         let desktop = Desktop::connect()?;
         // Only some desktops (KDE) have a primary output.
         let manage_primary = manage_primary && desktop.has_primary();
@@ -590,12 +399,10 @@ impl Displays {
             windows_checked: Instant::now(),
             windows_unplaced: false,
             order: Vec::new(),
-            rows: Vec::new(),
-            mirror_wanted: saved.mirror,
+            rows: set.rows.clone(),
+            settings: settings.clone(),
             audio: None,
-            audio_wanted: saved.audio,
             mic: None,
-            mic_wanted: saved.mic,
             audio_retry: Backoff::default(),
             mic_retry: Backoff::default(),
             mic_recording: false,
@@ -609,28 +416,27 @@ impl Displays {
             primary: None,
             manage_primary,
         };
-        for spec in saved.specs.iter().take(MAX_MONITORS) {
-            displays.add(spec.clone())?;
+        // In the order of the rows, then any the rows leave out.
+        let mut ids: Vec<ScreenId> = set
+            .rows
+            .iter()
+            .flatten()
+            .map(|e| e.id)
+            .filter(|id| set.specs.contains_key(id))
+            .collect();
+        let rest: Vec<ScreenId> = set
+            .specs
+            .keys()
+            .filter(|id| !ids.contains(id))
+            .copied()
+            .collect();
+        ids.extend(rest);
+        for id in ids.into_iter().take(MAX_MONITORS) {
+            displays.add_as(id, set.specs[&id].clone())?;
         }
-        let ids = displays.order.clone();
-        // Rebuild the saved rows over the new ids (same order as the saved specs).
-        let mut rest = ids.as_slice();
-        for seen in &saved.rows {
-            let (row, tail) = rest.split_at(seen.len().min(rest.len()));
-            rest = tail;
-            if !row.is_empty() {
-                displays.rows.push(
-                    row.iter()
-                        .zip(seen)
-                        .map(|(&id, &(center, middle))| desk::Entry { id, center, middle })
-                        .collect(),
-                );
-            }
-        }
-        if let Some(&id) = saved.primary.and_then(|i| ids.get(i)) {
-            displays.set_primary(id);
-        } else {
-            displays.ensure_primary();
+        match set.primary {
+            Some(id) if displays.is_monitor(id) => displays.set_primary(id),
+            _ => displays.ensure_primary(),
         }
         displays.tick();
         displays.sync_wallpapers();
@@ -652,7 +458,8 @@ impl Displays {
         self.screens.get(&ScreenId::BUILTIN)
     }
 
-    fn is_monitor(&self, id: ScreenId) -> bool {
+    /// Whether `id` is one of the virtual monitors.
+    pub fn is_monitor(&self, id: ScreenId) -> bool {
         self.screens.get(&id).is_some_and(Screen::is_virtual)
     }
 
@@ -667,6 +474,12 @@ impl Displays {
             );
         }
         let id = ScreenId::first_free(|id| self.screens.contains_key(&id));
+        self.add_as(id, spec)?;
+        Ok(id)
+    }
+
+    /// Adds monitor `id`.
+    fn add_as(&mut self, id: ScreenId, spec: MonitorSpec) -> Result<()> {
         let mut output = self.desktop.create(id.number() + 1, &spec)?;
         let encoder = self.start_stream(id, &mut output)?;
         self.screens.insert(
@@ -676,7 +489,7 @@ impl Displays {
         self.order.push(id);
         self.apply_layout();
         self.send_order();
-        Ok(id)
+        Ok(())
     }
 
     /// Starts stream `id`: its slot in the router and an encoder fed by `output`. When
@@ -709,6 +522,12 @@ impl Displays {
         self.sync_audio();
         self.check_primary();
         self.check_window_panels();
+        self.sync_mirror();
+    }
+
+    /// Streams the laptop screen while it is wanted and there, and starts it again
+    /// when it stopped (the laptop lid closed and opened, say).
+    fn sync_mirror(&mut self) {
         let broken = self.router.mirror_failed.swap(false, Ordering::Relaxed);
         if let Some(m) = self.mirror()
             && (broken || m.output.as_ref().is_none_or(|o| o.closed()))
@@ -719,7 +538,7 @@ impl Displays {
             self.stop_mirror();
             self.mirror_retry = Instant::now() + Duration::from_secs(2);
         }
-        if !self.mirror_wanted || self.mirror().is_some() || self.mirror_retry > Instant::now() {
+        if !self.settings.mirror || self.mirror().is_some() || self.mirror_retry > Instant::now() {
             return;
         }
         self.mirror_retry = Instant::now() + Duration::from_secs(2);
@@ -773,23 +592,62 @@ impl Displays {
         }
     }
 
-    pub fn set_mirror(&mut self, enabled: bool) {
-        self.mirror_wanted = enabled;
-        self.mirror_retry = Instant::now();
-        if !enabled {
-            self.stop_mirror();
+    /// Follows the settings `wanted` (as the store has them now): quality and the text
+    /// preset on every encoder, sound, microphone and the laptop screen. Another codec
+    /// is [`Displays::encode_with`].
+    pub fn apply(&mut self, wanted: &Settings) {
+        let was = std::mem::replace(&mut self.settings, wanted.clone());
+        if wanted.bitrate * 1000 != self.cfg.bitrate_kbps {
+            self.cfg.bitrate_kbps = wanted.bitrate * 1000;
+            for (_, e) in self.encoders() {
+                e.set_bitrate(self.cfg.bitrate_kbps);
+            }
         }
-        self.tick();
-        self.router.send(HostMsg::MirrorWanted { enabled });
+        if wanted.sharp != self.cfg.sharp {
+            self.cfg.sharp = wanted.sharp;
+            let value = self.cfg.target_usage();
+            for (_, e) in self.encoders() {
+                e.set_target_usage(value);
+            }
+        }
+        // Switched on by hand: tried right away.
+        if wanted.audio != was.audio {
+            self.audio_retry.succeeded();
+            self.router.send(HostMsg::AudioWanted {
+                enabled: wanted.audio,
+            });
+        }
+        if wanted.mic != was.mic {
+            self.mic_retry.succeeded();
+            self.router.send(HostMsg::MicWanted {
+                enabled: wanted.mic,
+            });
+        }
+        self.sync_audio();
+        if wanted.mirror != was.mirror {
+            self.mirror_retry = Instant::now();
+            if !wanted.mirror {
+                self.stop_mirror();
+            }
+            self.sync_mirror();
+            self.router.send(HostMsg::MirrorWanted {
+                enabled: wanted.mirror,
+            });
+        }
     }
 
-    /// Clearer text (slower preset) for every running encoder and monitors added later.
-    pub fn set_sharp(&mut self, sharp: bool) {
-        self.cfg.sharp = sharp;
-        let value = self.cfg.target_usage();
-        for (_, e) in self.encoders() {
-            e.set_target_usage(value);
-        }
+    /// Tells a headset that just connected what the settings are.
+    pub fn announce_settings(&self) {
+        self.router.send(HostMsg::MirrorWanted {
+            enabled: self.settings.mirror,
+        });
+        self.router.send(HostMsg::AudioWanted {
+            enabled: self.settings.audio,
+        });
+        self.router.send(HostMsg::MicWanted {
+            enabled: self.settings.mic,
+        });
+        self.announce_pc_settings();
     }
 
     /// How the PC encodes, for the headset menu.
@@ -852,30 +710,17 @@ impl Displays {
         }
     }
 
-    /// Settings changed in the headset menu. Quality and the text preset apply on the
-    /// fly; another codec or the CPU encoder restarts the encoders (the monitors and
-    /// their windows stay).
-    pub fn set_pc_settings(&mut self, wanted: PcSettings) -> Result<()> {
-        let quality = wanted.quality.clamp(5, 100);
-        if quality != self.cfg.bitrate_kbps / 1000 {
-            self.set_bitrate(quality);
-        }
-        if wanted.sharp != self.cfg.sharp {
-            self.set_sharp(wanted.sharp);
-        }
+    /// Another codec or the CPU encoder, asked for in the headset menu: every stream
+    /// starts over with what the PC can make of it (the monitors and their windows
+    /// stay). Nothing changes when that is what encodes now.
+    pub fn encode_with(&mut self, codec: Codec, software: bool) -> Result<()> {
         let current = self.pc_settings();
-        let switched = if wanted.codec != current.codec || wanted.software != current.software {
-            crate::encoder::pick(wanted.codec, wanted.software).and_then(|(backend, codec)| {
-                info!("encoding with {backend:?} {codec:?} (from the headset menu)");
-                self.switch_encoding(backend, codec)
-            })
-        } else {
-            Ok(())
-        };
-        // What is in use now, the codec as before if it could not change.
-        self.save();
-        self.announce_pc_settings();
-        switched
+        if (codec, software) == (current.codec, current.software) {
+            return Ok(());
+        }
+        let (backend, codec) = crate::encoder::pick(codec, software)?;
+        info!("encoding with {backend:?} {codec:?} (from the headset menu)");
+        self.switch_encoding(backend, codec)
     }
 
     /// Encodes with `backend` and `codec` from now on: every monitor's stream starts
@@ -950,14 +795,6 @@ impl Displays {
         result
     }
 
-    /// Applies a new bitrate to every running encoder and to monitors added later.
-    pub fn set_bitrate(&mut self, mbps: u32) {
-        self.cfg.bitrate_kbps = mbps * 1000;
-        for (_, e) in self.encoders() {
-            e.set_bitrate(self.cfg.bitrate_kbps);
-        }
-    }
-
     pub fn monitor_count(&self) -> usize {
         self.monitors().count()
     }
@@ -1022,7 +859,7 @@ impl Displays {
 
     /// Starts or stops PC sound and microphone to match the wishes and the state.
     fn sync_audio(&mut self) {
-        let audio = self.streaming && self.audio_wanted;
+        let audio = self.streaming && self.settings.audio;
         if audio && self.audio.is_none() && self.audio_retry.due() {
             let router = self.router.clone();
             match AudioOut::start(move |pcm| router.send_audio(pcm)) {
@@ -1038,7 +875,7 @@ impl Displays {
         } else if !audio {
             self.audio = None;
         }
-        let mic = self.streaming && self.mic_wanted;
+        let mic = self.streaming && self.settings.mic;
         if mic && self.mic.is_none() && self.mic_retry.due() {
             match MicIn::start() {
                 Ok(m) => {
@@ -1067,39 +904,12 @@ impl Displays {
         }
     }
 
-    pub fn set_audio_wanted(&mut self, enabled: bool) {
-        self.audio_wanted = enabled;
-        // Switched on by hand: try right away.
-        self.audio_retry.succeeded();
-        self.sync_audio();
-        self.router.send(HostMsg::AudioWanted { enabled });
-    }
-
-    pub fn set_mic_wanted(&mut self, enabled: bool) {
-        self.mic_wanted = enabled;
-        self.mic_retry.succeeded();
-        self.sync_audio();
-        self.router.send(HostMsg::MicWanted { enabled });
-    }
-
     /// The screen whose output is `name`.
     pub fn id_of_output(&self, name: &str) -> Option<ScreenId> {
         self.screens
             .values()
             .find(|s| s.output_name() == Some(name))
             .map(|s| s.id)
-    }
-
-    pub fn mic_wanted(&self) -> bool {
-        self.mic_wanted
-    }
-
-    pub fn audio_wanted(&self) -> bool {
-        self.audio_wanted
-    }
-
-    pub fn mirror_wanted(&self) -> bool {
-        self.mirror_wanted
     }
 
     /// Removes monitor `id`, or closes window panel `id`.
@@ -1346,7 +1156,7 @@ impl Displays {
         let has_mirror = |rows: &[Vec<desk::Entry<ScreenId>>]| {
             rows.iter().flatten().any(|e| e.id == ScreenId::BUILTIN)
         };
-        if self.mirror_wanted && self.mirror().is_none() && !has_mirror(&rows) {
+        if self.settings.mirror && self.mirror().is_none() && !has_mirror(&rows) {
             for (i, old) in self.rows.iter().enumerate() {
                 let Some(spot) = old.iter().find(|e| e.id == ScreenId::BUILTIN) else {
                     continue;
@@ -1596,51 +1406,21 @@ impl Displays {
                 .any(|s| s.output.as_ref().is_none_or(|o| o.closed()))
     }
 
-    /// Remembers the set for the next session.
-    pub fn save(&self) {
-        // Left without monitors (none could stream again), the set saved before stays
-        // for the next start.
-        if self.monitors().next().is_none() {
-            return;
+    /// The set and its rows as they are now, to keep; none without monitors (none
+    /// could stream again), so the set kept before stays for the next start.
+    pub fn saved_screens(&self) -> Option<SavedScreens> {
+        let specs: BTreeMap<ScreenId, MonitorSpec> = self
+            .monitors()
+            .filter_map(|s| Some((s.id, s.kind.spec()?.clone())))
+            .collect();
+        if specs.is_empty() {
+            return None;
         }
-        self.saved().save();
-    }
-
-    /// The set and the choices as they are now, to save.
-    fn saved(&self) -> SavedMonitors {
-        let mut saved = SavedMonitors {
-            mirror: self.mirror_wanted,
-            audio: self.audio_wanted,
-            mic: self.mic_wanted,
-            bitrate: Some(self.cfg.bitrate_kbps / 1000),
-            sharp: self.cfg.sharp,
-            codec: Some(self.cfg.codec),
-            software: self.cfg.backend == crate::encoder::Backend::X264,
-            ..SavedMonitors::default()
-        };
-        for row in self.effective_rows() {
-            let mut seen = Vec::new();
-            for e in &row {
-                // The laptop screen is not part of the set.
-                let Some(spec) = self
-                    .screens
-                    .get(&e.id)
-                    .filter(|s| s.is_virtual())
-                    .and_then(|s| s.kind.spec())
-                else {
-                    continue;
-                };
-                if self.primary == Some(e.id) {
-                    saved.primary = Some(saved.specs.len());
-                }
-                saved.specs.push(spec.clone());
-                seen.push((e.center, e.middle));
-            }
-            if !seen.is_empty() {
-                saved.rows.push(seen);
-            }
-        }
-        saved
+        Some(SavedScreens {
+            specs,
+            rows: self.effective_rows(),
+            primary: self.primary,
+        })
     }
 }
 
@@ -1756,15 +1536,6 @@ mod tests {
         assert!(sent(&outbox).is_empty());
     }
 
-    fn spec(s: &str) -> Result<MonitorSpec, String> {
-        let (w, h) = s.split_once('x').ok_or("no x")?;
-        Ok(MonitorSpec {
-            width: w.parse().map_err(|_| "width")?,
-            height: h.parse().map_err(|_| "height")?,
-            scale: 1.0,
-        })
-    }
-
     /// Every monitor is in the rows once, in the first place listed: an order made
     /// from them never repeats one (or grows past what a message holds).
     #[test]
@@ -1790,44 +1561,5 @@ mod tests {
         let many = vec![vec![at(0, 0); 16]];
         let kept = rows_in_step(&many, &[0, 1], monitor, |_| false);
         assert_eq!(kept[0].iter().map(|e| e.id).collect::<Vec<_>>(), vec![0, 1]);
-    }
-
-    /// Where the headset showed each monitor, across and up and down, survives a
-    /// restart of the PC app: the desktop is then laid out as before at once.
-    #[test]
-    fn saved_set_keeps_where_monitors_were_seen() {
-        let saved = SavedMonitors {
-            specs: vec![spec("2560x1440").unwrap(), spec("1440x2560").unwrap()],
-            primary: Some(1),
-            rows: vec![vec![(Some(-1300), Some(200))], vec![(None, Some(-40))]],
-            mic: false,
-            bitrate: Some(40),
-            codec: Some(Codec::H264),
-            ..SavedMonitors::default()
-        };
-        let text = saved.to_text();
-        let back = SavedMonitors::parse(&text, spec);
-        assert_eq!(back.specs.len(), 2);
-        assert_eq!(back.primary, Some(1));
-        assert_eq!(back.rows, saved.rows);
-        assert!(!back.mic && back.audio && back.mirror);
-        assert_eq!(back.bitrate, Some(40));
-        assert_eq!(back.codec, Some(Codec::H264));
-        assert_eq!(back.to_text(), text);
-    }
-
-    /// Files from before vertical positions were kept still load.
-    #[test]
-    fn old_saved_sets_load() {
-        let old = "row\n2560x1440 at -1300 *\n1920x1080\nmirror off\nbitrate 30\n";
-        let saved = SavedMonitors::parse(old, spec);
-        assert_eq!(saved.specs.len(), 2);
-        assert_eq!(saved.primary, Some(0));
-        assert_eq!(saved.rows, vec![vec![(Some(-1300), None), (None, None)]]);
-        assert!(!saved.mirror);
-        // Before rows were saved at all: one row.
-        let older = SavedMonitors::parse("2560x1440\n1920x1080\n", spec);
-        assert!(older.rows.is_empty());
-        assert_eq!(SavedMonitors::parse(&older.to_text(), spec).specs.len(), 2);
     }
 }

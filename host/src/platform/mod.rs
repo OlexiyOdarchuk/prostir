@@ -25,7 +25,7 @@
 //!   `restore_after_crash`.
 //! - `sound_source::Watcher` (`start`, `output`): the output whose window plays sound.
 //! - `notifications::watch`: the PC's desktop notifications, as text.
-//! - `tray`: `spawn`, `Handle`, `set_status`, `set_battery`, `set_encoding`,
+//! - `tray`: `spawn`, `Handle`, `set_status`, `set_battery`, `set_settings`,
 //!   `set_pairing`; the tray menu also turns autostart on and off.
 //! - `dialogs`: `ask_code` (the pairing code typed on the PC), `notify` and
 //!   `notify_and_wait` (desktop notifications).
@@ -100,6 +100,26 @@ impl MonitorSpec {
             );
         }
         Ok(())
+    }
+}
+
+/// `2560x1440` or `3840x2160@1.5`, as on the command line and in saved files.
+impl std::str::FromStr for MonitorSpec {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        let (size, scale) = match s.split_once('@') {
+            Some((a, b)) => (a, b.parse::<f64>().map_err(|e| format!("bad scale: {e}"))?),
+            None => (s, 1.0),
+        };
+        let (w, h) = size.split_once(['x', 'X']).ok_or("expected WIDTHxHEIGHT")?;
+        let spec = MonitorSpec {
+            width: w.parse().map_err(|e| format!("bad width: {e}"))?,
+            height: h.parse().map_err(|e| format!("bad height: {e}"))?,
+            scale,
+        };
+        spec.validate().map_err(|e| e.to_string())?;
+        Ok(spec)
     }
 }
 

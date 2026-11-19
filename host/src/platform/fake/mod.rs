@@ -302,7 +302,7 @@ pub mod tray {
 
     pub struct Handle;
 
-    pub fn spawn(commands: Sender<TrayCommand>, _bitrate: u32, _sharp: bool) -> Option<Handle> {
+    pub fn spawn(commands: Sender<TrayCommand>) -> Option<Handle> {
         let path = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR")?).join("fake-tray");
         let watched = std::thread::Builder::new()
             .name("fake-tray".into())
@@ -337,7 +337,7 @@ pub mod tray {
 
     pub fn set_battery(_handle: Option<&Handle>, _battery: Option<(u8, bool)>) {}
 
-    pub fn set_encoding(_handle: Option<&Handle>, _bitrate: u32, _sharp: bool) {}
+    pub fn set_settings(_handle: Option<&Handle>, _bitrate: u32, _sharp: bool, _counting: bool) {}
 
     pub fn set_pairing(_handle: Option<&Handle>, _code: Option<String>) {}
 }

@@ -24,8 +24,10 @@ pub struct Tray {
     status: Status,
     /// Code to type in the headset, while pairing.
     pairing_code: Option<String>,
+    /// The settings shown (the main loop says when they change).
     bitrate: u32,
     sharp: bool,
+    counting: bool,
     /// The headset's battery: percent, charging.
     battery: Option<(u8, bool)>,
     commands: Sender<Command>,
@@ -34,7 +36,7 @@ pub struct Tray {
 pub type Handle = ksni::blocking::Handle<Tray>;
 
 /// Shows the tray icon; `None` when the desktop has no tray.
-pub fn spawn(commands: Sender<Command>, bitrate: u32, sharp: bool) -> Option<Handle> {
+pub fn spawn(commands: Sender<Command>) -> Option<Handle> {
     // Rewritten on each start, so it names this install's program even after an
     // upgrade moved it (a Nix store path, say).
     if autostart::enabled() {
@@ -43,8 +45,9 @@ pub fn spawn(commands: Sender<Command>, bitrate: u32, sharp: bool) -> Option<Han
     let tray = Tray {
         status: Status::default(),
         pairing_code: None,
-        bitrate,
-        sharp,
+        bitrate: 0,
+        sharp: false,
+        counting: false,
         battery: None,
         commands,
     };
@@ -60,8 +63,6 @@ pub fn set_status(handle: Option<&Handle>, status: Status) {
     }
 }
 
-/// Shows (or hides) the pairing code in the tray.
-/// Quality and the text preset changed elsewhere (the headset menu).
 /// The headset's battery as it last reported it (`None`: no headset).
 pub fn set_battery(handle: Option<&Handle>, battery: Option<(u8, bool)>) {
     if let Some(h) = handle {
@@ -69,15 +70,18 @@ pub fn set_battery(handle: Option<&Handle>, battery: Option<(u8, bool)>) {
     }
 }
 
-pub fn set_encoding(handle: Option<&Handle>, bitrate: u32, sharp: bool) {
+/// The settings to show: quality, the text preset, the counter.
+pub fn set_settings(handle: Option<&Handle>, bitrate: u32, sharp: bool, counting: bool) {
     if let Some(h) = handle {
         h.update(|t| {
             t.bitrate = bitrate;
             t.sharp = sharp;
+            t.counting = counting;
         });
     }
 }
 
+/// Shows (or hides) the pairing code in the tray.
 pub fn set_pairing(handle: Option<&Handle>, code: Option<String>) {
     if let Some(h) = handle {
         h.update(|t| t.pairing_code = code);
@@ -248,9 +252,7 @@ impl ksni::Tray for Tray {
                     RadioGroup {
                         selected,
                         select: Box::new(|tray: &mut Self, i| {
-                            let mbps = QUALITIES[i].0;
-                            tray.bitrate = mbps;
-                            let _ = tray.commands.send(Command::SetBitrate(mbps));
+                            let _ = tray.commands.send(Command::SetBitrate(QUALITIES[i].0));
                         }),
                         options: QUALITIES
                             .iter()
@@ -275,8 +277,7 @@ impl ksni::Tray for Tray {
                 ),
                 checked: self.sharp,
                 activate: Box::new(|tray: &mut Self| {
-                    tray.sharp = !tray.sharp;
-                    let _ = tray.commands.send(Command::SetSharp(tray.sharp));
+                    let _ = tray.commands.send(Command::SetSharp(!tray.sharp));
                 }),
                 ..Default::default()
             }
@@ -287,15 +288,12 @@ impl ksni::Tray for Tray {
                         "Рахувати цей ПК серед користувачів",
                         "Count this PC among users",
                     ),
-                    crate::usage::enabled(),
+                    self.counting,
                 ),
-                checked: crate::usage::enabled(),
+                checked: self.counting,
                 visible: crate::usage::available(),
                 activate: Box::new(|tray: &mut Self| {
-                    let on = !crate::usage::enabled();
-                    let _ = tray.commands.send(Command::SetCounting(on));
-                    // The tray re-reads the choice; write it now so the check mark follows.
-                    crate::usage::set_enabled(on);
+                    let _ = tray.commands.send(Command::SetCounting(!tray.counting));
                 }),
                 ..Default::default()
             }

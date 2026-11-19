@@ -5,7 +5,8 @@
 //! that used Prostir on it. The first time ever it also sends `/install`. Nothing else
 //! goes along: no id, no host name, no settings. GoatCounter keeps no IP addresses.
 //!
-//! On by default, off with the tray item or `PROSTIR_NO_COUNT=1`. The first start says
+//! On by default, off with the tray item (`count` in the settings) or
+//! `PROSTIR_NO_COUNT=1`. The first start says
 //! so in a notification, and nothing is sent before the next day, so there is time to
 //! turn it off before anything leaves the PC. Only official builds
 //! count: the key is set at build time (`PROSTIR_COUNT_TOKEN`), so builds from source
@@ -16,8 +17,6 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use log::{info, warn};
-
 use crate::i18n::t;
 use crate::pairing::config_dir;
 
@@ -26,10 +25,6 @@ const SITE: &str = match option_env!("PROSTIR_COUNT_SITE") {
     Some(s) => s,
     None => "ishawyha",
 };
-
-fn switch_file() -> Option<PathBuf> {
-    Some(config_dir().join("count"))
-}
 
 fn state_file() -> Option<PathBuf> {
     Some(config_dir().join("counted"))
@@ -41,9 +36,9 @@ fn notice_file() -> Option<PathBuf> {
 }
 
 /// On the first start: says that Prostir counts its users and how to turn it off.
-/// Counting starts the day after this.
-pub fn announce_once() {
-    if !available() || !enabled() {
+/// Counting starts the day after this. `count`: the person's choice.
+pub fn announce_once(count: bool) {
+    if !available() || !enabled(count) {
         return;
     }
     let Some(notice) = notice_file() else { return };
@@ -63,24 +58,10 @@ pub fn available() -> bool {
     TOKEN.is_some_and(|t| !t.is_empty())
 }
 
-/// The user's choice (on unless turned off).
-pub fn enabled() -> bool {
-    if std::env::var_os("PROSTIR_NO_COUNT").is_some_and(|v| v != "0") {
-        return false;
-    }
-    switch_file()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .is_none_or(|s| s.trim() != "off")
-}
-
-pub fn set_enabled(on: bool) {
-    if let Some(p) = switch_file() {
-        let _ = std::fs::create_dir_all(p.parent().unwrap_or(&p));
-        if let Err(e) = std::fs::write(&p, if on { "on\n" } else { "off\n" }) {
-            warn!("cannot save the counting choice: {e}");
-        }
-    }
-    info!("counting this PC among users: {on}");
+/// Whether to count: the person's choice (`count`, in the settings), unless
+/// `PROSTIR_NO_COUNT` says no.
+pub fn enabled(count: bool) -> bool {
+    count && std::env::var_os("PROSTIR_NO_COUNT").is_none_or(|v| v == "0")
 }
 
 /// Today's date in UTC as `YYYY-MM-DD` (days since the epoch to a civil date).
@@ -103,8 +84,8 @@ fn today() -> String {
 }
 
 /// A headset connected: count this PC for today, at most once a day.
-pub fn headset_connected() {
-    if !available() || !enabled() {
+pub fn headset_connected(count: bool) {
+    if !available() || !enabled(count) {
         return;
     }
     let Some(state) = state_file() else { return };
@@ -113,7 +94,7 @@ pub fn headset_connected() {
     let told = notice_file().and_then(|p| std::fs::read_to_string(p).ok());
     match told.as_deref().map(str::trim) {
         None => {
-            announce_once();
+            announce_once(count);
             return;
         }
         Some(day) if day >= date.as_str() => return,
