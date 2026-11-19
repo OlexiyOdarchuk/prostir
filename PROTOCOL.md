@@ -654,9 +654,14 @@ A request that fails is answered with `Error`.
 
 | Ids | What | Notes |
 |---|---|---|
-| `0`, `1`, … | Virtual monitors | The host gives a new monitor the lowest free id. With at most 6 monitors these are `0` to `5`. |
+| `0`, `1`, … | Virtual monitors | The host gives a new monitor the lowest free id. With at most 6 monitors these are `0` to `5`. A monitor keeps its id between sessions and runs of the host, so the headset may keep where it showed a monitor by its id. |
 | `10`, `11`, `12` | Window panels (`WINDOW_IDS` = `10..13`) | A small output made for one window, shown as a floating panel. At most three, because the headset has only so many video decoders. |
 | `100` | Mirror of the physical display (`MIRROR_ID`) | The laptop panel, streamed as it is. |
+
+A monitor whose stream cannot start (its output or encoder fails) stays in `Order`
+without a `StreamStart`, and the host says why in an `Error`; it is tried again at the
+next session. A client keeps its place. A monitor removed leaves `Order`; its
+`StreamEnd` and the `Order` without it may come in either order.
 
 ### StreamStart
 
@@ -796,38 +801,50 @@ connection ends.
 
 ### Units
 
-`center` and `middle` are in pixels of one scale shared by all monitors. Only
-differences between values matter; the origin is arbitrary. The current client
-computes them from the angles the monitors take up as seen from where the layout faces:
-the horizontal angle (yaw) and the elevation, times pixels per radian, which is the
-average over the monitors of their pixel width divided by their angular width. Values
-are rounded to multiples of 8, so a hand's tremor does not rearrange the desktop. This
-method is implementation-defined; what the host relies on is that the values are
+`center` and `middle` are in pixels of the monitors' own streams. Only differences
+between values matter; the origin is arbitrary. The current client works them out from
+where the monitors are seen from where the layout faces, and rounds them to multiples
+of 8 so a hand's tremor does not rearrange the desktop:
+
+- `middle`: the elevation of the monitor's middle times pixels per radian (the average
+  over the monitors of their pixel width over their angular width).
+- `center`: every row unrolled side by side in its monitors' own pixels (each
+  monitor's `center` is the previous one's plus half of both widths), and laid over the
+  row next to it towards the row with the primary monitor where it is seen over it:
+  the monitor seen most over that row has its middle over the pixel seen under its
+  middle. (Seen on a circle a wide monitor takes fewer degrees per pixel than a narrow
+  one, so one scale for all would put a row above off its place.)
+
+This method is implementation-defined; what the host relies on is that the values are
 comparable between monitors and to the monitors' own pixel sizes.
 
 ### What the host does with it
 
-(Implementation-defined; `host/src/displays.rs` and `host/src/layout.rs`.)
+(Implementation-defined; `host/src/displays.rs` and `layout/src/desk.rs`, a crate
+the client uses too to draw the same desktop on its map.)
 
 1. Clamps every known `center` and `middle` to ±100000.
 2. Keeps the rows, drops ids that are neither a current monitor nor the active mirror,
    and appends monitors missing from the rows to the end of the last row, with no
-   positions.
-3. Sets the monitor order to the ids of all rows, top to bottom and left to right,
-   without the mirror, and sends it back as `Order`.
-4. Arranges the desktop, in logical pixels (pixel size divided by the output's scale):
-   - If every entry has a known `center` and `middle`, the desktop follows what is seen:
-     starting from the primary monitor, each monitor joins the nearest one already
-     placed, on the side where they meet in the headset, edge to edge, offset along that
-     edge as seen (lined up when within 24 px), sharing at least 200 px of the edge (or
-     the whole edge if shorter) so the mouse can cross, and overlapping nothing.
-   - Otherwise it arranges by rows: the row with the primary monitor side by side
-     (vertically by `middle` if all are known, else centred), and every monitor of
-     another row above or below the one it overlaps most, keeping the horizontal
-     offset seen in the headset.
-   - The mirror goes under the primary monitor unless the headset placed it; window
-     panels go in a column to the right of everything.
-5. Saves the layout for the next session.
+   positions. The rows are the one source of the order: it sends the monitor ids of
+   all rows, top to bottom and left to right, without the mirror, back as `Order`, and
+   keeps the rows for the next run.
+3. Lays the desktop out, in logical pixels (pixel size divided by the output's scale),
+   once however many changes came in at once, and only with outputs the desktop lists
+   already:
+   - Every row lies on one line, side by side, so neighbours in it share the whole edge
+     of the shorter one. The row with the primary monitor goes left to right by
+     `center`, its tops, middles or bottoms lined up with the primary monitor,
+     whichever is closest to the `middle`s (middles when any is unknown).
+   - Every other row, outwards from that one, is one block side by side, bottoms
+     lined up above it and tops below. The monitor that overlaps the next row inwards
+     most by `center` keeps its offset from the one it overlaps; the block overlaps that
+     row by at least 200 px and touches the nearest monitors under (or over) it. Where
+     it would touch a sliver of an edge, it moves by less than 200 px to where the
+     mouse crosses every edge it shares, or at least one.
+   - The mirror goes under the primary monitor unless the headset placed it, other
+     real displays next to it; window panels go in a column right of everything.
+   Nothing overlaps.
 
 `SetOrder` and `SetMonitors` replace the layout with one row in the given order, with
 no positions.

@@ -293,8 +293,9 @@ pub mod notifications {
 }
 
 /// A tray without an icon: a test "clicks" its items by writing their names, one a
-/// line, to `$XDG_RUNTIME_DIR/fake-tray` (`forget`, `recenter`, `quit`), which is read
-/// and removed a few times a second.
+/// line, to `$XDG_RUNTIME_DIR/fake-tray` (`forget`, `recenter`, `quit`, `sharp on`,
+/// `sharp off`, `quality 15`, `quality 50`), which is read and removed a few times a
+/// second.
 pub mod tray {
     use std::path::PathBuf;
     use std::sync::mpsc::Sender;
@@ -320,6 +321,10 @@ pub mod tray {
                             "forget" => TrayCommand::ForgetHeadsets,
                             "recenter" => TrayCommand::Recenter,
                             "quit" => TrayCommand::Quit,
+                            "sharp on" => TrayCommand::SetSharp(true),
+                            "sharp off" => TrayCommand::SetSharp(false),
+                            "quality 15" => TrayCommand::SetBitrate(15),
+                            "quality 50" => TrayCommand::SetBitrate(50),
                             other => {
                                 log::warn!("fake tray: no item {other:?}");
                                 continue;

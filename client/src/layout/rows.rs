@@ -893,4 +893,91 @@ mod tests {
         assert_eq!(row_ids(&fresh, &m).len(), 2);
         desktop_matches_view(&fresh, &m, Some(2)).unwrap();
     }
+
+    /// Two rows made by hand live through everything that happens to them: a monitor
+    /// added and removed, the headset app restarted (layout.txt), "Line up", a profile
+    /// and back. Every time the same rows, and the same desktop for the PC.
+    #[test]
+    fn two_rows_survive_everything() {
+        let m = [
+            (0, 2560, 1440),
+            (1, 2560, 1440),
+            (2, 1920, 1080),
+            (3, 1920, 1080),
+            (4, 1440, 2560),
+        ];
+        let four = &m[..4];
+        // Two side by side, two more put over them.
+        let mut p = arrange(Preset::Arc, &m[..2], Some(0), None);
+        let up = Vec3::new(0.0, 1.0, -1.0).normalize();
+        let new = place_new(&p, &m[..3], m[2], CENTER, Preset::Arc, up).unwrap();
+        p.insert(2, new);
+        // Looking right of that one.
+        let right = Quat::from_rotation_y(-0.7) * p[&2].position.normalize();
+        let new = place_new(&p, four, m[3], CENTER, Preset::Arc, right).unwrap();
+        p.insert(3, new);
+        let p = tidy(&p, four, CENTER, Some(0));
+        let rows = row_ids(&p, four);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        let desk = desktop_spots(&seen(&p, four, CENTER, Preset::Arc), Some(0));
+        let same = |q: &HashMap<u8, Placement>, what: &str| {
+            assert_eq!(row_ids(q, four), rows, "{what}: rows");
+            assert_eq!(
+                desktop_spots(&seen(q, four, CENTER, Preset::Arc), Some(0)),
+                desk,
+                "{what}: desktop"
+            );
+        };
+        // A monitor added: the others stay, and so do their rows.
+        let mut with = p.clone();
+        let new = place_new(&p, &m, m[4], CENTER, Preset::Arc, -Vec3::Z).unwrap();
+        with.insert(4, new);
+        for (id, place) in &p {
+            assert_eq!(with[id], *place, "{id} moved");
+        }
+        let five = seen(&with, &m, CENTER, Preset::Arc);
+        let kept: Vec<Vec<u8>> = rows_of(&five)
+            .iter()
+            .map(|r| {
+                r.iter()
+                    .map(|s| s.id)
+                    .filter(|id| *id != 4)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|r| !r.is_empty())
+            .collect();
+        assert_eq!(kept, rows, "a new monitor joins, nobody leaves a row");
+        // And removed again.
+        with.remove(&4);
+        same(&with, "removed");
+        // The headset app restarted.
+        let dir = std::env::temp_dir().join(format!("prostir-two-rows-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let desk_file = crate::layout::Desk::new(dir.join("layout.txt"));
+        desk_file.save(&p, &HashMap::new(), (CENTER, RADIUS), false);
+        same(&desk_file.load().placements, "restarted");
+        let _ = std::fs::remove_dir_all(&dir);
+        // Lined up.
+        same(&tidy(&p, four, CENTER, Some(0)), "lined up");
+        // Saved in a profile, another profile, and back: the places by their order.
+        let mut profile = crate::profiles::Profile::default_for(0);
+        profile.sizes = four.iter().map(|x| (x.1, x.2)).collect();
+        profile.places = four.iter().map(|x| p[&x.0]).collect();
+        let text = {
+            let path =
+                std::env::temp_dir().join(format!("prostir-two-rows-p-{}", std::process::id()));
+            let mut all = std::array::from_fn(crate::profiles::Profile::default_for);
+            all[0] = profile;
+            crate::profiles::save(&path, &all);
+            let back = crate::profiles::load(&path);
+            let _ = std::fs::remove_file(&path);
+            back
+        };
+        let back: HashMap<u8, Placement> = four
+            .iter()
+            .map(|x| x.0)
+            .zip(text[0].places.clone())
+            .collect();
+        same(&back, "profile and back");
+    }
 }

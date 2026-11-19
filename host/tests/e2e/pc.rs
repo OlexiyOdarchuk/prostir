@@ -257,9 +257,15 @@ impl Pc {
         starts
     }
 
-    /// Clicks `item` in the PC app's tray (`forget`, `recenter`, `quit`).
+    /// Clicks `item` in the PC app's tray (see the fake tray for the items).
     pub fn tray(&self, item: &str) {
         std::fs::write(self.run_dir.join("fake-tray"), format!("{item}\n")).unwrap();
+    }
+
+    /// Kills the PC app (`SIGKILL`), as a crash or a power cut would.
+    pub fn kill(mut self) {
+        self.signal(libc::SIGKILL);
+        let _ = self.child.wait();
     }
 
     /// Stops the PC app dead (`SIGSTOP`), as a PC going to sleep does.

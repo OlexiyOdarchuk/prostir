@@ -17,6 +17,44 @@
 - A frame that waits too long is still dropped, and a new keyframe now also drops the
   older frames of its monitor still waiting, so a slow moment costs less.
 
+### Monitors and the desktop
+
+- Monitors in the headset no longer overlap, however many there are. When a row would
+  reach behind your back (past 210 degrees), the circle grows a little; past 1.5 m the
+  monitors make a second row above the main one, then a third. Three 2560×1440
+  monitors stay as they were; six big ones (three ultrawide) make two rows at about
+  1.35 m.
+- Your arrangement stays yours. A layout is applied only when you pick it (and on the
+  very first start). A new monitor takes a free place next to the others, at the end
+  of a row or over or under one, nearest to where you look, and nothing else moves; a
+  removed one leaves the others where they are. Two rows stay two rows after a restart
+  of the PC or of the headset app, a reconnect, taking the headset off, Line up and a
+  profile switch.
+- Line up (the A button) straightens every row on its own: side by side on its circle,
+  the main monitor staying where it is. Rows never merge, and a row that almost touches
+  the next one touches it.
+- A profile keeps where its monitors stood, so switching to it and back brings your
+  rows back. Profiles saved before keep working and are laid out by their layout.
+- The PC desktop follows the rows: the monitors of a row side by side on one line, a
+  row above on top of it where you see it. The mouse crosses along whole edges, not at
+  corners, and the desktop no longer spreads out into a staircase. The map in the menu
+  shows the desktop the PC makes.
+- A monitor whose picture cannot start on the PC keeps its place and is tried again at
+  the next connection; the headset says why. Before, it was dropped from the saved set.
+
+### Settings
+
+- The PC keeps its settings in `~/.config/prostir/settings.txt` and the monitors with
+  their rows in `screens.txt`, plain text. The first start moves them over from
+  `monitors.txt`, which stays for an older version to read.
+- Options on the command line (`--monitor`, `--bitrate`, `--codec`, `--software`) hold
+  for that run only and no longer replace what was saved. What you change while it
+  runs is saved, also in the tray while no headset is connected.
+- Monitors keep their numbers between runs, so after a restart each one comes back
+  where you put it in the headset.
+- The codec you choose in the headset stays chosen when the graphics card has to use
+  another one.
+
 ### Connection
 
 - A dropped connection, a PC gone to sleep or a headset switched off is noticed within

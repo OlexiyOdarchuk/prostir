@@ -66,11 +66,11 @@ hit one.
 ## What it does
 
 You add and remove monitors from inside the headset: 1080p, 1440p, 4K, ultrawide or
-portrait, up to six. The desktop arranges its displays the way you see them: each
-monitor sits against its neighbour on the side where they meet in the headset, with
-the same offset along that edge. So the mouse leaves one screen where the next one
-begins, sideways or up and down, even with a portrait monitor in the middle and its
-neighbours higher or lower. In KDE the primary monitor gets the Plasma panel.
+portrait, up to six. The desktop arranges its displays the way you see them, row by
+row: the monitors of a row side by side on one line, a row above the main one on top
+of it where you see it, a row below under it. So the mouse leaves one screen where the
+next one begins, sideways or up and down, along whole edges rather than at corners.
+In KDE the primary monitor gets the Plasma panel.
 
 Text stays sharp because the video goes straight into the Quest compositor's own
 layers (`XR_KHR_android_surface_swapchain`) instead of a flat window inside an app.
@@ -83,21 +83,27 @@ showing it). That is not the whole delay from screen to eye: capturing and encod
 the screen add a few milliseconds before it.
 
 Three layouts get you started: around you, on a wall, or above your head for lying
-down, with flat or curved monitors. From there, grab any monitor and put it where you
-like. Let go of one almost against another, at about the same distance, and it sticks
-to it edge to edge; while you drag, the edge it will stick to lights up (Monitors →
-Stick together). The A button (Line up) takes the seams out of your own arrangement
-without rebuilding it: neighbours within a monitor's width are joined edge to edge,
-like on a hinge. One beside another curves around you, one above or below tilts
-towards you like a laptop lid, and monitors you put clearly apart stay where they are.
-With Monitors → Drag → All together, grabbing any monitor moves, turns, brings nearer
-and scales the whole arrangement as one piece.
+down, with flat or curved monitors. Around you, the monitors never overlap however many
+there are: when a row would reach behind your back (past 210 degrees), the circle grows
+a little, and past 1.5 m a second row starts above the main one, then a third. From
+there, grab any monitor and put it where you like: the layout is only applied when you
+pick it (or on the very first start). A new monitor takes a free place next to the
+others, at the end of a row or over or under one, nearest to where you look, and nothing
+else moves; a removed one leaves the others where they are. Let go of one almost
+against another, at about the same distance, and it sticks to it edge to edge; while
+you drag, the edge it will stick to lights up (Monitors → Stick together). The A button
+(Line up) straightens your own arrangement row by row without rebuilding it: the
+monitors of each row side by side on their circle, the main one staying where it is;
+rows never merge, and a row that almost touches the next one touches it. With
+Monitors → Drag → All together, grabbing any monitor moves, turns, brings nearer and
+scales the whole arrangement as one piece.
 
 The laptop's own screen is part of the arrangement too, so you can see it without
 taking the headset off. It starts under the main monitor without a seam; wherever you
 put it, the PC puts it there as well, and the mouse crosses where you see them meet.
-Line up and Stick together treat it like any other monitor (on the Wall layout, Line
-up puts it back under the main monitor). It disappears when you close the lid.
+Line up and Stick together treat it like any other monitor in a row (alone in a row of
+its own it stays as it is; on the Wall layout, Line up puts it back under the main
+monitor). It disappears when you close the lid.
 
 Profiles switch the whole setup at once. "Work" is the setup you build yourself: the
 first time you pick a profile, the monitors you have then are saved as "Work", so you can
@@ -419,8 +425,10 @@ Next to them: add a monitor (1920×1080, 2560×1440, 3840×2160, 3440×1440 or
 together, drag (one monitor or all together) and the cinema screen. Cinema itself is
 a tile in Quick and a sector of the palm menu.
 
-Line up keeps your own arrangement and only closes the seams. On the Wall layout it
+Line up keeps your own arrangement and straightens it row by row. On the Wall layout it
 keeps everything in one plane; in Lying down and in cinema it rebuilds the preset.
+A profile keeps where its monitors stood, so switching to it and back brings your rows
+back.
 Stick together works on the Wall layout too, in the wall's plane, but not in Lying
 down or cinema, and not while dragging all together.
 
@@ -461,9 +469,15 @@ prostir [--monitor WxH[@scale]]... [--codec h265|h264] [--bitrate MBPS] [--softw
         [--keep-primary] [--linger SECONDS] [--port PORT] [--no-discovery] [--no-adb]
 ```
 
-Without `--monitor`, Prostir brings back the monitors from the last session. They are
-stored in `~/.config/prostir/monitors.txt`, together with the choices from the headset
-menu's PC settings. `--codec` and `--software` on the command line win over those.
+Without `--monitor`, Prostir brings back the monitors from the last session, each with
+its number, so the headset finds it where it was. They are stored in
+`~/.config/prostir/screens.txt` with the rows the headset shows them in, and the
+settings (quality, clearer text, codec, sound, microphone, laptop screen, the counter)
+in `~/.config/prostir/settings.txt`; both are plain text. The first start of 0.2.0
+moves them over from `monitors.txt` of 0.1, which stays as it was. Options on the
+command line (`--monitor`, `--bitrate`, `--codec`, `--software`) hold for that run only
+and are never saved; what you change while it runs is, and a set of monitors you
+change in the headset replaces the one from `--monitor`.
 
 ## Update and uninstall
 
