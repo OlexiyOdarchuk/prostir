@@ -1,4 +1,5 @@
 use super::*;
+use crate::link::LinkInfo;
 use crate::tests::{Seeded, client_samples, host_samples, mutate};
 use crate::{ClientMsg, HostMsg};
 
@@ -20,7 +21,7 @@ impl RecordSender for Capture {
 
     fn set_pace(&mut self, _bytes_per_sec: u64) {}
 
-    fn delivery_rate(&mut self) -> Option<u64> {
+    fn link_info(&mut self) -> Option<LinkInfo> {
         None
     }
 }

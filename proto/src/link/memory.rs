@@ -7,7 +7,7 @@ use std::io;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use super::{Closer, Link, PeerInfo, RecordReceiver, RecordSender, Via};
+use super::{Closer, Link, LinkInfo, PeerInfo, RecordReceiver, RecordSender, Via};
 
 /// A send waits at most this long for room, like a TCP write timeout.
 const WRITE_LIMIT: Duration = Duration::from_secs(5);
@@ -114,7 +114,7 @@ impl RecordSender for Sender {
 
     fn set_pace(&mut self, _bytes_per_sec: u64) {}
 
-    fn delivery_rate(&mut self) -> Option<u64> {
+    fn link_info(&mut self) -> Option<LinkInfo> {
         None
     }
 }

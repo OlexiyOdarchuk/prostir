@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use snow::StatelessTransportState;
 
-use super::{Closer, Link, MAX_RECORD, PeerInfo, RecordReceiver, RecordSender, Via};
+use super::{Closer, Link, LinkInfo, MAX_RECORD, PeerInfo, RecordReceiver, RecordSender, Via};
 use crate::secure::Identity;
 
 /// AES-GCM rather than ChaChaPoly: both CPUs have hardware AES (AES-NI, ARMv8 crypto),
@@ -44,9 +44,9 @@ pub trait SocketOptions: Send + Sync {
     /// Sends at most `bytes_per_sec` (0: no limit), spreading packets out evenly.
     fn set_pace(&self, stream: &TcpStream, bytes_per_sec: u64);
 
-    /// The socket's latest delivery rate in bytes a second (`TCP_INFO`), if the
-    /// system says.
-    fn delivery_rate(&self, _stream: &TcpStream) -> Option<u64> {
+    /// The socket's latest delivery rate and round trip (`TCP_INFO`), if the system
+    /// says.
+    fn link_info(&self, _stream: &TcpStream) -> Option<LinkInfo> {
         None
     }
 }
@@ -225,8 +225,8 @@ impl RecordSender for TcpSender {
         }
     }
 
-    fn delivery_rate(&mut self) -> Option<u64> {
-        self.options.delivery_rate(&self.stream)
+    fn link_info(&mut self) -> Option<LinkInfo> {
+        self.options.link_info(&self.stream)
     }
 }
 

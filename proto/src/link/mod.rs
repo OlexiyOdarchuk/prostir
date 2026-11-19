@@ -36,9 +36,22 @@ pub trait RecordSender: Send {
     /// burst does not fill the queue of a Wi-Fi access point at once.
     fn set_pace(&mut self, bytes_per_sec: u64);
 
-    /// How fast the network delivered what this side sent, in bytes a second, as last
-    /// measured (TCP's delivery rate); `None` where the transport cannot tell.
-    fn delivery_rate(&mut self) -> Option<u64>;
+    /// What the transport last measured about the network (TCP's delivery rate and
+    /// round trip); `None` where it cannot tell.
+    fn link_info(&mut self) -> Option<LinkInfo>;
+}
+
+/// What TCP measured about the connection, as last seen.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LinkInfo {
+    /// How fast the network delivered what this side sent, bytes a second (its latest
+    /// sample).
+    pub delivery_rate: u64,
+    /// The round trip, smoothed, and how much it varies.
+    pub rtt: Duration,
+    pub rtt_var: Duration,
+    /// The shortest round trip seen on this connection.
+    pub min_rtt: Duration,
 }
 
 /// The receiving half of a link.

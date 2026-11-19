@@ -287,7 +287,7 @@ fn serve_client(
                         let held_back = waited * 2 >= now - last_look;
                         let bytes = std::mem::take(&mut sent);
                         (waited, last_look) = (Duration::ZERO, now);
-                        if let Some(rate) = sender.delivery_rate()
+                        if let Some(rate) = sender.link_info().map(|i| i.delivery_rate)
                             && let Some(pace) = pacer.sample(rate, held_back, bytes)
                         {
                             sender.set_pace(pace);

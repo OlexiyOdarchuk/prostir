@@ -562,6 +562,7 @@ impl State {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use prostir_proto::link::LinkInfo;
 
     /// Takes the records the writer sends, and reads them back as the headset would.
     #[derive(Default)]
@@ -581,7 +582,7 @@ pub(crate) mod tests {
 
         fn set_pace(&mut self, _bytes_per_sec: u64) {}
 
-        fn delivery_rate(&mut self) -> Option<u64> {
+        fn link_info(&mut self) -> Option<LinkInfo> {
             None
         }
     }

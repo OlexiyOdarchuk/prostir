@@ -2,8 +2,12 @@
 //! system and not on the desktop (the fake desktop of the tests uses them too).
 
 use std::net::TcpStream;
+#[cfg(target_os = "linux")]
+use std::time::Duration;
 
 use log::warn;
+#[cfg(target_os = "linux")]
+use prostir_proto::link::LinkInfo;
 use prostir_proto::link::tcp::SocketOptions;
 
 /// The options of a connection to the headset.
@@ -65,7 +69,7 @@ impl SocketOptions for TcpOptions {
     }
 
     /// From `TCP_INFO`.
-    fn delivery_rate(&self, stream: &TcpStream) -> Option<u64> {
+    fn link_info(&self, stream: &TcpStream) -> Option<LinkInfo> {
         use std::os::fd::AsRawFd;
         let mut info = TcpInfo::default();
         let mut len = std::mem::size_of::<TcpInfo>() as libc::socklen_t;
@@ -80,8 +84,14 @@ impl SocketOptions for TcpOptions {
                 &mut len,
             ) == 0
         };
-        // An older kernel fills less: no delivery rate then.
-        (ok && len as usize >= std::mem::size_of::<TcpInfo>()).then_some(info.delivery_rate)
+        // An older kernel fills less: nothing to tell then.
+        let us = |v: u32| Duration::from_micros(u64::from(v));
+        (ok && len as usize >= std::mem::size_of::<TcpInfo>()).then(|| LinkInfo {
+            delivery_rate: info.delivery_rate,
+            rtt: us(info.rtt),
+            rtt_var: us(info.rtt_var),
+            min_rtt: us(info.min_rtt),
+        })
     }
 }
 
@@ -99,15 +109,28 @@ struct TcpInfo {
     wscale: u8,
     /// `tcpi_delivery_rate_app_limited` and `tcpi_fastopen_client_fail`.
     flags: u8,
-    /// From `tcpi_rto` to `tcpi_total_retrans`.
-    counters: [u32; 24],
+    /// From `tcpi_rto` to `tcpi_rcv_ssthresh`.
+    counters: [u32; 15],
+    /// The smoothed round trip and its variation, microseconds.
+    rtt: u32,
+    rtt_var: u32,
+    /// From `tcpi_snd_ssthresh` to `tcpi_total_retrans`.
+    more_counters: [u32; 7],
     /// `tcpi_pacing_rate`, `tcpi_max_pacing_rate`, `tcpi_bytes_acked`,
     /// `tcpi_bytes_received`.
     totals: [u64; 4],
-    /// From `tcpi_segs_out` to `tcpi_data_segs_out`.
-    segments: [u32; 6],
+    /// `tcpi_segs_out`, `tcpi_segs_in`, `tcpi_notsent_bytes`.
+    segments: [u32; 3],
+    /// The shortest round trip seen, microseconds.
+    min_rtt: u32,
+    /// `tcpi_data_segs_in`, `tcpi_data_segs_out`.
+    data_segments: [u32; 2],
     delivery_rate: u64,
 }
 
 #[cfg(target_os = "linux")]
-const _: () = assert!(std::mem::offset_of!(TcpInfo, delivery_rate) == 160);
+const _: () = {
+    assert!(std::mem::offset_of!(TcpInfo, rtt) == 68);
+    assert!(std::mem::offset_of!(TcpInfo, min_rtt) == 148);
+    assert!(std::mem::offset_of!(TcpInfo, delivery_rate) == 160);
+};
