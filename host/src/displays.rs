@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use log::{debug, error, info, warn};
 use prostir_proto::{Codec, HostMsg, LayoutRow, MIRROR_ID, NEXT, PcSettings, WINDOW_IDS};
-use std::sync::atomic::AtomicU8;
 
 use crate::encoder::{Encoder, EncoderConfig, EncoderEvent};
 use crate::layout::{Seat, arrange, arrange_free, panel_size};
@@ -50,7 +49,13 @@ pub const MAX_MONITORS: usize = 6;
 /// Per-stream delivery state for the currently connected client.
 struct StreamSlot {
     size: Option<(u32, u32)>,
+    /// What the encoder makes, announced with the stream.
+    codec: Codec,
+    /// The current size and codec were announced to the headset.
     announced: bool,
+    /// The headset has this stream (announced on this connection, perhaps by an
+    /// encoder since replaced), so it is told when the stream ends.
+    known: bool,
     need_keyframe: bool,
     /// When a keyframe was last asked for: asking again on every frame while waiting
     /// would make the encoder emit one huge keyframe after another.
@@ -72,10 +77,12 @@ impl StreamSlot {
         due
     }
 
-    fn new() -> Self {
+    fn new(codec: Codec, known: bool) -> Self {
         Self {
             size: None,
+            codec,
             announced: false,
+            known,
             need_keyframe: true,
             keyframe_asked: None,
             sent: BTreeMap::new(),
@@ -122,8 +129,6 @@ fn stream_name(id: u8) -> String {
 
 /// Delivers encoder output to whichever client is connected.
 pub struct Router {
-    /// The codec announced with new streams (it can change: see `set_pc_settings`).
-    codec: AtomicU8,
     /// A screenshot waiting for the next keyframe of stream `id` (see `screenshot`).
     snapshot: Mutex<Option<(u8, std::sync::mpsc::SyncSender<Vec<u8>>)>>,
     inner: Mutex<RouterInner>,
@@ -137,9 +142,8 @@ struct RouterInner {
 }
 
 impl Router {
-    fn new(codec: Codec) -> Self {
+    fn new() -> Self {
         Self {
-            codec: AtomicU8::new(codec as u8),
             inner: Mutex::new(RouterInner {
                 tx: None,
                 streams: BTreeMap::new(),
@@ -155,6 +159,7 @@ impl Router {
         inner.tx = Some(tx);
         for s in inner.streams.values_mut() {
             s.announced = false;
+            s.known = false;
             s.need_keyframe = true;
         }
     }
@@ -173,18 +178,17 @@ impl Router {
         }
     }
 
-    fn add_stream(&self, id: u8) {
-        self.inner
-            .lock()
-            .unwrap()
-            .streams
-            .insert(id, StreamSlot::new());
+    /// Stream `id` starts, or starts over with a new encoder making `codec`.
+    fn add_stream(&self, id: u8, codec: Codec) {
+        let mut inner = self.inner.lock().unwrap();
+        let known = inner.streams.get(&id).is_some_and(|s| s.known);
+        inner.streams.insert(id, StreamSlot::new(codec, known));
     }
 
     fn remove_stream(&self, id: u8) {
         let mut inner = self.inner.lock().unwrap();
-        let announced = inner.streams.remove(&id).is_some_and(|s| s.announced);
-        if announced
+        let known = inner.streams.remove(&id).is_some_and(|s| s.known);
+        if known
             && let Some(tx) = &inner.tx
             && !tx.control(HostMsg::StreamEnd { id })
         {
@@ -271,11 +275,7 @@ impl Router {
                         id,
                         width,
                         height,
-                        codec: if self.codec.load(Ordering::Relaxed) == Codec::H264 as u8 {
-                            Codec::H264
-                        } else {
-                            Codec::H265
-                        },
+                        codec: slot.codec,
                         name: stream_name(id),
                     };
                     if !sender.control(start) {
@@ -283,6 +283,7 @@ impl Router {
                         return false;
                     }
                     slot.announced = true;
+                    slot.known = true;
                 }
                 if slot.need_keyframe && !keyframe {
                     return slot.ask_keyframe();
@@ -515,7 +516,7 @@ impl Displays {
             mirror_retry: Instant::now(),
             primary_checked: Instant::now(),
             desktop,
-            router: Arc::new(Router::new(cfg.codec)),
+            router: Arc::new(Router::new()),
             cfg,
             primary: None,
             manage_primary,
@@ -581,18 +582,17 @@ impl Displays {
     /// Starts stream `id`: its slot in the router and an encoder fed by `output`. When
     /// that fails, nothing of the stream stays registered.
     fn start_stream(&self, id: u8, output: &mut Output) -> Result<Encoder> {
-        self.router.add_stream(id);
-        self.start_encoder(id, output)
+        self.start_encoder(id, output, &self.cfg)
             .inspect_err(|_| self.router.remove_stream(id))
     }
 
-    /// An encoder for stream `id`, fed by `output`.
-    fn start_encoder(&self, id: u8, output: &mut Output) -> Result<Encoder> {
+    /// A new encoder with `cfg` for stream `id`, fed by `output`. The stream's slot
+    /// starts over with it, and stays when this fails.
+    fn start_encoder(&self, id: u8, output: &mut Output, cfg: &EncoderConfig) -> Result<Encoder> {
+        self.router.add_stream(id, cfg.codec);
         let router = self.router.clone();
-        let encoder = Encoder::start(&output.input(), &self.cfg, move |ev| {
-            router.on_event(id, ev)
-        })?;
-        output.attach(&encoder, self.cfg.backend.takes_dmabuf())?;
+        let encoder = Encoder::start(&output.input(), cfg, move |ev| router.on_event(id, ev))?;
+        output.attach(&encoder, cfg.backend.takes_dmabuf())?;
         Ok(encoder)
     }
 
@@ -754,48 +754,92 @@ impl Displays {
         if wanted.codec != current.codec || wanted.software != current.software {
             let (backend, codec) = crate::encoder::pick(wanted.codec, wanted.software)?;
             info!("encoding with {backend:?} {codec:?} (from the headset menu)");
-            self.cfg.backend = backend;
-            self.cfg.codec = codec;
-            self.router.codec.store(codec as u8, Ordering::Relaxed);
-            self.restart_encoders()?;
+            if let Err(e) = self.switch_encoding(backend, codec) {
+                // The headset shows the settings that are still in use.
+                self.announce_pc_settings();
+                return Err(e);
+            }
         }
         self.save();
         self.announce_pc_settings();
         Ok(())
     }
 
-    /// New encoders for every stream with the current settings. Each old one stops
-    /// before its replacement starts, so the headset never gets frames of two codecs
-    /// for one stream.
-    fn restart_encoders(&mut self) -> Result<()> {
+    /// Encodes with `backend` and `codec` from now on: every monitor's stream starts
+    /// over with them. When one cannot, all go back to how they encoded before.
+    fn switch_encoding(&mut self, backend: crate::encoder::Backend, codec: Codec) -> Result<()> {
+        let before = self.cfg.clone();
+        self.cfg.backend = backend;
+        self.cfg.codec = codec;
         let ids: Vec<u8> = self.monitors.keys().copied().collect();
-        for id in ids {
-            let Some(Monitor {
-                encoder,
-                mut output,
-                spec,
-            }) = self.monitors.remove(&id)
-            else {
+        for (i, &id) in ids.iter().enumerate() {
+            let Err(e) = self.restart_monitor(id, Some(&before)) else {
                 continue;
             };
-            output.detach();
-            drop(encoder);
-            let encoder = self.start_stream(id, &mut output)?;
-            encoder.force_keyframe();
-            self.monitors.insert(
-                id,
-                Monitor {
-                    encoder,
-                    output,
-                    spec,
-                },
+            warn!(
+                "cannot encode with {backend:?} {codec:?}: {e:#}; back to {:?} {:?}",
+                before.backend, before.codec
             );
+            self.cfg = before;
+            for &id in &ids[..i] {
+                if let Err(e) = self.restart_monitor(id, None) {
+                    error!("{}: {e:#}", stream_name(id));
+                }
+            }
+            return Err(e);
         }
         // Window panels are made again when wanted; the mirror restarts by itself.
         self.close_window_panels();
         self.stop_mirror();
         self.mirror_retry = Instant::now();
         Ok(())
+    }
+
+    /// A new encoder for monitor `id` with the current settings, or else with
+    /// `fallback`; the old one stops before, so the headset never gets frames of two
+    /// codecs for one stream. Returns why the current settings did not work. A monitor
+    /// whose stream cannot start at all goes away, as if removed.
+    fn restart_monitor(&mut self, id: u8, fallback: Option<&EncoderConfig>) -> Result<()> {
+        let Some(Monitor {
+            encoder,
+            mut output,
+            spec,
+        }) = self.monitors.remove(&id)
+        else {
+            return Ok(());
+        };
+        output.detach();
+        drop(encoder);
+        let (encoder, result) = match self.start_encoder(id, &mut output, &self.cfg) {
+            Ok(encoder) => (Some(encoder), Ok(())),
+            Err(e) => {
+                let again = fallback.and_then(|cfg| {
+                    self.start_encoder(id, &mut output, cfg)
+                        .inspect_err(|e| error!("{}: {e:#}", stream_name(id)))
+                        .ok()
+                });
+                (again, Err(e))
+            }
+        };
+        match encoder {
+            Some(encoder) => {
+                encoder.force_keyframe();
+                self.monitors.insert(
+                    id,
+                    Monitor {
+                        encoder,
+                        output,
+                        spec,
+                    },
+                );
+            }
+            None => {
+                error!("{}: no stream, removing the monitor", stream_name(id));
+                drop(output);
+                self.forget(id);
+            }
+        }
+        result
     }
 
     /// Applies a new bitrate to every running encoder and to monitors added later.
@@ -970,8 +1014,15 @@ impl Displays {
                 )
             );
         }
-        self.router.remove_stream(id);
         self.monitors.remove(&id);
+        self.forget(id);
+        Ok(())
+    }
+
+    /// Monitor `id`, no longer in `monitors`, leaves the router, the order and the
+    /// desktop's arrangement.
+    fn forget(&mut self, id: u8) {
+        self.router.remove_stream(id);
         self.order.retain(|o| *o != id);
         self.router.send(HostMsg::Order {
             ids: self.order.clone(),
@@ -982,7 +1033,6 @@ impl Displays {
         self.ensure_primary();
         // Close the gap the monitor leaves.
         self.apply_layout();
-        Ok(())
     }
 
     pub fn set_primary(&mut self, id: u8) {
@@ -1155,8 +1205,9 @@ impl Displays {
             .iter()
             .map(|s| {
                 let i = unused.iter().position(|id| {
-                    let have = &self.monitors[id].spec;
-                    have.width == s.width && have.height == s.height
+                    self.monitors
+                        .get(id)
+                        .is_some_and(|m| m.spec.width == s.width && m.spec.height == s.height)
                 })?;
                 Some(unused.remove(i))
             })
@@ -1492,14 +1543,9 @@ impl Displays {
             m.encoder.force_keyframe();
             let frame = rx.recv_timeout(Duration::from_secs(2));
             self.router.snapshot.lock().unwrap().take();
-            let codec = if self.router.codec.load(Ordering::Relaxed) == Codec::H264 as u8 {
-                Codec::H264
-            } else {
-                Codec::H265
-            };
             match frame
                 .map_err(anyhow::Error::from)
-                .and_then(|data| crate::encoder::keyframe_to_png(&data, codec))
+                .and_then(|data| crate::encoder::keyframe_to_png(&data, self.cfg.codec))
             {
                 Ok(path) => return Ok(path),
                 Err(e) => warn!("screenshot from the stream: {e:#}; taking the whole desktop"),
@@ -1520,8 +1566,11 @@ impl Displays {
         }
     }
 
+    /// Every monitor streams. Without any left (none could start again), the set is
+    /// made anew for the next session.
     pub fn healthy(&self) -> bool {
-        !self.router.failed.load(Ordering::Relaxed)
+        !self.monitors.is_empty()
+            && !self.router.failed.load(Ordering::Relaxed)
             && !self
                 .monitors
                 .values()
@@ -1577,5 +1626,78 @@ impl Displays {
         if let Err(e) = result {
             warn!("cannot save {}: {e}", path.display());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sent(outbox: &Outbox) -> Vec<HostMsg> {
+        let mut msgs = Vec::new();
+        while !outbox.is_idle() {
+            msgs.extend(outbox.next());
+        }
+        msgs
+    }
+
+    fn keyframe(router: &Router, id: u8) {
+        router.on_event(
+            id,
+            EncoderEvent::Size {
+                width: 64,
+                height: 32,
+            },
+        );
+        router.on_event(
+            id,
+            EncoderEvent::Frame {
+                pts_us: 0,
+                keyframe: true,
+                data: vec![0],
+            },
+        );
+    }
+
+    /// A stream that starts over with another encoder is announced with its codec, and
+    /// the headset hears when it ends, even before the new encoder sent anything.
+    #[test]
+    fn a_restarted_stream_is_announced_and_ended() {
+        let router = Router::new();
+        let outbox = Arc::new(Outbox::default());
+        router.attach(outbox.clone());
+        router.add_stream(0, Codec::H265);
+        keyframe(&router, 0);
+        assert!(matches!(
+            sent(&outbox)[..],
+            [
+                HostMsg::StreamStart {
+                    id: 0,
+                    codec: Codec::H265,
+                    ..
+                },
+                HostMsg::Frame { .. }
+            ]
+        ));
+        router.add_stream(0, Codec::H264);
+        keyframe(&router, 0);
+        assert!(matches!(
+            sent(&outbox)[..],
+            [
+                HostMsg::StreamStart {
+                    id: 0,
+                    codec: Codec::H264,
+                    ..
+                },
+                HostMsg::Frame { .. }
+            ]
+        ));
+        router.add_stream(0, Codec::H265);
+        router.remove_stream(0);
+        assert!(matches!(sent(&outbox)[..], [HostMsg::StreamEnd { id: 0 }]));
+        // Never shown: nothing to end.
+        router.add_stream(1, Codec::H265);
+        router.remove_stream(1);
+        assert!(sent(&outbox).is_empty());
     }
 }
