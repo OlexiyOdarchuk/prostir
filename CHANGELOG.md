@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.3 (not released yet)
+
+### Monitors and windows
+
+- On KDE, sharing one of Prostir's monitors in another app (Discord, OBS) no longer
+  leaves it shrunk: Prostir puts its size back within a second.
+
 ## 0.1.2 (2026-11-19)
 
 A fix for the headset app. The PC part is the same as in 0.1.1.

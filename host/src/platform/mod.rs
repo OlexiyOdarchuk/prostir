@@ -214,6 +214,11 @@ pub trait OutputBackend {
     /// Whether the desktop closed it.
     fn closed(&self) -> bool;
 
+    /// The pixel size another program gave it, when that is no longer the size it was
+    /// made with (on KDE, sharing it in Discord or OBS can do that). Starting its
+    /// encoder over puts the size back. `None` where the desktop never does that.
+    fn resized(&self) -> Option<(u32, u32)>;
+
     /// Makes it the primary output (where the desktop has one).
     fn make_primary(&self);
 

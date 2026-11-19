@@ -179,6 +179,14 @@ impl OutputBackend for Output {
         }
     }
 
+    fn resized(&self) -> Option<(u32, u32)> {
+        match &self.kind {
+            Kind::Kde(o) => o.resized(),
+            // Its outputs change size only through monitor rules, not through capture.
+            Kind::Hyprland(_) => None,
+        }
+    }
+
     fn make_primary(&self) {
         // Hyprland has no such thing.
         if let Kind::Kde(o) = &self.kind {

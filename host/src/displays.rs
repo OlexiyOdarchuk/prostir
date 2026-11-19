@@ -15,7 +15,7 @@ use crate::encoder::{Encoder, EncoderConfig, EncoderEvent};
 use crate::layout::{Seat, arrange, arrange_free, panel_size};
 use crate::outbox::Outbox;
 use crate::platform::audio::{AudioOut, MicIn};
-use crate::platform::windows;
+use crate::platform::{self, windows};
 use crate::platform::{
     ActiveWindow, Desktop, DesktopBackend, Geometry, MonitorSpec, Output, OutputBackend,
 };
@@ -40,6 +40,79 @@ impl Backoff {
 
     fn succeeded(&mut self) {
         *self = Self::default();
+    }
+}
+
+/// Restores of one monitor's size allowed in [`RESTORE_WINDOW`].
+const RESTORES_ALLOWED: usize = 3;
+const RESTORE_WINDOW: Duration = Duration::from_secs(60);
+/// How long a restart has to put the size back before the output is made anew.
+const RESTORE_WAIT: Duration = Duration::from_secs(2);
+
+/// What to do about a monitor's size (see [`SizeGuard::check`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SizeAction {
+    /// The size is right, or the last step still has time to work.
+    Wait,
+    /// The size is right again: lay the desktop out again for it.
+    Restored,
+    /// Start its encoder over: the desktop gives the output back its size.
+    Restart,
+    /// The restart did not help: make the output anew with the same number and spec.
+    Recreate,
+    /// Restored too often lately: say so once and leave the size as it is.
+    GiveUp,
+}
+
+/// Puts a monitor's size back after another program changed it, without fighting
+/// that program forever.
+#[derive(Default)]
+struct SizeGuard {
+    /// When the size was restored (restarts and recreations), within the window.
+    restores: Vec<Instant>,
+    /// The last step taken and when, while the size is still wrong.
+    last: Option<(SizeAction, Instant)>,
+    /// Gave up (and said so): no more restores until the size is right again with
+    /// room in the window.
+    gave_up: bool,
+    /// The size was wrong at the last check.
+    wrong: bool,
+}
+
+impl SizeGuard {
+    /// What to do at `now`, given the size another program gave the monitor
+    /// (`None` while it has its own size). Records the step it returns.
+    fn check(&mut self, resized: Option<(u32, u32)>, now: Instant) -> SizeAction {
+        self.restores
+            .retain(|&at| now.duration_since(at) < RESTORE_WINDOW);
+        let full = self.restores.len() >= RESTORES_ALLOWED;
+        if resized.is_none() {
+            self.last = None;
+            // A give-up ends once the window has room again, so it is said once.
+            self.gave_up &= full;
+            return if std::mem::take(&mut self.wrong) {
+                SizeAction::Restored
+            } else {
+                SizeAction::Wait
+            };
+        }
+        self.wrong = true;
+        if self.gave_up {
+            return SizeAction::Wait;
+        }
+        let step = match self.last {
+            Some((_, at)) if now.duration_since(at) < RESTORE_WAIT => return SizeAction::Wait,
+            Some((SizeAction::Restart, _)) => SizeAction::Recreate,
+            _ => SizeAction::Restart,
+        };
+        if full {
+            self.last = None;
+            self.gave_up = true;
+            return SizeAction::GiveUp;
+        }
+        self.restores.push(now);
+        self.last = Some((step, now));
+        step
     }
 }
 
@@ -321,6 +394,7 @@ struct Monitor {
     encoder: Encoder,
     output: Output,
     spec: MonitorSpec,
+    size_guard: SizeGuard,
 }
 
 /// The physical display (laptop panel) streamed as-is.
@@ -656,6 +730,7 @@ impl Displays {
                 encoder,
                 output,
                 spec,
+                size_guard: SizeGuard::default(),
             },
         );
         self.order.push(id);
@@ -687,6 +762,7 @@ impl Displays {
     /// laptop lid closes and comes back when it opens.
     pub fn tick(&mut self) {
         self.sync_audio();
+        self.check_sizes();
         self.check_primary();
         self.check_window_panels();
         let broken = self.router.mirror_failed.swap(false, Ordering::Relaxed);
@@ -721,6 +797,117 @@ impl Displays {
                 self.apply_layout();
             }
             Err(e) => warn!("cannot mirror {name}: {e:#}"),
+        }
+    }
+
+    /// Puts back the size of monitors another program changed (on KDE, sharing one in
+    /// Discord or OBS can shrink it to what that program asks for).
+    fn check_sizes(&mut self) {
+        // Paused encoders connect again on resuming, which puts the size back too.
+        if !self.streaming {
+            return;
+        }
+        let now = Instant::now();
+        let mut changed = false;
+        let ids: Vec<u8> = self.monitors.keys().copied().collect();
+        for id in ids {
+            let Some(m) = self.monitors.get_mut(&id) else {
+                continue;
+            };
+            let resized = m.output.resized();
+            let action = m.size_guard.check(resized, now);
+            if action == SizeAction::Wait {
+                continue;
+            }
+            let name = m.output.output_name().to_owned();
+            let spec = m.spec.clone();
+            let (w, h) = resized.unwrap_or_default();
+            match action {
+                SizeAction::Wait => {}
+                SizeAction::Restored => {
+                    info!("{name} is {spec} again");
+                    changed = true;
+                }
+                // Laid out once the size is back: the desktop still lists the wrong one.
+                SizeAction::Restart => {
+                    warn!(
+                        "{name} was resized to {w}x{h} by another program (screen sharing?): restoring {spec}"
+                    );
+                    if let Err(e) = self.restart_monitor(id, None) {
+                        error!("{}: {e:#}", stream_name(id));
+                    }
+                }
+                SizeAction::Recreate => {
+                    warn!("{name} is still {w}x{h}: making it again at {spec}");
+                    self.recreate_monitor(id);
+                    changed = true;
+                }
+                SizeAction::GiveUp => {
+                    warn!("{name} keeps being resized by another program: leaving it at {w}x{h}");
+                    let body = format!(
+                        "{} {}. {}",
+                        t(
+                            "Інша програма раз у раз змінює розмір монітора",
+                            "Another program keeps changing the size of monitor"
+                        ),
+                        u32::from(id) + 1,
+                        t(
+                            "Припиніть показувати цей монітор у ній, а тоді зніміть і знову вдягніть шолом.",
+                            "Stop sharing that monitor in it, then take the headset off and put it on again."
+                        )
+                    );
+                    platform::dialogs::notify(t("Розмір монітора", "Monitor size"), &body);
+                }
+            }
+        }
+        if changed {
+            self.apply_layout();
+        }
+    }
+
+    /// Makes monitor `id`'s output anew with the same number and spec, when nothing
+    /// else gives it back its size. Its windows move to the other screens.
+    fn recreate_monitor(&mut self, id: u8) {
+        let Some(Monitor {
+            encoder,
+            output,
+            spec,
+            size_guard,
+        }) = self.monitors.remove(&id)
+        else {
+            return;
+        };
+        // The encoder stops before the output goes away.
+        drop(encoder);
+        drop(output);
+        let made = self
+            .desktop
+            .create(u32::from(id) + 1, &spec)
+            .and_then(|mut output| {
+                let encoder = self.start_encoder(id, &mut output, &self.cfg)?;
+                Ok((encoder, output))
+            });
+        match made {
+            Ok((encoder, output)) => {
+                encoder.force_keyframe();
+                if self.manage_primary && self.primary == Some(id) {
+                    output.make_primary();
+                }
+                self.monitors.insert(
+                    id,
+                    Monitor {
+                        encoder,
+                        output,
+                        spec,
+                        size_guard,
+                    },
+                );
+                self.sync_wallpapers();
+            }
+            Err(e) => {
+                error!("{}: {e:#}, removing the monitor", stream_name(id));
+                self.forget(id);
+            }
         }
     }
 
@@ -891,6 +1078,7 @@ impl Displays {
             encoder,
             mut output,
             spec,
+            size_guard,
         }) = self.monitors.remove(&id)
         else {
             return Ok(());
@@ -917,6 +1105,7 @@ impl Displays {
                         encoder,
                         output,
                         spec,
+                        size_guard,
                     },
                 );
             }
@@ -1527,6 +1716,7 @@ impl Displays {
                 encoder,
                 output,
                 spec,
+                size_guard: SizeGuard::default(),
             },
         );
         self.apply_layout();
@@ -1792,6 +1982,60 @@ mod tests {
             height: h.parse().map_err(|_| "height")?,
             scale: 1.0,
         })
+    }
+
+    const SHRUNK: Option<(u32, u32)> = Some((320, 240));
+
+    fn secs(start: Instant, s: f64) -> Instant {
+        start + Duration::from_secs_f64(s)
+    }
+
+    #[test]
+    fn a_resized_monitor_is_restarted_once_and_then_left_to_settle() {
+        let start = Instant::now();
+        let mut guard = SizeGuard::default();
+        assert_eq!(guard.check(None, start), SizeAction::Wait);
+        assert_eq!(guard.check(SHRUNK, secs(start, 1.0)), SizeAction::Restart);
+        // The size comes back a moment after the restart.
+        assert_eq!(guard.check(SHRUNK, secs(start, 1.5)), SizeAction::Wait);
+        assert_eq!(guard.check(None, secs(start, 2.0)), SizeAction::Restored);
+        assert_eq!(guard.check(None, secs(start, 2.5)), SizeAction::Wait);
+        assert_eq!(guard.restores.len(), 1);
+    }
+
+    #[test]
+    fn a_size_that_does_not_come_back_makes_the_output_anew() {
+        let start = Instant::now();
+        let mut guard = SizeGuard::default();
+        assert_eq!(guard.check(SHRUNK, start), SizeAction::Restart);
+        assert_eq!(guard.check(SHRUNK, secs(start, 1.9)), SizeAction::Wait);
+        assert_eq!(guard.check(SHRUNK, secs(start, 2.0)), SizeAction::Recreate);
+        // The new output gets its time too; still wrong after that, a restart again.
+        assert_eq!(guard.check(SHRUNK, secs(start, 3.0)), SizeAction::Wait);
+        assert_eq!(guard.check(SHRUNK, secs(start, 4.0)), SizeAction::Restart);
+        assert_eq!(guard.check(None, secs(start, 4.5)), SizeAction::Restored);
+    }
+
+    #[test]
+    fn a_program_that_keeps_resizing_is_not_fought_forever() {
+        let start = Instant::now();
+        let mut guard = SizeGuard::default();
+        let mut actions = Vec::new();
+        // Resized again every 3 s, each time after the size came back.
+        for i in 0..5 {
+            let at = f64::from(i) * 3.0;
+            actions.push(guard.check(SHRUNK, secs(start, at)));
+            guard.check(None, secs(start, at + 0.5));
+        }
+        use SizeAction::*;
+        assert_eq!(actions, [Restart, Restart, Restart, GiveUp, Wait]);
+        // Still shrunk: no more restores.
+        assert_eq!(guard.check(SHRUNK, secs(start, 20.0)), Wait);
+        assert_eq!(guard.check(SHRUNK, secs(start, 90.0)), Wait);
+        // Back by other means (the headset taken off and put on): laid out again.
+        assert_eq!(guard.check(None, secs(start, 91.0)), Restored);
+        // After a quiet minute the guard starts over.
+        assert_eq!(guard.check(SHRUNK, secs(start, 92.0)), Restart);
     }
 
     /// Where the headset showed each monitor, across and up and down, survives a
