@@ -11,13 +11,18 @@
 use std::collections::VecDeque;
 use std::io;
 use std::sync::{Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use prostir_proto::ClientMsg;
 use prostir_proto::link::RecordSender;
 use prostir_proto::packet::{Encoded, FRAGMENT, Outgoing, lane};
+use prostir_proto::stats::{Histogram, Pings};
 
 /// About 2.5 s of microphone sound: more than that waiting means the network is stuck.
 pub const MAX_LOSSY: usize = 256;
+/// In a session the headset pings the PC this often: for the round trip, and so the
+/// connection never falls silent while it is fine.
+pub const PING_EVERY: Duration = Duration::from_secs(1);
 
 /// Messages it costs little to lose when the network is stuck.
 fn lossy(msg: &ClientMsg) -> bool {
@@ -28,6 +33,10 @@ fn lossy(msg: &ClientMsg) -> bool {
 struct State {
     control: VecDeque<Encoded>,
     lossy: VecDeque<Encoded>,
+    pings: Pings,
+    /// When the next ping is due; `None` until the session is open.
+    next_ping: Option<Instant>,
+    round_trip: Histogram,
     closed: bool,
 }
 
@@ -89,6 +98,26 @@ impl Outbox {
         Ok(())
     }
 
+    /// The session is open: pings start.
+    pub fn start_pings(&self) {
+        let mut s = self.state.lock().unwrap();
+        s.next_ping = Some(Instant::now());
+        self.ready.notify_one();
+    }
+
+    /// The PC answered ping `seq`.
+    pub fn pong(&self, seq: u32) {
+        let mut s = self.state.lock().unwrap();
+        if let Some(rtt) = s.pings.pong(seq, Instant::now()) {
+            s.round_trip.add(rtt);
+        }
+    }
+
+    /// The round trips since the last call.
+    pub fn take_round_trips(&self) -> Histogram {
+        std::mem::take(&mut self.state.lock().unwrap().round_trip)
+    }
+
     /// The session is over: nothing more is taken or sent.
     pub fn close(&self) {
         let mut s = self.state.lock().unwrap();
@@ -106,10 +135,26 @@ impl Outbox {
             if s.closed {
                 return None;
             }
+            let now = Instant::now();
+            if let Some(at) = s.next_ping
+                && now >= at
+            {
+                s.next_ping = Some(now + PING_EVERY);
+                let seq = s.pings.ping(now);
+                if let Ok(ping) = (ClientMsg::Ping { seq }).encode() {
+                    s.control.push_back(ping);
+                }
+            }
             if let Some(pick) = s.pick(lanes) {
                 return Some(pick);
             }
-            s = self.ready.wait(s).unwrap();
+            s = match s.next_ping {
+                Some(at) => {
+                    let wait = at.saturating_duration_since(now);
+                    self.ready.wait_timeout(s, wait).unwrap().0
+                }
+                None => self.ready.wait(s).unwrap(),
+            };
         }
     }
 }
@@ -201,6 +246,30 @@ mod tests {
         let mic = msgs.iter().filter(|(l, _)| *l == lane::SOUND).count();
         assert_eq!(mic, MAX_LOSSY);
         assert_eq!(msgs.len() - mic, MAX_LOSSY + 10);
+    }
+
+    /// Pings start with the session, one a second, and pongs give the round trip.
+    #[test]
+    fn pings_start_with_the_session() {
+        let o = Outbox::default();
+        let mut lanes = Lanes::default();
+        let nothing = o.state.lock().unwrap().pick(&mut lanes);
+        assert_eq!(nothing, None, "no ping before the session");
+        o.start_pings();
+        assert_eq!(o.next(&mut lanes), Some(Pick::Control));
+        let (mut headset, mut pc) = memory::pair(8);
+        lanes.send(Pick::Control, &mut *headset.sender).unwrap();
+        let mut asm = ClientMsg::assembler();
+        let m = asm.push(pc.receiver.recv().unwrap()).unwrap().unwrap();
+        let Some(ClientMsg::Ping { seq }) = ClientMsg::from_message(m).unwrap() else {
+            panic!("a ping")
+        };
+        o.pong(seq);
+        assert_eq!(o.take_round_trips().count(), 1);
+        // The next one a second later.
+        let start = Instant::now();
+        assert_eq!(o.next(&mut lanes), Some(Pick::Control));
+        assert!(start.elapsed() >= PING_EVERY - Duration::from_millis(50));
     }
 
     #[test]

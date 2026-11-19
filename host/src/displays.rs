@@ -164,7 +164,8 @@ impl Router {
 
     /// Logs, every [`REPORT_EVERY`] while a headset is connected, one line per stream:
     /// what the outbox sent and dropped, how long frames waited there, keyframes, and
-    /// encoded → shown in the headset. Then one line for sound.
+    /// encoded → shown in the headset. Then one line for sound and one for the round
+    /// trip of the pings.
     pub fn report(&self) {
         let (window, mut stats, streams) = {
             let mut inner = self.inner.lock().unwrap();
@@ -210,6 +211,11 @@ impl Router {
                 stats.audio_dropped
             );
         }
+        info!(
+            "link: round trip {} ({} pings answered)",
+            stats.round_trip.summary_ms(),
+            stats.round_trip.count()
+        );
     }
 
     pub fn detach(&self) {

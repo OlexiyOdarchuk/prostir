@@ -190,6 +190,9 @@ impl Drop for EndSession {
 
 /// Taken off for this long, the headset counts as gone.
 const TAKEN_OFF_GRACE: Duration = Duration::from_secs(10);
+/// Nothing at all from the headset for this long (it pings every second): the session
+/// is over.
+const SILENCE: Duration = Duration::from_secs(5);
 
 /// How the tray names the way the headset is connected.
 fn via_name(via: Via) -> &'static str {
@@ -238,17 +241,34 @@ fn serve_client(
     };
 
     let (msg_tx, msg_rx) = mpsc::channel::<std::io::Result<ClientMsg>>();
-    std::thread::Builder::new()
-        .name("net-reader".into())
-        .spawn(move || {
-            loop {
-                let msg = ClientMsg::recv(&mut *receiver, &mut packets);
-                let stop = msg.is_err();
-                if msg_tx.send(msg).is_err() || stop {
-                    break;
+    {
+        let outbox = outbox.clone();
+        receiver.set_idle_limit(Some(SILENCE));
+        std::thread::Builder::new()
+            .name("net-reader".into())
+            .spawn(move || {
+                loop {
+                    let msg = ClientMsg::recv(&mut *receiver, &mut packets);
+                    // Answered here, not in the session loop (which may wait on a
+                    // desktop tool for a while): the round trip is the network's.
+                    match msg {
+                        Ok(ClientMsg::Ping { seq }) => {
+                            outbox.control(HostMsg::Pong { seq });
+                            continue;
+                        }
+                        Ok(ClientMsg::Pong { seq }) => {
+                            outbox.pong(seq);
+                            continue;
+                        }
+                        _ => {}
+                    }
+                    let stop = msg.is_err();
+                    if msg_tx.send(msg).is_err() || stop {
+                        break;
+                    }
                 }
-            }
-        })?;
+            })?;
+    }
 
     displays.router.attach(outbox.clone());
     if let Some(id) = displays.primary() {
@@ -456,6 +476,12 @@ fn serve_client(
             }
             Ok(Ok(other)) => warn!("ignoring {other:?}"),
             Ok(Err(e)) if e.kind() == ErrorKind::UnexpectedEof => break Ok(()),
+            Ok(Err(e)) if e.kind() == ErrorKind::TimedOut => {
+                break Err(anyhow::anyhow!(
+                    "silence: nothing from the headset for {} s",
+                    SILENCE.as_secs()
+                ));
+            }
             Ok(Err(e)) => break Err(e.into()),
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break Ok(()),

@@ -24,6 +24,9 @@ const LOOK_EVERY: Duration = Duration::from_millis(500);
 
 /// How often the session logs what it received.
 const REPORT_EVERY: Duration = Duration::from_secs(10);
+/// Nothing at all from the PC for this long (it pings every second): the session is
+/// over.
+const SILENCE: Duration = Duration::from_secs(5);
 
 pub struct Frame {
     /// When the frame arrived from the network.
@@ -99,6 +102,11 @@ impl Feedback {
     /// The session is over: the writer stops.
     fn close(&self) {
         self.outbox.close();
+    }
+
+    /// The session is open: pings start.
+    fn start_pings(&self) {
+        self.outbox.start_pings();
     }
 }
 
@@ -925,8 +933,9 @@ fn run_session(
     }
     ended.opened = true;
     packets.set_limits(HostMsg::limits(true));
-    // The host re-sends the last frame every 500 ms, so 10 s of silence means a dead link.
-    receiver.set_idle_limit(Some(Duration::from_secs(10)));
+    // Both sides ping every second: a few seconds of silence is a dead link.
+    receiver.set_idle_limit(Some(SILENCE));
+    feedback.start_pings();
     let _ = events.send(NetEvent::Connected {
         addr,
         name,
@@ -960,10 +969,12 @@ fn run_session(
         } as u64;
         if let Some(window) = report.due(now) {
             info!(
-                "received {} messages, {:.1} Mbit/s of video and sound; pauses {}",
+                "received {} messages, {:.1} Mbit/s of video and sound; pauses {}; \
+                 round trip {}",
                 gaps.events(),
                 media_bytes as f64 * 8.0 / window.as_secs_f64() / 1e6,
-                gaps.summary(window)
+                gaps.summary(window),
+                feedback.outbox.take_round_trips().summary_ms()
             );
             gaps.restart();
             media_bytes = 0;
@@ -1086,6 +1097,9 @@ fn run_session(
             }
             // The PC asks; the headset's own switch decides (checked below too).
             HostMsg::MicActive { active } => mic_asked = active,
+            // Answered at once, from here: the round trip is the network's.
+            HostMsg::Ping { seq } => feedback.send(ClientMsg::Pong { seq })?,
+            HostMsg::Pong { seq } => feedback.outbox.pong(seq),
             // Only before the session: ignored in it.
             HostMsg::Welcome { .. }
             | HostMsg::Opened

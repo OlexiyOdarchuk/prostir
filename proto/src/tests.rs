@@ -127,6 +127,8 @@ pub(crate) fn host_samples() -> Vec<HostMsg> {
         HostMsg::PairMsg { msg: [4; 33] },
         HostMsg::PairResult { tag: Some([1; 32]) },
         HostMsg::PairResult { tag: None },
+        HostMsg::Ping { seq: 7 },
+        HostMsg::Pong { seq: u32::MAX },
     ]
 }
 
@@ -215,6 +217,8 @@ pub(crate) fn client_samples() -> Vec<ClientMsg> {
         },
         ClientMsg::PairMsg { msg: [1; 33] },
         ClientMsg::PairConfirm { tag: [9; 32] },
+        ClientMsg::Ping { seq: 0 },
+        ClientMsg::Pong { seq: 3 },
     ]
 }
 

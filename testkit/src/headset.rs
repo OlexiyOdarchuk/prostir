@@ -11,7 +11,7 @@ use prostir_proto::link::tcp::{NoiseTcp, Plain};
 use prostir_proto::link::{Closer, Link, PeerInfo, RecordReceiver, RecordSender};
 use prostir_proto::packet::{self, Assembler, FRAGMENT, lane};
 use prostir_proto::secure::{Identity, Pairing, TrustStore, confirmation, tags_match};
-use prostir_proto::stats::Gaps;
+use prostir_proto::stats::{Gaps, Pings};
 use prostir_proto::{ClientMsg, Codec, HostMsg, PcSettings};
 
 use crate::nal;
@@ -22,6 +22,8 @@ const ACK_EVERY: Duration = Duration::from_millis(100);
 const REPLY: Duration = Duration::from_secs(10);
 /// Pairing waits for a person typing the code on the PC.
 const PAIRING: Duration = Duration::from_secs(300);
+/// The headset pings the PC this often in a session, like the Quest app.
+const PING_EVERY: Duration = Duration::from_secs(1);
 
 /// A headset's long-term key and the PCs it trusts, kept in a directory.
 pub struct Keys {
@@ -138,6 +140,10 @@ pub struct View {
     pub sound_gaps: Gaps,
     pub errors: Vec<String>,
     pub notices: Vec<String>,
+    /// Pings from the PC (each answered at once).
+    pub pings: u32,
+    /// Round trips of this headset's pings, as their pongs came.
+    pub round_trips: Vec<Duration>,
     pub messages: u64,
     /// The PC closed the connection.
     pub closed: bool,
@@ -215,8 +221,10 @@ impl View {
             }
             HostMsg::Error { text } => self.errors.push(text.clone()),
             HostMsg::Notice { text } => self.notices.push(text.clone()),
+            HostMsg::Ping { .. } => self.pings += 1,
             _ => {}
         }
+        self.round_trips.extend(arrived.round_trip);
     }
 
     /// Every monitor in `order` streams and shows a picture.
@@ -235,6 +243,8 @@ struct Arrived {
     at: Instant,
     /// `CLOCK_MONOTONIC` at the same moment, in nanoseconds.
     monotonic_ns: u64,
+    /// For a pong: how long since its ping went out.
+    round_trip: Option<Duration>,
 }
 
 /// `CLOCK_MONOTONIC` now, in nanoseconds (the clock the fake desktop stamps sound with).
@@ -289,7 +299,9 @@ impl FakeHeadset {
         receiver.set_idle_limit(None);
         packets.set_limits(HostMsg::limits(true));
         let writer = Arc::new(Mutex::new(sender));
-        let incoming = spawn_reader(receiver, packets, writer.clone())?;
+        let pings = Arc::new(Mutex::new(Pings::default()));
+        let incoming = spawn_reader(receiver, packets, writer.clone(), pings.clone())?;
+        spawn_pinger(writer.clone(), pings)?;
         Ok(Self {
             closer,
             writer,
@@ -386,6 +398,8 @@ impl FakeHeadset {
         v.ended.clear();
         v.errors.clear();
         v.notices.clear();
+        v.pings = 0;
+        v.round_trips.clear();
         v.audio_bytes = 0;
         v.sound_delays.clear();
         v.sound_gaps.restart();
@@ -478,6 +492,7 @@ fn spawn_reader(
     mut receiver: Box<dyn RecordReceiver>,
     mut packets: Assembler,
     writer: Arc<Mutex<Box<dyn RecordSender>>>,
+    pings: Arc<Mutex<Pings>>,
 ) -> std::io::Result<Receiver<Arrived>> {
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new()
@@ -486,6 +501,16 @@ fn spawn_reader(
             let mut acked: BTreeMap<u8, Instant> = BTreeMap::new();
             while let Ok(msg) = HostMsg::recv(&mut *receiver, &mut packets) {
                 let (at, monotonic_ns) = (Instant::now(), monotonic_ns());
+                let mut round_trip = None;
+                match &msg {
+                    // Answered at once, from here, as the Quest app does.
+                    HostMsg::Ping { seq } => {
+                        let pong = ClientMsg::Pong { seq: *seq };
+                        let _ = send(&mut **writer.lock().unwrap(), pong);
+                    }
+                    HostMsg::Pong { seq } => round_trip = pings.lock().unwrap().pong(*seq, at),
+                    _ => {}
+                }
                 if let HostMsg::Frame { id, pts_us, .. } = &msg
                     && acked.get(id).is_none_or(|t| t.elapsed() >= ACK_EVERY)
                 {
@@ -500,6 +525,7 @@ fn spawn_reader(
                     msg,
                     at,
                     monotonic_ns,
+                    round_trip,
                 };
                 if tx.send(arrived).is_err() {
                     return;
@@ -507,6 +533,25 @@ fn spawn_reader(
             }
         })?;
     Ok(rx)
+}
+
+/// Pings the PC every [`PING_EVERY`] until the connection closes.
+fn spawn_pinger(
+    writer: Arc<Mutex<Box<dyn RecordSender>>>,
+    pings: Arc<Mutex<Pings>>,
+) -> std::io::Result<()> {
+    std::thread::Builder::new()
+        .name("fake-headset-ping".into())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(PING_EVERY);
+                let seq = pings.lock().unwrap().ping(Instant::now());
+                if send(&mut **writer.lock().unwrap(), ClientMsg::Ping { seq }).is_err() {
+                    return;
+                }
+            }
+        })?;
+    Ok(())
 }
 
 /// Pairs with the code this headset shows (the person at the PC types it), waiting

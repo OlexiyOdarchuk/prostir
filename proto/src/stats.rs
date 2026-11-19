@@ -153,6 +153,39 @@ pub fn per_minute(n: u32, window: Duration) -> f64 {
     f64::from(n) * 60.0 / window.as_secs_f64().max(1e-3)
 }
 
+/// Pings in flight, for the round trip of each pong. Pings left unanswered are
+/// forgotten after a few newer ones.
+#[derive(Debug, Clone, Default)]
+pub struct Pings {
+    next: u32,
+    sent: std::collections::VecDeque<(u32, Instant)>,
+}
+
+/// How many unanswered pings are remembered.
+const PINGS_KEPT: usize = 8;
+
+impl Pings {
+    /// A ping goes out at `now`: its number.
+    pub fn ping(&mut self, now: Instant) -> u32 {
+        let seq = self.next;
+        self.next = self.next.wrapping_add(1);
+        if self.sent.len() >= PINGS_KEPT {
+            self.sent.pop_front();
+        }
+        self.sent.push_back((seq, now));
+        seq
+    }
+
+    /// The pong for ping `seq` came at `now`: the round trip, if that ping is known.
+    /// Older pings are forgotten with it.
+    pub fn pong(&mut self, seq: u32, now: Instant) -> Option<Duration> {
+        let i = self.sent.iter().position(|(s, _)| *s == seq)?;
+        let (_, at) = self.sent[i];
+        self.sent.drain(..=i);
+        Some(now.saturating_duration_since(at))
+    }
+}
+
 /// Says when a periodic report is due.
 #[derive(Debug, Clone)]
 pub struct Period {
@@ -237,6 +270,24 @@ mod tests {
         g.restart();
         g.event(t0 + ms(530));
         assert_eq!(g.over(), [1, 1, 0, 0]);
+    }
+
+    #[test]
+    fn pongs_give_round_trips() {
+        let t0 = Instant::now();
+        let mut p = Pings::default();
+        let a = p.ping(t0);
+        let b = p.ping(t0 + ms(1000));
+        assert_ne!(a, b);
+        assert_eq!(p.pong(b, t0 + ms(1012)), Some(ms(12)));
+        // Answered late, after a newer one: forgotten.
+        assert_eq!(p.pong(a, t0 + ms(1500)), None);
+        assert_eq!(p.pong(77, t0), None, "never sent");
+        // Only the newest few are kept.
+        for i in 0..20 {
+            p.ping(t0 + ms(i));
+        }
+        assert_eq!(p.sent.len(), PINGS_KEPT);
     }
 
     #[test]

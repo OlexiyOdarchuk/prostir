@@ -165,6 +165,7 @@ fn main() -> Result<()> {
             HostMsg::PcSettings { settings, encoders } => {
                 println!("PC encodes: {settings:?}, can use {encoders:#05b}")
             }
+            HostMsg::Ping { .. } | HostMsg::Pong { .. } => {}
             HostMsg::Incompatible { .. }
             | HostMsg::PairingRequired
             | HostMsg::PairMsg { .. }

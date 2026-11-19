@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use log::{info, warn};
 use prostir_proto::link::RecordSender;
 use prostir_proto::packet::{Encoded, FRAGMENT, Outgoing, lane};
-use prostir_proto::stats::{Histogram, per_minute};
+use prostir_proto::stats::{Histogram, Pings, per_minute};
 use prostir_proto::{HostMsg, MIRROR_ID};
 
 /// Sound queued at most: 8 slices of 10 ms. Older slices make room for newer ones.
@@ -39,6 +39,9 @@ const MAX_VIDEO_BYTES: usize = 16 << 20;
 /// Control messages are never dropped; this much of them waiting means the headset
 /// reads nothing any more, and the session ends.
 const MAX_CONTROL_BYTES: usize = 4 << 20;
+/// A ping goes to the headset this often: it shows the round trip, and keeps the
+/// connection from falling silent (which ends a session after a few seconds).
+pub const PING_EVERY: Duration = Duration::from_secs(1);
 
 // Every stream id the PC makes has a lane of its own (the mirror's is the highest).
 const _: () = assert!(MIRROR_ID <= u8::MAX - lane::VIDEO);
@@ -136,6 +139,8 @@ pub struct OutboxStats {
     pub audio_wait: Histogram,
     /// Sound slices dropped to make room for newer ones.
     pub audio_dropped: u32,
+    /// From a ping going out to its pong arriving.
+    pub round_trip: Histogram,
 }
 
 #[derive(Default)]
@@ -152,6 +157,9 @@ struct State {
     /// How fast the connection may send, and whether the writer has to apply it.
     pace: u64,
     pace_changed: bool,
+    pings: Pings,
+    /// When the next ping is due (from the writer's first look on).
+    next_ping: Option<Instant>,
     closed: bool,
 }
 
@@ -339,6 +347,14 @@ impl Outbox {
         }
     }
 
+    /// The headset answered ping `seq`.
+    pub fn pong(&self, seq: u32) {
+        let mut s = self.lock();
+        if let Some(rtt) = s.pings.pong(seq, Instant::now()) {
+            s.stats.round_trip.add(rtt);
+        }
+    }
+
     /// What happened since the last call.
     pub fn take_stats(&self) -> OutboxStats {
         std::mem::take(&mut self.lock().stats)
@@ -372,10 +388,21 @@ impl Outbox {
             if s.closed {
                 return None;
             }
+            let now = Instant::now();
+            let ping_at = *s.next_ping.get_or_insert(now + PING_EVERY);
+            if now >= ping_at {
+                s.next_ping = Some(now + PING_EVERY);
+                let seq = s.pings.ping(now);
+                if let Some(ping) = encode(HostMsg::Ping { seq }) {
+                    s.control_bytes += ping.len();
+                    s.control.push_back(ping);
+                }
+            }
             if let Some(pick) = s.pick(lanes) {
                 return Some(pick);
             }
-            s = self.ready.wait(s).unwrap();
+            let wait = ping_at.saturating_duration_since(now);
+            s = self.ready.wait_timeout(s, wait).unwrap().0;
         }
     }
 
@@ -787,6 +814,23 @@ pub(crate) mod tests {
             None,
             "the same pace again changes nothing"
         );
+    }
+
+    /// A ping goes out every second, and its pong gives the round trip.
+    #[test]
+    fn pings_go_out_every_second() {
+        let o = Outbox::default();
+        let mut lanes = Lanes::default();
+        let start = Instant::now();
+        assert_eq!(o.next(&mut lanes), Some(Pick::Control));
+        assert!(start.elapsed() >= PING_EVERY - Duration::from_millis(5));
+        let mut out = Capture::default();
+        lanes.send(Pick::Control, &mut out).unwrap();
+        let [HostMsg::Ping { seq }] = out.messages()[..] else {
+            panic!("a ping: {:?}", out.messages())
+        };
+        o.pong(seq);
+        assert_eq!(o.take_stats().round_trip.count(), 1);
     }
 
     /// A message that cannot be sent ends the session, and nothing else is sent.

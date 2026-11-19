@@ -273,6 +273,10 @@ wire_enum! {
         9 => PairingRequired,
         /// The PC's SPAKE2 message (see [`secure::Pairing`]).
         10 => PairMsg { msg: [u8; secure::PAIR_MSG_LEN] },
+        /// Sent every second in the session: answer with [`ClientMsg::Pong`] at once.
+        25 => Ping { seq: u32 },
+        /// The answer to [`ClientMsg::Ping`] with its `seq`.
+        26 => Pong { seq: u32 },
         /// Whether the codes matched: the PC's confirmation tag if they did.
         11 => PairResult { tag: Option<[u8; secure::CONFIRM_LEN]> },
     }
@@ -368,6 +372,10 @@ wire_enum! {
         110 => PairMsg { msg: [u8; secure::PAIR_MSG_LEN] },
         /// Proof that the headset derived the same pairing key.
         111 => PairConfirm { tag: [u8; secure::CONFIRM_LEN] },
+        /// Sent every second in the session: answer with [`HostMsg::Pong`] at once.
+        128 => Ping { seq: u32 },
+        /// The answer to [`HostMsg::Ping`] with its `seq`.
+        129 => Pong { seq: u32 },
     }
 }
 
