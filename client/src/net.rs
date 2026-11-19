@@ -976,7 +976,7 @@ fn run_session(
                 }
                 slot.waiting.fetch_add(1, Ordering::Relaxed);
                 let sent = slot.tx.try_send(Frame {
-                    received: std::time::Instant::now(),
+                    received: now,
                     pts_us,
                     keyframe,
                     data,
