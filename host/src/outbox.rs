@@ -153,6 +153,8 @@ struct State {
     video_bytes: usize,
     /// Streams that lost a frame since the router last looked: they need a keyframe.
     dropped: BTreeSet<u8>,
+    /// Bytes queued since the writer last asked: what the streams need.
+    queued: usize,
     stats: OutboxStats,
     pings: Pings,
     /// When the next ping is due (from the writer's first look on).
@@ -256,6 +258,7 @@ impl Outbox {
             self.close_locked(&mut s);
             return false;
         };
+        s.queued += msg.len();
         match stream {
             Some(id) => {
                 let gone = s.drop_frames(id);
@@ -299,6 +302,7 @@ impl Outbox {
             s.audio.pop_front();
             s.stats.audio_dropped += 1;
         }
+        s.queued += msg.len();
         s.audio.push_back((Instant::now(), msg));
         self.ready.notify_one();
     }
@@ -328,6 +332,7 @@ impl Outbox {
             return false;
         }
         s.video_bytes += msg.len();
+        s.queued += msg.len();
         let q = s.streams.entry(id).or_default();
         q.broken = false;
         q.items.push_back(Item::Frame(Frame {
@@ -351,6 +356,12 @@ impl Outbox {
     /// What happened since the last call.
     pub fn take_stats(&self) -> OutboxStats {
         std::mem::take(&mut self.lock().stats)
+    }
+
+    /// How many bytes of messages were queued since the last call (frames dropped
+    /// later count too: they are what the streams need).
+    pub fn take_queued(&self) -> usize {
+        std::mem::take(&mut self.lock().queued)
     }
 
     /// Streams that lost frames since the last call.

@@ -287,14 +287,16 @@ fn serve_client(
                         let held_back = waited * 2 >= now - last_look;
                         let bytes = std::mem::take(&mut sent);
                         (waited, last_look) = (Duration::ZERO, now);
-                        if let Some(rate) = sender.link_info().map(|i| i.delivery_rate)
-                            && let Some(pace) = pacer.sample(rate, held_back, bytes)
-                        {
+                        let queued = outbox.take_queued();
+                        let rate = sender.link_info().map_or(0, |i| i.delivery_rate);
+                        if let Some(pace) = pacer.sample(now, rate, held_back, bytes, queued) {
                             sender.set_pace(pace);
                             let mbit = |b: u64| b * 8 / 1_000_000;
                             let line = format!(
-                                "the link carries about {} Mbit/s: pacing at {}",
+                                "the link carries about {} Mbit/s, the streams need up to {}: \
+                                 pacing at {}",
                                 mbit(pacer.estimate().unwrap_or(0)),
+                                mbit(pacer.floor()),
                                 mbit(pace)
                             );
                             if pace.abs_diff(logged) > logged / 4 {

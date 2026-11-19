@@ -730,10 +730,13 @@ waiting, new non-key frames are refused the same way. Other streams are not affe
 
 The host also paces the connection (`SO_MAX_PACING_RATE`, `host/src/pacing.rs`): at
 about 90 % of what TCP measured the network delivering while the network held the
-host back (a keyframe going out, say), never under 20 Mbit/s, so a keyframe does not
+host back (a keyframe going out, say), so a keyframe does not
 land in the Wi-Fi access point's queue all at once with sound stuck behind it, where
 nothing can overtake it any more. It paces only once it measured such a stretch,
-and never over USB. Paced, it tries now and then whether the link carries more. It keeps little unsent data in the kernel
+and never over USB. Paced, it tries now and then whether the link carries more.
+Whatever the measure says, it never paces under half as much again as what was queued
+for the headset over the last 2 s (and never under 20 Mbit/s): a link slower than the
+video is for the bitrate to adapt to, not for pacing to starve. It keeps little unsent data in the kernel
 (`TCP_NOTSENT_LOWAT` 32 KiB) for the same reason.
 
 These values are implementation-defined; the rule a client can rely on is that
