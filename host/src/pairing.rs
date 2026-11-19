@@ -763,6 +763,51 @@ mod tests {
         assert!(l.wait().is_none());
     }
 
+    /// A headset the PC trusts still opens the session first: a session message before
+    /// `Open` ends the connection, and nothing starts.
+    #[test]
+    fn nothing_before_open() {
+        let mut pc = TestPc::new("early");
+        // The headset's key, made before it connects, so the PC can trust it.
+        let name = pc
+            .dir
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .replace("-p-", "-h-");
+        let key = Identity::load_or_create(&std::env::temp_dir().join(name).join("key"))
+            .unwrap()
+            .public;
+        pc.security.trusted.add(key, "test headset").unwrap();
+        let (refused, after) = connect(&mut pc, |mut r, mut w, _, _| {
+            ClientMsg::Hello {
+                version: PROTOCOL_VERSION,
+                min: prostir_proto::MIN_PROTOCOL,
+                app: "test".into(),
+            }
+            .write(&mut w)
+            .unwrap();
+            assert!(matches!(
+                HostMsg::read(&mut r).unwrap(),
+                HostMsg::Welcome { .. }
+            ));
+            ClientMsg::AddMonitor {
+                width: 1920,
+                height: 1080,
+            }
+            .write(&mut w)
+            .unwrap();
+            HostMsg::read(&mut r).map_err(|e| e.kind())
+        });
+        let err = refused.unwrap_err().to_string();
+        assert!(err.contains("before the session"), "{err}");
+        assert_eq!(
+            after,
+            Err(std::io::ErrorKind::UnexpectedEof),
+            "closed, no Opened"
+        );
+    }
+
     /// "Code on the PC": the headset asks first, the PC makes and shows its code, the
     /// user types it in the headset, and the headset is trusted afterwards.
     #[test]

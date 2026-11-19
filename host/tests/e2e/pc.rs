@@ -49,6 +49,14 @@ impl TestDir {
         keys
     }
 
+    /// Makes the PC forget every headset it paired with (the tray's "Forget paired
+    /// headsets").
+    pub fn forget_headsets(&self) {
+        TrustStore::load(&self.config().join("prostir/paired_headsets"))
+            .clear()
+            .unwrap();
+    }
+
     /// The monitor set the PC app starts with (its saved `monitors.txt`).
     pub fn save_monitors(&self, text: &str) {
         let path = self.config().join("prostir/monitors.txt");

@@ -138,6 +138,35 @@ fn a_headset_that_forgot_the_pc_pairs_again() {
         .unwrap();
 }
 
+/// A PC that forgot the headset (the headset still trusts it) asks it to pair when it
+/// opens the session: pairing then, and the session after it.
+#[test]
+fn a_pc_that_forgot_the_headset_pairs_again() {
+    let dir = TestDir::new("pc-forgot");
+    dir.save_monitors(TWO_MONITORS);
+    let mut keys = dir.pair();
+    dir.forget_headsets();
+    let pc = Pc::start(
+        &dir,
+        &Options {
+            typed_code: Some("141421".into()),
+            ..Options::default()
+        },
+    );
+    let refused = FakeHeadset::connect(pc.addr, &mut keys, None);
+    assert!(matches!(refused, Err(ConnectError::NotPaired)));
+    let mut headset = FakeHeadset::connect(pc.addr, &mut keys, Some(&mut || "141421".into()))
+        .unwrap_or_else(|e| panic!("pairing again: {e}"));
+    headset
+        .wait(START, "every monitor showing", View::all_monitors_show)
+        .unwrap();
+    headset.disconnect();
+    let mut again = connect(&pc, &mut keys);
+    again
+        .wait(START, "every monitor showing", View::all_monitors_show)
+        .unwrap();
+}
+
 /// A layout that lists one monitor many times is not a layout: the PC ends the session
 /// instead of taking it in (it once turned into an order longer than a message may
 /// hold, which stopped the PC from sending anything), and the headset connects again
