@@ -602,6 +602,19 @@ impl Scene {
         }
     }
 
+    /// Cinema mode with no view yet (started in cinema, or switched to a PC in it):
+    /// built once every monitor the PC has is here, so the chosen screen is among
+    /// them. A view that exists, moved by hand perhaps, is left alone.
+    fn build_cinema_view_if_due(&mut self) {
+        let due = self.settings.cinema
+            && !self.order.is_empty()
+            && self.order.iter().all(|id| self.monitors.contains_key(id))
+            && !self.order.iter().any(|id| self.placements.contains_key(id));
+        if due {
+            self.arrange_all();
+        }
+    }
+
     fn relayout_pending(&self) -> bool {
         self.relayout_until.is_some_and(|t| Instant::now() < t)
     }
@@ -1608,7 +1621,13 @@ fn run(app: &AndroidApp) -> Result<()> {
     let mut scene = Scene {
         monitors: HashMap::new(),
         order: Vec::new(),
-        placements: desk.load(),
+        // In cinema mode the view is built once the PC's monitors are here (see
+        // `build_cinema_view_if_due`); the desk layout stays on disk until cinema ends.
+        placements: if settings.cinema {
+            HashMap::new()
+        } else {
+            desk.load()
+        },
         primary: None,
         mirror_wanted: true,
         audio_wanted: true,
@@ -2902,6 +2921,7 @@ fn handle_net_event(
             if scene.relayout_pending() {
                 scene.arrange_all();
             }
+            scene.build_cinema_view_if_due();
         }
         NetEvent::HostError(text) => scene.show_error(text),
         NetEvent::StreamStart {
@@ -2951,6 +2971,7 @@ fn handle_net_event(
                             scene.arrange_all();
                         }
                     }
+                    scene.build_cinema_view_if_due();
                 }
                 Err(e) => error!("monitor {id}: {e:#}"),
             }
