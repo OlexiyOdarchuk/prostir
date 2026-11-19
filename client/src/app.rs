@@ -423,12 +423,14 @@ struct Scene {
     /// Where layouts are centred and which way they face (head position, yaw).
     center: (Vec3, f32),
     /// The circle around the head the arrangement stands on (it grows for many
-    /// monitors, see `layout::split`).
+    /// monitors, see `layout::preset_radius`).
     radius: f32,
-    /// The arrangement last sent to the PC.
-    sent_layout: Option<Vec<prostir_proto::LayoutRow>>,
-    /// A changed arrangement waiting to settle before it is sent.
-    pending_layout: Option<(Vec<prostir_proto::LayoutRow>, Instant)>,
+    /// The desktop last sent to the PC.
+    sent_layout: Option<layout::Desktop>,
+    /// A changed desktop waiting to settle before it is sent.
+    pending_layout: Option<(layout::Desktop, Instant)>,
+    /// The desktop for the arrangement now, kept while nothing moves.
+    desktop_memo: layout::DesktopMemo,
     /// Head position and gaze this frame.
     head: (Vec3, Vec3),
     /// The head's right, rolled and tilted with it (where the right ear is).
@@ -504,26 +506,28 @@ impl Scene {
             return;
         }
         // The laptop screen too: the PC puts it where it stands here. Monitors stay in
-        // the rows the PC has until clearly moved out of them.
-        let rows = layout::layout_rows(&self.seen(), self.primary, &self.sent_rows());
-        if rows.is_empty() || self.sent_layout.as_ref() == Some(&rows) {
+        // the rows the PC has until clearly moved out of them, and its desktop stays
+        // while it fits as well as a new one would.
+        let desktop = self.desktop();
+        if desktop.rows.is_empty() || self.sent_layout.as_ref() == Some(&desktop) {
             self.pending_layout = None;
             return;
         }
         // Only an arrangement that has held for a moment: monitors arriving one by one
         // or being laid out again pass through states KDE should not be shown.
         match &self.pending_layout {
-            Some((pending, since)) if *pending == rows => {
+            Some((pending, since)) if *pending == desktop => {
                 if since.elapsed() < Duration::from_millis(800) {
                     return;
                 }
             }
             _ => {
-                self.pending_layout = Some((rows, Instant::now()));
+                self.pending_layout = Some((desktop, Instant::now()));
                 return;
             }
         }
         self.pending_layout = None;
+        let rows = desktop.wire();
         info!(
             "KDE arrangement: {}",
             rows.iter()
@@ -540,7 +544,7 @@ impl Scene {
             .flat_map(prostir_proto::LayoutRow::ids)
             .filter(|id| *id != MIRROR_ID)
             .collect();
-        self.sent_layout = Some(rows.clone());
+        self.sent_layout = Some(desktop);
         self.send(ClientMsg::SetLayout { rows });
     }
 
@@ -552,12 +556,12 @@ impl Scene {
 
     /// Puts the laptop mirror back under the primary monitor, leaving the rest alone.
     fn place_mirror(&mut self) {
-        let all = self.around_user(layout::arrange_curved(
+        let all = self.around_user(layout::arrange(
             self.settings.preset,
             &self.quest_sizes(),
             self.primary,
             self.mirror_size(),
-            self.curve_radius(),
+            self.curve_factor(),
         ));
         if let Some(p) = all.get(&MIRROR_ID) {
             self.placements.insert(MIRROR_ID, *p);
@@ -646,19 +650,12 @@ impl Scene {
                 self.center,
                 self.settings.preset,
                 self.head.1,
+                &self.sent_rows(),
+                self.radius,
             );
-            match at {
-                Some(p) => {
-                    info!("monitor {} placed next to the others", m.0);
-                    self.placements.insert(m.0, p);
-                    placed = true;
-                }
-                // Nowhere to put it: laid out by the preset.
-                None => {
-                    self.arrange_all();
-                    return;
-                }
-            }
+            info!("monitor {} placed next to the others", m.0);
+            self.placements.insert(m.0, at);
+            placed = true;
         }
         if self.monitors.contains_key(&MIRROR_ID) && !self.placements.contains_key(&MIRROR_ID) {
             self.place_mirror();
@@ -801,12 +798,12 @@ impl Scene {
         }
         let mirror_place = self.placements.get(&MIRROR_ID).copied();
         self.radius = layout::preset_radius(self.settings.preset, &self.quest_sizes());
-        self.placements = self.around_user(layout::arrange_curved(
+        self.placements = self.around_user(layout::arrange(
             self.settings.preset,
             &self.quest_sizes(),
             self.primary,
             self.mirror_size(),
-            self.curve_radius(),
+            self.curve_factor(),
         ));
         // Keep the mirror's spot while the laptop lid is closed.
         if let (Some(p), false) = (mirror_place, self.placements.contains_key(&MIRROR_ID)) {
@@ -863,28 +860,29 @@ impl Scene {
         )
     }
 
-    /// The monitors on the map: as the PC lays its desktop out from the rows it gets
-    /// (see `layout::desktop_spots`).
+    /// The monitors on the map: the desktop the PC gets (see `layout::Desktop`).
     fn map_spots(&self) -> HashMap<u8, [f32; 4]> {
-        layout::desktop_spots(&self.seen(), self.primary, &self.sent_rows())
+        self.desktop().spots()
     }
 
     /// The rows last sent to the PC, by id: what its desktop is laid out by now.
     fn sent_rows(&self) -> Vec<Vec<u8>> {
         self.sent_layout
-            .iter()
-            .flatten()
-            .map(|r| r.ids().collect())
-            .collect()
+            .as_ref()
+            .map(|d| d.rows.clone())
+            .unwrap_or_default()
     }
 
-    /// The monitors and the laptop screen as seen from where the arrangement faces.
-    fn seen(&self) -> Vec<layout::Seen> {
-        layout::seen(
+    /// The PC desktop for the monitors and the laptop screen as they stand now, seen
+    /// from where the arrangement faces.
+    fn desktop(&self) -> layout::Desktop {
+        self.desktop_memo.get(
             &self.placements,
             &self.layout_sizes(),
             self.center,
             self.settings.preset,
+            self.primary,
+            self.sent_layout.as_ref(),
         )
     }
 
@@ -1143,53 +1141,43 @@ impl Scene {
     }
 
     /// The A button: lines up what the user arranged by hand, row by row (see
-    /// `layout::tidy`), instead of replacing it with the preset. Cinema and lying down
-    /// (monitors over the head) still rebuild their own arrangement.
+    /// `layout::line_up`), instead of replacing it with the preset: every row keeps its
+    /// place and the way it stands, tilted back or overhead too. Cinema rebuilds its
+    /// own view.
     fn tidy_up(&mut self) {
-        if self.settings.cinema
-            || self.settings.preset == crate::settings::Preset::Overhead
-            || self.placements.is_empty()
-        {
+        if self.settings.cinema || self.placements.is_empty() {
             self.arrange_all();
             return;
         }
-        let wall = self.settings.preset == crate::settings::Preset::Wall;
-        let mut tidy = if wall {
-            // On a wall everything goes into one plane, the laptop screen under the
-            // primary monitor as before.
-            let mut t = layout::tidy_wall(&self.placements, &self.quest_sizes(), self.center);
-            let mirror = self.placements.get(&MIRROR_ID).copied();
-            if let (Some(m), Some(p)) = (mirror, self.primary.and_then(|id| t.get(&id).copied())) {
-                let primary = self.primary.unwrap_or_default();
-                let under =
-                    layout::under(&p, self.height_of(primary), &m, self.height_of(MIRROR_ID));
-                t.insert(MIRROR_ID, under);
-            }
-            t
-        } else {
-            // Every row on its own, side by side on its circle; rows do not merge.
-            layout::tidy(
-                &self.placements,
-                &self.layout_sizes(),
-                self.center,
-                self.primary,
-            )
-        };
+        let lid = self
+            .placements
+            .contains_key(&MIRROR_ID)
+            .then_some(MIRROR_ID);
+        let lined = layout::line_up(
+            &self.placements,
+            &self.layout_sizes(),
+            self.center,
+            self.settings.preset,
+            self.primary,
+            &self.sent_rows(),
+            lid,
+        );
         // Window panels (and anything not laid out) stay as they are.
-        for (id, p) in &self.placements {
-            tidy.entry(*id).or_insert(*p);
-        }
-        self.placements = tidy;
+        self.placements.extend(lined);
         self.grabs = [None, None];
         self.save_layout();
         self.send_layout();
     }
 
+    /// The cylinder curved monitors are drawn on, times the arrangement's radius.
+    fn curve_factor(&self) -> Option<f32> {
+        self.curve_supported
+            .then(|| self.settings.curve.radius_factor())
+            .flatten()
+    }
+
     fn curve_radius(&self) -> Option<f32> {
-        if !self.curve_supported {
-            return None;
-        }
-        self.settings.curve.radius_factor().map(|f| f * self.radius)
+        self.curve_factor().map(|f| f * self.radius)
     }
 
     fn height_of(&self, id: u8) -> f32 {
@@ -1838,6 +1826,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         radius: layout::RADIUS,
         sent_layout: None,
         pending_layout: None,
+        desktop_memo: layout::DesktopMemo::default(),
         head: (Vec3::ZERO, -Vec3::Z),
         head_right: Vec3::X,
         view_eye: None,

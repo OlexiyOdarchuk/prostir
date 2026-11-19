@@ -1,87 +1,25 @@
 //! Where monitors float in the room, how controllers move them, and persistence.
+//!
+//! How the monitors are arranged (the presets, a new monitor, "Line up"), the rows they
+//! make and the PC desktop made of those is `prostir_layout`, the code the PC runs too;
+//! here the headset's state goes in and out of it.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use glam::{Quat, Vec2, Vec3};
-use prostir_proto::is_window_panel;
+use prostir_layout::circle::{self, Limits};
+use prostir_layout::desk::{self, Spot};
+use prostir_layout::space::{Frame, Monitor};
+use prostir_layout::view::Room;
+use prostir_layout::{place, rows, tidy};
+use prostir_proto::{LayoutEntry, LayoutRow, is_window_panel};
 
 use crate::settings::Preset;
 
-mod arc;
-mod rows;
-pub use arc::{MAX_ARC, MAX_RADIUS, Rows, angular_width, arc_radius, split, wall_width};
-pub use rows::{Seen, desktop_spots, layout_rows, place_new, rows_of, seen, tidy};
-
-/// Monitor size in metres per stream pixel: every monitor gets the same pixel
-/// density, so neighbours line up like one big screen (2560 px ≈ 1.25 m).
-pub const METRES_PER_PIXEL: f32 = 1.25 / 2560.0;
-/// Distance from the head to the monitors' edges, nearest (see [`arc`]).
-pub const RADIUS: f32 = 1.1;
-/// The main row sits a little below eye height.
-const EYE_DROP: f32 = 0.08;
-/// How far up the "overhead" layout is tilted, for lying down.
-pub const OVERHEAD_PITCH: f32 = 0.95;
-/// The laptop mirror is shown at most this wide.
-const MIRROR_MAX_WIDTH: f32 = 1.0;
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Placement {
-    pub position: Vec3,
-    pub rotation: Quat,
-    /// Width in metres; height follows the stream's aspect ratio.
-    pub width: f32,
-}
-
-/// Rotation that makes a quad (front face along +Z) look at `target`, without roll.
-pub fn facing(position: Vec3, target: Vec3) -> Quat {
-    let dir = (target - position).normalize_or(Vec3::Z);
-    let yaw = dir.x.atan2(dir.z);
-    let pitch = dir.y.clamp(-1.0, 1.0).asin();
-    Quat::from_rotation_y(yaw) * Quat::from_rotation_x(-pitch)
-}
-
-/// An upright monitor on the cylinder of `radius` around the head, its edges on the
-/// cylinder, centred at `yaw` (0 = straight ahead, positive = right) and height `y`.
-fn on_cylinder(yaw: f32, y: f32, width: f32, radius: f32) -> Placement {
-    let half = angular_width(width, radius) / 2.0;
-    let r = radius * half.cos();
-    let position = Vec3::new(r * yaw.sin(), y, -r * yaw.cos());
-    Placement {
-        position,
-        rotation: facing(position, Vec3::new(0.0, y, 0.0)),
-        width,
-    }
-}
-
-/// `(id, width_m, centre height)` side by side without gaps on the cylinder of
-/// `radius`, centred straight ahead.
-fn row(items: &[(u8, f32, f32)], radius: f32, out: &mut HashMap<u8, Placement>) {
-    let total: f32 = items.iter().map(|m| angular_width(m.1, radius)).sum();
-    let mut yaw = -total / 2.0;
-    for &(id, w, y) in items {
-        let a = angular_width(w, radius);
-        out.insert(id, on_cylinder(yaw + a / 2.0, y, w, radius));
-        yaw += a;
-    }
-}
-
-fn yaw_of(p: &Placement) -> f32 {
-    p.position.x.atan2(-p.position.z)
-}
-
-/// Places every monitor for a preset. `monitors` and `mirror` hold
-/// `(id, width_px, height_px)`; Quest monitors go left to right in the given order (as in KDE),
-/// and the laptop mirror goes under the primary monitor.
-/// Left-to-right order of monitors as they stand around the user (by direction).
-pub fn order_by_direction(placements: &HashMap<u8, Placement>, ids: &[u8]) -> Vec<u8> {
-    let mut v: Vec<(f32, u8)> = ids
-        .iter()
-        .filter_map(|id| placements.get(id).map(|p| (yaw_of(p), *id)))
-        .collect();
-    v.sort_by(|a, b| a.0.total_cmp(&b.0));
-    v.into_iter().map(|(_, id)| id).collect()
-}
+pub use prostir_layout::circle::{OVERHEAD_PITCH, RADIUS};
+pub use prostir_layout::space::{METRES_PER_PIXEL, Placement, facing};
 
 /// Lines `value` (half size `half`) up with a neighbour at `other` (half size
 /// `other_half`) only when it is all but lined up already: centres, or first or last
@@ -374,91 +312,6 @@ pub fn stick_on_wall(
     })
 }
 
-/// The A button on a wall: everything into one plane (at the monitors' average
-/// depth), facing the same way; rows side by side, centred where they were, stacked to
-/// touch.
-pub fn tidy_wall(
-    placements: &HashMap<u8, Placement>,
-    monitors: &[(u8, u32, u32)],
-    center: (Vec3, f32),
-) -> HashMap<u8, Placement> {
-    let unturn = Quat::from_rotation_y(-center.1);
-    let turn = Quat::from_rotation_y(center.1);
-    // (id, local position, width, height)
-    let items: Vec<(u8, Vec3, f32, f32)> = monitors
-        .iter()
-        .filter_map(|&(id, w, h)| {
-            let p = placements.get(&id)?;
-            let local = unturn * (p.position - center.0);
-            Some((id, local, p.width, p.width * h as f32 / w.max(1) as f32))
-        })
-        .collect();
-    if items.is_empty() {
-        return HashMap::new();
-    }
-    let depth = items.iter().map(|m| m.1.z).sum::<f32>() / items.len() as f32;
-    // The rows as seen (see `rows_of`), top to bottom.
-    let rows: Vec<Vec<(u8, Vec3, f32, f32)>> =
-        rows_of(&seen(placements, monitors, center, Preset::Wall))
-            .iter()
-            .map(|r| {
-                r.iter()
-                    .filter_map(|m| items.iter().find(|it| it.0 == m.id).copied())
-                    .collect()
-            })
-            .collect();
-    let mut ys: Vec<(f32, f32)> = rows
-        .iter()
-        .map(|r| {
-            let y = r.iter().map(|m| m.1.y).sum::<f32>() / r.len() as f32;
-            (y, r.iter().map(|m| m.3).fold(0.0, f32::max))
-        })
-        .collect();
-    for i in 1..ys.len() {
-        let above_bottom = ys[i - 1].0 - ys[i - 1].1 / 2.0;
-        if above_bottom - (ys[i].0 + ys[i].1 / 2.0) < 0.15 * ys[i].1 {
-            ys[i].0 = above_bottom - ys[i].1 / 2.0;
-        }
-    }
-    let mut out = HashMap::new();
-    for (mut row, (y, _)) in rows.into_iter().zip(ys) {
-        row.sort_by(|a, b| a.1.x.total_cmp(&b.1.x));
-        let left = row[0].1.x - row[0].2 / 2.0;
-        let last = &row[row.len() - 1];
-        let mid = (left + last.1.x + last.2 / 2.0) / 2.0;
-        let total: f32 = row.iter().map(|m| m.2).sum();
-        let mut x = mid - total / 2.0;
-        for (id, _, w, _) in row {
-            let local = Vec3::new(x + w / 2.0, y, depth);
-            out.insert(
-                id,
-                Placement {
-                    position: center.0 + turn * local,
-                    rotation: turn,
-                    width: w,
-                },
-            );
-            x += w;
-        }
-    }
-    out
-}
-
-/// Puts the laptop mirror right under `primary`, on its plane, keeping its own width.
-pub fn under(
-    primary: &Placement,
-    primary_height: f32,
-    mirror: &Placement,
-    mirror_height: f32,
-) -> Placement {
-    let down = primary.rotation * Vec3::Y;
-    Placement {
-        position: primary.position - down * (primary_height / 2.0 + mirror_height / 2.0),
-        rotation: primary.rotation,
-        width: mirror.width,
-    }
-}
-
 /// The monitor shown in cinema mode: the one at position `pick` in the row, else the
 /// largest landscape one (films are wide), else the first.
 pub fn cinema_choice(monitors: &[(u8, u32, u32)], pick: Option<u8>) -> Option<u8> {
@@ -495,174 +348,274 @@ pub fn cinema(monitors: &[(u8, u32, u32)], pick: Option<u8>) -> HashMap<u8, Plac
     out
 }
 
-/// How far from the head `preset` puts `monitors` (see [`arc`]).
-pub fn preset_radius(preset: Preset, monitors: &[(u8, u32, u32)]) -> f32 {
-    let widths: Vec<f32> = monitors
+/// The layout's name for `preset`.
+fn shape(preset: Preset) -> circle::Preset {
+    match preset {
+        Preset::Arc => circle::Preset::Arc,
+        Preset::Wall => circle::Preset::Wall,
+        Preset::Overhead => circle::Preset::Overhead,
+    }
+}
+
+/// `(id, width, height)` as the layout takes them.
+fn pixel_sizes(monitors: &[(u8, u32, u32)]) -> Vec<(u8, prostir_layout::space::PixelSize)> {
+    monitors
         .iter()
-        .map(|m| m.1 as f32 * METRES_PER_PIXEL)
-        .collect();
-    split(preset, &widths, None).radius
+        .map(|&(id, w, h)| (id, prostir_layout::space::PixelSize::new(w, h)))
+        .collect()
 }
 
+/// How far from the head `preset` puts `monitors` (a wall's distance): the circle
+/// grows when they do not fit around the user (see `prostir_layout::circle`).
+pub fn preset_radius(preset: Preset, monitors: &[(u8, u32, u32)]) -> f32 {
+    circle::radius_of(shape(preset), &pixel_sizes(monitors), &Limits::default())
+}
+
+/// Places every monitor for a preset, around the origin facing -Z (see
+/// `prostir_layout::circle`). `monitors` and `mirror` hold `(id, width_px,
+/// height_px)`; the monitors go left to right in the given order (as on the desktop),
+/// in one row while it fits around the user, else in rows; the laptop mirror goes under
+/// the primary monitor. `curve`: the monitors are drawn curved, on a cylinder this many
+/// times the arrangement's radius (`None`: flat); the mirror then continues the
+/// cylinder of the monitor above it.
 pub fn arrange(
-    preset: Preset,
-    monitors: &[(u8, u32, u32)],
-    primary: Option<u8>,
-    mirror: Option<(u8, u32, u32)>,
-) -> HashMap<u8, Placement> {
-    arrange_curved(preset, monitors, primary, mirror, None)
-}
-
-/// [`arrange`] for monitors drawn curved with cylinder radius `curve` (metres): the
-/// laptop mirror then continues the cylinder of the monitor above it.
-pub fn arrange_curved(
     preset: Preset,
     monitors: &[(u8, u32, u32)],
     primary: Option<u8>,
     mirror: Option<(u8, u32, u32)>,
     curve: Option<f32>,
 ) -> HashMap<u8, Placement> {
-    let sorted: Vec<(u8, f32, f32)> = monitors
-        .iter()
-        .map(|&(id, w, h)| (id, w as f32 * METRES_PER_PIXEL, h as f32 * METRES_PER_PIXEL))
-        .collect();
-    let height_of = |id: u8| sorted.iter().find(|m| m.0 == id).map_or(0.0, |m| m.2);
-
-    let mut out = HashMap::new();
-    let widths: Vec<f32> = sorted.iter().map(|m| m.1).collect();
-    let rows = split(
-        preset,
-        &widths,
-        sorted.iter().position(|m| Some(m.0) == primary),
-    );
-    let radius = rows.radius;
-    // The main row at eye level, its middles lined up; the others above it in order,
-    // bottoms lined up on the top of the tallest monitor under them.
-    let main_y = if preset == Preset::Overhead {
-        0.0
-    } else {
-        -EYE_DROP
-    };
-    let tallest =
-        |r: &std::ops::Range<usize>| sorted[r.clone()].iter().map(|m| m.2).fold(0.0, f32::max);
-    let mut levels: Vec<(std::ops::Range<usize>, Option<f32>)> = Vec::new();
-    let mut line = main_y + tallest(&rows.groups[rows.main]) / 2.0;
-    levels.push((rows.groups[rows.main].clone(), None));
-    for (i, g) in rows.groups.iter().enumerate().rev() {
-        if i != rows.main {
-            levels.push((g.clone(), Some(line)));
-            line += tallest(g);
-        }
-    }
-    for (group, bottom) in levels {
-        let items: Vec<(u8, f32, f32)> = sorted[group]
-            .iter()
-            .map(|&(id, w, h)| (id, w, bottom.map_or(main_y, |b| b + h / 2.0)))
-            .collect();
-        match preset {
-            Preset::Arc | Preset::Overhead => row(&items, radius, &mut out),
-            Preset::Wall => {
-                // Side by side in one plane straight ahead, all facing the same way.
-                let total: f32 = items.iter().map(|m| m.1).sum();
-                let mut x = -total / 2.0;
-                for &(id, w, y) in &items {
-                    out.insert(
-                        id,
-                        Placement {
-                            position: Vec3::new(x + w / 2.0, y, -radius),
-                            rotation: Quat::IDENTITY,
-                            width: w,
-                        },
-                    );
-                    x += w;
-                }
-            }
-        }
-    }
-
-    if let Some((id, w, h)) = mirror {
-        let (mut w, mut h) = (w as f32 * METRES_PER_PIXEL, h as f32 * METRES_PER_PIXEL);
-        if w > MIRROR_MAX_WIDTH {
-            h *= MIRROR_MAX_WIDTH / w;
-            w = MIRROR_MAX_WIDTH;
-        }
-        let anchor = primary
-            .and_then(|p| out.get(&p).map(|pl| (*pl, height_of(p))))
-            .or_else(|| {
-                let mid = sorted.get(sorted.len().saturating_sub(1) / 2)?;
-                Some((*out.get(&mid.0)?, mid.2))
-            });
-        let yaw = anchor.map_or(0.0, |(p, _)| yaw_of(&p));
-        // Below every monitor it could cover: those whose arc overlaps its own.
-        let reach = angular_width(w, radius) / 2.0;
-        let bottom = sorted
-            .iter()
-            .filter_map(|m| {
-                let p = out.get(&m.0)?;
-                let overlaps = (yaw_of(p) - yaw).abs() < reach + angular_width(m.1, radius) / 2.0;
-                overlaps.then_some(p.position.y - m.2 / 2.0)
-            })
-            .fold(f32::INFINITY, f32::min);
-        let bottom = if bottom.is_finite() {
-            bottom
-        } else {
-            -EYE_DROP
-        };
-        // Curved: a tilted cylinder cannot meet the curved edge above along its whole
-        // width, so the mirror continues the same cylinder downwards, like the lower
-        // part of one tall curved screen.
-        if let (Some(radius), Some((above, _))) = (curve, anchor) {
-            let normal = above.rotation * Vec3::Z;
-            let half_above = (above.width / 2.0).min(radius * 0.999);
-            let axis = above.position + normal * (radius * radius - half_above * half_above).sqrt();
-            let half = (w / 2.0).min(radius * 0.999);
-            let mut position = axis - normal * (radius * radius - half * half).sqrt();
-            position.y = bottom - h / 2.0;
-            out.insert(
-                id,
-                Placement {
-                    position,
-                    rotation: above.rotation,
-                    width: w,
-                },
-            );
-            return finish(preset, out);
-        }
-        // Flat: hinged at its top edge to the bottom edge of the monitor above (no seam)
-        // and tilted back towards the eyes like a laptop lid, since it sits below them.
-        let top = match anchor {
-            Some((p, _)) => Vec3::new(p.position.x, bottom, p.position.z),
-            None => on_cylinder(yaw, bottom, w, radius).position,
-        };
-        let mut position = top - Vec3::Y * h / 2.0;
-        let mut rotation = facing(position, Vec3::ZERO);
-        for _ in 0..4 {
-            position = top + rotation * Vec3::new(0.0, -h / 2.0, 0.0);
-            rotation = facing(position, Vec3::ZERO);
-        }
-        out.insert(
-            id,
-            Placement {
-                position,
-                rotation,
-                width: w,
-            },
-        );
-    }
-
-    finish(preset, out)
+    circle::arrange(
+        shape(preset),
+        &pixel_sizes(monitors),
+        primary,
+        mirror.map(|m| pixel_sizes(&[m])[0]),
+        curve,
+        &Limits::default(),
+    )
+    .into_iter()
+    .collect()
 }
 
-/// Tilts everything up for the overhead preset.
-fn finish(preset: Preset, mut out: HashMap<u8, Placement>) -> HashMap<u8, Placement> {
+/// Where the arrangement is seen from and how it is turned: from `center` (eye, yaw);
+/// lying down, along the band tilted up overhead (seen from below, left and right would
+/// make no sense).
+pub fn frame(center: (Vec3, f32), preset: Preset) -> Frame {
     if preset == Preset::Overhead {
-        let tilt = Quat::from_rotation_x(OVERHEAD_PITCH);
-        for p in out.values_mut() {
-            p.position = tilt * p.position;
-            p.rotation = tilt * p.rotation;
-        }
+        Frame::tilted(center.0, center.1, OVERHEAD_PITCH)
+    } else {
+        Frame::upright(center.0, center.1)
     }
-    out
+}
+
+/// Every one of `monitors` (id, pixel size) that has a placement.
+fn placed(placements: &HashMap<u8, Placement>, monitors: &[(u8, u32, u32)]) -> Vec<Monitor<u8>> {
+    pixel_sizes(monitors)
+        .into_iter()
+        .filter_map(|(id, px)| {
+            Some(Monitor {
+                id,
+                px,
+                placement: *placements.get(&id)?,
+            })
+        })
+        .collect()
+}
+
+/// The rows of `monitors` as seen from `frame`, top to bottom and each left to right:
+/// monitors side by side as the eye sees them. Two neighbours in `previous` (the rows
+/// the PC has) stay neighbours until one is clearly moved away, so a hand's tremor
+/// never moves a monitor from one row to another (see `prostir_layout::rows`).
+fn rows_seen(room: &Room<u8>, monitors: &[Monitor<u8>], previous: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    let ids: Vec<u8> = monitors.iter().map(|m| m.id).collect();
+    rows::rows_of(&ids, room, Some(previous))
+}
+
+/// What the PC lays its desktop out by: the rows the monitors are seen in, and the
+/// desktop made of them, in the pixels of the streams. The PC makes the same desktop of
+/// it, to the pixel, and the map in the menu shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Desktop {
+    /// Top to bottom, each left to right.
+    pub rows: Vec<Vec<u8>>,
+    pub plan: Vec<Spot<u8>>,
+}
+
+impl Desktop {
+    /// The desktop for `monitors` as they stand in `placements`, seen from `center`,
+    /// the `primary` monitor's row first. `sent`: the desktop the PC has. Its rows keep
+    /// their monitors until one is clearly moved out, and while the rows stay its plan
+    /// does as long as it fits what is seen as well, give or take a hand's tremor (see
+    /// `prostir_layout::desk::settled`): a nudge changes nothing on the PC.
+    pub fn of(
+        placements: &HashMap<u8, Placement>,
+        monitors: &[(u8, u32, u32)],
+        center: (Vec3, f32),
+        preset: Preset,
+        primary: Option<u8>,
+        sent: Option<&Desktop>,
+    ) -> Self {
+        let all = placed(placements, monitors);
+        let room = Room::new(&frame(center, preset), &all);
+        let rows = rows_seen(&room, &all, sent.map_or(&[], |d| &d.rows));
+        let size = |id: u8| {
+            let m = all.iter().find(|m| m.id == id)?;
+            Some(desk::Size {
+                w: i32::try_from(m.px.w).ok()?,
+                h: i32::try_from(m.px.h).ok()?,
+            })
+        };
+        let wanted = desk::Desk {
+            rows: rows.clone(),
+            main: primary,
+            ..desk::Desk::default()
+        };
+        let fresh = desk::plan(&wanted, size, &room);
+        let plan = match sent {
+            Some(s) if s.rows == rows => desk::settled(&s.plan, &fresh, &room),
+            _ => fresh,
+        };
+        Self { rows, plan }
+    }
+
+    /// As `SetLayout` carries it: the rows, and where each monitor's spot is centred
+    /// (see `PROTOCOL.md`, "Layout").
+    pub fn wire(&self) -> Vec<LayoutRow> {
+        self.rows
+            .iter()
+            .map(|row| LayoutRow {
+                entries: row
+                    .iter()
+                    .map(|&id| {
+                        let at = self.plan.iter().find(|s| s.id == id).map(Spot::wire);
+                        LayoutEntry {
+                            id,
+                            center: at.map(|a| a.0),
+                            middle: at.map(|a| a.1),
+                        }
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+
+    /// The monitors for the map in the menu: centre and half size in pixels, up
+    /// positive.
+    pub fn spots(&self) -> HashMap<u8, [f32; 4]> {
+        self.plan
+            .iter()
+            .map(|s| {
+                let (w, h) = (s.w as f32, s.h as f32);
+                let (x, y) = (s.x as f32 + w / 2.0, s.y as f32 + h / 2.0);
+                (s.id, [x, -y, w / 2.0, h / 2.0])
+            })
+            .collect()
+    }
+}
+
+/// What a [`Desktop`] is made of.
+#[derive(Debug, Clone, PartialEq)]
+struct DesktopInputs {
+    placed: Vec<(u8, Placement, u32, u32)>,
+    center: (Vec3, f32),
+    preset: Preset,
+    primary: Option<u8>,
+    sent: Option<Desktop>,
+}
+
+/// [`Desktop::of`], made again only when what it is made of changes: the headset asks
+/// for it every frame, and planning takes about a millisecond for six monitors.
+#[derive(Debug, Default)]
+pub struct DesktopMemo(RefCell<Option<(DesktopInputs, Desktop)>>);
+
+impl DesktopMemo {
+    /// [`Desktop::of`] these.
+    pub fn get(
+        &self,
+        placements: &HashMap<u8, Placement>,
+        monitors: &[(u8, u32, u32)],
+        center: (Vec3, f32),
+        preset: Preset,
+        primary: Option<u8>,
+        sent: Option<&Desktop>,
+    ) -> Desktop {
+        let inputs = DesktopInputs {
+            placed: monitors
+                .iter()
+                .filter_map(|&(id, w, h)| Some((id, *placements.get(&id)?, w, h)))
+                .collect(),
+            center,
+            preset,
+            primary,
+            sent: sent.cloned(),
+        };
+        if let Some((known, desktop)) = &*self.0.borrow()
+            && *known == inputs
+        {
+            return desktop.clone();
+        }
+        let desktop = Desktop::of(placements, monitors, center, preset, primary, sent);
+        *self.0.borrow_mut() = Some((inputs, desktop.clone()));
+        desktop
+    }
+}
+
+/// "Line up" (the A button): the crookedness taken out of every row (a monitor turned
+/// or hanging crooked, gaps, steps) and nothing more. How each row stands (tilted back,
+/// overhead, turned) and where, the rows themselves and the gaps between them stay (see
+/// `prostir_layout::tidy`). `previous`: the rows the PC has. `lid`: the laptop screen,
+/// which is not lined up and moves only down out of the way of a monitor lined up over
+/// it.
+pub fn line_up(
+    placements: &HashMap<u8, Placement>,
+    monitors: &[(u8, u32, u32)],
+    center: (Vec3, f32),
+    preset: Preset,
+    primary: Option<u8>,
+    previous: &[Vec<u8>],
+    lid: Option<u8>,
+) -> HashMap<u8, Placement> {
+    let all = placed(placements, monitors);
+    let frame = frame(center, preset);
+    let rows = rows_seen(&Room::new(&frame, &all), &all, previous);
+    tidy::line_up(&all, &frame, primary, Some(&rows), lid)
+        .into_iter()
+        .collect()
+}
+
+/// Where a new monitor `new` (id, pixel size) goes next to the placed ones of
+/// `monitors`, which do not move: at the end of a row, or over the top row or under
+/// the bottom one, nearest the gaze (a direction in the room), covering nothing (see
+/// `prostir_layout::place`). The first one goes straight ahead on a circle of
+/// `radius`. `previous`: the rows the PC has.
+#[allow(clippy::too_many_arguments)]
+pub fn place_new(
+    placements: &HashMap<u8, Placement>,
+    monitors: &[(u8, u32, u32)],
+    new: (u8, u32, u32),
+    center: (Vec3, f32),
+    preset: Preset,
+    gaze: Vec3,
+    previous: &[Vec<u8>],
+    radius: f32,
+) -> Placement {
+    let all: Vec<Monitor<u8>> = placed(placements, monitors)
+        .into_iter()
+        .filter(|m| m.id != new.0)
+        .collect();
+    let frame = frame(center, preset);
+    let rows = rows_seen(&Room::new(&frame, &all), &all, previous);
+    place::place_new(
+        &all,
+        &frame,
+        gaze,
+        pixel_sizes(&[new])[0].1,
+        Some(&rows),
+        &Limits {
+            radius,
+            ..Limits::default()
+        },
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1125,6 +1078,7 @@ mod tests {
             &[(0, 2560, 1440), (1, 2560, 1440), (2, 1920, 1080)],
             Some(1),
             None,
+            None,
         );
         for p in l.values() {
             let normal = p.rotation * Vec3::Z;
@@ -1148,7 +1102,7 @@ mod tests {
     /// Where each monitor is seen from the head: yaw span and height span.
     fn seen_spans(p: &Placement, h: f32) -> ((f32, f32), (f32, f32)) {
         let flat = Vec2::new(p.position.x, p.position.z).length();
-        let yaw = yaw_of(p);
+        let yaw = p.position.x.atan2(-p.position.z);
         let half = (p.width / 2.0 / flat.max(0.1)).atan();
         (
             (yaw - half, yaw + half),
@@ -1181,7 +1135,7 @@ mod tests {
                 })
                 .collect();
             let primary = Some(((seed >> 7) as usize % n) as u8);
-            let l = arrange(Preset::Arc, &mons, primary, None);
+            let l = arrange(Preset::Arc, &mons, primary, None, None);
             let spans: Vec<_> = mons
                 .iter()
                 .map(|&(id, w, h)| {
@@ -1201,16 +1155,17 @@ mod tests {
                     );
                 }
             }
+            // The circle they stand on is the preset's radius.
             let radius = preset_radius(Preset::Arc, &mons);
-            let rows = split(
-                Preset::Arc,
-                &mons
-                    .iter()
-                    .map(|m| m.1 as f32 * METRES_PER_PIXEL)
-                    .collect::<Vec<_>>(),
-                None,
-            );
-            assert_eq!(radius, rows.radius);
+            for (&(_, w, _), p) in mons.iter().map(|m| (m, l[&m.0])) {
+                let half = w as f32 * METRES_PER_PIXEL / 2.0;
+                let edge =
+                    (Vec2::new(p.position.x, p.position.z).length().powi(2) + half * half).sqrt();
+                assert!(
+                    (edge - radius).abs() < 1e-3,
+                    "case {case}: {edge} vs {radius}"
+                );
+            }
         }
     }
 
@@ -1221,11 +1176,12 @@ mod tests {
             &[(0, 2560, 1440), (1, 2560, 1440), (2, 2560, 1440)],
             Some(1),
             Some((100, 2880, 1800)),
+            None,
         );
         let (m, p) = (l[&100], l[&1]);
         assert!(m.position.y < p.position.y - 0.5);
         assert!((m.position.x - p.position.x).abs() < 1e-3);
-        assert!(m.width <= MIRROR_MAX_WIDTH + 1e-6);
+        assert!(m.width <= circle::MIRROR_MAX_WIDTH + 1e-6);
         // Leans back to face the eyes.
         assert!((m.rotation * Vec3::Z).y > 0.2);
     }
@@ -1239,7 +1195,7 @@ mod tests {
             (3, 3440, 1440),
         ];
         for preset in [Preset::Arc, Preset::Wall, Preset::Overhead] {
-            let l = arrange(preset, &mons, Some(0), Some((100, 2880, 1800)));
+            let l = arrange(preset, &mons, Some(0), Some((100, 2880, 1800)), None);
             assert_eq!(l.len(), 5, "{preset:?}");
             assert!(
                 l.values()
@@ -1250,7 +1206,13 @@ mod tests {
 
     #[test]
     fn strong_curve_on_arc_is_centred_on_the_head() {
-        let l = arrange(Preset::Arc, &[(0, 2560, 1440), (1, 2560, 1440)], None, None);
+        let l = arrange(
+            Preset::Arc,
+            &[(0, 2560, 1440), (1, 2560, 1440)],
+            None,
+            None,
+            None,
+        );
         for p in l.values() {
             let c = Cylinder::new(p, RADIUS);
             assert!(
@@ -1305,10 +1267,10 @@ mod tests {
             &[(0, 2560, 1440), (2, 1440, 2560), (1, 2560, 1440)],
             Some(2),
             None,
+            None,
         );
         assert!(l[&0].position.x < l[&2].position.x && l[&2].position.x < l[&1].position.x);
         assert!(l[&2].position.x.abs() < 1e-3, "portrait is straight ahead");
-        assert_eq!(order_by_direction(&l, &[1, 0, 2]), vec![0, 2, 1]);
     }
 
     #[test]
@@ -1368,12 +1330,15 @@ mod tests {
                 &monitors,
                 Some(primary),
                 Some((100, 2880, 1800)),
+                None,
             );
             let above = out[&primary];
             let h_above =
                 monitors.iter().find(|m| m.0 == primary).unwrap().2 as f32 * METRES_PER_PIXEL;
             let mirror = out[&100];
-            let h = 1800.0 * METRES_PER_PIXEL * (MIRROR_MAX_WIDTH / (2880.0 * METRES_PER_PIXEL));
+            let h = 1800.0
+                * METRES_PER_PIXEL
+                * (circle::MIRROR_MAX_WIDTH / (2880.0 * METRES_PER_PIXEL));
             let top_edge = mirror.position + mirror.rotation * Vec3::new(0.0, h / 2.0, 0.0);
             let bottom_edge = above.position - Vec3::Y * h_above / 2.0;
             // The portrait one in the middle hangs lowest; under it there is no gap.
@@ -1396,12 +1361,12 @@ mod tests {
     fn curved_mirror_continues_the_cylinder() {
         let monitors = [(0, 2560, 1440), (1, 2560, 1440), (2, 2560, 1440)];
         let radius = RADIUS;
-        let out = arrange_curved(
+        let out = arrange(
             Preset::Arc,
             &monitors,
             Some(1),
             Some((100, 2880, 1800)),
-            Some(radius),
+            Some(1.0),
         );
         let (above, mirror) = (out[&1], out[&100]);
         let a = Cylinder::new(&above, radius);
@@ -1409,24 +1374,28 @@ mod tests {
         // Same axis (horizontally) and same radius: the edges meet along the whole width.
         assert!(Vec2::new(a.center.x - m.center.x, a.center.z - m.center.z).length() < 1e-3);
         let h_above = 1440.0 * METRES_PER_PIXEL;
-        let h = 1800.0 * METRES_PER_PIXEL * (MIRROR_MAX_WIDTH / (2880.0 * METRES_PER_PIXEL));
+        let h =
+            1800.0 * METRES_PER_PIXEL * (circle::MIRROR_MAX_WIDTH / (2880.0 * METRES_PER_PIXEL));
         assert!(((above.position.y - h_above / 2.0) - (mirror.position.y + h / 2.0)).abs() < 1e-3);
+    }
+
+    /// The desktop for `placements` as the PC gets it, seen from straight ahead.
+    fn desktop_of(
+        placements: &HashMap<u8, Placement>,
+        m: &[(u8, u32, u32)],
+        preset: Preset,
+        primary: Option<u8>,
+    ) -> Desktop {
+        Desktop::of(placements, m, (Vec3::ZERO, 0.0), preset, primary, None)
     }
 
     #[test]
     fn rows_follow_what_the_user_sees() {
-        let center = (Vec3::ZERO, 0.0);
-        let rows_ids = |p: &HashMap<u8, Placement>, m: &[(u8, u32, u32)]| {
-            layout_rows(&seen(p, m, center, Preset::Arc), None, &[])
-                .iter()
-                .map(|r| r.ids().collect::<Vec<_>>())
-                .collect::<Vec<_>>()
-        };
         // An arc: one row, left to right.
         let three = [(0, 2560, 1440), (1, 1440, 2560), (2, 2560, 1440)];
-        let arc = arrange(Preset::Arc, &three, Some(1), None);
+        let arc = arrange(Preset::Arc, &three, Some(1), None, None);
         assert_eq!(
-            rows_ids(&arc, &three),
+            desktop_of(&arc, &three, Preset::Arc, Some(1)).rows,
             vec![vec![0, 1, 2]],
             "a portrait monitor in the arc is in the same row"
         );
@@ -1438,17 +1407,21 @@ mod tests {
         top.position = Vec3::new(mid.position.x, mid.position.y + 1.0, mid.position.z);
         top.rotation = facing(top.position, Vec3::ZERO);
         lifted.insert(2, top);
-        let rows = layout_rows(&seen(&lifted, &three, center, Preset::Arc), Some(1), &[]);
-        assert_eq!(rows_ids(&lifted, &three), vec![vec![2], vec![0, 1]]);
+        let desktop = desktop_of(&lifted, &three, Preset::Arc, Some(1));
+        assert_eq!(desktop.rows, vec![vec![2], vec![0, 1]]);
         // It is seen right over the middle monitor, not over the right edge.
+        let rows = desktop.wire();
         let seen_at = |row: usize, i: usize| rows[row].entries[i].center.unwrap();
         let middle = seen_at(1, 1);
         assert!((seen_at(0, 0) - middle).abs() < 150, "{rows:?}");
         assert!(seen_at(1, 0) < middle - 1500, "{rows:?}");
 
         // A wall: one row, left to right.
-        let wall = arrange(Preset::Wall, &three, None, None);
-        assert_eq!(rows_ids(&wall, &three), vec![vec![0, 1, 2]]);
+        let wall = arrange(Preset::Wall, &three, None, None, None);
+        assert_eq!(
+            desktop_of(&wall, &three, Preset::Wall, None).rows,
+            vec![vec![0, 1, 2]]
+        );
     }
 
     const H: f32 = 1440.0 / 2560.0;
@@ -1476,7 +1449,7 @@ mod tests {
     #[test]
     fn the_magnet_needs_a_monitor_almost_against_another() {
         let two = [(0, 2560, 1440), (1, 2560, 1440)];
-        let arc = arrange(Preset::Arc, &two, None, None);
+        let arc = arrange(Preset::Arc, &two, None, None, None);
         let moved = |by: Vec3| {
             let mut p = arc.clone();
             let m = p.get_mut(&1).unwrap();
@@ -1499,7 +1472,13 @@ mod tests {
     #[test]
     fn dropped_on_a_seam_it_joins_the_nearer_monitor() {
         let three = [(0, 2560, 1440), (1, 2560, 1440), (2, 2560, 1440)];
-        let mut p = arrange(Preset::Arc, &[(1, 2560, 1440), (2, 2560, 1440)], None, None);
+        let mut p = arrange(
+            Preset::Arc,
+            &[(1, 2560, 1440), (2, 2560, 1440)],
+            None,
+            None,
+            None,
+        );
         let over2 = p[&2].position + p[&2].rotation * Vec3::new(0.4, 0.0, 0.0);
         p.insert(
             0,
@@ -1516,7 +1495,7 @@ mod tests {
     #[test]
     fn on_a_wall_the_magnet_stays_in_the_plane() {
         let two = [(0, 2560, 1440), (1, 2560, 1440)];
-        let mut p = arrange(Preset::Wall, &two, None, None);
+        let mut p = arrange(Preset::Wall, &two, None, None, None);
         let w = p[&0].width;
         p.get_mut(&1).unwrap().position = p[&0].position + Vec3::new(w + 0.1, 0.02, 0.05);
         let s = stick_on_wall(&p, &two, (Vec3::ZERO, 0.0), 1).expect("sticks");
@@ -1527,31 +1506,251 @@ mod tests {
 
     #[test]
     fn lying_down_the_monitors_are_one_row() {
-        let center = (Vec3::ZERO, 0.0);
         let three = [(0, 2560, 1440), (1, 2560, 1440), (2, 2560, 1440)];
-        let overhead = arrange(Preset::Overhead, &three, None, None);
-        let rows = layout_rows(
-            &seen(&overhead, &three, center, Preset::Overhead),
-            None,
-            &[],
-        );
-        assert_eq!(rows.len(), 1, "{rows:?}");
-        assert_eq!(rows[0].ids().collect::<Vec<_>>(), vec![0, 1, 2]);
+        let overhead = arrange(Preset::Overhead, &three, None, None, None);
+        let desktop = desktop_of(&overhead, &three, Preset::Overhead, None);
+        assert_eq!(desktop.rows, vec![vec![0, 1, 2]]);
     }
 
-    /// A wall: A brings everything into one plane, facing one way, rows touching.
+    /// A wall: A closes the gap and the step a hand left, in the wall's plane.
     #[test]
-    fn tidy_wall_is_flat() {
+    fn a_wall_lines_up_in_its_plane() {
         let center = (Vec3::ZERO, 0.0);
         let two = [(0, 2560, 1440), (1, 2560, 1440)];
-        let mut rough = arrange(Preset::Wall, &two, None, None);
-        rough.get_mut(&1).unwrap().position += Vec3::new(0.2, 0.05, 0.3);
-        rough.get_mut(&1).unwrap().rotation = Quat::from_rotation_y(0.4);
-        let t = tidy_wall(&rough, &two, center);
-        assert!((t[&0].position.z - t[&1].position.z).abs() < 1e-5);
-        assert!(t[&0].rotation.angle_between(t[&1].rotation) < 1e-5);
+        let mut rough = arrange(Preset::Wall, &two, None, None, None);
+        rough.get_mut(&1).unwrap().position += Vec3::new(0.06, 0.01, 0.0);
+        let t = line_up(&rough, &two, center, Preset::Wall, Some(0), &[], None);
+        assert!((t[&0].position.z - t[&1].position.z).abs() < 1e-4);
+        assert!(t[&0].rotation.angle_between(t[&1].rotation) < 1e-4);
+        assert!((t[&0].position.y - t[&1].position.y).abs() < 1e-4);
         let gap = (t[&1].position.x - t[&1].width / 2.0) - (t[&0].position.x + t[&0].width / 2.0);
-        assert!(gap.abs() < 1e-4, "gap {gap}");
+        assert!(gap.abs() < 1e-3, "gap {gap}");
+    }
+
+    /// What the PC makes of `desktop` as `SetLayout` brings it (as
+    /// `host/src/displays.rs` does): boxes from the wire, planned again.
+    fn on_the_pc(desktop: &Desktop, m: &[(u8, u32, u32)], primary: Option<u8>) -> Vec<Spot<u8>> {
+        let size = |id: u8| {
+            let &(_, w, h) = m.iter().find(|x| x.0 == id)?;
+            Some(desk::Size {
+                w: w as i32,
+                h: h as i32,
+            })
+        };
+        let boxes = desk::Boxes::new(
+            desktop
+                .wire()
+                .iter()
+                .flat_map(|r| &r.entries)
+                .filter_map(|e| {
+                    let s = size(e.id)?;
+                    let seen = desk::SeenBox::from_wire(e.center?, e.middle?, s);
+                    Some((e.id, seen, s))
+                })
+                .collect(),
+        );
+        let wanted = desk::Desk {
+            rows: desktop.rows.clone(),
+            main: primary,
+            ..desk::Desk::default()
+        };
+        let mut plan = desk::plan(&wanted, size, &boxes);
+        plan.sort_by_key(|s| s.id);
+        plan
+    }
+
+    /// The PC's desktop is the map's, to the pixel.
+    fn same_on_the_pc(desktop: &Desktop, m: &[(u8, u32, u32)], primary: Option<u8>) {
+        let mut mine = desktop.plan.clone();
+        mine.sort_by_key(|s| s.id);
+        assert_eq!(on_the_pc(desktop, m, primary), mine, "{:?}", desktop.rows);
+    }
+
+    /// Whether two monitors cover each other as seen from `center`.
+    fn covered(placements: &HashMap<u8, Placement>, m: &[(u8, u32, u32)]) -> bool {
+        let all = placed(placements, m);
+        let seen = prostir_layout::space::see(&frame((Vec3::ZERO, 0.0), Preset::Arc), &all);
+        seen.iter().enumerate().any(|(i, a)| {
+            seen[i + 1..]
+                .iter()
+                .any(|b| prostir_layout::space::overlaps(a, b, 0.01))
+        })
+    }
+
+    /// Every row of `desktop` lies on one line (tops, middles or bottoms), side by side.
+    fn rows_on_a_line(desktop: &Desktop) {
+        for row in &desktop.rows {
+            let spots: Vec<Spot<u8>> = row
+                .iter()
+                .filter_map(|id| desktop.plan.iter().find(|s| s.id == *id).copied())
+                .collect();
+            let line = |f: &dyn Fn(&Spot<u8>) -> i32| {
+                spots.iter().all(|s| (f(s) - f(&spots[0])).abs() <= 1)
+            };
+            assert!(
+                line(&|s| s.y) || line(&|s| s.bottom()) || line(&|s| 2 * s.y + s.h),
+                "one line: {:?}",
+                desktop.plan
+            );
+            for w in spots.windows(2) {
+                assert_eq!(w[0].right(), w[1].x, "side by side: {:?}", desktop.plan);
+            }
+        }
+    }
+
+    /// The six monitors as the headset had them on 2026-11-19 (one row on a 1.1 m
+    /// circle, overlapping): the desktop the PC makes of them has no staircase (the
+    /// old one spread over -1720..7600 with neighbours meeting at corners). Laid out
+    /// again by the preset now: two rows on a wider circle, nothing overlapping.
+    #[test]
+    fn six_overlapping_monitors_make_no_staircase() {
+        let m = [
+            (0, 3440, 1440),
+            (1, 2560, 1440),
+            (2, 1440, 2560),
+            (3, 3440, 1440),
+            (4, 2560, 1440),
+            (5, 3440, 1440),
+        ];
+        // The old preset: angles cut at asin(0.95), so they overlapped.
+        let angle = |w: f32| 2.0 * (w / 2.0 / RADIUS).min(0.95).asin();
+        let widths: Vec<f32> = m.iter().map(|x| x.1 as f32 * METRES_PER_PIXEL).collect();
+        let total: f32 = widths.iter().map(|w| angle(*w)).sum();
+        let mut yaw = -total / 2.0;
+        let mut p = HashMap::new();
+        for (x, w) in m.iter().zip(&widths) {
+            let a = angle(*w);
+            let half = (w / 2.0 / RADIUS).min(0.95).asin();
+            let r = RADIUS * half.cos();
+            let at = yaw + a / 2.0;
+            let position = Vec3::new(r * at.sin(), -0.08, -r * at.cos());
+            p.insert(
+                x.0,
+                Placement {
+                    position,
+                    rotation: facing(position, Vec3::new(0.0, -0.08, 0.0)),
+                    width: *w,
+                },
+            );
+            yaw += a;
+        }
+        assert!(covered(&p, &m), "they did overlap");
+        let desktop = desktop_of(&p, &m, Preset::Arc, Some(2));
+        rows_on_a_line(&desktop);
+        same_on_the_pc(&desktop, &m, Some(2));
+        let fresh = arrange(Preset::Arc, &m, Some(2), None, None);
+        assert!(!covered(&fresh, &m));
+        assert!(preset_radius(Preset::Arc, &m) > RADIUS);
+        let desktop = desktop_of(&fresh, &m, Preset::Arc, Some(2));
+        assert_eq!(desktop.rows.len(), 2, "{:?}", desktop.rows);
+        rows_on_a_line(&desktop);
+        same_on_the_pc(&desktop, &m, Some(2));
+    }
+
+    /// Two rows made by hand live through everything that happens to them: a monitor
+    /// added and removed, the headset app restarted (layout.txt), "Line up", a profile
+    /// and back. Every time the same rows, and the same desktop for the PC.
+    #[test]
+    fn two_rows_survive_everything() {
+        let center = (Vec3::ZERO, 0.0);
+        let m = [
+            (0, 2560, 1440),
+            (1, 2560, 1440),
+            (2, 1920, 1080),
+            (3, 1920, 1080),
+            (4, 1440, 2560),
+        ];
+        let four = &m[..4];
+        let new = |p: &HashMap<u8, Placement>, of: &[(u8, u32, u32)], gaze: Vec3| {
+            let id = of[of.len() - 1];
+            place_new(p, of, id, center, Preset::Arc, gaze, &[], RADIUS)
+        };
+        // Two side by side, two more put over them.
+        let mut p = arrange(Preset::Arc, &m[..2], Some(0), None, None);
+        let up = Vec3::new(0.0, 1.0, -1.0).normalize();
+        p.insert(2, new(&p, &m[..3], up));
+        // Looking right of that one.
+        let right = Quat::from_rotation_y(-0.7) * p[&2].position.normalize();
+        p.insert(3, new(&p, four, right));
+        let p = line_up(&p, four, center, Preset::Arc, Some(0), &[], None);
+        let desktop = desktop_of(&p, four, Preset::Arc, Some(0));
+        assert_eq!(desktop.rows.len(), 2, "{:?}", desktop.rows);
+        same_on_the_pc(&desktop, four, Some(0));
+        let same = |q: &HashMap<u8, Placement>, what: &str| {
+            let again = Desktop::of(q, four, center, Preset::Arc, Some(0), Some(&desktop));
+            assert_eq!(again, desktop, "{what}");
+        };
+        // A monitor added: the others stay, and so do their rows.
+        let mut with = p.clone();
+        with.insert(4, new(&p, &m, -Vec3::Z));
+        for (id, place) in &p {
+            assert_eq!(with[id], *place, "{id} moved");
+        }
+        assert!(!covered(&with, &m), "the new one covers nothing");
+        let five = Desktop::of(&with, &m, center, Preset::Arc, Some(0), Some(&desktop));
+        let kept: Vec<Vec<u8>> = five
+            .rows
+            .iter()
+            .map(|r| r.iter().copied().filter(|id| *id != 4).collect::<Vec<_>>())
+            .filter(|r| !r.is_empty())
+            .collect();
+        assert_eq!(
+            kept, desktop.rows,
+            "a new monitor joins, nobody leaves a row"
+        );
+        same_on_the_pc(&five, &m, Some(0));
+        // And removed again.
+        with.remove(&4);
+        same(&with, "removed");
+        // The headset app restarted.
+        let dir = std::env::temp_dir().join(format!("prostir-two-rows-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let desk_file = Desk::new(dir.join("layout.txt"));
+        desk_file.save(&p, &HashMap::new(), (center, RADIUS), false);
+        same(&desk_file.load().placements, "restarted");
+        let _ = std::fs::remove_dir_all(&dir);
+        // Lined up again.
+        same(
+            &line_up(&p, four, center, Preset::Arc, Some(0), &desktop.rows, None),
+            "lined up",
+        );
+        // Saved in a profile, another profile, and back: the places by their order.
+        let mut profile = crate::profiles::Profile::default_for(0);
+        profile.sizes = four.iter().map(|x| (x.1, x.2)).collect();
+        profile.places = four.iter().map(|x| p[&x.0]).collect();
+        let text = {
+            let path =
+                std::env::temp_dir().join(format!("prostir-two-rows-p-{}", std::process::id()));
+            let mut all = std::array::from_fn(crate::profiles::Profile::default_for);
+            all[0] = profile;
+            crate::profiles::save(&path, &all);
+            let back = crate::profiles::load(&path);
+            let _ = std::fs::remove_file(&path);
+            back
+        };
+        let back: HashMap<u8, Placement> = four
+            .iter()
+            .map(|x| x.0)
+            .zip(text[0].places.clone())
+            .collect();
+        same(&back, "profile and back");
+    }
+
+    /// The memo gives what `Desktop::of` gives, and follows a moved monitor.
+    #[test]
+    fn the_desktop_memo_follows_the_arrangement() {
+        let center = (Vec3::ZERO, 0.0);
+        let three = [(0, 2560, 1440), (1, 1440, 2560), (2, 2560, 1440)];
+        let memo = DesktopMemo::default();
+        let mut p = arrange(Preset::Arc, &three, Some(1), None, None);
+        let of =
+            |p: &HashMap<u8, Placement>| Desktop::of(p, &three, center, Preset::Arc, Some(1), None);
+        let get =
+            |p: &HashMap<u8, Placement>| memo.get(p, &three, center, Preset::Arc, Some(1), None);
+        assert_eq!(get(&p), of(&p));
+        assert_eq!(get(&p), of(&p));
+        p.get_mut(&2).unwrap().position += Vec3::new(0.0, 0.3, 0.0);
+        assert_eq!(get(&p), of(&p));
     }
 
     fn temp_desk(name: &str) -> (PathBuf, Desk) {
@@ -1569,7 +1768,7 @@ mod tests {
         let two = [(0, 2560, 1440), (1, 1920, 1080)];
         let sizes = HashMap::from([(0, (2560, 1440)), (1, (1920, 1080))]);
         let center = (Vec3::ZERO, 0.0);
-        let mut arranged = arrange(Preset::Arc, &two, Some(0), None);
+        let mut arranged = arrange(Preset::Arc, &two, Some(0), None, None);
         arranged.get_mut(&1).unwrap().position += Vec3::new(0.1, 0.3, 0.0);
         desk.save(&arranged, &sizes, (center, RADIUS), false);
         desk.save(&cinema(&two, None), &sizes, (center, RADIUS), true);
@@ -1591,7 +1790,7 @@ mod tests {
     fn desk_keeps_sizes_and_center() {
         let (dir, desk) = temp_desk("desk-sizes");
         let two = [(0, 2560, 1440), (1, 1440, 2560)];
-        let arranged = arrange(Preset::Arc, &two, Some(0), None);
+        let arranged = arrange(Preset::Arc, &two, Some(0), None, None);
         let sizes = HashMap::from([(0, (2560, 1440)), (1, (1440, 2560))]);
         let center = (Vec3::new(0.1, 0.0, -0.2), 0.7);
         desk.save(&arranged, &sizes, (center, RADIUS), false);
@@ -1635,7 +1834,7 @@ mod tests {
     /// A monitor that comes back with another resolution keeps the size of a pixel.
     #[test]
     fn refit_keeps_the_size_of_a_pixel() {
-        let landscape = arrange(Preset::Arc, &[(0, 2560, 1440)], Some(0), None)[&0];
+        let landscape = arrange(Preset::Arc, &[(0, 2560, 1440)], Some(0), None, None)[&0];
         let rotated = refit(landscape, (2560, 1440), (1440, 2560));
         let density = |p: &Placement, w: u32| p.width / w as f32;
         assert!((density(&rotated, 1440) - density(&landscape, 2560)).abs() < 1e-9);
@@ -1651,6 +1850,7 @@ mod tests {
             Preset::Arc,
             &[(0, 2560, 1440), (1, 2560, 1440), (2, 2560, 1440)],
             Some(1),
+            None,
             None,
         );
         let yaw = 0.8f32;

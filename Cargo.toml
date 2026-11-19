@@ -12,6 +12,14 @@ repository = "https://github.com/OlexiyOdarchuk/prostir"
 homepage = "https://prostir.ishawyha.dev"
 rust-version = "1.90"
 
+# The layout math's tests check its invariants over thousands of arrangements:
+# optimised in debug builds too, so `cargo test --workspace` stays quick.
+[profile.dev.package.prostir-layout]
+opt-level = 3
+
+[profile.dev.package.glam]
+opt-level = 3
+
 [profile.release]
 lto = "thin"
 debug = 1

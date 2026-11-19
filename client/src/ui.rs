@@ -3529,7 +3529,7 @@ mod tests {
         mirror: Option<(f32, f32)>,
         primary: u8,
     ) {
-        use crate::layout::{Placement, desktop_spots, seen};
+        use crate::layout::{Desktop, Placement};
         use crate::settings::Preset;
         use glam::{Quat, Vec3};
         use prostir_proto::MIRROR_ID;
@@ -3549,11 +3549,15 @@ mod tests {
             .collect();
         let sizes: Vec<(u8, u32, u32)> = all.iter().map(|&(id, w, h, ..)| (id, w, h)).collect();
         let center = (Vec3::ZERO, 0.0);
-        let spots = desktop_spots(
-            &seen(&placements, &sizes, center, Preset::Arc),
+        let spots = Desktop::of(
+            &placements,
+            &sizes,
+            center,
+            Preset::Arc,
             Some(primary),
-            &[],
-        );
+            None,
+        )
+        .spots();
         let mut st = sample_state();
         st.tab = Tab::Monitors;
         st.primary = Some(primary);

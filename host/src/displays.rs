@@ -208,6 +208,11 @@ impl Router {
         }
     }
 
+    /// The size stream `id` goes out at, once its encoder has said.
+    fn stream_size(&self, id: ScreenId) -> Option<(u32, u32)> {
+        self.inner.lock().unwrap().streams.get(&id)?.size
+    }
+
     /// Stream `id` starts, or starts over with a new encoder making `codec`.
     fn add_stream(&self, id: ScreenId, codec: Codec) {
         let mut inner = self.inner.lock().unwrap();
@@ -356,6 +361,8 @@ pub struct Displays {
     rows: Vec<Vec<desk::Entry<ScreenId>>>,
     /// The desktop is to be laid out again (see [`Displays::place`]).
     layout_due: bool,
+    /// The rows and the layout the desktop took last (see [`Displays::place_now`]).
+    applied: (Vec<Vec<Out>>, Vec<desk::Spot<Out>>),
     /// Laid out without an output the desktop did not list yet: again once it does.
     layout_waits: bool,
     /// After the desktop refused a layout: when to try again, and how many times it did.
@@ -403,6 +410,7 @@ impl Displays {
             windows_checked: Instant::now(),
             rows: set.rows.clone(),
             layout_due: true,
+            applied: (Vec::new(), Vec::new()),
             layout_waits: false,
             layout_retry: (Instant::now(), 0),
             settings: settings.clone(),
@@ -1121,12 +1129,6 @@ impl Displays {
     }
 
     fn place_now(&mut self) -> Result<()> {
-        /// An output on the desktop: a screen, or another real display.
-        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-        enum Out {
-            Screen(ScreenId),
-            Other(usize),
-        }
         let geometries = self.desktop.geometries();
         let mut names: BTreeMap<Out, String> = self
             .screens
@@ -1158,21 +1160,28 @@ impl Displays {
             .screens
             .values()
             .any(|s| s.output_name().is_some_and(|n| !geometries.contains_key(n)));
-        let plan = desk::plan(
+        let rows = self.effective_rows();
+        let row_ids: Vec<Vec<Out>> = rows
+            .iter()
+            .map(|r| r.iter().map(|e| Out::Screen(e.id)).collect())
+            .collect();
+        // Where the headset has each monitor: the boxes of its own plan, in the pixels
+        // of the streams (`SetLayout`, see `PROTOCOL.md`).
+        let boxes = desk::Boxes::new(
+            rows.iter()
+                .flatten()
+                .filter_map(|e| {
+                    let out = Out::Screen(e.id);
+                    let on_desk = size(out)?;
+                    let (w, h) = self.stream_size_of(e.id).unwrap_or((on_desk.w, on_desk.h));
+                    let seen = desk::SeenBox::from_wire(e.center?, e.middle?, desk::Size { w, h });
+                    Some((out, seen, on_desk))
+                })
+                .collect(),
+        );
+        let fresh = desk::plan(
             &desk::Desk {
-                rows: self
-                    .effective_rows()
-                    .into_iter()
-                    .map(|r| {
-                        r.into_iter()
-                            .map(|e| desk::Entry {
-                                id: Out::Screen(e.id),
-                                center: e.center,
-                                middle: e.middle,
-                            })
-                            .collect()
-                    })
-                    .collect(),
+                rows: row_ids.clone(),
                 main: self
                     .primary
                     .or_else(|| self.order().first().copied())
@@ -1186,7 +1195,17 @@ impl Displays {
                 column: self.windows().map(|s| Out::Screen(s.id)).collect(),
             },
             size,
+            &boxes,
         );
+        // The headset's own plan comes back as it is (planning a plan gives the plan)
+        // and is taken, so the desktop is what its map shows. Anything worked out here
+        // (outputs scaled, monitors the headset has not placed) replaces the layout the
+        // desktop has, in the same rows, only when better by more than a hand's tremor.
+        let plan = if is_the_headsets(&fresh, &boxes) || self.applied.0 != row_ids {
+            fresh
+        } else {
+            desk::settled(&self.applied.1, &fresh, &boxes)
+        };
         // Every applied change makes KWin reconfigure its outputs, which also cuts the
         // laptop mirror's stream: `place` only sends what actually differs.
         let positions: Vec<(String, i32, i32)> = plan
@@ -1198,7 +1217,19 @@ impl Displays {
             .and_then(|p| self.screens.get(&p))
             .filter(|_| self.manage_primary)
             .and_then(Screen::output_name);
-        self.desktop.place(&positions, primary, &geometries)
+        self.desktop.place(&positions, primary, &geometries)?;
+        self.applied = (row_ids, plan);
+        Ok(())
+    }
+
+    /// The size of the stream of screen `id`: as its encoder says, else as the
+    /// monitor was made.
+    fn stream_size_of(&self, id: ScreenId) -> Option<(i32, i32)> {
+        let (w, h) = self.router.stream_size(id).or_else(|| {
+            let spec = self.screens.get(&id)?.kind.spec()?;
+            Some((spec.width, spec.height))
+        })?;
+        Some((i32::try_from(w).ok()?, i32::try_from(h).ok()?))
     }
 
     /// Makes the monitors match `sizes` left to right (a headset profile). Monitors of a
@@ -1561,6 +1592,34 @@ impl Displays {
     }
 }
 
+/// An output on the desktop: a screen, or another real display.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Out {
+    Screen(ScreenId),
+    Other(usize),
+}
+
+/// Whether `plan` is the headset's plan as `boxes` hold it: every output with a box
+/// where the box is, give or take one shift of the whole.
+fn is_the_headsets<K: Copy + Ord>(plan: &[desk::Spot<K>], boxes: &desk::Boxes<K>) -> bool {
+    use desk::View;
+    let mut shift = None;
+    let mut any = false;
+    for s in plan {
+        if !boxes.boxes.iter().any(|b| b.0 == s.id) {
+            continue;
+        }
+        let Some((x, y)) = boxes.exact(s.id, desk::Size { w: s.w, h: s.h }) else {
+            return false;
+        };
+        if *shift.get_or_insert((s.x - x, s.y - y)) != (s.x - x, s.y - y) {
+            return false;
+        }
+        any = true;
+    }
+    any
+}
+
 /// `rows` kept in step with the outputs: only monitors (`monitor`) and other outputs
 /// that show (`shown`) stay, each in the first place it is listed in, and any of
 /// `monitors` left out go to the end of the bottom row. So every monitor is listed
@@ -1671,6 +1730,36 @@ mod tests {
         router.add_stream(s1, Codec::H265);
         router.remove_stream(s1);
         assert!(sent(&outbox).is_empty());
+    }
+
+    /// The headset's plan read back from `SetLayout` is recognised as its plan,
+    /// shifted as a whole too; a plan that moved one monitor is not.
+    #[test]
+    fn the_headsets_plan_is_recognised() {
+        let spot = |id, x, y| desk::Spot {
+            id,
+            x,
+            y,
+            w: 640,
+            h: 360,
+        };
+        let headset = [spot(0u8, 0, 360), spot(1, 640, 300)];
+        let boxes = desk::Boxes::new(
+            headset
+                .iter()
+                .map(|s| {
+                    let (c, m) = s.wire();
+                    let size = desk::Size { w: s.w, h: s.h };
+                    (s.id, desk::SeenBox::from_wire(c, m, size), size)
+                })
+                .collect(),
+        );
+        assert!(is_the_headsets(&headset, &boxes));
+        let shifted = [spot(0, 0, 60), spot(1, 640, 0)];
+        assert!(is_the_headsets(&shifted, &boxes));
+        let moved = [spot(0, 0, 360), spot(1, 640, 0)];
+        assert!(!is_the_headsets(&moved, &boxes));
+        assert!(!is_the_headsets(&moved, &desk::Boxes::new(Vec::new())));
     }
 
     /// Every monitor is in the rows once, in the first place listed: an order made

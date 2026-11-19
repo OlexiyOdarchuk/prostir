@@ -1848,6 +1848,9 @@ dependencies = [
 [[package]]
 name = "prostir-layout"
 version = "0.2.0"
+dependencies = [
+ "glam",
+]
 
 [[package]]
 name = "prostir-proto"

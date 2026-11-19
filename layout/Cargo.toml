@@ -9,5 +9,7 @@ homepage.workspace = true
 rust-version.workspace = true
 description = "Where Prostir's monitors go: pure layout rules shared by the PC and the headset"
 
-# No dependencies and no input or output: only functions to test.
+# Only vector math: no input or output, nothing tied to an operating system, so the PC
+# and the headset share it and everything here is tested on the PC.
 [dependencies]
+glam = "0.30"
