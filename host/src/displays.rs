@@ -172,12 +172,14 @@ impl Router {
             if video.frames == 0 && video.dropped.total() == 0 && skipped == 0 {
                 continue;
             }
+            let shown = match shown.count() {
+                0 => "no reports".to_owned(),
+                n => format!("{} ({n} reports)", shown.summary_ms()),
+            };
             info!(
-                "{}: {}; {skipped} skipped waiting for a keyframe; encoded → shown in headset {} ({} reports)",
+                "{}: {}; {skipped} skipped waiting for a keyframe; encoded → shown in headset {shown}",
                 stream_name(*id),
                 video.summary(window),
-                shown.summary_ms(),
-                shown.count()
             );
         }
         if stats.audio_wait.count() > 0 || stats.audio_dropped > 0 {

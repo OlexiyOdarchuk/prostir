@@ -64,8 +64,11 @@ impl Histogram {
         self.max()
     }
 
-    /// `p50 0.3 p95 2.0 max 15.1 ms`, for logs.
+    /// `p50 0.3 p95 2.0 max 15.1 ms`, for logs; `none` without samples.
     pub fn summary_ms(&self) -> String {
+        if self.count == 0 {
+            return "none".into();
+        }
         let ms = |d: Duration| d.as_secs_f64() * 1e3;
         format!(
             "p50 {:.1} p95 {:.1} max {:.1} ms",
@@ -187,6 +190,7 @@ mod tests {
     fn percentiles_come_from_the_buckets() {
         let mut h = Histogram::default();
         assert_eq!(h.percentile(0.5), Duration::ZERO);
+        assert_eq!(h.summary_ms(), "none");
         for _ in 0..90 {
             h.add(Duration::from_micros(400));
         }

@@ -184,7 +184,12 @@ fn taking_the_headset_off_pauses_and_then_ends_the_session() {
     // The numbers each stream reports every 10 s.
     let line = pc.wait_log(Duration::from_secs(15), "Prostir-1: sent");
     assert!(line.contains("waited in outbox p50"), "{line}");
-    assert!(line.contains("encoded → shown in headset p50"), "{line}");
+    let reports: u32 = line
+        .rsplit_once(" reports)")
+        .and_then(|(head, _)| head.rsplit_once('('))
+        .and_then(|(_, n)| n.parse().ok())
+        .unwrap_or(0);
+    assert!(reports > 0, "the headset reported shown frames: {line}");
     pc.wait_log(Duration::from_secs(1), "sound: sent");
     // Off for good: the session ends, and the monitors go.
     headset.send(&ClientMsg::Presence { worn: false }).unwrap();
