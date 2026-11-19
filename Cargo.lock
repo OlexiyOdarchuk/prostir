@@ -1859,6 +1859,7 @@ name = "prostir-testkit"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "libc",
  "prostir-proto",
 ]
 

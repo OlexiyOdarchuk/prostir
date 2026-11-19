@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use log::info;
 
-use super::screen::{self, Screen};
+use super::screen::{self, Picture, Screen};
 use crate::encoder::{Encoder, Input};
 use crate::platform::{DesktopBackend, Geometry, MonitorSpec, OutputBackend};
 
@@ -24,6 +24,7 @@ pub struct FakeDesktop {
     layout: Layout,
     /// Picture changes per second on every output (0: still).
     fps: u32,
+    picture: Picture,
 }
 
 impl DesktopBackend for FakeDesktop {
@@ -32,10 +33,16 @@ impl DesktopBackend for FakeDesktop {
             Ok(v) => v.parse().context("PROSTIR_FAKE_FPS: a whole number")?,
             Err(_) => 0,
         };
-        info!("desktop: fake, the picture changes {fps} times a second");
+        let picture = match std::env::var("PROSTIR_FAKE_PICTURE").as_deref() {
+            Ok("noise") => Picture::Noise,
+            Ok("bands") | Err(_) => Picture::Bands,
+            Ok(other) => anyhow::bail!("PROSTIR_FAKE_PICTURE: bands or noise, not {other:?}"),
+        };
+        info!("desktop: fake, the picture ({picture:?}) changes {fps} times a second");
         Ok(Self {
             layout: Layout::default(),
             fps,
+            picture,
         })
     }
 
@@ -45,7 +52,13 @@ impl DesktopBackend for FakeDesktop {
 
     fn create(&self, number: u32, spec: &MonitorSpec) -> Result<FakeOutput> {
         let name = format!("{PREFIX}{number}");
-        let output = FakeOutput::start(name.clone(), spec, self.fps, self.layout.clone())?;
+        let output = FakeOutput::start(
+            name.clone(),
+            spec,
+            self.fps,
+            self.picture,
+            self.layout.clone(),
+        )?;
         info!("fake desktop: created {name} ({spec})");
         Ok(output)
     }
@@ -107,8 +120,14 @@ pub struct FakeOutput {
 }
 
 impl FakeOutput {
-    fn start(name: String, spec: &MonitorSpec, fps: u32, layout: Layout) -> Result<Self> {
-        let screen = Screen::add(&name, spec.width, spec.height)?;
+    fn start(
+        name: String,
+        spec: &MonitorSpec,
+        fps: u32,
+        picture: Picture,
+        layout: Layout,
+    ) -> Result<Self> {
+        let screen = Screen::add(&name, spec.width, spec.height, picture)?;
         let stop = Arc::new(AtomicBool::new(false));
         let changer = if fps > 0 {
             let (screen, stop) = (screen.clone(), stop.clone());

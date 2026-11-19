@@ -30,9 +30,12 @@
 //! - `dialogs`: `ask_code` (the pairing code typed on the PC), `notify` and
 //!   `notify_and_wait` (desktop notifications).
 //! - System: `config_home`, `single_instance`, `quit_on_signals`, `quit_requested`,
-//!   `clean_up_after_crash`, `give_memory_back`, `set_keepalive`, `hostname`,
-//!   `broadcast_addresses`, `run` (a program run to the end, stopped if it hangs).
-//!   The private runtime dir stays inside the platform.
+//!   `clean_up_after_crash`, `give_memory_back`, `hostname`, `broadcast_addresses`,
+//!   `run` (a program run to the end, stopped if it hangs). The private runtime dir
+//!   stays inside the platform.
+//!
+//! The network belongs to the operating system, not to the desktop: `net.rs` holds
+//! it for every desktop, the fake one too, with a part for each operating system.
 //!
 //! The compiler checks the list: the core does not build until everything is there.
 //! `fake/` is the smallest complete example: a desktop that exists only in memory,
@@ -65,6 +68,10 @@ pub use linux::*;
 mod fake;
 #[cfg(feature = "fake-desktop")]
 pub use fake::*;
+
+// The connection to the headset, the same with the fake desktop as with a real one.
+mod net;
+pub use net::*;
 
 #[cfg(not(any(target_os = "linux", feature = "fake-desktop")))]
 compile_error!("Prostir has no platform layer for this operating system yet (see platform/mod.rs)");

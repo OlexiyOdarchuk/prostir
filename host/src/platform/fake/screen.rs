@@ -31,10 +31,22 @@ pub const ELEMENT: &str = "prostirfakescreen";
 /// Screens by output name, for the sources to find theirs.
 static SCREENS: LazyLock<Mutex<HashMap<String, Arc<Screen>>>> = LazyLock::new(Default::default);
 
-/// One fake monitor's picture: grey bands that move with every change.
+/// What a fake monitor shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Picture {
+    /// Grey bands that move with every change: small frames, like a quiet desktop.
+    Bands,
+    /// Random pixels, a band of them new with every change (a busy screen: video
+    /// playing, windows moving). An encoder can hardly compress them, so keyframes
+    /// are as big as the bitrate lets them be, and other frames a fraction of that.
+    Noise,
+}
+
+/// One fake monitor's picture, changing as [`Picture`] says.
 pub struct Screen {
     name: String,
     info: gst_video::VideoInfo,
+    picture: Picture,
     /// How many times the picture changed.
     changes: Mutex<u64>,
     changed: Condvar,
@@ -42,7 +54,7 @@ pub struct Screen {
 
 impl Screen {
     /// A screen named `name`, findable by its source until [`Screen::remove`].
-    pub fn add(name: &str, width: u32, height: u32) -> Result<Arc<Self>> {
+    pub fn add(name: &str, width: u32, height: u32, picture: Picture) -> Result<Arc<Self>> {
         register()?;
         let info = gst_video::VideoInfo::builder(gst_video::VideoFormat::I420, width, height)
             // Frames come when they come, but a nominal rate: with KWin's "variable"
@@ -53,6 +65,7 @@ impl Screen {
         let screen = Arc::new(Self {
             name: name.to_owned(),
             info,
+            picture,
             changes: Mutex::new(0),
             changed: Condvar::new(),
         });
@@ -85,12 +98,41 @@ impl Screen {
         let (w, h) = (self.info.width() as usize, self.info.height() as usize);
         let stride = self.info.stride()[0] as usize;
         let mut data = vec![128u8; self.info.size()];
-        for (y, row) in data[..stride * h].chunks_exact_mut(stride).enumerate() {
-            for (x, px) in row[..w].iter_mut().enumerate() {
-                *px = ((x + y) / 8 + changes as usize * 4) as u8;
+        let luma = &mut data[..stride * h];
+        match self.picture {
+            Picture::Bands => {
+                for (y, row) in luma.chunks_exact_mut(stride).enumerate() {
+                    for (x, px) in row[..w].iter_mut().enumerate() {
+                        *px = ((x + y) / 8 + changes as usize * 4) as u8;
+                    }
+                }
+            }
+            Picture::Noise => {
+                // The same noise everywhere, but an eighth of the rows, moving down
+                // with every change, new: a whole new picture each time would make
+                // every frame a keyframe (the encoder sees a scene cut).
+                noise(luma, 0);
+                let band = h.div_ceil(8);
+                let top = (changes as usize % 8) * band;
+                let rows = top..(top + band).min(h);
+                noise(
+                    &mut luma[rows.start * stride..rows.end * stride],
+                    changes + 1,
+                );
             }
         }
         gst::Buffer::from_mut_slice(data)
+    }
+}
+
+/// Fills `bytes` with random ones, the same for the same `seed` (xorshift64).
+fn noise(bytes: &mut [u8], seed: u64) {
+    let mut x = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+    for chunk in bytes.chunks_mut(8) {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        chunk.copy_from_slice(&x.to_le_bytes()[..chunk.len()]);
     }
 }
 

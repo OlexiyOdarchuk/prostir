@@ -7,10 +7,15 @@
 //! - Monitors are pictures made here and streamed to the encoder like KWin streams
 //!   its outputs (see `screen.rs`): the current picture when the encoder starts, then
 //!   only when the picture changes (`PROSTIR_FAKE_FPS` times a second; 0, the
-//!   default, is a still screen).
-//! - Sound is silence, 10 ms at a time; the microphone goes nowhere.
+//!   default, is a still screen). `PROSTIR_FAKE_PICTURE=noise` makes the picture
+//!   random pixels instead of grey bands, so frames are as big as on a busy screen.
+//! - Sound is silence, 10 ms at a time, each slice starting with the time it was
+//!   made (see [`audio`]), so a fake headset can tell how late it arrives; the
+//!   microphone goes nowhere.
 //! - No windows, no mouse, no screenshots, no tray, no notifications, and no outside
 //!   programs are run ([`run`] says none is installed).
+//! - The network is the real one: the connection to the headset is set up as on any
+//!   Linux PC (`platform/net.rs`), so the tests measure what a user gets.
 //! - It runs only when asked to with `PROSTIR_FAKE_DESKTOP=1`, and its settings live
 //!   in `$XDG_CONFIG_HOME` only, which must be set: a fake build started by mistake
 //!   never falls back to the user's own `~/.config`.
@@ -24,7 +29,7 @@
 mod desktop;
 mod screen;
 
-use std::net::{Ipv4Addr, TcpStream};
+use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -99,8 +104,6 @@ pub fn quit_on_signals() {
 pub fn clean_up_after_crash() {}
 
 pub fn give_memory_back() {}
-
-pub fn set_keepalive(_stream: &TcpStream) {}
 
 pub fn hostname() -> String {
     "fake-pc".into()
@@ -189,6 +192,10 @@ pub mod focus {
 }
 
 /// Silence to the headset; the headset microphone goes nowhere.
+///
+/// Every slice of sound starts with the `CLOCK_MONOTONIC` time it was made, in
+/// nanoseconds (`u64`, little-endian): a fake headset on the same machine reads how
+/// long each slice took to arrive (see `prostir-testkit`).
 pub mod audio {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -213,13 +220,26 @@ pub mod audio {
                 .spawn(move || {
                     let mut next = Instant::now();
                     while !stopped.load(Ordering::Relaxed) {
-                        on_sound(vec![0; SLICE_BYTES]);
+                        let mut pcm = vec![0; SLICE_BYTES];
+                        pcm[..8].copy_from_slice(&monotonic_ns().to_le_bytes());
+                        on_sound(pcm);
                         next += Duration::from_millis(10);
                         std::thread::sleep(next.saturating_duration_since(Instant::now()));
                     }
                 })?;
             Ok(Self { stop })
         }
+    }
+
+    /// `CLOCK_MONOTONIC` now, in nanoseconds.
+    fn monotonic_ns() -> u64 {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: clock_gettime writes into the timespec it is given.
+        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+        ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
     }
 
     impl Drop for AudioOut {

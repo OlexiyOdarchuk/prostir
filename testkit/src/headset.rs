@@ -10,6 +10,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use prostir_proto::secure::{
     self, Identity, Pairing, SecureReader, SecureWriter, TrustStore, confirmation, tags_match,
 };
+use prostir_proto::stats::Gaps;
 use prostir_proto::{ClientMsg, Codec, HostMsg, PROTOCOL_VERSION, PcSettings};
 
 use crate::nal;
@@ -94,6 +95,9 @@ pub struct Stream {
     pub frames: u64,
     pub keyframes: u64,
     pub bytes: u64,
+    /// Bytes of the keyframes among them, and of the biggest one.
+    pub keyframe_bytes: u64,
+    pub keyframe_max: u64,
     pub first_is_key: Option<bool>,
     /// Keyframes a decoder could not start from (no parameter sets or no IDR).
     pub bad_keyframes: u64,
@@ -125,6 +129,12 @@ pub struct View {
     pub mirror_wanted: Option<bool>,
     /// Bytes of PC sound received.
     pub audio_bytes: u64,
+    /// How late each slice of sound arrived, in order: from when the fake desktop made
+    /// it (the time it starts with) to when it was read here. Only a PC with the fake
+    /// desktop stamps its sound so; from any other PC these numbers mean nothing.
+    pub sound_delays: Vec<Duration>,
+    /// Pauses between slices of sound arriving.
+    pub sound_gaps: Gaps,
     pub errors: Vec<String>,
     pub notices: Vec<String>,
     pub messages: u64,
@@ -133,7 +143,8 @@ pub struct View {
 }
 
 impl View {
-    fn apply(&mut self, msg: &HostMsg) {
+    fn apply(&mut self, arrived: &Arrived) {
+        let msg = &arrived.msg;
         self.messages += 1;
         match msg {
             HostMsg::StreamStart {
@@ -155,6 +166,8 @@ impl View {
                         frames: 0,
                         keyframes: 0,
                         bytes: 0,
+                        keyframe_bytes: 0,
+                        keyframe_max: 0,
                         first_is_key: None,
                         bad_keyframes: 0,
                     },
@@ -169,6 +182,8 @@ impl View {
                     s.bytes += data.len() as u64;
                     if *keyframe {
                         s.keyframes += 1;
+                        s.keyframe_bytes += data.len() as u64;
+                        s.keyframe_max = s.keyframe_max.max(data.len() as u64);
                         if !nal::starts_decoder(data, s.codec) {
                             s.bad_keyframes += 1;
                         }
@@ -188,7 +203,15 @@ impl View {
             HostMsg::AudioWanted { enabled } => self.audio_wanted = Some(*enabled),
             HostMsg::MicWanted { enabled } => self.mic_wanted = Some(*enabled),
             HostMsg::MirrorWanted { enabled } => self.mirror_wanted = Some(*enabled),
-            HostMsg::Audio { pcm } => self.audio_bytes += pcm.len() as u64,
+            HostMsg::Audio { pcm } => {
+                self.audio_bytes += pcm.len() as u64;
+                if let Some(made) = pcm.first_chunk::<8>() {
+                    let made = u64::from_le_bytes(*made);
+                    let late = arrived.monotonic_ns.saturating_sub(made);
+                    self.sound_delays.push(Duration::from_nanos(late));
+                }
+                self.sound_gaps.event(arrived.at);
+            }
             HostMsg::Error { text } => self.errors.push(text.clone()),
             HostMsg::Notice { text } => self.notices.push(text.clone()),
             _ => {}
@@ -205,13 +228,32 @@ impl View {
     }
 }
 
+/// A message from the PC and when it was read off the connection.
+struct Arrived {
+    msg: HostMsg,
+    at: Instant,
+    /// `CLOCK_MONOTONIC` at the same moment, in nanoseconds.
+    monotonic_ns: u64,
+}
+
+/// `CLOCK_MONOTONIC` now, in nanoseconds (the clock the fake desktop stamps sound with).
+fn monotonic_ns() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: clock_gettime writes into the timespec it is given.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
+}
+
 /// A connected fake headset. A reader thread takes everything the PC sends (so the
 /// PC never waits on this side) and acknowledges shown frames like the Quest app;
 /// [`FakeHeadset::recv`] and [`FakeHeadset::wait`] go through what it took.
 pub struct FakeHeadset {
     stream: TcpStream,
     writer: Arc<Mutex<SecureWriter>>,
-    incoming: Receiver<HostMsg>,
+    incoming: Receiver<Arrived>,
     view: View,
     /// The PC's protocol version and language, from its welcome.
     pub version: u32,
@@ -300,9 +342,9 @@ impl FakeHeadset {
     /// Once the PC closed the connection, an error.
     pub fn recv(&mut self, timeout: Duration) -> Result<Option<HostMsg>> {
         match self.incoming.recv_timeout(timeout) {
-            Ok(msg) => {
-                self.view.apply(&msg);
-                Ok(Some(msg))
+            Ok(arrived) => {
+                self.view.apply(&arrived);
+                Ok(Some(arrived.msg))
             }
             Err(RecvTimeoutError::Timeout) => Ok(None),
             Err(RecvTimeoutError::Disconnected) => {
@@ -366,11 +408,14 @@ impl FakeHeadset {
         let v = &mut self.view;
         for s in v.streams.values_mut() {
             (s.frames, s.keyframes, s.bad_keyframes, s.bytes) = (0, 0, 0, 0);
+            (s.keyframe_bytes, s.keyframe_max) = (0, 0);
         }
         v.ended.clear();
         v.errors.clear();
         v.notices.clear();
         v.audio_bytes = 0;
+        v.sound_delays.clear();
+        v.sound_gaps.restart();
         v.messages = 0;
     }
 
@@ -401,13 +446,14 @@ fn hello(w: &mut SecureWriter) -> std::io::Result<()> {
 fn spawn_reader(
     mut r: BufReader<SecureReader>,
     writer: Arc<Mutex<SecureWriter>>,
-) -> std::io::Result<Receiver<HostMsg>> {
+) -> std::io::Result<Receiver<Arrived>> {
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new()
         .name("fake-headset".into())
         .spawn(move || {
             let mut acked: BTreeMap<u8, Instant> = BTreeMap::new();
             while let Ok(msg) = HostMsg::read(&mut r) {
+                let (at, monotonic_ns) = (Instant::now(), monotonic_ns());
                 if let HostMsg::Frame { id, pts_us, .. } = &msg
                     && acked.get(id).is_none_or(|t| t.elapsed() >= ACK_EVERY)
                 {
@@ -419,7 +465,12 @@ fn spawn_reader(
                     };
                     let _ = shown.write(&mut *w).and_then(|()| w.flush());
                 }
-                if tx.send(msg).is_err() {
+                let arrived = Arrived {
+                    msg,
+                    at,
+                    monotonic_ns,
+                };
+                if tx.send(arrived).is_err() {
                     return;
                 }
             }

@@ -3,6 +3,7 @@
 //! `cargo test -p prostir-host --features fake-desktop --test e2e`). Needs GStreamer
 //! with x264enc (plugins-ugly), h264parse (plugins-bad) and the base plugins.
 
+mod link;
 mod pc;
 
 use std::collections::BTreeMap;
@@ -13,7 +14,7 @@ use prostir_proto::{ClientMsg, Codec, LayoutEntry, LayoutRow, PcSettings, encode
 use prostir_testkit::{ConnectError, FakeHeadset, Keys, View};
 
 /// Long enough for a slow CI machine to start GStreamer and the encoders.
-const START: Duration = Duration::from_secs(30);
+pub const START: Duration = Duration::from_secs(30);
 /// A change asked for by the headset shows within this.
 const SOON: Duration = Duration::from_secs(10);
 
@@ -31,7 +32,7 @@ fn assert_started_once(before: &BTreeMap<String, usize>, after: &BTreeMap<String
     );
 }
 
-fn connect(pc: &Pc, keys: &mut Keys) -> FakeHeadset {
+pub fn connect(pc: &Pc, keys: &mut Keys) -> FakeHeadset {
     FakeHeadset::connect(pc.addr, keys, None).unwrap_or_else(|e| panic!("connecting: {e}"))
 }
 

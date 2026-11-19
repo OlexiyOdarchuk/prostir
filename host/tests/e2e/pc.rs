@@ -79,6 +79,10 @@ impl Drop for TestDir {
 pub struct Options {
     /// Picture changes per second on the fake monitors (0: a still screen).
     pub fps: u32,
+    /// Random pixels instead of grey bands: frames as big as the bitrate allows.
+    pub noise: bool,
+    /// `--bitrate`: Mbit/s per monitor.
+    pub bitrate: u32,
     /// `--linger`: seconds the monitors stay after the headset leaves.
     pub linger: u32,
     /// The pairing code the person at the PC types, if asked.
@@ -89,6 +93,8 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             fps: 0,
+            noise: false,
+            bitrate: 8,
             linger: 30,
             typed_code: None,
         }
@@ -110,13 +116,18 @@ impl Pc {
         }
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_prostir"));
         cmd.args(["--port", "0", "--no-discovery", "--no-adb", "--software"])
-            .args(["--bitrate", "8", "--linger", &options.linger.to_string()])
+            .args(["--bitrate", &options.bitrate.to_string()])
+            .args(["--linger", &options.linger.to_string()])
             .env("XDG_CONFIG_HOME", root.join("config"))
             .env("XDG_RUNTIME_DIR", root.join("run"))
             .env("HOME", root.join("home"))
             .env("PROSTIR_FAKE_DESKTOP", "1")
             .env("PROSTIR_NO_COUNT", "1")
             .env("PROSTIR_FAKE_FPS", options.fps.to_string())
+            .env(
+                "PROSTIR_FAKE_PICTURE",
+                if options.noise { "noise" } else { "bands" },
+            )
             .env("LANGUAGE", "en")
             .env("RUST_LOG", "info")
             // One plugin registry for all tests, so GStreamer scans its plugins once.
