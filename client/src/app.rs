@@ -63,6 +63,15 @@ const POKE_RELEASE: f32 = 0.025;
 /// A finger further behind the menu than this is not touching it (reaching past).
 const POKE_BEHIND: f32 = -0.06;
 
+/// Something held like a tablet: taken by its edge with the fingers closed on it, it
+/// moves and turns with the hand. Where it is relative to the hand.
+#[derive(Clone, Copy)]
+struct TabletHold {
+    id: u8,
+    offset: Vec3,
+    turn: glam::Quat,
+}
+
 /// A monitor held with both hands: the distance between them sets its width.
 #[derive(Clone, Copy)]
 struct Scaling {
@@ -358,6 +367,8 @@ struct Scene {
     panel_place: Placement,
     button_place: Option<Placement>,
     grabs: [Option<Grab>; 2],
+    /// Per hand: what it holds like a tablet (see `TabletHold`).
+    tablet: [Option<TabletHold>; 2],
     host: Option<String>,
     /// PCs announcing themselves while not connected.
     found: Vec<net::FoundHost>,
@@ -1054,6 +1065,32 @@ impl Scene {
         }
     }
 
+    /// The menu, monitor or window panel whose edge the hand at `at` is on.
+    fn edge_at(&self, at: Vec3) -> Option<(u8, Placement)> {
+        let menu = self.panel_open.then(|| {
+            let p = self.panel_place;
+            (PANEL_ID, p, p.width * ui::HEIGHT as f32 / ui::WIDTH as f32)
+        });
+        let screens = self
+            .placements
+            .iter()
+            .map(|(id, p)| (*id, *p, self.height_of(*id)));
+        menu.into_iter()
+            .chain(screens)
+            .filter_map(|(id, p, height)| {
+                let local = p.rotation.inverse() * (at - p.position);
+                let half = Vec2::new(p.width, height) / 2.0;
+                let within = local.x.abs() <= half.x + 0.07
+                    && local.y.abs() <= half.y + 0.07
+                    && local.z.abs() <= 0.09;
+                // At the edge, not in the middle of the picture.
+                let edge = local.x.abs() >= half.x - 0.10 || local.y.abs() >= half.y - 0.10;
+                (within && edge).then_some((local.z.abs(), id, p))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, id, p)| (id, p))
+    }
+
     /// What moves with the hands now: the held monitors, and with "move all together"
     /// every monitor that goes along (drawn where it is, not catching up, or the
     /// arrangement would tear apart while it moves).
@@ -1624,6 +1661,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         },
         button_place: None,
         grabs: [None, None],
+        tablet: [None, None],
         host: None,
         found: Vec::new(),
         ip_input: None,
@@ -1676,6 +1714,7 @@ fn run(app: &AndroidApp) -> Result<()> {
     };
 
     let mut hold_since: [Option<Instant>; 2] = [None, None];
+    let mut fingers_closed = [false; 2];
     // A hand's pinch on a menu button: clicked when let go, unless it was held long
     // enough to drag the menu instead (as on the Quest's own windows).
     let mut pending_click: [Option<(ui::Action, Vec3)>; 2] = [None, None];
@@ -1890,6 +1929,60 @@ fn run(app: &AndroidApp) -> Result<()> {
         let hands_in_view = tips.iter().any(Option::is_some);
         scene.hands_in_view = hands_in_view;
         controls.hands_from_joints(&joints, head, forward);
+        // Fingers closed on the edge of the menu, a monitor or a window panel: it is held
+        // like a tablet and goes wherever the hand takes it, turned with it.
+        #[allow(clippy::needless_range_loop)] // `hand` indexes several per-hand arrays
+        for hand in 0..2 {
+            let Some(j) = joints[hand].as_ref() else {
+                fingers_closed[hand] = false;
+                if scene.tablet[hand].take().is_some() {
+                    layout::save(&scene.layout_path, &scene.placements);
+                }
+                continue;
+            };
+            let was_closed = fingers_closed[hand];
+            let (at, turn, closed) = layout::hand_hold(j, was_closed);
+            fingers_closed[hand] = closed;
+            if !closed {
+                if let Some(held) = scene.tablet[hand].take() {
+                    scene.follow_hold =
+                        scene.settings.follow && scene.placements.contains_key(&held.id);
+                    layout::save(&scene.layout_path, &scene.placements);
+                }
+                continue;
+            }
+            if !was_closed
+                && scene.tablet[hand].is_none()
+                && scene.grabs[hand].is_none()
+                && let Some((id, p)) = scene.edge_at(at)
+            {
+                scene.tablet[hand] = Some(TabletHold {
+                    id,
+                    offset: turn.inverse() * (p.position - at),
+                    turn: turn.inverse() * p.rotation,
+                });
+            }
+            let Some(held) = scene.tablet[hand] else {
+                continue;
+            };
+            // Lightly smoothed: hand tracking trembles more than a held thing would.
+            let k = 1.0 - (-dt * 25.0).exp();
+            let to = (at + turn * held.offset, (turn * held.turn).normalize());
+            let target = if held.id == PANEL_ID {
+                Some(&mut scene.panel_place)
+            } else {
+                scene.placements.get_mut(&held.id)
+            };
+            if let Some(p) = target {
+                let before = *p;
+                p.position = p.position.lerp(to.0, k);
+                p.rotation = p.rotation.slerp(to.1, k).normalize();
+                let after = *p;
+                scene.carry_all(held.id, &before, &after);
+            }
+            // That hand points and clicks nothing while it holds.
+            controls.state[hand] = Default::default();
+        }
         let menu_hand = usize::from(scene.settings.left_handed);
         scene.wrist = palm_menu_place(
             joints[menu_hand].as_ref(),
@@ -2578,7 +2671,13 @@ fn run(app: &AndroidApp) -> Result<()> {
             });
 
         // Far monitors first so nearer (and grabbed) ones draw on top.
-        let grabbed: Vec<u8> = scene.grabs.iter().flatten().map(|g| g.id).collect();
+        let grabbed: Vec<u8> = scene
+            .grabs
+            .iter()
+            .flatten()
+            .map(|g| g.id)
+            .chain(scene.tablet.iter().flatten().map(|t| t.id))
+            .collect();
         let moving = scene.moving_now(&grabbed);
         scene.animate(dt, &moving);
         // Keep KDE's arrangement in step once nothing is being moved.

@@ -1133,6 +1133,28 @@ mod grab_tests {
     }
 }
 
+/// The hand's own place and turn from its joints, and whether its fingers are closed
+/// as on the edge of a tablet: the index, middle and ring fingertips all near the palm
+/// (an index finger stretched out to press, or a pinch, is not that).
+pub fn hand_hold(j: &[(Vec3, f32); 26], closed_before: bool) -> (Vec3, Quat, bool) {
+    let (palm, wrist) = (j[0].0, j[1].0);
+    let (index_base, middle_base, little_base) = (j[6].0, j[11].0, j[21].0);
+    let along = (middle_base - wrist).normalize_or(Vec3::Y);
+    let across = index_base - little_base;
+    let across = (across - along * across.dot(along)).normalize_or(Vec3::X);
+    let turn =
+        Quat::from_mat3(&glam::Mat3::from_cols(across, along, across.cross(along))).normalize();
+    // In the hand's own size: how far the fingertips are from the palm.
+    let size = wrist.distance(middle_base).max(0.03);
+    let curl = [10, 15, 20]
+        .iter()
+        .map(|&tip| j[tip].0.distance(palm))
+        .fold(0.0f32, f32::max)
+        / size;
+    let closed = curl < if closed_before { 1.15 } else { 0.95 };
+    (palm, turn, closed)
+}
+
 pub fn load(path: &Path) -> HashMap<u8, Placement> {
     let Ok(text) = std::fs::read_to_string(path) else {
         return HashMap::new();
@@ -1645,5 +1667,52 @@ mod tests {
         assert!(t[&0].rotation.angle_between(t[&1].rotation) < 1e-5);
         let gap = (t[&1].position.x - t[&1].width / 2.0) - (t[&0].position.x + t[&0].width / 2.0);
         assert!(gap.abs() < 1e-4, "gap {gap}");
+    }
+}
+
+#[cfg(test)]
+mod hold_tests {
+    use super::*;
+
+    /// A right hand, palm facing forward, fingers up; `tips` where the index, middle
+    /// and ring fingertips are.
+    fn hand(tips: [Vec3; 3]) -> [(Vec3, f32); 26] {
+        let mut j = [(Vec3::ZERO, 0.01); 26];
+        j[0].0 = Vec3::new(0.0, 0.04, 0.0); // palm
+        j[1].0 = Vec3::ZERO; // wrist
+        j[6].0 = Vec3::new(0.03, 0.08, 0.0); // index base
+        j[11].0 = Vec3::new(0.0, 0.08, 0.0); // middle base
+        j[21].0 = Vec3::new(-0.03, 0.07, 0.0); // little base
+        (j[10].0, j[15].0, j[20].0) = (tips[0], tips[1], tips[2]);
+        j
+    }
+
+    #[test]
+    fn closed_fingers_hold_and_a_pointing_finger_does_not() {
+        let open = hand([
+            Vec3::new(0.03, 0.17, 0.0),
+            Vec3::new(0.0, 0.18, 0.0),
+            Vec3::new(-0.02, 0.17, 0.0),
+        ]);
+        let holding = hand([
+            Vec3::new(0.03, 0.08, -0.04),
+            Vec3::new(0.0, 0.08, -0.045),
+            Vec3::new(-0.02, 0.075, -0.04),
+        ]);
+        let pointing = hand([
+            Vec3::new(0.03, 0.17, 0.0),
+            Vec3::new(0.0, 0.08, -0.045),
+            Vec3::new(-0.02, 0.075, -0.04),
+        ]);
+        assert!(!hand_hold(&open, false).2);
+        assert!(hand_hold(&holding, false).2);
+        assert!(!hand_hold(&pointing, false).2);
+        // Opening a little does not drop what is held.
+        let looser = hand([
+            Vec3::new(0.03, 0.10, -0.05),
+            Vec3::new(0.0, 0.10, -0.05),
+            Vec3::new(-0.02, 0.095, -0.05),
+        ]);
+        assert!(!hand_hold(&looser, false).2 && hand_hold(&looser, true).2);
     }
 }
