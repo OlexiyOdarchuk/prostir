@@ -1,12 +1,16 @@
-# Prostir protocol, version 1
+# Prostir protocol, version 2
 
 This document describes how the PC program (`host/`) and the Meta Quest app (`client/`)
 talk to each other. It is meant for anyone who wants to understand the connection or
 write their own client or host.
 
-The source of truth is the code: [`proto/src/lib.rs`](proto/src/lib.rs) (messages and
-their encoding) and [`proto/src/secure.rs`](proto/src/secure.rs) (encryption and
-pairing). Behaviour that comes from `host/` or `client/` rather than from `proto/` is
+The source of truth is the code: [`proto/src/lib.rs`](proto/src/lib.rs) (messages),
+[`proto/src/wire.rs`](proto/src/wire.rs) (how values are encoded) and
+[`proto/src/secure.rs`](proto/src/secure.rs) (encryption and pairing).
+
+Version 2 (Prostir 0.2) is a clean break from version 1 (Prostir 0.1.x): only the
+version handshake is the same, so the two can tell the user which side to update
+(see [The version handshake](#the-version-handshake-frozen)). Behaviour that comes from `host/` or `client/` rather than from `proto/` is
 what the current apps do; it is marked **implementation-defined** where another
 implementation may reasonably differ.
 
@@ -16,6 +20,7 @@ Words used below:
 - **client** or **headset**: the Quest app. It connects to the host.
 - **stream**: one encoded video picture (a virtual monitor, a window panel or the
   mirrored laptop screen), identified by a one-byte stream id.
+- **frozen**: kept byte for byte in every protocol version, past and future.
 
 Contents:
 
@@ -128,9 +133,9 @@ key from the handshake is in the store.
 - Headset: a file inside the app. The label is the host's name (from the beacon), its
   IP address, or "PC (USB)". Settings → PC lists and forgets entries.
 
-The host serves only trusted headsets. Before trust it sends nothing but
-`PairingRequired`, `PairMsg`, `PairResult`, `Error` and `Incompatible`, and it creates
-no monitors. The current client pairs with an untrusted host only after the user agreed
+The host serves only trusted headsets. Before trust it sends nothing but `Welcome`
+(its protocol version and interface language), `PairingRequired`, `PairMsg`,
+`PairResult`, `Error` and `Incompatible`, and it creates no monitors. The current client pairs with an untrusted host only after the user agreed
 in the menu (the agreement holds for 10 minutes); otherwise it closes the connection
 right after the handshake and asks the user (implementation-defined).
 
@@ -173,7 +178,9 @@ tag(role) = HMAC-SHA256(key = SPAKE2 key,
 Because the tag covers the handshake hash and both static keys, a man in the middle
 who runs two separate handshakes cannot relay a valid confirmation.
 
-**Message sequence** (after the handshake; `Hello` may come before or after):
+**Message sequence** (after `Hello` and `Welcome`, before the session is open; the
+client starts it when it does not trust the host, or when the host answered `Open`
+with `PairingRequired`):
 
 ```
 client                                   host
@@ -183,7 +190,7 @@ client                                   host
   PairMsg{client SPAKE2 message}  ->
   PairConfirm{tag("headset")}     ->
                                          checks the tag
-                                  <-     PairResult{ok, tag("pc") if ok, else empty}
+                                  <-     PairResult{tag("pc") if the codes matched, else none}
   checks the host's tag
 ```
 
@@ -193,11 +200,11 @@ the client's `PairMsg` and then `PairConfirm`; any other message in their place 
 the connection.
 
 On success both sides add the other's static key to their trust store. The connection
-stays open, and the client continues with `Hello` (again, if it had sent one).
+stays open, and the client continues with `Open`.
 
 If the host cannot obtain a code (the dialog was cancelled or timed out after 120 s, or
-no dialog program is installed), it sends `Error{text}` and `PairResult{ok=0, tag
-empty}` without a `PairMsg`. A client waiting for `PairMsg` treats that `PairResult` as a
+no dialog program is installed), it sends `Error{text}` and `PairResult` without a tag
+and without a `PairMsg`. A client waiting for `PairMsg` treats that `PairResult` as a
 failed attempt.
 
 ### Limits and timeouts
@@ -206,11 +213,11 @@ Host (implementation-defined values from `host/src/pairing.rs`):
 
 | Limit | Value |
 |---|---|
-| Handshake and `Hello` | Must be done within 10 s in total; each read waits at most 5 s; each write at most 3 s |
+| Handshake, `Hello` and `Open` | Must be done within 10 s in total; each read waits at most 5 s; each write at most 3 s |
 | While pairing | The deadline and the read timeout become 300 s, and go back to 10 s and 5 s after the attempt |
 | `PairBegin` per connection | At most 3; a 4th closes the connection |
 | Failed attempts in a row (all connections) | The first 3 are free. After the 4th, the next attempt has to wait 30 s, then 60 s, 120 s, 240 s, 480 s, and at most 900 s. A success resets the count |
-| During a wait | `PairBegin` is answered with `Error` ("Too many wrong codes. Try again in N min.") and `PairResult{ok=0}`, and the connection is closed |
+| During a wait | `PairBegin` is answered with `Error` ("Too many wrong codes. Try again in N min.") and `PairResult` without a tag, and the connection is closed |
 
 Every attempt that does not succeed counts as a failed one: a wrong code, a host that
 has no code to offer (cancelled dialog, no dialog program) and an exchange that breaks
@@ -243,32 +250,50 @@ into encrypted transport frames.
 ```
 
 - `tag`: which message (see [Message reference](#5-message-reference)). Host→client tags
-  are 1 to 23, client→host tags 101 to 126.
+  are 1 to 24, client→host tags 101 to 127.
 - `length`: payload length in bytes, **little-endian**.
 - Maximum payload: 64 MiB (`64 * 1024 * 1024`) for a message from the host, 64 KiB
-  (`64 * 1024`) for a message from the headset. A reader rejects a larger length and
-  the connection ends. The biggest headset message in use, a slice of microphone sound,
-  is under 1 KiB; the lower limit keeps what a peer that is not trusted yet can make the
-  host allocate small.
+  (`64 * 1024`) for a message from the headset, before and after trust. A reader rejects
+  a larger length and the connection ends, also for a message it would skip. The
+  biggest headset message in use, a slice of microphone sound, is under 1 KiB; the
+  lower limit keeps what a peer that is not trusted yet can make the host allocate
+  small.
 
-Inside payloads:
+### Encoding
 
-- All integers are little-endian: `u8`, `u16`, `u32`, `u64`, and `i32` (two's
-  complement).
-- A boolean is one byte: written as `0` or `1`, read as "not zero".
-- Strings are UTF-8 with no length prefix and no terminator: a string is always the
-  last field and runs to the end of the payload. Readers decode invalid UTF-8 lossily.
-- Byte blobs and id lists (`data`, `pcm`, `msg`, `ids`, `tag`) also run to the end of
-  the payload.
+A payload is the message's fields, one after the other in the order the reference
+lists them, with nothing in between (`proto/src/wire.rs`):
 
-Reading rules of the current implementation:
+| Type | Bytes |
+|---|---|
+| `u8`, `u16`, `u32`, `u64` | Little-endian |
+| `i32` | Little-endian, two's complement |
+| `bool` | One byte, `0` or `1` |
+| `opt<T>` | One byte: `0` (none), or `1` followed by a `T` |
+| `str(max N)` | A `u16` count of bytes, then that many bytes of UTF-8; at most N bytes |
+| `list<T>(max N)` | A `u16` count of items, then the items; at most N items |
+| `bytes[N]` | Exactly N bytes, no count |
+| `(A, B)` | An `A`, then a `B` |
+| struct | Its fields in order |
+| enum | A `u8` tag, then the fields of the variant with that tag |
+| `str*`, `bytes*` | The rest of the payload, no count (only in the frozen messages and the media messages `Frame`, `Audio`, `Mic`) |
 
-- A payload shorter than its fixed fields is an error, and the connection ends.
-- Bytes after the last field that a reader knows are ignored. This applies to messages
-  whose fields all have a fixed size; it does not help messages ending in a string or
-  blob, or the repeated structures of `SetLayout` and `SetMonitors`.
-- A message with an unknown tag is skipped whole (its length is known), see
-  [Forward compatibility](#forward-compatibility).
+Enum tags are fixed numbers written next to each variant in the code, so reordering
+variants never changes the bytes. The only enum inside messages so far is the codec:
+`0` H.264, `1` H.265 (HEVC).
+
+Reading is strict, and any of these ends the connection:
+
+- a payload shorter than its fields;
+- bytes left over after the last field;
+- a `bool` or `opt` byte other than `0` or `1`;
+- an enum tag no variant has (an unknown codec, say);
+- a string that is not valid UTF-8 (also in the frozen messages);
+- a string or list over its limit.
+
+A message with a tag the reader does not know is skipped whole (its length is known),
+see [Forward compatibility](#forward-compatibility). Unknown values inside a known
+message are not skipped: they are errors.
 
 ### Encrypted transport frames
 
@@ -304,17 +329,39 @@ After the handshake, the byte stream of protocol messages is sent in chunks:
 client                                         host
   TCP connect                          ->
   Noise XX handshake (3 messages)      <->
-  [pairing, if the client does not trust the host and the user agreed]
   Hello{version, min, app}             ->
                                                not compatible:
                                        <-        Error{text}, Incompatible{protocol, app}, close
+                                               compatible:
+                                       <-        Welcome{version, language}
+  [pairing, if the client does not trust the host and the user agreed]
+  Open                                 ->
                                                client not trusted:
                                        <-        PairingRequired
-  [pairing, then Hello again]
+  [pairing, then Open again]
                                                trusted:
-                                       <-        Welcome{version, language}
+                                       <-        Opened
   steady state
 ```
+
+### The version handshake (frozen)
+
+`Hello`, `Welcome`, `Incompatible` and `Error` keep the bytes they have in version 1 in
+every version: the fixed fields, then a UTF-8 text running to the end of the payload
+(`str*`). `Hello` is always the client's first message, before pairing or anything
+else. So any two versions, older or newer, can finish this exchange and tell the user
+which side to update. These four must never change; what a new version needs goes into
+other messages.
+
+| Tag | Message | Bytes |
+|---:|---|---|
+| 101 | `Hello` | `version:u32, min:u32, app:str*` |
+| 1 | `Welcome` | `version:u32, language:str*` |
+| 17 | `Incompatible` | `protocol:u32, app:str*` |
+| 6 | `Error` | `text:str*` |
+
+For example `Hello{version: 2, min: 2, app: "0.2.0"}` is
+`65 0d 00 00 00 02 00 00 00 02 00 00 00 30 2e 32 2e 30`.
 
 **Hello.** The client sends its newest protocol (`version` = `PROTOCOL_VERSION`), the
 oldest it still understands (`min` = `MIN_PROTOCOL`) and its app version (for example
@@ -329,46 +376,60 @@ fn compatible(version: u32, min: u32) -> bool {
 ```
 
 where `PROTOCOL_VERSION` and `MIN_PROTOCOL` are the host's own. In this version both are
-`1`. There is no negotiated version: if the ranges overlap, both sides speak, and each
-skips what it does not know.
+`2`. There is no negotiated version: if the ranges overlap, both sides speak, and each
+skips messages it does not know.
 
 If the check fails, the host sends `Error` with a human-readable text (for clients
 older than `Incompatible`), then `Incompatible{protocol: host PROTOCOL_VERSION, app:
-host app version}`, and closes the connection. This happens before the trust check, so
-an unpaired client also learns this. The client compares `protocol` with its own
-`PROTOCOL_VERSION` to tell which side needs an update. The current client waits 10 s
-before trying again.
+host app version}`, and closes the connection. This happens before any trust check or
+pairing, so an unpaired client also learns this. The client compares `protocol` with
+its own `PROTOCOL_VERSION` to tell which side needs an update. The current client waits
+10 s before trying again.
 
-**PairingRequired.** Sent when the version fits but the client's key is not trusted.
-The client may pair (section 2) and then send `Hello` again. The host keeps reading in
-this pre-session loop until it can send `Welcome`; in that loop it accepts `Hello`,
-`PairBegin` and unknown tags, and closes the connection on anything else.
+A first message other than `Hello` can only come from a version 1 client (Prostir
+0.1.x), which may ask to pair before saying hello. The host answers it the same way
+(`Error` saying to update the headset, then `Incompatible`) and closes the connection,
+skipping the message unread.
 
-**Welcome.** Sent once the client is trusted and compatible. `version` is the host's
-`PROTOCOL_VERSION` (the current client does not use it); `language` is the PC's
-interface language, `uk` or `en`, which the headset follows by default. The session
-starts.
+**Welcome.** The versions fit. `version` is the host's `PROTOCOL_VERSION`; `language`
+is the PC's interface language, `uk` or `en`, which the headset follows by default.
+Nothing else starts yet.
+
+**Trust.** If the client does not trust the host's key, it pairs now (only after the
+user agreed in its menu; otherwise it closes the connection and asks the user). Then it
+sends `Open`. The host answers `PairingRequired` if it does not trust the client: the
+client may pair and send `Open` again. Once the host trusts the client it answers
+`Opened`, and the session starts. Until then the host accepts only `Open` and
+`PairBegin` (and skips unknown tags), and closes the connection on anything else.
 
 If the host then cannot set up its monitors or encoders, it sends `Error{text}` and
 closes the connection.
 
+### What a version 1 peer sees
+
+| Peer | What happens |
+|---|---|
+| 0.1.x client, trusts the host | Sends `Hello{1, 1}`. The host sends `Error` ("Update Prostir in the headset…") and `Incompatible{2, …}`; the client shows its "update the headset" page. |
+| 0.1.x client, pairing first | Sends `PairBegin` first. The host sends the same `Error` and `Incompatible` and closes. The client shows the error text, treats `Incompatible` during pairing as unexpected and reconnects. |
+| 0.1.x host | Gets `Hello{2, 2}` and answers `Error` ("Update Prostir on the PC…") and `Incompatible{1, …}`; the client shows "update the PC". The host also shows a desktop notification. |
+
 ### Steady state
 
-Right after `Welcome` the host sends, in this order: `PrimaryChanged` (if a primary
+Right after `Opened` the host sends, in this order: `PrimaryChanged` (if a primary
 monitor is set), `Order`, `MirrorWanted`, `AudioWanted`, `MicWanted`, `PcSettings`,
 `Abilities`. Then it forces a keyframe on every encoder, and each stream starts with
 `StreamStart` followed by `Frame`s (see [Streams](#6-streams-sound-and-microphone)).
 `Focus` follows whenever the monitor under the mouse changes (checked every 150 ms).
 
-The current client sends after `Welcome`: `SetMic` (its microphone switch), and
+The current client sends after `Opened`: `SetMic` (its microphone switch), and
 `SetNotifications{1}` and `SetSoundFromScreen{1}` if those are on, and `Presence{0}`
 if the headset is not worn. `SetLayout` follows once the monitors are placed and the
 arrangement has held still for 800 ms. Everything else is sent when the user does
 something.
 
 The host ignores (and logs) known client messages that have no meaning in the session,
-such as `Hello` or `PairBegin`. The client ignores host pairing messages, `Welcome` and
-`Incompatible` in the session.
+such as `Open` or `PairBegin`. The client ignores host pairing messages, `Welcome`,
+`Opened` and `Incompatible` in the session.
 
 ### End of session
 
@@ -387,73 +448,75 @@ apps:
 ### Forward compatibility
 
 - **Unknown tags must be skipped.** A reader that gets a tag it does not know reads
-  and discards `length` bytes and goes on. Both sides do this, also before `Welcome`.
-- A `StreamStart` with an unknown codec value is skipped the same way (the stream is
-  ignored, the connection stays); its `Frame`s then belong to an unknown stream and are
-  dropped.
+  and discards `length` bytes and goes on. Both sides do this, also before the session.
+- Unknown values inside a known message (a codec, an enum tag, an `opt` byte) are
+  errors, not skipped. A new value of an existing field therefore needs a new message
+  or a new protocol version.
 - So a new **optional** message needs no new protocol version: older peers skip it.
 - Raise `MIN_PROTOCOL` (and `PROTOCOL_VERSION` with it) only for a change an older peer
   cannot just skip: a different layout or meaning of an existing message, a message the
   other side must understand for the session to work, or a change to framing, the
   handshake or pairing. Peers whose ranges no longer overlap then get `Incompatible`
   instead of misreading each other.
-- Never reuse a tag number for a different message.
+- Never reuse a tag number for a different message, and never change the
+  [frozen messages](#the-version-handshake-frozen).
 
 ## 5. Message reference
 
-Payload notation: fields in order, `name:type`. `str*` and `bytes*` run to the end of
-the payload. `bool` is one byte. All integers little-endian.
+Payload notation: fields in order, `name:type`, with the types of
+[Encoding](#encoding). Frozen messages are marked as such (their bytes never change).
 
 ### Host → headset
 
 | Tag | Name | Payload | Meaning |
 |---:|---|---|---|
-| 1 | `Welcome` | `version:u32, language:str*` | Session accepted. `version`: host `PROTOCOL_VERSION`. `language`: `uk` or `en`. |
-| 2 | `StreamStart` | `id:u8, codec:u8, width:u32, height:u32, name:str*` | A stream begins, or restarts with a new size or codec. `codec`: `0` H.264, `1` H.265 (HEVC). `width`, `height`: encoded size in pixels. `name`: `Prostir-<id+1>` or `mirror`, informational. Note the order: `id`, `codec`, then the sizes. |
+| 1 | `Welcome` (frozen) | `version:u32, language:str*` | The versions fit. `version`: host `PROTOCOL_VERSION`. `language`: `uk` or `en`. |
+| 2 | `StreamStart` | `id:u8, width:u32, height:u32, codec:u8, name:str(max 64)` | A stream begins, or restarts with a new size or codec. `codec`: `0` H.264, `1` H.265 (HEVC); any other value is an error. `width`, `height`: encoded size in pixels. `name`: `Prostir-<id+1>` or `mirror`, informational. |
 | 3 | `Frame` | `id:u8, keyframe:bool, pts_us:u64, data:bytes*` | One encoded access unit of stream `id`. See [Frames](#frames). |
 | 4 | `StreamEnd` | `id:u8` | The stream is gone (monitor removed, panel closed, mirror stopped). |
 | 5 | `PrimaryChanged` | `id:u8` | Monitor `id` is the desktop's primary monitor (KDE: where the Plasma panel is). |
-| 6 | `Error` | `text:str*` | Something failed; text for the user, in the PC's language. |
+| 6 | `Error` (frozen) | `text:str*` | Something failed; text for the user, in the PC's language. |
 | 7 | `MirrorWanted` | `enabled:bool` | Whether the laptop screen should be mirrored into the headset (the host's setting, also the echo of `SetMirror`). |
-| 8 | `Order` | `ids:bytes*` | Monitor ids, one byte each, left to right (rows flattened top to bottom); without the mirror and window panels. |
-| 9 | `PairingRequired` | (empty) | The host does not trust this headset: pair first. |
-| 10 | `PairMsg` | `msg:bytes*` | The host's SPAKE2 message (33 bytes). |
-| 11 | `PairResult` | `ok:bool, tag:bytes*` | Whether the codes matched. On success `tag` is the host's 32-byte confirmation tag; on failure it is empty. |
+| 8 | `Order` | `ids:list<u8>(max 16)` | Monitor ids, left to right (rows flattened top to bottom); without the mirror and window panels. |
+| 9 | `PairingRequired` | (empty) | The answer to `Open` when the host does not trust this headset: pair first. |
+| 10 | `PairMsg` | `msg:bytes[33]` | The host's SPAKE2 message. |
+| 11 | `PairResult` | `tag:opt<bytes[32]>` | Whether the codes matched: the host's confirmation tag if they did, none if not. |
 | 12 | `Audio` | `pcm:bytes*` | A slice of PC sound: 48 kHz, 2 channels, interleaved signed 16-bit little-endian. |
 | 13 | `AudioWanted` | `enabled:bool` | Whether PC sound goes to the headset. |
 | 14 | `MicWanted` | `enabled:bool` | Whether the headset microphone should act as the PC's microphone (the host's setting). |
 | 15 | `MicActive` | `active:bool` | A PC app is recording from the headset microphone right now (`1`), or stopped (`0`). |
-| 16 | `Focus` | `id:u8` | The stream the mouse is on; `255` (`NO_FOCUS`) if none of the streamed ones. |
-| 17 | `Incompatible` | `protocol:u32, app:str*` | The versions do not fit. `protocol`: host `PROTOCOL_VERSION`; `app`: host app version. The host closes the connection after it. |
-| 18 | `PcSettings` | `quality:u32, codec:u8, software:bool, sharp:bool, encoders:u8` | How the host encodes. `quality`: bitrate per stream in Mbit/s. `codec`: as in `StreamStart` (a reader maps unknown values to H.265). `software`: CPU encoder (x264). `sharp`: slower preset for clearer small text. `encoders`: what the PC can use, bits `1` GPU H.264, `2` GPU H.265, `4` CPU H.264. Payload is 8 bytes. |
+| 16 | `Focus` | `id:opt<u8>` | The stream the mouse is on; none if it is on none of the streamed ones. |
+| 17 | `Incompatible` (frozen) | `protocol:u32, app:str*` | The versions do not fit. `protocol`: host `PROTOCOL_VERSION`; `app`: host app version. The host closes the connection after it. |
+| 18 | `PcSettings` | `quality:u32, codec:u8, software:bool, sharp:bool, encoders:u8` | How the host encodes. `quality`: bitrate per stream in Mbit/s. `codec`: as in `StreamStart`. `software`: CPU encoder (x264). `sharp`: slower preset for clearer small text. `encoders`: what the PC can use, bits `1` GPU H.264, `2` GPU H.265, `4` CPU H.264. |
 | 19 | `Recenter` | (empty) | Turn the monitors to face the user (asked for from the PC tray). |
-| 20 | `Notice` | `text:str*` | Something done, to show briefly (a saved screenshot, a PC desktop notification). Not an error. |
+| 20 | `Notice` | `text:str(max 8192)` | Something done, to show briefly (a saved screenshot, a PC desktop notification). Not an error. |
 | 21 | `MouseAt` | `id:u8, x:u16, y:u16` | Answer to `FindMouse`: the mouse is on stream `id` at `x`, `y` across its picture, `0` to `65535` from the top left. |
 | 22 | `Abilities` | `bits:u8` | What the PC can do beyond the basics. Bit `1` (`MOVE_MOUSE`): it can move the mouse, so `MouseTo` works. |
-| 23 | `SoundFrom` | `id:u8` | The window playing sound is on stream `id`; `255` (`NO_FOCUS`) if not known. Sent only while `SetSoundFromScreen` is on, when it changes. |
+| 23 | `SoundFrom` | `id:opt<u8>` | The window playing sound is on stream `id`; none if not known. Sent only while `SetSoundFromScreen` is on, when it changes. |
+| 24 | `Opened` | (empty) | The answer to `Open` from a trusted headset: the session started. |
 
 ### Headset → host
 
 | Tag | Name | Payload | Meaning |
 |---:|---|---|---|
-| 101 | `Hello` | `version:u32, min:u32, app:str*` | First message of a session (see [Opening](#opening)). |
+| 101 | `Hello` (frozen) | `version:u32, min:u32, app:str*` | First message of every connection (see [Opening](#opening)). |
 | 102 | `RequestKeyframe` | `id:u8` | The decoder of stream `id` lost frames: send a keyframe. |
 | 103 | `FrameShown` | `id:u8, pts_us:u64` | The frame with this `pts_us` was handed to the compositor. |
 | 104 | `AddMonitor` | `width:u32, height:u32` | Create another virtual monitor of this size in pixels. |
 | 105 | `RemoveMonitor` | `id:u8` | Remove monitor `id`. For a window panel id (10 to 12), close the panel and put its window back. |
 | 106 | `SetPrimary` | `id:u8` | Make monitor `id` the primary one. Answered with `PrimaryChanged`; an unknown id is ignored. |
 | 107 | `SetMirror` | `enabled:bool` | Show or hide the mirror of the laptop screen. Answered with `MirrorWanted`. |
-| 108 | `SetOrder` | `ids:bytes*` | New left-to-right order: must contain exactly the ids of the current monitors, otherwise `Error`. Resets the layout to one row. Answered with `Order`. |
-| 109 | `PairBegin` | `headset_shows:bool, name:str*` | Start a pairing attempt. `headset_shows`: `1` the headset shows the code, `0` the host shows it. `name`: label for the host's trust store (the current client sends `Meta Quest`). |
-| 110 | `PairMsg` | `msg:bytes*` | The headset's SPAKE2 message (33 bytes). |
-| 111 | `PairConfirm` | `tag:bytes*` | The headset's 32-byte confirmation tag. |
+| 108 | `SetOrder` | `ids:list<u8>(max 16)` | New left-to-right order: must contain exactly the ids of the current monitors, otherwise `Error`. Resets the layout to one row. Answered with `Order`. |
+| 109 | `PairBegin` | `headset_shows:bool, name:str(max 64)` | Start a pairing attempt. `headset_shows`: `1` the headset shows the code, `0` the host shows it. `name`: label for the host's trust store (the current client sends `Meta Quest`). |
+| 110 | `PairMsg` | `msg:bytes[33]` | The headset's SPAKE2 message. |
+| 111 | `PairConfirm` | `tag:bytes[32]` | The headset's confirmation tag. |
 | 112 | `SetAudio` | `enabled:bool` | Send PC sound to the headset, or keep it on the PC. Answered with `AudioWanted`. |
 | 113 | `SetMic` | `enabled:bool` | Use the headset microphone as the PC's microphone. Answered with `MicWanted`. |
 | 114 | `Mic` | `pcm:bytes*` | A slice of microphone sound: 48 kHz, 1 channel, signed 16-bit little-endian. |
 | 115 | `Presence` | `worn:bool` | Whether the headset is worn. While it is not, the host pauses encoding and sound. |
-| 116 | `SetMonitors` | `primary:u8, then (width:u32, height:u32) repeated` | Switch to this set of monitors, left to right (a profile). `primary` is an index into the list. Note that `primary` comes first. Monitors whose size already matches are kept. |
-| 117 | `SetLayout` | rows, see [Layout](#7-layout) | How the monitors stand around the user. |
-| 118 | `SetPcSettings` | `quality:u32, codec:u8, software:bool, sharp:bool` | Change how the PC encodes (same fields as `PcSettings`, without `encoders`; 7 bytes). Answered with `PcSettings`, or `Error`. |
+| 116 | `SetMonitors` | `sizes:list<(width:u32, height:u32)>(max 16), primary:u8` | Switch to this set of monitors, left to right (a profile). `primary` is an index into `sizes`. Monitors whose size already matches are kept. |
+| 117 | `SetLayout` | `rows:list<row>(max 16)`, see [Layout](#7-layout) | How the monitors stand around the user. |
+| 118 | `SetPcSettings` | `quality:u32, codec:u8, software:bool, sharp:bool` | Change how the PC encodes (same fields as `PcSettings`, without `encoders`). Answered with `PcSettings`, or `Error`. |
 | 119 | `Battery` | `percent:u8, charging:bool` | The headset's battery, for the PC tray. |
 | 120 | `DetachWindow` | (empty) | Put the PC's active window on a panel of its own. A new stream with an id from 10 to 12 starts, or `Error`. |
 | 121 | `WindowHere` | `id:u8` | Move the PC's active window to monitor `id` (a monitor or `100`, the mirror). |
@@ -462,16 +525,13 @@ the payload. `bool` is one byte. All integers little-endian.
 | 124 | `MouseTo` | `id:u8, x:u16, y:u16` | Put the mouse on stream `id` at `x`, `y` across its picture (`0` to `65535`). Only if `Abilities` has `MOVE_MOUSE`. No answer. |
 | 125 | `SetNotifications` | `enabled:bool` | Pass the PC's desktop notifications to the headset as `Notice`. |
 | 126 | `SetSoundFromScreen` | `enabled:bool` | Report which stream the sound comes from (`SoundFrom`). |
+| 127 | `Open` | (empty) | Start the session, once the headset trusts the host. Answered with `Opened` or `PairingRequired`. |
 
-Tags 0, 24 to 100 and 127 to 255 are unused. Both enums also have an `Unknown`
-variant, which only stands for a skipped message and is never sent.
+Tags 0, 25 to 100 and 128 to 255 are unused.
 
 Host behaviour for monitor requests (implementation-defined): at most 6 monitors; sizes
 from 320×240 to 7680×4320; the last monitor cannot be removed; at most 3 window panels.
 A request that fails is answered with `Error`.
-
-`SetMonitors` may list at most 16 sizes; a reader rejects a longer list as invalid, and
-the connection ends. (`SetLayout` has similar limits, see [Layout](#7-layout).)
 
 ## 6. Streams, sound and microphone
 
@@ -482,7 +542,6 @@ the connection ends. (`SetLayout` has similar limits, see [Layout](#7-layout).)
 | `0`, `1`, … | Virtual monitors | The host gives a new monitor the lowest free id. With at most 6 monitors these are `0` to `5`. |
 | `10`, `11`, `12` | Window panels (`WINDOW_IDS` = `10..13`) | A small output made for one window, shown as a floating panel. At most three, because the headset has only so many video decoders. |
 | `100` | Mirror of the physical display (`MIRROR_ID`) | The laptop panel, streamed as it is. |
-| `255` | `NO_FOCUS` | Not a stream; used in `Focus` and `SoundFrom` for "none" or "not known". |
 
 ### StreamStart
 
@@ -565,25 +624,22 @@ eyes expect it.
 
 ### Encoding
 
-The payload is a sequence of rows until the payload ends:
-
 ```
-row:   count:u8, then count times:
-         id:u8, center:i32, middle:i32
+SetLayout: rows:list<row>(max 16)
+row:       entries:list<entry>(max 16)
+entry:     id:u8, center:opt<i32>, middle:opt<i32>
 ```
 
-Each entry is 9 bytes. Rows go from top to bottom, entries in a row from left to right.
-An empty payload means no rows. A row cut off in the middle is an error. A `SetLayout`
-may list at most 16 rows and at most 16 monitors in all its rows together; a reader
-rejects a larger one as invalid, and the connection ends.
+Rows go from top to bottom, entries in a row from left to right. An empty list means no
+rows. A `SetLayout` may hold at most 16 rows and at most 16 monitors in all its rows
+together; a reader rejects a larger one as invalid, and the connection ends.
 
 - `id`: a monitor id, or `100` for the mirror if the headset placed it. Window panels
   are not part of the layout.
-- `center`: where the monitor's centre is seen horizontally.
-- `middle`: where the monitor's centre is seen vertically, **downwards**.
-- `NEXT` = `i32::MIN` (`0x80000000`, written as bytes `00 00 00 80`) means "not known":
-  in `center`, "just right of the previous monitor in the row"; in `middle`, "centred in
-  the row". A writer with fewer centres or middles than ids fills in `NEXT`.
+- `center`: where the monitor's centre is seen horizontally; none: "just right of the
+  previous monitor in the row".
+- `middle`: where the monitor's centre is seen vertically, **downwards**; none: "not
+  known, centred in the row".
 
 ### Units
 
@@ -602,7 +658,8 @@ comparable between monitors and to the monitors' own pixel sizes.
 
 1. Clamps every known `center` and `middle` to ±100000.
 2. Keeps the rows, drops ids that are neither a current monitor nor the active mirror,
-   and appends monitors missing from the rows to the end of the last row with `NEXT`.
+   and appends monitors missing from the rows to the end of the last row, with no
+   positions.
 3. Sets the monitor order to the ids of all rows, top to bottom and left to right,
    without the mirror, and sends it back as `Order`.
 4. Arranges the desktop, in logical pixels (pixel size divided by the output's scale):
@@ -620,4 +677,4 @@ comparable between monitors and to the monitors' own pixel sizes.
 5. Saves the layout for the next session.
 
 `SetOrder` and `SetMonitors` replace the layout with one row in the given order, with
-all positions `NEXT`.
+no positions.
