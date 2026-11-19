@@ -383,13 +383,16 @@ fn config_path() -> Option<PathBuf> {
     Some(dir.join("monitors.txt"))
 }
 
-pub fn load_saved(parse: impl Fn(&str) -> Result<MonitorSpec, String>) -> Option<SavedMonitors> {
-    let text = std::fs::read_to_string(config_path()?).ok()?;
-    let saved = SavedMonitors::parse(&text, parse);
-    (!saved.specs.is_empty()).then_some(saved)
-}
-
 impl SavedMonitors {
+    /// What was saved last, with or without monitors; the defaults before the first
+    /// save.
+    pub fn load(parse: impl Fn(&str) -> Result<MonitorSpec, String>) -> Self {
+        config_path()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .map(|text| Self::parse(&text, parse))
+            .unwrap_or_default()
+    }
+
     fn parse(text: &str, parse: impl Fn(&str) -> Result<MonitorSpec, String>) -> Self {
         let mut saved = Self::default();
         let on = |v: &str| v.trim() == "on";
@@ -835,18 +838,18 @@ impl Displays {
             self.set_sharp(wanted.sharp);
         }
         let current = self.pc_settings();
-        if wanted.codec != current.codec || wanted.software != current.software {
-            let (backend, codec) = crate::encoder::pick(wanted.codec, wanted.software)?;
-            info!("encoding with {backend:?} {codec:?} (from the headset menu)");
-            if let Err(e) = self.switch_encoding(backend, codec) {
-                // The headset shows the settings that are still in use.
-                self.announce_pc_settings();
-                return Err(e);
-            }
-        }
+        let switched = if wanted.codec != current.codec || wanted.software != current.software {
+            crate::encoder::pick(wanted.codec, wanted.software).and_then(|(backend, codec)| {
+                info!("encoding with {backend:?} {codec:?} (from the headset menu)");
+                self.switch_encoding(backend, codec)
+            })
+        } else {
+            Ok(())
+        };
+        // What is in use now, the codec as before if it could not change.
         self.save();
         self.announce_pc_settings();
-        Ok(())
+        switched
     }
 
     /// Encodes with `backend` and `codec` from now on: every monitor's stream starts

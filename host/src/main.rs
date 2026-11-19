@@ -21,7 +21,7 @@ use log::{debug, error, info, warn};
 use prostir_proto::secure::{SecureReader, SecureWriter};
 use prostir_proto::{ClientMsg, Codec, HostMsg, NO_FOCUS};
 
-use displays::Displays;
+use displays::{Displays, SavedMonitors};
 use encoder::EncoderConfig;
 use platform::MonitorSpec;
 use platform::{TrayCommand, TrayStatus, focus, notifications, sound_source, tray};
@@ -108,19 +108,25 @@ impl Control {
                 TrayCommand::SetBitrate(mbps) => {
                     info!("video quality: {mbps} Mbit/s per monitor");
                     self.bitrate = mbps;
-                    if let Some(d) = displays.as_deref_mut() {
-                        d.set_bitrate(mbps);
-                        d.save();
-                        d.announce_pc_settings();
+                    match displays.as_deref_mut() {
+                        Some(d) => {
+                            d.set_bitrate(mbps);
+                            d.save();
+                            d.announce_pc_settings();
+                        }
+                        None => store(|s| s.bitrate = Some(mbps)),
                     }
                 }
                 TrayCommand::SetSharp(sharp) => {
                     info!("clearer text: {sharp}");
                     self.sharp = sharp;
-                    if let Some(d) = displays.as_deref_mut() {
-                        d.set_sharp(sharp);
-                        d.save();
-                        d.announce_pc_settings();
+                    match displays.as_deref_mut() {
+                        Some(d) => {
+                            d.set_sharp(sharp);
+                            d.save();
+                            d.announce_pc_settings();
+                        }
+                        None => store(|s| s.sharp = sharp),
                     }
                 }
                 TrayCommand::SetCounting(on) => usage::set_enabled(on),
@@ -157,6 +163,14 @@ impl Control {
             self.shown = Some(status);
         }
     }
+}
+
+/// Changes a saved choice while there are no monitors (with them, `Displays::save`
+/// keeps every choice).
+fn store(change: impl FnOnce(&mut SavedMonitors)) {
+    let mut saved = SavedMonitors::load(parse_monitor);
+    change(&mut saved);
+    saved.save();
 }
 
 /// Taken off for this long, the headset counts as gone.
@@ -412,14 +426,14 @@ fn serve_client(
                 }
             }
             Ok(Ok(ClientMsg::SetPcSettings { settings })) => {
-                match displays.set_pc_settings(settings) {
-                    Ok(()) => {
-                        control.bitrate = settings.quality.clamp(5, 100);
-                        control.sharp = settings.sharp;
-                        tray::set_encoding(control.tray.as_ref(), control.bitrate, control.sharp);
-                    }
-                    Err(e) => report(displays, format!("{e:#}")),
+                if let Err(e) = displays.set_pc_settings(settings) {
+                    report(displays, format!("{e:#}"));
                 }
+                // Quality and clearer text apply even when the codec cannot change.
+                let now = displays.pc_settings();
+                control.bitrate = now.quality;
+                control.sharp = now.sharp;
+                tray::set_encoding(control.tray.as_ref(), control.bitrate, control.sharp);
             }
             Ok(Ok(ClientMsg::Unknown { tag })) => {
                 debug!("skipping message {tag} from a newer headset")
@@ -503,14 +517,14 @@ fn spawn_adb_reverse(port: u16) {
 }
 
 fn create_displays(args: &Args, bitrate: u32, sharp: bool) -> Result<Displays> {
-    let stored = displays::load_saved(parse_monitor);
+    let mut saved = SavedMonitors::load(parse_monitor);
     // The command line wins, then the headset menu's choice, then HEVC.
     let prefer = match args.codec {
         Some(CodecArg::H264) => Codec::H264,
         Some(CodecArg::H265) => Codec::H265,
-        None => stored.as_ref().and_then(|s| s.codec).unwrap_or(Codec::H265),
+        None => saved.codec.unwrap_or(Codec::H265),
     };
-    let software = args.software || stored.as_ref().is_some_and(|s| s.software);
+    let software = args.software || saved.software;
     let (backend, codec) = encoder::pick(prefer, software)?;
     info!("encoding with {backend:?} {codec:?}");
     let cfg = EncoderConfig {
@@ -519,7 +533,6 @@ fn create_displays(args: &Args, bitrate: u32, sharp: bool) -> Result<Displays> {
         backend,
         sharp,
     };
-    let mut saved = stored.unwrap_or_default();
     // Monitors from the command line replace the saved set and where it stood; the
     // other choices (sound, microphone, mirror) stay as saved.
     if !args.monitors.is_empty() {
@@ -585,11 +598,9 @@ fn main() -> Result<()> {
         spawn_adb_reverse(args.port);
     }
 
-    let bitrate = args
-        .bitrate
-        .or_else(|| displays::load_saved(parse_monitor).and_then(|s| s.bitrate))
-        .unwrap_or(30);
-    let sharp = displays::load_saved(parse_monitor).is_some_and(|s| s.sharp);
+    let saved = SavedMonitors::load(parse_monitor);
+    let bitrate = args.bitrate.or(saved.bitrate).unwrap_or(30);
+    let sharp = saved.sharp;
     let (command_tx, commands) = mpsc::channel();
     let mut control = Control {
         security: pairing::Security::load()?,
