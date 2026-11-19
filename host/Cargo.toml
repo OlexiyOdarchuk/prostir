@@ -13,6 +13,18 @@ description = "Prostir host: virtual KDE Plasma 6 and Hyprland monitors streamed
 name = "prostir"
 path = "src/main.rs"
 
+[features]
+# For the end-to-end tests only (host/tests/e2e): the platform is a fake desktop in
+# memory instead of KDE Plasma or Hyprland (see src/platform/fake). Never in releases.
+# `cargo e2e` runs the tests with it.
+fake-desktop = ["dep:gstreamer-base"]
+
+# Started by the end-to-end tests with the fake desktop and driven by a fake headset.
+[[test]]
+name = "e2e"
+path = "tests/e2e/main.rs"
+required-features = ["fake-desktop"]
+
 [dependencies]
 prostir-proto = { path = "../proto" }
 anyhow = "1"
@@ -22,6 +34,8 @@ env_logger = "0.11"
 libc = "0.2"
 gstreamer = "0.25"
 gstreamer-app = "0.25"
+# The fake desktop's picture source (a GStreamer element of its own).
+gstreamer-base = { version = "0.25", optional = true }
 gstreamer-video = { version = "0.25", features = ["v1_24"] }
 wayland-client = "0.31"
 wayland-protocols-plasma = { version = "0.3", features = ["client"] }
@@ -43,6 +57,9 @@ wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 # fallback (NVIDIA, or no VA encoder), pipewiresrc, pulsesrc/pulsesink, h264parse and
 # h265parse; pw-cli and pw-loopback; pactl; kscreen-doctor and qdbus6 on KDE Plasma;
 # grim for screenshots on Hyprland (optional).
+[dev-dependencies]
+prostir-testkit = { path = "../testkit" }
+
 [package.metadata.deb]
 name = "prostir"
 maintainer = "Prostir contributors <https://github.com/OlexiyOdarchuk/prostir>"

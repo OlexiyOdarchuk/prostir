@@ -656,7 +656,9 @@ playing (PipeWire streams carry its process id) and where its window is (Hyprlan
 client list, or a KWin script). The Quest app is native OpenXR written in Rust; the
 compositor draws the monitors, and the app itself renders only the hands.
 
-`cargo test` runs the protocol, layout, profile and menu tests on the PC.
+`cargo test` runs the protocol, layout, profile and menu tests on the PC. `cargo e2e`
+runs the PC app with a fake desktop against a fake headset (pairing, monitors, taking
+the headset off, reconnecting, codec switch); it needs GStreamer with x264enc.
 `cargo run -p prostir-testkit --bin prostir-probe -- [HOST:PORT] [SECONDS] [DIR]` connects
 like a headset, pairs, and saves the video and sound it receives, to check the PC side
 without a headset.

@@ -1,5 +1,8 @@
 // Every unsafe block says why it is sound.
 #![deny(clippy::undocumented_unsafe_blocks)]
+// The fake desktop for tests uses less of the core than the real platforms do (no
+// tray commands, no pushed frames); unused code is found in the real build.
+#![cfg_attr(feature = "fake-desktop", allow(dead_code))]
 mod displays;
 mod encoder;
 mod i18n;
@@ -595,16 +598,17 @@ fn main() -> Result<()> {
     let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, args.port))
         .with_context(|| format!("cannot listen on port {}", args.port))?;
     listener.set_nonblocking(true)?;
+    // The one listened on: with `--port 0` the system picks a free one (tests).
+    let port = listener.local_addr()?.port();
     info!(
-        "Prostir {} waiting for the headset on port {}",
+        "Prostir {} waiting for the headset on port {port}",
         env!("CARGO_PKG_VERSION"),
-        args.port
     );
     if !args.no_discovery {
-        spawn_discovery(args.port)?;
+        spawn_discovery(port)?;
     }
     if !args.no_adb {
-        spawn_adb_reverse(args.port);
+        spawn_adb_reverse(port);
     }
 
     let saved = SavedMonitors::load(parse_monitor);

@@ -652,7 +652,10 @@ VA-API читає напряму, тож через процесор нічог�
 і де її вікно (список клієнтів Hyprland або скрипт KWin). Застосунок для Quest написано
 на Rust поверх OpenXR; монітори малює компоновник, а сам застосунок рендерить лише руки.
 
-`cargo test` запускає тести протоколу, розкладок, профілів і меню на ПК.
+`cargo test` запускає тести протоколу, розкладок, профілів і меню на ПК. `cargo e2e`
+запускає програму для ПК з несправжньою стільницею проти несправжнього шолома
+(сполучення, монітори, зняття шолома, перепідключення, зміна кодека); потрібен
+GStreamer з x264enc.
 `cargo run -p prostir-client --example panel_preview -- menu.png` рендерить меню шолома
 в PNG (`TAB=monitors|look|controls|sound|language|pc|help`, `LANG_UI=en`, `WRIST=1`), а `--example sky_preview -- DIR`
 рендерить панорами. `cargo run -p prostir-testkit --bin prostir-probe -- [HOST:PORT]

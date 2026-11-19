@@ -342,12 +342,18 @@ impl FakeHeadset {
         Ok(())
     }
 
-    /// Forgets what was seen so far (counts start again from here).
-    pub fn reset_view(&mut self) {
-        self.view = View {
-            closed: self.view.closed,
-            ..View::default()
-        };
+    /// Counts start again from here: frames, sound, ended streams, errors and notices.
+    /// What the headset knows stays: the streams, the order, the settings.
+    pub fn reset_counts(&mut self) {
+        let v = &mut self.view;
+        for s in v.streams.values_mut() {
+            (s.frames, s.keyframes, s.bad_keyframes, s.bytes) = (0, 0, 0, 0);
+        }
+        v.ended.clear();
+        v.errors.clear();
+        v.notices.clear();
+        v.audio_bytes = 0;
+        v.messages = 0;
     }
 
     /// Hangs up, as a headset that lost the network would.

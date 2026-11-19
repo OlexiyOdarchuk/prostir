@@ -35,6 +35,8 @@
 //!   The private runtime dir stays inside the platform.
 //!
 //! The compiler checks the list: the core does not build until everything is there.
+//! `fake/` is the smallest complete example: a desktop that exists only in memory,
+//! which the end-to-end tests build in place of the real platform.
 //!
 //! # A new Linux desktop (GNOME)
 //!
@@ -52,12 +54,19 @@ use anyhow::{Result, bail};
 
 use crate::encoder::{Encoder, Input};
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(feature = "fake-desktop")))]
 mod linux;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(feature = "fake-desktop")))]
 pub use linux::*;
 
-#[cfg(not(target_os = "linux"))]
+// A desktop inside the process, for the end-to-end tests only (see `fake/mod.rs`). It
+// replaces the whole platform, so a test build never touches the real desktop.
+#[cfg(feature = "fake-desktop")]
+mod fake;
+#[cfg(feature = "fake-desktop")]
+pub use fake::*;
+
+#[cfg(not(any(target_os = "linux", feature = "fake-desktop")))]
 compile_error!("Prostir has no platform layer for this operating system yet (see platform/mod.rs)");
 
 /// A virtual monitor to make: its mode and scale.
