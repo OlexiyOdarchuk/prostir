@@ -24,7 +24,7 @@ use std::io;
 use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use log::warn;
+use log::{info, warn};
 use prostir_proto::link::RecordSender;
 use prostir_proto::packet::{Encoded, FRAGMENT, Outgoing, lane};
 use prostir_proto::stats::{Histogram, per_minute};
@@ -149,6 +149,9 @@ struct State {
     /// Streams that lost a frame since the router last looked: they need a keyframe.
     dropped: BTreeSet<u8>,
     stats: OutboxStats,
+    /// How fast the connection may send, and whether the writer has to apply it.
+    pace: u64,
+    pace_changed: bool,
     closed: bool,
 }
 
@@ -158,12 +161,14 @@ pub struct Outbox {
     ready: Condvar,
 }
 
-/// The lane the writer sends a packet in next.
+/// What the writer does next: send a packet in a lane, or change how fast it sends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pick {
     Control,
     Sound,
     Video(u8),
+    /// Send at most this many bytes a second from now on.
+    Pace(u64),
 }
 
 /// The messages the writer has started: at most one per lane.
@@ -178,9 +183,13 @@ pub struct Lanes {
 }
 
 impl Lanes {
-    /// Sends the next packet in `pick`'s lane.
+    /// Sends the next packet in `pick`'s lane (or paces the connection).
     pub fn send(&mut self, pick: Pick, tx: &mut dyn RecordSender) -> io::Result<()> {
         match pick {
+            Pick::Pace(bytes_per_sec) => {
+                tx.set_pace(bytes_per_sec);
+                Ok(())
+            }
             Pick::Control => send_next(&mut self.control, tx),
             Pick::Sound => send_next(&mut self.sound, tx),
             Pick::Video(id) => {
@@ -316,6 +325,20 @@ impl Outbox {
         true
     }
 
+    /// How fast the connection may send from now on (see `displays::pace_for`).
+    pub fn set_pace(&self, bytes_per_sec: u64) {
+        let mut s = self.lock();
+        if s.pace != bytes_per_sec {
+            info!(
+                "pacing the connection at {} Mbit/s",
+                bytes_per_sec * 8 / 1_000_000
+            );
+            s.pace = bytes_per_sec;
+            s.pace_changed = true;
+            self.ready.notify_one();
+        }
+    }
+
     /// What happened since the last call.
     pub fn take_stats(&self) -> OutboxStats {
         std::mem::take(&mut self.lock().stats)
@@ -396,6 +419,9 @@ impl State {
     /// The next lane to send in, taking a message into `lanes` when its lane is free:
     /// control, then sound, then the streams in turn.
     fn pick(&mut self, lanes: &mut Lanes) -> Option<Pick> {
+        if std::mem::take(&mut self.pace_changed) {
+            return Some(Pick::Pace(self.pace));
+        }
         if lanes.control.is_none()
             && let Some(msg) = self.control.pop_front()
         {
@@ -742,6 +768,25 @@ pub(crate) mod tests {
         }
         assert!(!o.control(notice()), "over the limit");
         assert_eq!(o.next(&mut Lanes::default()), None, "closed");
+    }
+
+    /// A new pace reaches the writer before the next packet, once.
+    #[test]
+    fn the_writer_paces_the_connection() {
+        let o = Outbox::default();
+        o.control(HostMsg::Recenter);
+        o.set_pace(2_500_000);
+        let mut lanes = Lanes::default();
+        assert_eq!(o.try_next(&mut lanes), Some(Pick::Pace(2_500_000)));
+        assert_eq!(o.try_next(&mut lanes), Some(Pick::Control));
+        o.set_pace(2_500_000);
+        let mut out = Capture::default();
+        lanes.send(Pick::Control, &mut out).unwrap();
+        assert_eq!(
+            o.try_next(&mut lanes),
+            None,
+            "the same pace again changes nothing"
+        );
     }
 
     /// A message that cannot be sent ends the session, and nothing else is sent.
