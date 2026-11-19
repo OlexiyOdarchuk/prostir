@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.2 (not released yet)
+
+### Monitors and windows
+
+- Tapping a monitor on the map no longer closes the app when monitors overlap or
+  stand far apart.
+
 ## 0.1.1 (2026-11-19)
 
 Fixes for things that came up in the first days of use. Update both the PC part and
