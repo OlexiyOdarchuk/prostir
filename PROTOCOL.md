@@ -794,34 +794,41 @@ connection ends.
 
 - `id`: a monitor id, or `100` for the mirror if the headset placed it. Window panels
   are not part of the layout.
-- `center`: where the monitor's centre is seen horizontally; none: "just right of the
-  previous monitor in the row".
-- `middle`: where the monitor's centre is seen vertically, **downwards**; none: "not
-  known, centred in the row".
+- `center`: across, where the centre of the monitor's place on the PC desktop is in
+  the client's plan of it (see Units); none: not known.
+- `middle`: the same **downwards**; none: not known.
 
 ### Units
 
 `center` and `middle` are in pixels of the monitors' own streams. Only differences
-between values matter; the origin is arbitrary. The current client works them out from
-where the monitors are seen from where the layout faces, and rounds them to multiples
-of 8 so a hand's tremor does not rearrange the desktop:
+between values matter; the origin is arbitrary.
 
-- `middle`: the elevation of the monitor's middle times pixels per radian (the average
-  over the monitors of their pixel width over their angular width).
-- `center`: every row unrolled side by side in its monitors' own pixels (each
-  monitor's `center` is the previous one's plus half of both widths), and laid over the
-  row next to it towards the row with the primary monitor where it is seen over it:
-  the monitor seen most over that row has its middle over the pixel seen under its
-  middle. (Seen on a circle a wide monitor takes fewer degrees per pixel than a narrow
-  one, so one scale for all would put a row above off its place.)
+The current client plans the PC desktop itself, from how it shows the monitors (the
+same code the host runs, `layout/src/desk.rs`), and sends that plan: each monitor's
+place on it, a rectangle of its stream's size, as its top-left corner plus half its
+size, rounded down (`x + w / 2`, `y + h / 2` in whole pixels). So a host that plans
+from these rectangles gets the client's plan back to the pixel, and the client's map
+shows what the PC desktop will be. The rows and the plan follow what the eyes see:
+
+- A row is a chain of monitors side by side as seen; a monitor joins its neighbour
+  when their facing edges share at least half of the shorter one, and stays while they
+  share a quarter, so a hand's tremor never moves a monitor from one row to another.
+- Monitors stand on the desktop as they are seen along the edges they share: offset
+  as seen, so the mouse and a dragged window cross where the monitors meet, sideways
+  and up or down. A difference within 3 % of the shorter edge is a hand's and is lined
+  up; a larger one is kept, cut back only so that neighbours share at least 200 px.
+- A changed arrangement is sent only when it has held for 0.8 s and nothing is being
+  moved; a plan that fits what is seen as well as a new one, give or take a hand's
+  tremor, is kept.
 
 This method is implementation-defined; what the host relies on is that the values are
-comparable between monitors and to the monitors' own pixel sizes.
+rectangles' centres in one pixel space, comparable between monitors and to the
+monitors' own pixel sizes.
 
 ### What the host does with it
 
 (Implementation-defined; `host/src/displays.rs` and `layout/src/desk.rs`, a crate
-the client uses too to draw the same desktop on its map.)
+the client uses too to plan the desktop it sends and shows on its map.)
 
 1. Clamps every known `center` and `middle` to ±100000.
 2. Keeps the rows, drops ids that are neither a current monitor nor the active mirror,
@@ -831,20 +838,22 @@ the client uses too to draw the same desktop on its map.)
    keeps the rows for the next run.
 3. Lays the desktop out, in logical pixels (pixel size divided by the output's scale),
    once however many changes came in at once, and only with outputs the desktop lists
-   already:
-   - Every row lies on one line, side by side, so neighbours in it share the whole edge
-     of the shorter one. The row with the primary monitor goes left to right by
-     `center`, its tops, middles or bottoms lined up with the primary monitor,
-     whichever is closest to the `middle`s (middles when any is unknown).
-   - Every other row, outwards from that one, is one block side by side, bottoms
-     lined up above it and tops below. The monitor that overlaps the next row inwards
-     most by `center` keeps its offset from the one it overlaps; the block overlaps that
-     row by at least 200 px and touches the nearest monitors under (or over) it. Where
-     it would touch a sliver of an edge, it moves by less than 200 px to where the
-     mouse crosses every edge it shares, or at least one.
+   already. Each monitor with both values is a rectangle of its stream's size centred
+   there; the plan is made of the rows and those rectangles:
+   - When the rectangles already are a plan (the client's: every monitor of the rows
+     placed, in whole pixels, each the size of its output on the desktop, nothing
+     overlapping, rows in order and side by side, every monitor in reach of the mouse),
+     it is taken as it is.
+   - Otherwise the row with the primary monitor goes side by side from `0,0`, each
+     monitor offset from its left neighbour as its rectangle is (within 3 % lined up,
+     sharing at least 200 px); every other row, outwards from it, is cut where another
+     row's monitor stands between two of its monitors, and each piece rests on what is
+     placed where its rectangles meet it. A plan worked out this way replaces the one
+     the desktop has only when it is better by more than a hand's tremor.
    - The mirror goes under the primary monitor unless the headset placed it, other
      real displays next to it; window panels go in a column right of everything.
-   Nothing overlaps.
+   Nothing overlaps, every output can be reached by the mouse, and the top-left corner
+   of everything is at `0,0`.
 
 `SetOrder` and `SetMonitors` replace the layout with one row in the given order, with
 no positions.

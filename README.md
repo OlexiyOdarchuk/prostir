@@ -92,18 +92,19 @@ others, at the end of a row or over or under one, nearest to where you look, and
 else moves; a removed one leaves the others where they are. Let go of one almost
 against another, at about the same distance, and it sticks to it edge to edge; while
 you drag, the edge it will stick to lights up (Monitors → Stick together). The A button
-(Line up) straightens your own arrangement row by row without rebuilding it: the
-monitors of each row side by side on their circle, the main one staying where it is;
-rows never merge, and a row that almost touches the next one touches it. With
+(Line up) takes the crookedness out of your own arrangement without rebuilding it: a
+monitor turned or hanging crooked, gaps and small steps between neighbours. Every row
+stays where it is and keeps how it stands (tilted back as a whole for a reclined pose,
+say); rows never merge, and a gap you left between two rows stays. With
 Monitors → Drag → All together, grabbing any monitor moves, turns, brings nearer and
 scales the whole arrangement as one piece.
 
 The laptop's own screen is part of the arrangement too, so you can see it without
 taking the headset off. It starts under the main monitor without a seam; wherever you
 put it, the PC puts it there as well, and the mouse crosses where you see them meet.
-Line up and Stick together treat it like any other monitor in a row (alone in a row of
-its own it stays as it is; on the Wall layout, Line up puts it back under the main
-monitor). It disappears when you close the lid.
+Stick together treats it like any other monitor in a row; Line up leaves it where it is,
+or moves it down just enough when a monitor lined up over it would cover it. It
+disappears when you close the lid.
 
 Profiles switch the whole setup at once. "Work" is the setup you build yourself: the
 first time you pick a profile, the monitors you have then are saved as "Work", so you can
@@ -425,8 +426,9 @@ Next to them: add a monitor (1920×1080, 2560×1440, 3840×2160, 3440×1440 or
 together, drag (one monitor or all together) and the cinema screen. Cinema itself is
 a tile in Quick and a sector of the palm menu.
 
-Line up keeps your own arrangement and straightens it row by row. On the Wall layout it
-keeps everything in one plane; in Lying down and in cinema it rebuilds the preset.
+Line up keeps your own arrangement and straightens it row by row, on the Wall layout in
+the wall's plane and in Lying down overhead as it is; in cinema it rebuilds the cinema
+screen.
 A profile keeps where its monitors stood, so switching to it and back brings your rows
 back.
 Stick together works on the Wall layout too, in the wall's plane, but not in Lying

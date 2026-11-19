@@ -30,15 +30,23 @@
   removed one leaves the others where they are. Two rows stay two rows after a restart
   of the PC or of the headset app, a reconnect, taking the headset off, Line up and a
   profile switch.
-- Line up (the A button) straightens every row on its own: side by side on its circle,
-  the main monitor staying where it is. Rows never merge, and a row that almost touches
-  the next one touches it.
+- Line up (the A button) takes the crookedness out of each row and nothing more: a
+  monitor turned or hanging crooked, gaps and small steps between neighbours. Every row
+  stays where it was and keeps how it stands: tilted back for a reclined pose,
+  overhead for lying down (Line up now works there too), or turned a little as a
+  whole. Two monitors placed as mirror images stay mirror images. Rows never merge, and
+  a gap you left between two rows stays.
+- A monitor stays in its row while you move it about. A portrait monitor between two
+  others no longer jumps into a row of its own when one of them is nudged; a monitor
+  leaves its row only when you clearly move it out.
 - A profile keeps where its monitors stood, so switching to it and back brings your
   rows back. Profiles saved before keep working and are laid out by their layout.
-- The PC desktop follows the rows: the monitors of a row side by side on one line, a
-  row above on top of it where you see it. The mouse crosses along whole edges, not at
-  corners, and the desktop no longer spreads out into a staircase. The map in the menu
-  shows the desktop the PC makes.
+- The PC desktop matches the headset in every direction: the mouse, and a window you
+  drag across, go from one monitor to the next where the two meet in the headset,
+  sideways and up or down. A monitor you hung higher on purpose is just as much higher
+  on the desktop; a small difference left by the hand is lined up. Neighbours always
+  share enough of an edge for the mouse to cross, and the desktop no longer spreads out
+  into a staircase. The map in the menu shows exactly the desktop the PC makes.
 - A monitor whose picture cannot start on the PC keeps its place and is tried again at
   the next connection; the headset says why. Before, it was dropped from the saved set.
 
