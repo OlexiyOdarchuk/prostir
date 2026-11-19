@@ -1715,6 +1715,7 @@ fn run(app: &AndroidApp) -> Result<()> {
 
     let mut hold_since: [Option<Instant>; 2] = [None, None];
     let mut fingers_closed = [false; 2];
+    let mut closed_at: [Option<Instant>; 2] = [None, None];
     // A hand's pinch on a menu button: clicked when let go, unless it was held long
     // enough to drag the menu instead (as on the Quest's own windows).
     let mut pending_click: [Option<(ui::Action, Vec3)>; 2] = [None, None];
@@ -1943,19 +1944,27 @@ fn run(app: &AndroidApp) -> Result<()> {
             let was_closed = fingers_closed[hand];
             let (at, turn, closed) = layout::hand_hold(j, was_closed);
             fingers_closed[hand] = closed;
+            if closed && !was_closed {
+                closed_at[hand] = Some(Instant::now());
+            }
             if !closed {
                 if let Some(held) = scene.tablet[hand].take() {
+                    info!("let go of {} held like a tablet", held.id);
                     scene.follow_hold =
                         scene.settings.follow && scene.placements.contains_key(&held.id);
                     layout::save(&scene.layout_path, &scene.placements);
                 }
                 continue;
             }
-            if !was_closed
+            // Taken within half a second of closing the fingers (the hand may reach the
+            // edge a moment later), also from a pinch that began to drag it.
+            let fresh = closed_at[hand].is_some_and(|t| t.elapsed() < Duration::from_millis(500));
+            if fresh
                 && scene.tablet[hand].is_none()
-                && scene.grabs[hand].is_none()
                 && let Some((id, p)) = scene.edge_at(at)
             {
+                info!("holding {id} like a tablet");
+                scene.grabs[hand] = None;
                 scene.tablet[hand] = Some(TabletHold {
                     id,
                     offset: turn.inverse() * (p.position - at),

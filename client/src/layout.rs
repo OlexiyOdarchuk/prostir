@@ -455,10 +455,27 @@ pub fn snap(
     if rest.is_empty() {
         return HashMap::new();
     }
+    // Upright and facing the user first: a monitor turned askew (held in a hand) would
+    // otherwise be joined by whichever corner it happens to reach out with.
+    for m in &mut rest {
+        m.1.rotation = facing(m.1.position, eye);
+    }
+    // The monitors first, the laptop screen after: it joins them, not they it.
+    let laptop = rest
+        .iter()
+        .position(|m| m.0 == prostir_proto::MIRROR_ID)
+        .filter(|_| rest.len() > 1)
+        .map(|i| rest.remove(i));
     let first = rest.iter().position(|m| Some(m.0) == anchor).unwrap_or(0);
     let mut placed = vec![rest.remove(first)];
     // Outwards from the anchor: always the monitor closest to one already placed.
-    while !rest.is_empty() {
+    loop {
+        if rest.is_empty() {
+            match laptop {
+                Some(l) if !placed.iter().any(|m| m.0 == l.0) => rest.push(l),
+                _ => break,
+            }
+        }
         let (ri, joined) = rest
             .iter()
             .enumerate()
@@ -1500,6 +1517,35 @@ mod tests {
         let expected = (0.2 / METRES_PER_PIXEL / 8.0).round() as i32 * 8;
         assert!(((right.1 - mid.1) - expected).abs() <= 8, "{here:?}");
         assert_eq!(right.0 - mid.0, (1440 + 2560) / 2, "{here:?}");
+    }
+
+    #[test]
+    fn line_up_straightens_and_joins_monitors_before_the_laptop_screen() {
+        let mirror = prostir_proto::MIRROR_ID;
+        let sizes = [(1, 1440, 2560), (2, 2560, 1440), (mirror, 1920, 1080)];
+        let eye = Vec3::ZERO;
+        let mut p = arrange(
+            Preset::Arc,
+            &sizes[..2],
+            Some(1),
+            Some((mirror, 1920, 1080)),
+        );
+        // The right monitor turned askew and dropped low, its corner by the laptop
+        // screen's edge.
+        let r = p.get_mut(&2).unwrap();
+        r.position.y -= 0.55;
+        r.rotation = Quat::from_rotation_z(0.6) * r.rotation;
+        let done = snap(&p, &sizes, eye, Some(1));
+        let (right, primary) = (done[&2], done[&1]);
+        // Upright again, beside the primary (its left edge against the primary's right
+        // edge), not under the laptop screen.
+        let up = right.rotation * Vec3::Y;
+        assert!(up.y > 0.99, "{up:?}");
+        // Its left edge lies on the primary's right edge (in the primary's plane).
+        let right_left = right.position - right.rotation * Vec3::X * right.width / 2.0;
+        let local = primary.rotation.inverse() * (right_left - primary.position);
+        assert!((local.x - primary.width / 2.0).abs() < 0.01, "{local:?}");
+        assert!(local.z.abs() < 0.01, "{local:?}");
     }
 
     /// Placements and the monitors' pixel sizes, for the A and magnet tests.
