@@ -2767,7 +2767,17 @@ fn run(app: &AndroidApp) -> Result<()> {
         layers.extend(cursors.iter().map(as_layer));
         // The compositor supports 16 layers at most.
         layers.truncate(16);
-        frame_stream.end(time, xr::EnvironmentBlendMode::OPAQUE, &layers)?;
+        match frame_stream.end(time, xr::EnvironmentBlendMode::OPAQUE, &layers) {
+            // One frame the compositor refused is not worth closing the app over.
+            Err(
+                e @ (xr::sys::Result::ERROR_POSE_INVALID
+                | xr::sys::Result::ERROR_LAYER_INVALID
+                | xr::sys::Result::ERROR_SWAPCHAIN_RECT_INVALID),
+            ) => {
+                warn!("frame refused: {e}");
+            }
+            other => other?,
+        }
     }
 
     info!("exiting");

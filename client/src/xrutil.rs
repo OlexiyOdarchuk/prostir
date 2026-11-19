@@ -33,7 +33,25 @@ pub fn quat(q: xr::Quaternionf) -> Quat {
     Quat::from_xyzw(q.x, q.y, q.z, q.w)
 }
 
+/// A pose the compositor accepts: a unit rotation and a finite position. A broken one
+/// (from a bad hand-tracking frame, say) would make it reject the whole frame and end
+/// the session, so it is repaired and reported instead.
 pub fn pose(position: Vec3, rotation: Quat) -> xr::Posef {
+    let length = rotation.length_squared();
+    let rotation = if rotation.is_finite() && (length - 1.0).abs() < 1e-3 {
+        rotation
+    } else if rotation.is_finite() && length > 1e-6 {
+        rotation.normalize()
+    } else {
+        report_bad_pose(position, rotation);
+        Quat::IDENTITY
+    };
+    let position = if position.is_finite() {
+        position
+    } else {
+        report_bad_pose(position, rotation);
+        Vec3::ZERO
+    };
     xr::Posef {
         orientation: xr::Quaternionf {
             x: rotation.x,
@@ -46,6 +64,15 @@ pub fn pose(position: Vec3, rotation: Quat) -> xr::Posef {
             y: position.y,
             z: position.z,
         },
+    }
+}
+
+/// Logs a broken pose, a few times only (it may come every frame).
+fn report_bad_pose(position: Vec3, rotation: Quat) {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static TOLD: AtomicU32 = AtomicU32::new(0);
+    if TOLD.fetch_add(1, Ordering::Relaxed) < 5 {
+        log::warn!("broken layer pose repaired: position {position:?}, rotation {rotation:?}");
     }
 }
 
