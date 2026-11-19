@@ -5,13 +5,14 @@
 //! scripts do the work (see `kde/windows.rs`).
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use log::info;
 
-use crate::platform::ActiveWindow;
 use crate::platform::linux::hyprland;
 use crate::platform::linux::kde;
+use crate::platform::{ActiveWindow, run};
 
 pub fn active() -> Option<ActiveWindow> {
     if hyprland::running() {
@@ -82,23 +83,23 @@ pub fn vacated(panels: &[String]) -> Vec<String> {
 /// Saves a picture of `output` (or of the whole desktop) to the Pictures folder.
 pub fn screenshot(output: Option<&str>) -> Result<PathBuf> {
     let path = screenshot_path()?;
-    let status = if hyprland::running() {
+    let (tool, mut cmd) = if hyprland::running() {
         let mut cmd = std::process::Command::new("grim");
         if let Some(o) = output {
             cmd.args(["-o", o]);
         }
-        cmd.arg(&path).status()
+        ("grim", cmd)
     } else {
-        std::process::Command::new("spectacle")
-            .args(["--background", "--nonotify", "--fullscreen", "--output"])
-            .arg(&path)
-            .status()
-    }
-    .context(if hyprland::running() {
-        "grim is not installed"
-    } else {
-        "spectacle is not installed"
-    })?;
+        let mut cmd = std::process::Command::new("spectacle");
+        cmd.args(["--background", "--nonotify", "--fullscreen", "--output"]);
+        ("spectacle", cmd)
+    };
+    // Saving a picture of several large screens takes a few seconds.
+    let status = match run(cmd.arg(&path), Duration::from_secs(20)) {
+        Ok(out) => out.status,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!("{tool} is not installed"),
+        Err(e) => return Err(e).context(tool),
+    };
     if !status.success() || !path.exists() {
         bail!("the screenshot tool failed ({status})");
     }
@@ -115,14 +116,15 @@ pub fn screenshot_path() -> Result<PathBuf> {
 
 fn pictures_dir() -> PathBuf {
     let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
-    std::process::Command::new("xdg-user-dir")
-        .arg("PICTURES")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| PathBuf::from(s.trim()))
-        .filter(|p| p.is_absolute() && *p != home)
-        .unwrap_or_else(|| home.join("Pictures"))
+    run(
+        std::process::Command::new("xdg-user-dir").arg("PICTURES"),
+        Duration::from_secs(2),
+    )
+    .ok()
+    .and_then(|o| String::from_utf8(o.stdout).ok())
+    .map(|s| PathBuf::from(s.trim()))
+    .filter(|p| p.is_absolute() && *p != home)
+    .unwrap_or_else(|| home.join("Pictures"))
 }
 
 /// Local time as `2026-11-18 14-05-09`.

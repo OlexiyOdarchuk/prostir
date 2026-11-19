@@ -1,13 +1,14 @@
 //! Talking to the person at the PC: a dialog for the pairing code (kdialog, zenity or
 //! a dmenu-style launcher) and desktop notifications (notify-send).
 
+use std::io::ErrorKind;
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use log::warn;
 
 use crate::i18n::t;
-use crate::platform::NoCode;
+use crate::platform::{NoCode, run};
 
 /// Asks for the code the headset shows, in a small dialog on the PC.
 pub fn ask_code() -> Result<String, NoCode> {
@@ -26,38 +27,19 @@ pub fn ask_code() -> Result<String, NoCode> {
         ("rofi", vec!["-dmenu", "-l", "0", "-p", prompt]),
     ];
     for (program, args) in attempts {
-        let child = Command::new(program)
-            .args(&args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .spawn();
-        let Ok(mut child) = child else {
-            continue; // not installed
-        };
         // Nobody at the PC: the dialog goes away rather than holding the PC.
-        let until = Instant::now() + Duration::from_secs(120);
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break Some(status),
-                Ok(None) if Instant::now() < until => {
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-                _ => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    break None;
-                }
-            }
+        let out = match run(Command::new(program).args(&args), Duration::from_secs(120)) {
+            Ok(out) => out,
+            Err(e) if e.kind() == ErrorKind::NotFound => continue, // not installed
+            Err(_) => return Err(NoCode::Cancelled),               // timed out
         };
-        if !status.is_some_and(|s| s.success()) {
-            return Err(NoCode::Cancelled); // or timed out
+        if !out.status.success() {
+            return Err(NoCode::Cancelled);
         }
-        let mut out = String::new();
-        if let Some(mut stdout) = child.stdout.take() {
-            use std::io::Read;
-            let _ = stdout.read_to_string(&mut out);
-        }
-        let code: String = out.chars().filter(char::is_ascii_digit).collect();
+        let code: String = String::from_utf8_lossy(&out.stdout)
+            .chars()
+            .filter(char::is_ascii_digit)
+            .collect();
         return if code.is_empty() {
             Err(NoCode::Cancelled)
         } else {
@@ -88,8 +70,9 @@ pub fn notify(title: &str, body: &str) {
 
 /// Desktop notification, waiting until it is handed over; `true` when it was shown.
 pub fn notify_and_wait(title: &str, body: &str) -> bool {
-    Command::new("notify-send")
-        .args(["--app-name=Prostir", "--icon=prostir", title, body])
-        .status()
-        .is_ok_and(|s| s.success())
+    run(
+        Command::new("notify-send").args(["--app-name=Prostir", "--icon=prostir", title, body]),
+        Duration::from_secs(10),
+    )
+    .is_ok_and(|out| out.status.success())
 }

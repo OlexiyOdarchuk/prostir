@@ -489,8 +489,17 @@ fn spawn_adb_reverse(port: u16) {
             let spec = format!("tcp:{port}");
             let mut active: Vec<String> = Vec::new();
             loop {
-                let Ok(out) = std::process::Command::new("adb").arg("devices").output() else {
-                    return; // no adb installed
+                // The first call starts adb's server, which takes a few seconds.
+                let out = match platform::run(
+                    std::process::Command::new("adb").arg("devices"),
+                    Duration::from_secs(15),
+                ) {
+                    Ok(out) => out,
+                    Err(e) if e.kind() == ErrorKind::NotFound => return, // no adb installed
+                    Err(_) => {
+                        std::thread::sleep(Duration::from_secs(3));
+                        continue;
+                    }
                 };
                 // Only USB devices: "serial\tdevice"; adb-over-Wi-Fi serials are "ip:port".
                 let usb: Vec<String> = String::from_utf8_lossy(&out.stdout)
@@ -500,12 +509,12 @@ fn spawn_adb_reverse(port: u16) {
                     .map(str::to_owned)
                     .collect();
                 for serial in &usb {
-                    let ok = std::process::Command::new("adb")
-                        .args(["-s", serial, "reverse", &spec, &spec])
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .status()
-                        .is_ok_and(|s| s.success());
+                    let ok = platform::run(
+                        std::process::Command::new("adb")
+                            .args(["-s", serial, "reverse", &spec, &spec]),
+                        Duration::from_secs(5),
+                    )
+                    .is_ok_and(|out| out.status.success());
                     if ok && !active.contains(serial) {
                         info!("USB headset {serial}: adb reverse {spec} active");
                     }

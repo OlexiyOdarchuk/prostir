@@ -5,24 +5,37 @@ use std::time::Duration;
 use log::warn;
 
 use super::kscreen;
+use crate::platform::run;
+
+/// Plasma runs a script in well under a second.
+const TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Runs `script` in the Plasma shell through whichever qdbus this system has (Arch:
+/// qdbus6; Fedora: qdbus-qt6; older setups: qdbus). `None`: no qdbus found.
+fn evaluate(script: &str) -> Option<std::io::Result<std::process::Output>> {
+    ["qdbus6", "qdbus-qt6", "qdbus"].iter().find_map(|qdbus| {
+        let ran = run(
+            std::process::Command::new(qdbus).args([
+                "org.kde.plasmashell",
+                "/PlasmaShell",
+                "org.kde.PlasmaShell.evaluateScript",
+                script,
+            ]),
+            TIMEOUT,
+        );
+        match ran {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            ran => Some(ran),
+        }
+    })
+}
 
 /// The geometry Plasma gives its first screen (the one with the panel):
 /// `(x, y, width, height)`.
 pub fn first_screen() -> Option<(i32, i32, i32, i32)> {
     const SCRIPT: &str =
         "var g = screenGeometry(0); print(g.x + ' ' + g.y + ' ' + g.width + ' ' + g.height);";
-    let out = ["qdbus6", "qdbus-qt6", "qdbus"].iter().find_map(|q| {
-        std::process::Command::new(q)
-            .args([
-                "org.kde.plasmashell",
-                "/PlasmaShell",
-                "org.kde.PlasmaShell.evaluateScript",
-                SCRIPT,
-            ])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-    })?;
+    let out = evaluate(SCRIPT)?.ok().filter(|o| o.status.success())?;
     let nums: Vec<i32> = String::from_utf8_lossy(&out.stdout)
         .split_whitespace()
         .filter_map(|t| t.parse().ok())
@@ -66,28 +79,14 @@ pub fn sync_wallpapers() {
         .name("wallpapers".into())
         .spawn(|| {
             std::thread::sleep(Duration::from_secs(2));
-            // Arch: qdbus6; Fedora: qdbus-qt6; older setups: qdbus.
-            for qdbus in ["qdbus6", "qdbus-qt6", "qdbus"] {
-                let ran = std::process::Command::new(qdbus)
-                    .args([
-                        "org.kde.plasmashell",
-                        "/PlasmaShell",
-                        "org.kde.PlasmaShell.evaluateScript",
-                        SCRIPT,
-                    ])
-                    .output();
-                match ran {
-                    Ok(out) if out.status.success() => return,
-                    Ok(out) => {
-                        warn!(
-                            "wallpaper sync failed: {}",
-                            String::from_utf8_lossy(&out.stderr).trim()
-                        );
-                        return;
-                    }
-                    Err(_) => continue, // try the next qdbus name
-                }
+            match evaluate(SCRIPT) {
+                Some(Ok(out)) if out.status.success() => {}
+                Some(Ok(out)) => warn!(
+                    "wallpaper sync failed: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ),
+                Some(Err(e)) => warn!("wallpaper sync failed: {e}"),
+                None => warn!("qdbus not found, wallpapers stay per screen"),
             }
-            warn!("qdbus not found, wallpapers stay per screen");
         });
 }

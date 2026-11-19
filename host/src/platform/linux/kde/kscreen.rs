@@ -5,14 +5,21 @@ use std::time::Duration;
 
 use log::{info, warn};
 
-use crate::platform::Geometry;
+use crate::platform::{Geometry, run};
+
+/// KScreen answers within a second; applying a layout can take a little longer.
+const TIMEOUT: Duration = Duration::from_secs(5);
+
+fn kscreen_doctor(args: &[impl AsRef<std::ffi::OsStr>]) -> std::io::Result<std::process::Output> {
+    run(
+        std::process::Command::new("kscreen-doctor").args(args),
+        TIMEOUT,
+    )
+}
 
 /// Logical geometry `(x, y, width, height)` of each enabled output, from KScreen.
 pub fn geometries() -> HashMap<String, Geometry> {
-    let Ok(out) = std::process::Command::new("kscreen-doctor")
-        .arg("-o")
-        .output()
-    else {
+    let Ok(out) = kscreen_doctor(&["-o"]) else {
         return HashMap::new();
     };
     let text = String::from_utf8_lossy(&out.stdout);
@@ -66,10 +73,7 @@ pub fn geometries() -> HashMap<String, Geometry> {
 /// Connected real displays that KDE has switched off (e.g. the laptop panel after
 /// the lid was closed and opened again while other monitors were on).
 pub fn disabled_physical_outputs() -> Vec<String> {
-    let Ok(out) = std::process::Command::new("kscreen-doctor")
-        .arg("-o")
-        .output()
-    else {
+    let Ok(out) = kscreen_doctor(&["-o"]) else {
         return Vec::new();
     };
     let text = String::from_utf8_lossy(&out.stdout);
@@ -112,10 +116,7 @@ pub fn apply(settings: &[String]) {
         return;
     }
     for _ in 0..10 {
-        match std::process::Command::new("kscreen-doctor")
-            .args(settings)
-            .output()
-        {
+        match kscreen_doctor(settings) {
             Ok(out) if out.status.success() => {
                 info!("KDE layout: {}", settings.join(" "));
                 return;
@@ -135,10 +136,7 @@ pub fn apply(settings: &[String]) {
 pub fn set(output: &str, setting: &str) {
     let arg = format!("output.{output}.{setting}");
     for _ in 0..10 {
-        match std::process::Command::new("kscreen-doctor")
-            .arg(&arg)
-            .output()
-        {
+        match kscreen_doctor(&[&arg]) {
             Ok(out) if out.status.success() => {
                 info!("{output}: {setting}");
                 return;

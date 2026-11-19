@@ -12,7 +12,12 @@ use gstreamer_app as gst_app;
 use log::{info, warn};
 use prostir_proto::{AUDIO_CHANNELS, AUDIO_RATE, MIC_CHANNELS};
 
+use crate::platform::run;
+
 const SINK: &str = "prostir_headset";
+
+/// `pw-cli` and `pactl` answer at once while PipeWire is well.
+const TIMEOUT: Duration = Duration::from_secs(3);
 
 /// A PipeWire node created with `pw-cli`; destroyed on drop.
 struct VirtualNode {
@@ -27,10 +32,11 @@ impl VirtualNode {
              node.description=\"{description}\" media.class={class} \
              audio.position=[ FL FR ] audio.rate={AUDIO_RATE} object.linger=true }}"
         );
-        let out = Command::new("pw-cli")
-            .args(["create-node", "adapter", &props])
-            .output()
-            .context("pw-cli is needed for sound (PipeWire)")?;
+        let out = run(
+            Command::new("pw-cli").args(["create-node", "adapter", &props]),
+            TIMEOUT,
+        )
+        .context("pw-cli is needed for sound (PipeWire)")?;
         if !out.status.success() {
             bail!("pw-cli: {}", String::from_utf8_lossy(&out.stderr).trim());
         }
@@ -52,7 +58,7 @@ impl Drop for VirtualNode {
 }
 
 fn node_id(name: &str) -> Option<u32> {
-    let out = Command::new("pw-cli").args(["info", name]).output().ok()?;
+    let out = run(Command::new("pw-cli").args(["info", name]), TIMEOUT).ok()?;
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .find_map(|l| l.trim().strip_prefix("id: ")?.trim().parse().ok())
@@ -60,9 +66,10 @@ fn node_id(name: &str) -> Option<u32> {
 
 fn destroy_node(name: &str) {
     if let Some(id) = node_id(name) {
-        let _ = Command::new("pw-cli")
-            .args(["destroy", &id.to_string()])
-            .output();
+        let _ = run(
+            Command::new("pw-cli").args(["destroy", &id.to_string()]),
+            TIMEOUT,
+        );
     }
 }
 
@@ -75,7 +82,7 @@ pub fn restore_after_crash() {
 }
 
 fn pactl(args: &[&str]) -> Option<String> {
-    let out = Command::new("pactl").args(args).output().ok()?;
+    let out = run(Command::new("pactl").args(args), TIMEOUT).ok()?;
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())

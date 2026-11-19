@@ -31,7 +31,8 @@
 //!   `notify_and_wait` (desktop notifications).
 //! - System: `config_home`, `single_instance`, `quit_on_signals`, `quit_requested`,
 //!   `clean_up_after_crash`, `give_memory_back`, `set_keepalive`, `hostname`,
-//!   `broadcast_addresses`. The private runtime dir stays inside the platform.
+//!   `broadcast_addresses`, `run` (a program run to the end, stopped if it hangs).
+//!   The private runtime dir stays inside the platform.
 //!
 //! The compiler checks the list: the core does not build until everything is there.
 //!

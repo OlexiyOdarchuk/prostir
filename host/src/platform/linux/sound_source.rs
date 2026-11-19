@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::platform::windows;
+use crate::platform::{run, windows};
 
 /// Looks every second and a half, off the session loop (asking KWin takes a moment).
 pub struct Watcher {
@@ -49,13 +49,14 @@ impl Drop for Watcher {
 
 /// `pactl -f json list <what>` as a JSON array.
 fn pactl_list(what: &str) -> Vec<Value> {
-    Command::new("pactl")
-        .args(["-f", "json", "list", what])
-        .output()
-        .ok()
-        .and_then(|out| serde_json::from_slice::<Value>(&out.stdout).ok())
-        .and_then(|v| v.as_array().cloned())
-        .unwrap_or_default()
+    run(
+        Command::new("pactl").args(["-f", "json", "list", what]),
+        Duration::from_secs(3),
+    )
+    .ok()
+    .and_then(|out| serde_json::from_slice::<Value>(&out.stdout).ok())
+    .and_then(|v| v.as_array().cloned())
+    .unwrap_or_default()
 }
 
 /// A stream that is playing: process id (0 when not known) and program name.
