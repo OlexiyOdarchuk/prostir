@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.1.2 (not released yet)
+## 0.1.2 (2026-11-19)
+
+A fix for the headset app. The PC part is the same as in 0.1.1.
 
 ### Monitors and windows
 

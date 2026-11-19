@@ -1795,7 +1795,7 @@ dependencies = [
 
 [[package]]
 name = "prostir-client"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "android-activity",
  "android_logger",
@@ -1818,7 +1818,7 @@ dependencies = [
 
 [[package]]
 name = "prostir-host"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -1843,7 +1843,7 @@ dependencies = [
 
 [[package]]
 name = "prostir-proto"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "getrandom 0.3.4",
  "hmac",
