@@ -162,6 +162,9 @@ struct State {
     next_ping: Option<Instant>,
     /// A goodbye is queued: control messages go out up to it, nothing else does.
     leaving: bool,
+    /// Frames dropped while the lock was held, freed once it is not (a keyframe's
+    /// memory goes back to the system, which takes a moment).
+    garbage: Vec<Encoded>,
     closed: bool,
 }
 
@@ -226,6 +229,13 @@ fn send_next(out: &mut Option<Outgoing>, tx: &mut dyn RecordSender) -> io::Resul
 }
 
 /// The message's bytes, or why it cannot be sent (the PC's mistake: the session ends).
+/// Lets go of the queues, then frees what was dropped meanwhile.
+fn unlock(mut s: MutexGuard<'_, State>) {
+    let garbage = std::mem::take(&mut s.garbage);
+    drop(s);
+    drop(garbage);
+}
+
 fn encode(msg: HostMsg) -> Option<Encoded> {
     msg.encode()
         .inspect_err(|e| warn!("a message could not be sent, ending the session: {e}"))
@@ -278,6 +288,7 @@ impl Outbox {
             }
         }
         self.ready.notify_one();
+        unlock(s);
         true
     }
 
@@ -332,6 +343,7 @@ impl Outbox {
             msg,
         }));
         self.ready.notify_one();
+        unlock(s);
         true
     }
 
@@ -430,6 +442,7 @@ impl Outbox {
                 }
             }
             if let Some(pick) = s.pick(lanes) {
+                unlock(s);
                 return Some(pick);
             }
             let wait = ping_at.saturating_duration_since(now);
@@ -465,16 +478,17 @@ impl State {
         let Some(q) = self.streams.get_mut(&id) else {
             return 0;
         };
-        let (mut freed, mut gone) = (0, 0);
-        q.items.retain(|item| match item {
-            Item::Frame(f) => {
-                freed += f.msg.len();
+        let mut gone = 0;
+        let mut i = 0;
+        while i < q.items.len() {
+            if !matches!(q.items[i], Item::Frame(_)) {
+                i += 1;
+            } else if let Some(Item::Frame(f)) = q.items.remove(i) {
+                self.video_bytes -= f.msg.len();
+                self.garbage.push(f.msg);
                 gone += 1;
-                false
             }
-            Item::Announce(_) => true,
-        });
-        self.video_bytes -= freed;
+        }
         gone
     }
 
@@ -497,14 +511,19 @@ impl State {
             return Some(Pick::Sound);
         }
         // The streams after the last one served first, then the rest.
-        let ids: Vec<u8> = self.streams.keys().copied().collect();
-        let first = lanes
-            .last_stream
-            .map_or(0, |last| ids.partition_point(|&id| id <= last));
-        let turn = ids[first..].iter().chain(&ids[..first]);
-        turn.copied()
-            .find(|&id| lanes.video.contains_key(&id) || self.start_video(id, lanes))
-            .map(Pick::Video)
+        use std::ops::Bound::{Excluded, Included, Unbounded};
+        let last = lanes.last_stream;
+        let after = last.map_or(Unbounded, Excluded);
+        let up_to_last = last.map(|last| (Unbounded, Included(last)));
+        for (mut from, to) in std::iter::once((after, Unbounded)).chain(up_to_last) {
+            while let Some(&id) = self.streams.range((from, to)).next().map(|(id, _)| id) {
+                if lanes.video.contains_key(&id) || self.start_video(id, lanes) {
+                    return Some(Pick::Video(id));
+                }
+                from = Excluded(id);
+            }
+        }
+        None
     }
 
     /// The control lane, if it has something to send.
@@ -543,6 +562,7 @@ impl State {
                     q.broken = true;
                     self.dropped.insert(id);
                 }
+                self.garbage.push(f.msg);
                 continue;
             }
             q.broken = false;
