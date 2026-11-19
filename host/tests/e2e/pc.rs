@@ -57,11 +57,17 @@ impl TestDir {
             .unwrap();
     }
 
-    /// The monitor set the PC app starts with (its saved `monitors.txt`).
+    /// The monitor set the PC app starts with, as 0.1 saved it (`monitors.txt`, moved
+    /// over on the first start).
     pub fn save_monitors(&self, text: &str) {
         let path = self.config().join("prostir/monitors.txt");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
+    }
+
+    /// A file the PC app keeps in its settings directory (`screens.txt`, say).
+    pub fn saved(&self, name: &str) -> String {
+        std::fs::read_to_string(self.config().join("prostir").join(name)).unwrap_or_default()
     }
 }
 
@@ -89,6 +95,8 @@ pub struct Options {
     pub linger: u32,
     /// The pairing code the person at the PC types, if asked.
     pub typed_code: Option<String>,
+    /// Monitors (by number, from 1) the fake desktop cannot make.
+    pub broken_monitors: String,
 }
 
 impl Default for Options {
@@ -100,6 +108,7 @@ impl Default for Options {
             slow_monitors: Duration::ZERO,
             linger: 30,
             typed_code: None,
+            broken_monitors: String::new(),
         }
     }
 }
@@ -133,6 +142,7 @@ impl Pc {
                 "PROSTIR_FAKE_SLOW_MONITORS_MS",
                 options.slow_monitors.as_millis().to_string(),
             )
+            .env("PROSTIR_FAKE_BROKEN_MONITORS", &options.broken_monitors)
             .env(
                 "PROSTIR_FAKE_PICTURE",
                 if options.noise { "noise" } else { "bands" },

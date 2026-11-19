@@ -7,6 +7,7 @@ mod failures;
 mod goodbye;
 mod link;
 mod pc;
+mod saved;
 
 use std::collections::BTreeMap;
 use std::time::Duration;

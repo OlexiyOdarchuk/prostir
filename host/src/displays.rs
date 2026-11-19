@@ -18,7 +18,7 @@ use crate::outbox::Outbox;
 use crate::platform::audio::{AudioOut, MicIn};
 use crate::platform::windows;
 use crate::platform::{Desktop, DesktopBackend, Geometry, MonitorSpec, Output, OutputBackend};
-use crate::screen::{Screen, ScreenId, ScreenKind, wire_ids};
+use crate::screen::{Screen, ScreenId, ScreenKind, ScreenState, wire_ids};
 use crate::store::{SavedScreens, Settings};
 
 /// Retry timing after failures: 2 s, then doubling up to 2 min.
@@ -436,8 +436,18 @@ impl Displays {
             .copied()
             .collect();
         ids.extend(rest);
+        // One that cannot start stays in the set, Failed; without any running, there
+        // is nothing to show.
+        let mut first_error = None;
         for id in ids.into_iter().take(MAX_MONITORS) {
-            displays.add_as(id, set.specs[&id].clone())?;
+            if let Err(e) = displays.add_as(id, set.specs[&id].clone()) {
+                first_error.get_or_insert(e);
+            }
+        }
+        if !displays.monitors().any(Screen::running)
+            && let Some(e) = first_error
+        {
+            return Err(e);
         }
         match set.primary {
             Some(id) if displays.is_monitor(id) => displays.set_primary(id),
@@ -470,7 +480,8 @@ impl Displays {
     }
 
     /// Adds a monitor and returns its id; ids are reused so `Prostir-N` keeps the
-    /// position and scale KScreen remembers for that name.
+    /// position and scale KScreen remembers for that name. One that cannot start is
+    /// not added.
     pub fn add(&mut self, spec: MonitorSpec) -> Result<ScreenId> {
         if self.monitor_count() >= MAX_MONITORS {
             bail!(
@@ -480,28 +491,99 @@ impl Displays {
             );
         }
         let id = ScreenId::first_free(|id| self.screens.contains_key(&id));
-        self.add_as(id, spec)?;
+        if let Err(e) = self.add_as(id, spec) {
+            self.screens.remove(&id);
+            self.forget(id);
+            return Err(e);
+        }
         Ok(id)
     }
 
-    /// Adds monitor `id`.
+    /// Adds monitor `id` to the set, at the end of the bottom row unless the rows have
+    /// it, and starts it; one that cannot start stays, Failed (and says why).
     fn add_as(&mut self, id: ScreenId, spec: MonitorSpec) -> Result<()> {
-        let mut output = self.desktop.create(id.number() + 1, &spec)?;
-        let encoder = self.start_stream(id, &mut output)?;
-        self.screens.insert(
-            id,
-            Screen::running(id, ScreenKind::Virtual { spec }, output, encoder),
-        );
-        // A new one at the end of the bottom row.
+        self.screens
+            .insert(id, Screen::starting(id, ScreenKind::Virtual { spec }));
         if !self.rows.iter().flatten().any(|e| e.id == id) {
             match self.rows.last_mut() {
                 Some(row) => row.push(desk::Entry::new(id)),
                 None => self.rows.push(vec![desk::Entry::new(id)]),
             }
         }
-        self.layout_changed();
         self.send_order();
-        Ok(())
+        self.start(id)
+    }
+
+    /// Makes monitor `id`'s output if it has none and starts its stream: Running, or
+    /// Failed with why.
+    fn start(&mut self, id: ScreenId) -> Result<()> {
+        let Some(screen) = self.screens.get_mut(&id) else {
+            return Ok(());
+        };
+        let Some(spec) = screen.kind.spec().cloned() else {
+            return Ok(());
+        };
+        let output = screen.output.take();
+        let started = output
+            .map_or_else(|| self.desktop.create(id.number() + 1, &spec), Ok)
+            .and_then(|mut output| match self.start_stream(id, &mut output) {
+                Ok(encoder) => Ok((output, encoder)),
+                // The output stays for the next try.
+                Err(e) => {
+                    if let Some(s) = self.screens.get_mut(&id) {
+                        s.output = Some(output);
+                    }
+                    Err(e)
+                }
+            });
+        let Some(screen) = self.screens.get_mut(&id) else {
+            return Ok(());
+        };
+        let result = match started {
+            Ok((output, encoder)) => {
+                // Made while the headset is off: paused like the others.
+                if !self.streaming {
+                    encoder.set_paused(true);
+                }
+                screen.output = Some(output);
+                screen.stream = Some(encoder);
+                screen.state = ScreenState::Running;
+                Ok(())
+            }
+            Err(e) => {
+                error!("{id} cannot start: {e:#}");
+                screen.state = ScreenState::Failed {
+                    why: format!("{e:#}"),
+                };
+                Err(e)
+            }
+        };
+        self.layout_changed();
+        result
+    }
+
+    /// Tries again the monitors that could not start, and tells the headset about those
+    /// that still cannot.
+    fn retry_failed(&mut self) {
+        let failed: Vec<ScreenId> = self
+            .monitors()
+            .filter(|s| matches!(s.state, ScreenState::Failed { .. }))
+            .map(|s| s.id)
+            .collect();
+        for id in failed {
+            let _ = self.start(id);
+        }
+        for s in self.monitors() {
+            if let ScreenState::Failed { why } = &s.state {
+                self.router.send(HostMsg::Error {
+                    text: format!(
+                        "{} {}: {why}",
+                        t("Монітор не запустився", "A monitor could not start"),
+                        s.id.number() + 1
+                    ),
+                });
+            }
+        }
     }
 
     /// Starts stream `id`: its slot in the router and an encoder fed by `output`. When
@@ -574,7 +656,7 @@ impl Displays {
                     builtin: true,
                 };
                 self.screens
-                    .insert(id, Screen::running(id, kind, output, encoder));
+                    .insert(id, Screen::streaming(id, kind, output, encoder));
                 self.layout_changed();
             }
             Err(e) => warn!("cannot mirror {name}: {e:#}"),
@@ -768,7 +850,7 @@ impl Displays {
     /// A new encoder for monitor `id` with the current settings, or else with
     /// `fallback`; the old one stops before, so the headset never gets frames of two
     /// codecs for one stream. Returns why the current settings did not work. A monitor
-    /// whose stream cannot start at all goes away, as if removed.
+    /// whose stream cannot start at all stays in the set, Failed.
     fn restart_monitor(&mut self, id: ScreenId, fallback: Option<&EncoderConfig>) -> Result<()> {
         let Some(screen) = self.screens.get_mut(&id) else {
             return Ok(());
@@ -797,11 +879,20 @@ impl Displays {
                     screen.output = Some(output);
                 }
             }
+            // It keeps its place, and is tried again at the next session.
             None => {
-                error!("{id}: no stream, removing the monitor");
-                drop(output);
-                self.screens.remove(&id);
-                self.forget(id);
+                error!("{id}: no stream; trying again at the next session");
+                self.router.remove_stream(id);
+                if let Some(screen) = self.screens.get_mut(&id) {
+                    screen.output = Some(output);
+                    screen.state = ScreenState::Failed {
+                        why: result
+                            .as_ref()
+                            .err()
+                            .map_or_else(String::new, |e| format!("{e:#}")),
+                    };
+                }
+                self.layout_changed();
             }
         }
         result
@@ -840,6 +931,7 @@ impl Displays {
     /// picture now, monitors kept from the last session too.
     pub fn headset_connected(&mut self) {
         self.taken_off_at = None;
+        self.retry_failed();
         // Paused ones (kept from before) start over as `set_streaming` resumes them;
         // running ones (just made) are resumed here, which starts them over too.
         if self.streaming {
@@ -1313,7 +1405,7 @@ impl Displays {
             spec,
         };
         self.screens
-            .insert(id, Screen::running(id, kind, output, encoder));
+            .insert(id, Screen::streaming(id, kind, output, encoder));
         self.layout_changed();
         if let Err(e) = windows::move_to(&window, &name, true) {
             self.close_window_panel(id);
@@ -1439,15 +1531,15 @@ impl Displays {
         }
     }
 
-    /// Every monitor streams. Without any left (none could start again), the set is
+    /// Every running monitor streams, and one at least does. Otherwise the screens are
     /// made anew for the next session.
     pub fn healthy(&self) -> bool {
-        self.monitors().next().is_some()
+        self.monitors().any(Screen::running)
             && !self.router.failed.load(Ordering::Relaxed)
             && !self
                 .screens
                 .values()
-                .filter(|s| !s.is_builtin())
+                .filter(|s| s.running() && !s.is_builtin())
                 .any(|s| s.output.as_ref().is_none_or(|o| o.closed()))
     }
 

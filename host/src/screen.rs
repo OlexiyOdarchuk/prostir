@@ -98,6 +98,19 @@ impl ScreenKind {
     }
 }
 
+/// How a screen is doing.
+#[derive(Debug, Clone)]
+pub enum ScreenState {
+    /// Being made: no output or encoder yet.
+    Starting,
+    Running,
+    /// Its output or encoder could not start: it keeps its place in the set and the
+    /// rows, and is tried again at the next session.
+    Failed {
+        why: String,
+    },
+}
+
 /// A screen: what it is, its output on the desktop and the encoder streaming it.
 pub struct Screen {
     pub id: ScreenId,
@@ -105,17 +118,34 @@ pub struct Screen {
     // Field order matters: the encoder stops before the output goes away.
     pub stream: Option<Encoder>,
     pub output: Option<Output>,
+    pub state: ScreenState,
 }
 
 impl Screen {
     /// A screen streaming `output` with `stream`.
-    pub fn running(id: ScreenId, kind: ScreenKind, output: Output, stream: Encoder) -> Self {
+    pub fn streaming(id: ScreenId, kind: ScreenKind, output: Output, stream: Encoder) -> Self {
         Self {
             id,
             kind,
             stream: Some(stream),
             output: Some(output),
+            state: ScreenState::Running,
         }
+    }
+
+    /// A screen still to be made.
+    pub fn starting(id: ScreenId, kind: ScreenKind) -> Self {
+        Self {
+            id,
+            kind,
+            stream: None,
+            output: None,
+            state: ScreenState::Starting,
+        }
+    }
+
+    pub fn running(&self) -> bool {
+        matches!(self.state, ScreenState::Running)
     }
 
     /// The desktop's name for its output, while it has one.

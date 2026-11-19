@@ -27,6 +27,8 @@ pub struct FakeDesktop {
     picture: Picture,
     /// How long making a monitor takes (KScreen can take seconds).
     slow: Duration,
+    /// Monitors (by number, from 1) that cannot be made.
+    broken: Vec<u32>,
 }
 
 impl DesktopBackend for FakeDesktop {
@@ -46,12 +48,18 @@ impl DesktopBackend for FakeDesktop {
                 .context("PROSTIR_FAKE_SLOW_MONITORS_MS: a whole number")?,
             Err(_) => 0,
         };
+        let broken = std::env::var("PROSTIR_FAKE_BROKEN_MONITORS")
+            .unwrap_or_default()
+            .split(',')
+            .filter_map(|n| n.trim().parse().ok())
+            .collect();
         info!("desktop: fake, the picture ({picture:?}) changes {fps} times a second");
         Ok(Self {
             layout: Layout::default(),
             fps,
             picture,
             slow: Duration::from_millis(slow),
+            broken,
         })
     }
 
@@ -61,6 +69,10 @@ impl DesktopBackend for FakeDesktop {
 
     fn create(&self, number: u32, spec: &MonitorSpec) -> Result<FakeOutput> {
         std::thread::sleep(self.slow);
+        anyhow::ensure!(
+            !self.broken.contains(&number),
+            "fake monitor {number} is broken"
+        );
         let name = format!("{PREFIX}{number}");
         let output = FakeOutput::start(
             name.clone(),
