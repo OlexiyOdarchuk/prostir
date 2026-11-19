@@ -224,10 +224,24 @@ impl Pc {
         std::fs::write(self.run_dir.join("fake-tray"), format!("{item}\n")).unwrap();
     }
 
+    /// Stops the PC app dead (`SIGSTOP`), as a PC going to sleep does.
+    pub fn freeze(&self) {
+        self.signal(libc::SIGSTOP);
+    }
+
+    /// Lets a frozen PC app run on (`SIGCONT`), as after waking up.
+    pub fn thaw(&self) {
+        self.signal(libc::SIGCONT);
+    }
+
+    fn signal(&self, signal: libc::c_int) {
+        // SAFETY: a signal to our own child process.
+        unsafe { libc::kill(self.child.id() as libc::pid_t, signal) };
+    }
+
     /// Asks the PC app to quit as a user would (SIGTERM) and checks that it does.
     pub fn quit(mut self) {
-        // SAFETY: a signal to our own child process.
-        unsafe { libc::kill(self.child.id() as libc::pid_t, libc::SIGTERM) };
+        self.signal(libc::SIGTERM);
         let until = Instant::now() + Duration::from_secs(10);
         loop {
             if let Some(status) = self.child.try_wait().unwrap() {
@@ -245,6 +259,8 @@ impl Pc {
 
 impl Drop for Pc {
     fn drop(&mut self) {
+        // A frozen one does not die of SIGKILL before it runs again.
+        self.thaw();
         let _ = self.child.kill();
         let _ = self.child.wait();
     }

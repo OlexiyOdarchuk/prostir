@@ -1,13 +1,14 @@
 use std::collections::BTreeMap;
 use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use prostir_proto::handshake::{self, Answer};
-use prostir_proto::link::tcp::{NoiseTcp, Plain};
+use prostir_proto::link::tcp::{NoiseTcp, Plain, SocketOptions};
 use prostir_proto::link::{Closer, Link, PeerInfo, RecordReceiver, RecordSender};
 use prostir_proto::packet::{self, Assembler, FRAGMENT, lane};
 use prostir_proto::secure::{Identity, Pairing, TrustStore, confirmation, tags_match};
@@ -20,6 +21,8 @@ use crate::nal;
 const ACK_EVERY: Duration = Duration::from_millis(100);
 /// The PC answers within this, and takes what is sent within this.
 const REPLY: Duration = Duration::from_secs(10);
+/// In a session, nothing at all from the PC for this long ends it, as in the Quest app.
+const SILENCE: Duration = Duration::from_secs(5);
 /// Pairing waits for a person typing the code on the PC.
 const PAIRING: Duration = Duration::from_secs(300);
 /// The headset pings the PC this often in a session, like the Quest app.
@@ -151,6 +154,12 @@ pub struct View {
     pub messages: u64,
     /// The PC closed the connection.
     pub closed: bool,
+    /// Why reading stopped: `UnexpectedEof` when the PC closed the connection,
+    /// `TimedOut` after silence.
+    pub end: Option<std::io::ErrorKind>,
+    /// Slices of sound that came in while a frame was half way in: they went between
+    /// its packets.
+    pub sound_between_fragments: u32,
 }
 
 impl View {
@@ -216,6 +225,7 @@ impl View {
             HostMsg::MirrorWanted { enabled } => self.mirror_wanted = Some(*enabled),
             HostMsg::Audio { pcm } => {
                 self.audio_bytes += pcm.len() as u64;
+                self.sound_between_fragments += u32::from(arrived.between_fragments);
                 if let Some(made) = pcm.first_chunk::<8>() {
                     let made = u64::from_le_bytes(*made);
                     let late = arrived.monotonic_ns.saturating_sub(made);
@@ -250,6 +260,55 @@ struct Arrived {
     monotonic_ns: u64,
     /// For a pong: how long since its ping went out.
     round_trip: Option<Duration>,
+    /// Another message was half way in when this one completed.
+    between_fragments: bool,
+}
+
+/// What a test asks of the headset's threads, and what they found.
+#[derive(Default)]
+struct Shared {
+    /// Neither reading nor sending until then, as when Wi-Fi freezes.
+    stalled_until: Mutex<Option<Instant>>,
+    /// Hang up as soon as a message is half way in.
+    cut_mid_message: AtomicBool,
+    /// Why reading stopped.
+    end: Mutex<Option<std::io::ErrorKind>>,
+    pings: Mutex<Pings>,
+}
+
+impl Shared {
+    fn wait_while_stalled(&self) {
+        loop {
+            let until = *self.stalled_until.lock().unwrap();
+            match until.map(|t| t.saturating_duration_since(Instant::now())) {
+                Some(left) if !left.is_zero() => std::thread::sleep(left),
+                _ => return,
+            }
+        }
+    }
+}
+
+/// Keeps the receive buffer small, so a headset that reads slowly holds the PC back
+/// at once instead of after megabytes.
+struct SmallReceiveBuffer;
+
+impl SocketOptions for SmallReceiveBuffer {
+    fn prepare(&self, stream: &TcpStream) {
+        use std::os::fd::AsRawFd;
+        let size: libc::c_int = 64 * 1024;
+        // SAFETY: a valid socket and a c_int option value that lives through the call.
+        unsafe {
+            libc::setsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                (&size as *const libc::c_int).cast(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+        }
+    }
+
+    fn set_pace(&self, _stream: &TcpStream, _bytes_per_sec: u64) {}
 }
 
 /// `CLOCK_MONOTONIC` now, in nanoseconds (the clock the fake desktop stamps sound with).
@@ -269,6 +328,7 @@ fn monotonic_ns() -> u64 {
 pub struct FakeHeadset {
     closer: Closer,
     writer: Arc<Mutex<Box<dyn RecordSender>>>,
+    shared: Arc<Shared>,
     incoming: Receiver<Arrived>,
     view: View,
     /// The PC's protocol version and language, from its welcome.
@@ -284,16 +344,39 @@ impl FakeHeadset {
     pub fn connect(
         addr: SocketAddr,
         keys: &mut Keys,
+        pairing: Option<&mut dyn FnMut() -> String>,
+    ) -> Result<Self, ConnectError> {
+        Self::open(addr, keys, pairing, None)
+    }
+
+    /// As [`FakeHeadset::connect`] for a trusted headset that reads at most
+    /// `bytes_per_sec` (a slow link), with a small receive buffer.
+    pub fn connect_reading_at(
+        addr: SocketAddr,
+        keys: &mut Keys,
+        bytes_per_sec: u64,
+    ) -> Result<Self, ConnectError> {
+        Self::open(addr, keys, None, Some(bytes_per_sec))
+    }
+
+    fn open(
+        addr: SocketAddr,
+        keys: &mut Keys,
         mut pairing: Option<&mut dyn FnMut() -> String>,
+        read_rate: Option<u64>,
     ) -> Result<Self, ConnectError> {
         let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))?;
         stream.set_read_timeout(Some(REPLY))?;
+        let options: Arc<dyn SocketOptions> = match read_rate {
+            Some(_) => Arc::new(SmallReceiveBuffer),
+            None => Arc::new(Plain),
+        };
         let Link {
             mut sender,
             mut receiver,
             closer,
             peer,
-        } = NoiseTcp::connect(stream, &keys.identity, Arc::new(Plain))?;
+        } = NoiseTcp::connect(stream, &keys.identity, options)?;
         let mut packets = HostMsg::assembler();
         let mut ends = Ends {
             rx: &mut *receiver,
@@ -301,15 +384,23 @@ impl FakeHeadset {
             packets: &mut packets,
         };
         let (version, language) = open(&mut ends, keys, &peer, addr, &mut pairing)?;
-        receiver.set_idle_limit(None);
+        receiver.set_idle_limit(Some(SILENCE));
         packets.set_limits(HostMsg::limits(true));
         let writer = Arc::new(Mutex::new(sender));
-        let pings = Arc::new(Mutex::new(Pings::default()));
-        let incoming = spawn_reader(receiver, packets, writer.clone(), pings.clone())?;
-        spawn_pinger(writer.clone(), pings)?;
+        let shared = Arc::new(Shared::default());
+        let incoming = spawn_reader(
+            receiver,
+            packets,
+            writer.clone(),
+            shared.clone(),
+            closer.clone(),
+            read_rate,
+        )?;
+        spawn_pinger(writer.clone(), shared.clone())?;
         Ok(Self {
             closer,
             writer,
+            shared,
             incoming,
             view: View::default(),
             version,
@@ -339,6 +430,7 @@ impl FakeHeadset {
             Err(RecvTimeoutError::Timeout) => Ok(None),
             Err(RecvTimeoutError::Disconnected) => {
                 self.view.closed = true;
+                self.view.end = *self.shared.end.lock().unwrap();
                 bail!("the PC closed the connection")
             }
         }
@@ -406,9 +498,26 @@ impl FakeHeadset {
         v.pings = 0;
         v.round_trips.clear();
         v.audio_bytes = 0;
+        v.sound_between_fragments = 0;
         v.sound_delays.clear();
         v.sound_gaps.restart();
         v.messages = 0;
+    }
+
+    /// Neither reads nor sends for `time` from now, as when its Wi-Fi freezes.
+    pub fn stall(&self, time: Duration) {
+        *self.shared.stalled_until.lock().unwrap() = Some(Instant::now() + time);
+    }
+
+    /// Hangs up as soon as the next message is half way in (a frame, mostly).
+    pub fn cut_mid_message(&self) {
+        self.shared.cut_mid_message.store(true, Ordering::Relaxed);
+    }
+
+    /// Sends `record` as it is, a broken packet say.
+    pub fn send_record(&self, record: &[u8]) -> Result<()> {
+        self.writer.lock().unwrap().send(&[record])?;
+        Ok(())
     }
 
     /// Hangs up, as a headset that lost the network would.
@@ -513,14 +622,66 @@ fn spawn_reader(
     mut receiver: Box<dyn RecordReceiver>,
     mut packets: Assembler,
     writer: Arc<Mutex<Box<dyn RecordSender>>>,
-    pings: Arc<Mutex<Pings>>,
+    shared: Arc<Shared>,
+    closer: Closer,
+    read_rate: Option<u64>,
 ) -> std::io::Result<Receiver<Arrived>> {
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new()
         .name("fake-headset".into())
         .spawn(move || {
+            // However reading stops, the connection closes with it, as in the Quest app.
+            struct Close(Closer);
+            impl Drop for Close {
+                fn drop(&mut self) {
+                    self.0.close();
+                }
+            }
+            let _close = Close(closer.clone());
             let mut acked: BTreeMap<u8, Instant> = BTreeMap::new();
-            while let Ok(msg) = HostMsg::recv(&mut *receiver, &mut packets) {
+            // Bytes read but not yet waited for, when reading at a set rate.
+            let mut unpaid = 0u64;
+            loop {
+                shared.wait_while_stalled();
+                let record = match receiver.recv() {
+                    Ok(record) => record,
+                    Err(e) => {
+                        *shared.end.lock().unwrap() = Some(e.kind());
+                        return;
+                    }
+                };
+                if let Some(rate) = read_rate {
+                    unpaid += record.len() as u64;
+                    let owed = Duration::from_secs_f64(unpaid as f64 / rate as f64);
+                    if owed >= Duration::from_millis(2) {
+                        std::thread::sleep(owed);
+                        unpaid = 0;
+                    }
+                }
+                let complete = match packets.push(record) {
+                    Ok(complete) => complete,
+                    Err(e) => {
+                        *shared.end.lock().unwrap() = Some(std::io::Error::from(e).kind());
+                        return;
+                    }
+                };
+                let Some(m) = complete else {
+                    // Half a message in: hang up now if asked to.
+                    if shared.cut_mid_message.load(Ordering::Relaxed) {
+                        *shared.end.lock().unwrap() = Some(std::io::ErrorKind::ConnectionAborted);
+                        return;
+                    }
+                    continue;
+                };
+                let between_fragments = packets.assembling() > 0;
+                let msg = match HostMsg::from_message(m) {
+                    Ok(Some(msg)) => msg,
+                    Ok(None) => continue,
+                    Err(e) => {
+                        *shared.end.lock().unwrap() = Some(e.kind());
+                        return;
+                    }
+                };
                 let (at, monotonic_ns) = (Instant::now(), monotonic_ns());
                 let mut round_trip = None;
                 match &msg {
@@ -529,7 +690,9 @@ fn spawn_reader(
                         let pong = ClientMsg::Pong { seq: *seq };
                         let _ = send(&mut **writer.lock().unwrap(), pong);
                     }
-                    HostMsg::Pong { seq } => round_trip = pings.lock().unwrap().pong(*seq, at),
+                    HostMsg::Pong { seq } => {
+                        round_trip = shared.pings.lock().unwrap().pong(*seq, at);
+                    }
                     _ => {}
                 }
                 if let HostMsg::Frame { id, pts_us, .. } = &msg
@@ -547,6 +710,7 @@ fn spawn_reader(
                     at,
                     monotonic_ns,
                     round_trip,
+                    between_fragments,
                 };
                 if tx.send(arrived).is_err() {
                     return;
@@ -556,17 +720,19 @@ fn spawn_reader(
     Ok(rx)
 }
 
-/// Pings the PC every [`PING_EVERY`] until the connection closes.
+/// Pings the PC every [`PING_EVERY`] (but not while stalled) until the connection
+/// closes.
 fn spawn_pinger(
     writer: Arc<Mutex<Box<dyn RecordSender>>>,
-    pings: Arc<Mutex<Pings>>,
+    shared: Arc<Shared>,
 ) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("fake-headset-ping".into())
         .spawn(move || {
             loop {
                 std::thread::sleep(PING_EVERY);
-                let seq = pings.lock().unwrap().ping(Instant::now());
+                shared.wait_while_stalled();
+                let seq = shared.pings.lock().unwrap().ping(Instant::now());
                 if send(&mut **writer.lock().unwrap(), ClientMsg::Ping { seq }).is_err() {
                     return;
                 }

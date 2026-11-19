@@ -302,6 +302,35 @@ fn limits_before_and_in_the_session() {
     );
 }
 
+/// A connection that ends in the middle of a message takes it along: nothing of it
+/// comes out, and the next connection (a new assembler) starts with empty lanes.
+#[test]
+fn a_message_cut_off_with_its_connection_is_gone() {
+    let frame = HostMsg::Frame {
+        id: 0,
+        keyframe: true,
+        pts_us: 1,
+        data: vec![1; 3 * FRAGMENT],
+    };
+    let records = packets(lane::VIDEO, frame.clone().encode().unwrap(), FRAGMENT);
+    let mut asm = HostMsg::assembler();
+    asm.set_limits(HostMsg::limits(true));
+    assert_eq!(assemble(&mut asm, &records[..2]).unwrap(), []);
+    assert_eq!(asm.assembling(), 1);
+    drop(asm);
+    let mut next = HostMsg::assembler();
+    next.set_limits(HostMsg::limits(true));
+    // The rest of the old message is no packet the new connection can place.
+    assert_eq!(
+        next.push(&records[2]),
+        Err(PacketError::NotStarted { lane: lane::VIDEO })
+    );
+    let mut next = HostMsg::assembler();
+    next.set_limits(HostMsg::limits(true));
+    let [m] = <[Message; 1]>::try_from(assemble(&mut next, &records).unwrap()).unwrap();
+    assert_eq!(HostMsg::from_message(m).unwrap(), Some(frame));
+}
+
 /// A sender never makes a first packet without the whole header, however small a
 /// fragment it is asked for.
 #[test]

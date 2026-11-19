@@ -2,6 +2,10 @@
 //! like a home Wi-Fi network. `scripts/e2e-link.sh` runs this test inside a private
 //! network namespace whose loopback `tc netem` limits (100 Mbit/s and 2 ms by
 //! default); on a plain loopback it runs too, but the numbers then say little.
+//!
+//! The targets, for 100 Mbit/s and 2 ms: 95 % of the slices within 12 ms, none later
+//! than 25 ms, and no pause in the sound over 30 ms. Before packets and pacing (0.2.0
+//! step 3) the same link gave 26 to 32 ms, 70 to 90 ms and 13 to 23 such pauses.
 
 use std::time::{Duration, Instant};
 
@@ -18,6 +22,11 @@ const MEASURE: Duration = Duration::from_secs(15);
 /// Every this often, every stream is asked for a keyframe at once (as when a session
 /// opens or monitors are added).
 const KEYFRAMES_EVERY: Duration = Duration::from_secs(2);
+
+/// What sound may take at most, on the default shaped link: 95 % of the slices, and
+/// all of them.
+const TARGET_P95: Duration = Duration::from_millis(12);
+const TARGET_MAX: Duration = Duration::from_millis(25);
 
 /// The value below which a share `p` of `sorted` lies.
 fn percentile(sorted: &[Duration], p: f64) -> Duration {
@@ -93,5 +102,17 @@ fn sound_under_keyframes_on_a_shaped_link() {
         keyframe_bytes as f64 / keyframes.max(1) as f64 / 1024.0,
         keyframe_max as f64 / 1024.0,
     );
+    // Only the default link has targets; another rate or delay is for looking.
+    if std::env::var("PROSTIR_LINK").is_ok_and(|l| l == "100mbit 2ms") {
+        assert!(
+            percentile(&delays, 0.95) <= TARGET_P95,
+            "sound p95 over the target"
+        );
+        assert!(
+            percentile(&delays, 1.0) <= TARGET_MAX,
+            "sound later than the target"
+        );
+        assert_eq!(over[0], 0, "pauses in the sound over 30 ms");
+    }
     pc.quit();
 }

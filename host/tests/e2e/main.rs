@@ -3,6 +3,7 @@
 //! `cargo test -p prostir-host --features fake-desktop --test e2e`). Needs GStreamer
 //! with x264enc (plugins-ugly), h264parse (plugins-bad) and the base plugins.
 
+mod failures;
 mod goodbye;
 mod link;
 mod pc;
@@ -20,7 +21,7 @@ pub const START: Duration = Duration::from_secs(30);
 pub const SOON: Duration = Duration::from_secs(10);
 
 /// Two small monitors, so the CPU encoder keeps up anywhere.
-const TWO_MONITORS: &str = "row\n640x360\n480x272\nmirror off\n";
+pub const TWO_MONITORS: &str = "row\n640x360\n480x272\nmirror off\n";
 
 /// Every fake monitor's source started exactly once more between `before` and `after`
 /// (see [`Pc::source_starts`]).
