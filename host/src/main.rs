@@ -1,8 +1,5 @@
 // Every unsafe block says why it is sound.
 #![deny(clippy::undocumented_unsafe_blocks)]
-// The fake desktop for tests uses less of the core than the real platforms do (no
-// tray commands, no pushed frames); unused code is found in the real build.
-#![cfg_attr(feature = "fake-desktop", allow(dead_code))]
 mod displays;
 mod encoder;
 mod i18n;

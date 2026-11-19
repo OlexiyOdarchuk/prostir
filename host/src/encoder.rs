@@ -348,6 +348,10 @@ impl Encoder {
     }
 
     /// The `appsrc` to push frames into, when the input has one.
+    #[cfg_attr(
+        feature = "fake-desktop",
+        expect(dead_code, reason = "the fake desktop pushes no frames")
+    )]
     pub fn appsrc(&self) -> Option<gst_app::AppSrc> {
         self.pipeline
             .by_name("src")
@@ -355,6 +359,10 @@ impl Encoder {
     }
 
     /// Set while the encoder is paused, so a capture can rest too.
+    #[cfg_attr(
+        feature = "fake-desktop",
+        expect(dead_code, reason = "the fake desktop pushes no frames")
+    )]
     pub fn paused(&self) -> Arc<AtomicBool> {
         self.paused.clone()
     }

@@ -110,6 +110,10 @@ impl std::fmt::Display for MonitorSpec {
 #[derive(Debug, Clone)]
 pub struct ActiveWindow {
     /// The desktop's id for it (Hyprland address, KWin internal id).
+    #[cfg_attr(
+        feature = "fake-desktop",
+        expect(dead_code, reason = "the fake desktop has no windows")
+    )]
     pub id: String,
     /// Logical size on the desktop.
     pub width: i32,
@@ -121,6 +125,10 @@ pub struct ActiveWindow {
 }
 
 /// What the tray asks the main loop to do.
+#[cfg_attr(
+    feature = "fake-desktop",
+    expect(dead_code, reason = "the fake desktop has no tray")
+)]
 pub enum TrayCommand {
     SetBitrate(u32),
     /// Clearer text at about 2 ms more encoding per frame.
@@ -147,6 +155,10 @@ pub struct TrayStatus {
 
 /// Why there is no pairing code typed on the PC (see `dialogs::ask_code`).
 pub enum NoCode {
+    #[cfg_attr(
+        feature = "fake-desktop",
+        expect(dead_code, reason = "the fake pairing dialog is never cancelled")
+    )]
     Cancelled,
     /// The PC has no program to ask with.
     NoDialog,
