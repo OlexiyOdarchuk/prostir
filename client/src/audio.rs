@@ -152,10 +152,11 @@ impl Stream {
         }
     }
 
-    /// How many times AAudio ran out of sound to play (or of room) since it opened.
-    fn xruns(&self) -> i32 {
+    /// How many times AAudio ran out of sound to play (or of room) since it opened;
+    /// `None` when it cannot say (an error code).
+    fn xruns(&self) -> Option<u32> {
         // SAFETY: the stream is open.
-        unsafe { ffi::AAudioStream_getXRunCount(self.0) }.max(0)
+        u32::try_from(unsafe { ffi::AAudioStream_getXRunCount(self.0) }).ok()
     }
 
     /// Writes interleaved i16 frames, waiting up to 50 ms for room.
@@ -194,7 +195,8 @@ enum Ended {
 /// to take (`behind`).
 struct Report {
     period: Period,
-    xruns: i32,
+    /// The underrun count at the start of the window.
+    xruns: Option<u32>,
     late: u32,
     played: u32,
 }
@@ -209,11 +211,14 @@ impl Report {
         // Quiet while nothing comes (headset taken off, sound switched off). A window
         // in which the sound stopped also counts the stop as an underrun.
         if self.played > 0 || self.late > 0 || behind > 0 {
+            let underruns = match (xruns, self.xruns) {
+                (Some(now), Some(before)) => now.saturating_sub(before).to_string(),
+                _ => "unknown".into(),
+            };
             info!(
-                "sound: {} slices played in {:.0} s, {} underruns, dropped {} late and {} behind",
+                "sound: {} slices played in {:.0} s, {underruns} underruns, dropped {} late and {} behind",
                 self.played,
                 window.as_secs_f64(),
-                xruns - self.xruns,
                 self.late,
                 behind
             );
