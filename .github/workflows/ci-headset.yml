@@ -9,6 +9,7 @@ on:
     paths:
       - "client/**"
       - "proto/**"
+      - "layout/**"
       - ".cargo/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -17,6 +18,7 @@ on:
     paths:
       - "client/**"
       - "proto/**"
+      - "layout/**"
       - ".cargo/**"
       - "Cargo.toml"
       - "Cargo.lock"

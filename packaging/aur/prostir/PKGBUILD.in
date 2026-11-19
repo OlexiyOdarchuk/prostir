@@ -49,7 +49,7 @@ check() {
   cd "prostir-${pkgver}"
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
-  cargo test --frozen --release -p prostir-host -p prostir-proto
+  cargo test --frozen --release -p prostir-host -p prostir-proto -p prostir-layout
 }
 
 package() {

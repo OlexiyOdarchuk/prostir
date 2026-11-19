@@ -69,6 +69,7 @@ rustPlatform.buildRustPackage {
       (root + "/Cargo.lock")
       (root + "/.cargo")
       (root + "/proto")
+      (root + "/layout")
       (root + "/host")
       (root + "/client")
       # A workspace member (the fake headset for tests): cargo needs it present.

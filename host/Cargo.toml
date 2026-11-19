@@ -27,6 +27,7 @@ required-features = ["fake-desktop"]
 
 [dependencies]
 prostir-proto = { path = "../proto" }
+prostir-layout = { path = "../layout" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 log = "0.4"

@@ -1,0 +1,13 @@
+[package]
+name = "prostir-layout"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Where Prostir's monitors go: pure layout rules shared by the PC and the headset"
+
+# No dependencies and no input or output: only functions to test.
+[dependencies]

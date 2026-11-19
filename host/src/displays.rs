@@ -9,13 +9,14 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use log::{debug, error, info, warn};
+use prostir_layout::desk;
 use prostir_proto::stats::{Histogram, Period};
 use prostir_proto::{
     Codec, HostMsg, LayoutEntry, LayoutRow, MAX_MONITORS, MIRROR_ID, PcSettings, WINDOW_IDS,
 };
 
 use crate::encoder::{Encoder, EncoderConfig, EncoderEvent};
-use crate::layout::{Seat, arrange, arrange_free, panel_size};
+use crate::layout::panel_size;
 use crate::outbox::Outbox;
 use crate::platform::audio::{AudioOut, MicIn};
 use crate::platform::windows;
@@ -1178,126 +1179,100 @@ impl Displays {
         self.apply_layout();
     }
 
-    /// Lays the outputs out on the desktop like they stand in the headset: Quest
-    /// monitors side by side in `order`, vertically centred, and the mirrored display
-    /// under the primary monitor. The mouse then crosses screens where the eyes expect
-    /// it to.
+    /// Lays the outputs out on the desktop like they stand in the headset (see
+    /// `prostir_layout::desk`): the monitors in the headset's rows, the laptop screen
+    /// under the primary monitor unless the headset placed it, other real displays
+    /// next to it and window panels right of everything. The mouse then crosses
+    /// screens where the eyes expect it to.
     fn apply_layout(&self) {
+        /// An output on the desktop: one of ours by id, or another real display.
+        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+        enum Out {
+            Stream(u8),
+            Other(usize),
+        }
         let geometries = self.desktop.geometries();
-        let size = |name: &str, spec: Option<&MonitorSpec>| {
-            geometries.get(name).map(|g| (g.w, g.h)).or_else(|| {
-                spec.map(|s| {
-                    (
-                        (s.width as f64 / s.scale).round() as i32,
-                        (s.height as f64 / s.scale).round() as i32,
-                    )
-                })
-            })
-        };
-        // As the headset shows them (see `arrange`).
-        let mut names: HashMap<u8, String> = self
+        let mut names: BTreeMap<Out, String> = self
             .monitors
             .iter()
-            .map(|(id, m)| (*id, m.output.output_name().to_owned()))
+            .chain(&self.windows)
+            .map(|(id, m)| (Out::Stream(*id), m.output.output_name().to_owned()))
             .collect();
         if let Some(m) = &self.mirror {
-            names.insert(MIRROR_ID, m.output.output_name().to_owned());
-        }
-        let rows: Vec<Vec<Seat>> = self
-            .effective_rows()
-            .into_iter()
-            .map(|r| {
-                r.entries
-                    .iter()
-                    .filter_map(|e| {
-                        let spec = self.monitors.get(&e.id).map(|m| &m.spec);
-                        let (w, h) = size(names.get(&e.id)?, spec)?;
-                        Some(Seat {
-                            id: e.id,
-                            center: e.center,
-                            middle: e.middle,
-                            w,
-                            h,
-                        })
-                    })
-                    .collect()
-            })
-            .collect();
-        let main = self
-            .primary
-            .or_else(|| self.order.first().copied())
-            .unwrap_or(0);
-        let mut planned: Vec<(u8, String, i32, i32, i32, i32)> = Vec::new();
-        let mut top = 0;
-        // The headset said where each monitor is seen: the desktop follows that
-        // directly. Older headsets (or a saved layout): rows.
-        let seats: Vec<Seat> = rows.iter().flatten().copied().collect();
-        let arranged = arrange_free(&seats, main).unwrap_or_else(|| arrange(&rows, main));
-        for (id, x, y) in arranged {
-            if let Some(seat) = rows.iter().flatten().find(|m| m.id == id) {
-                planned.push((id, names[&id].clone(), x, y, seat.w, seat.h));
-                top = top.max(y + seat.h);
-            }
-        }
-        // KDE wants the desktop to start at 0,0.
-        let left = planned.iter().map(|p| p.2).min().unwrap_or(0);
-        // Every applied change makes KWin reconfigure its outputs, which also cuts the
-        // laptop mirror's stream: `place` only sends what actually differs.
-        let mut positions = Vec::new();
-        let mut placed = HashMap::new();
-        for (id, name, x, y, w, _) in &planned {
-            positions.push((name.clone(), x - left, *y));
-            placed.insert(*id, (x - left, *w));
-        }
-        // The laptop screen under the primary monitor, below every row.
-        let primary_at = self.primary.and_then(|p| placed.get(&p)).copied();
-        let mut bottom_x = primary_at.map_or(0, |(px, _)| px);
-        let mirror_name = self
-            .mirror
-            .as_ref()
-            .map(|m| m.output.output_name().to_owned());
-        // Unless the headset put it somewhere itself (it is then in a row).
-        let mirror_placed = planned.iter().any(|p| p.0 == MIRROR_ID);
-        if let (Some(name), Some((px, pw)), false) = (&mirror_name, primary_at, mirror_placed)
-            && let Some((w, _)) = size(name, None)
-        {
-            let x = (px + (pw - w) / 2).max(0);
-            positions.push((name.clone(), x, top));
-            bottom_x = x + w;
+            names.insert(Out::Stream(MIRROR_ID), m.output.output_name().to_owned());
         }
         // Other real displays (the laptop panel next to a mirrored external monitor,
         // say) go on the bottom row too, so nothing overlaps the Prostir monitors.
-        let ours: Vec<&str> = self
-            .monitors
-            .values()
-            .map(|m| m.output.output_name())
-            .collect();
-        let mut others: Vec<(&String, &Geometry)> = geometries
+        let mut others: Vec<&String> = geometries
             .iter()
             .filter(|(name, g)| {
                 g.enabled
                     && g.w > 0
-                    && !ours.contains(&name.as_str())
-                    && Some(name.as_str()) != mirror_name.as_deref()
+                    && !names.values().any(|n| n == *name)
                     && !self.desktop.is_virtual(name)
             })
+            .map(|(name, _)| name)
             .collect();
-        others.sort_by_key(|(name, _)| name.as_str());
-        for (name, g) in others {
-            positions.push((name.clone(), bottom_x, top));
-            bottom_x += g.w;
+        others.sort();
+        for (i, name) in others.into_iter().enumerate() {
+            names.insert(Out::Other(i), name.clone());
         }
-        // Window panels in a column right of everything: the mouse reaches them
-        // past the right edge.
-        let right = planned.iter().map(|p| p.2 - left + p.4).max().unwrap_or(0);
-        let mut panel_y = 0;
-        for m in self.windows.values() {
-            let name = m.output.output_name();
-            if let Some((_, h)) = size(name, Some(&m.spec)) {
-                positions.push((name.to_owned(), right, panel_y));
-                panel_y += h;
+        let size = |out: Out| {
+            let spec = match out {
+                Out::Stream(id) => self.monitors.get(&id).or_else(|| self.windows.get(&id)),
+                Out::Other(_) => None,
             }
-        }
+            .map(|m| &m.spec);
+            let name = names.get(&out)?;
+            geometries
+                .get(name)
+                .map(|g| (g.w, g.h))
+                .or_else(|| {
+                    spec.map(|s| {
+                        (
+                            (f64::from(s.width) / s.scale).round() as i32,
+                            (f64::from(s.height) / s.scale).round() as i32,
+                        )
+                    })
+                })
+                .map(|(w, h)| desk::Size { w, h })
+        };
+        let plan = desk::plan(
+            &desk::Desk {
+                rows: self
+                    .effective_rows()
+                    .iter()
+                    .map(|r| {
+                        r.entries
+                            .iter()
+                            .map(|e| desk::Entry {
+                                id: Out::Stream(e.id),
+                                center: e.center,
+                                middle: e.middle,
+                            })
+                            .collect()
+                    })
+                    .collect(),
+                main: self
+                    .primary
+                    .or_else(|| self.order.first().copied())
+                    .map(Out::Stream),
+                under_main: self.mirror.as_ref().map(|_| Out::Stream(MIRROR_ID)),
+                bottom: names
+                    .keys()
+                    .filter(|o| matches!(o, Out::Other(_)))
+                    .copied()
+                    .collect(),
+                column: self.windows.keys().map(|id| Out::Stream(*id)).collect(),
+            },
+            size,
+        );
+        // Every applied change makes KWin reconfigure its outputs, which also cuts the
+        // laptop mirror's stream: `place` only sends what actually differs.
+        let positions: Vec<(String, i32, i32)> = plan
+            .iter()
+            .map(|p| (names[&p.id].clone(), p.x, p.y))
+            .collect();
         let primary = self
             .primary
             .and_then(|p| self.monitors.get(&p))

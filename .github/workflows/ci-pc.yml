@@ -7,6 +7,7 @@ on:
     paths:
       - "host/**"
       - "proto/**"
+      - "layout/**"
       - "testkit/**"
       - ".cargo/**"
       - "Cargo.toml"
@@ -17,6 +18,7 @@ on:
     paths:
       - "host/**"
       - "proto/**"
+      - "layout/**"
       - "testkit/**"
       - ".cargo/**"
       - "Cargo.toml"
@@ -55,9 +57,9 @@ jobs:
           toolchain: stable
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: cargo fmt -p prostir-host -p prostir-proto -p prostir-testkit --check
-      - run: cargo clippy -p prostir-host -p prostir-proto -p prostir-testkit --all-targets -- -D warnings
-      - run: cargo test -p prostir-host -p prostir-proto -p prostir-testkit
+      - run: cargo fmt -p prostir-host -p prostir-proto -p prostir-layout -p prostir-testkit --check
+      - run: cargo clippy -p prostir-host -p prostir-proto -p prostir-layout -p prostir-testkit --all-targets -- -D warnings
+      - run: cargo test -p prostir-host -p prostir-proto -p prostir-layout -p prostir-testkit
       # The PC app with the fake desktop, driven by a fake headset (host/tests/e2e).
       - name: Clippy with the fake desktop
         run: cargo clippy -p prostir-host --features fake-desktop --all-targets -- -D warnings
