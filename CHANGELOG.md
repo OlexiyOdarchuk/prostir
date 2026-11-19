@@ -30,6 +30,15 @@
   PC why, and the PC writes it in its log. Both sides log the round trip of the
   connection every 10 s.
 
+## 0.1.2 (2026-11-19)
+
+A fix for the headset app. The PC part is the same as in 0.1.1.
+
+### Monitors and windows
+
+- Tapping a monitor on the map no longer closes the app when monitors overlap or
+  stand far apart.
+
 ## 0.1.1 (2026-11-19)
 
 Fixes for things that came up in the first days of use. Update both the PC part and

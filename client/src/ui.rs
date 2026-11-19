@@ -369,8 +369,8 @@ fn wedge_center(cx: f32, cy: f32, r0: f32, r1: f32, a0: f32, a1: f32) -> (f32, f
     (cx + r * a.sin(), cy - r * a.cos())
 }
 
-/// A ring sector as a path (see [`Item::Wedge`]).
-fn sector(cx: f32, cy: f32, r0: f32, r1: f32, a0: f32, a1: f32) -> Path {
+/// A ring sector as a path (see [`Item::Wedge`]), `None` if degenerate.
+fn sector(cx: f32, cy: f32, r0: f32, r1: f32, a0: f32, a1: f32) -> Option<Path> {
     if r0 <= 0.0 && a1 - a0 >= std::f32::consts::TAU - 1e-3 {
         return circle(cx, cy, r1);
     }
@@ -388,7 +388,9 @@ fn sector(cx: f32, cy: f32, r0: f32, r1: f32, a0: f32, a1: f32) -> Path {
         pb.line_to(x, y);
     }
     pb.close();
-    pb.finish().expect("valid sector")
+    let path = pb.finish();
+    debug_assert!(path.is_some(), "degenerate sector at {cx}, {cy}");
+    path
 }
 
 const TEXT: [u8; 4] = [232, 234, 240, 255];
@@ -1190,15 +1192,18 @@ impl Panel {
                         Style::Disabled => {
                             stroke(&mut pixmap, rounded(*r, 12.0), [255, 255, 255, 26], 1.5);
                         }
-                        // The current tab: an accent bar along its bottom edge.
-                        Style::TabOn => fill(
-                            &mut pixmap,
-                            rounded(
-                                rect(r.left() + 28.0, r.bottom() - 6.0, r.width() - 56.0, 4.0),
-                                2.0,
-                            ),
-                            ACCENT,
-                        ),
+                        // The current tab: an accent bar along its bottom edge. The
+                        // primary monitor on the map can be narrower than a tab.
+                        Style::TabOn => {
+                            let inset = (r.width() / 4.0).min(28.0);
+                            let bar = rect(
+                                r.left() + inset,
+                                r.bottom() - 6.0,
+                                r.width() - 2.0 * inset,
+                                4.0,
+                            );
+                            fill(&mut pixmap, rounded(bar, 2.0), ACCENT);
+                        }
                         _ => {}
                     }
                     let size = button_font_size(label);
@@ -3191,12 +3196,35 @@ fn overlap(a: &Rect, b: &Rect) -> bool {
     a.left() < b.right() && b.left() < a.right() && a.top() < b.bottom() && b.top() < a.bottom()
 }
 
-fn circle(cx: f32, cy: f32, r: f32) -> Path {
-    PathBuilder::from_circle(cx, cy, r).expect("valid circle")
+// Shapes that come out degenerate (negative or non-finite sizes) are a bug, caught
+// by the debug asserts in tests. In the app they are drawn as nothing: one bad shape
+// must not close the menu, and with it the app.
+
+/// A circle, `None` if degenerate.
+fn circle(cx: f32, cy: f32, r: f32) -> Option<Path> {
+    let path = PathBuilder::from_circle(cx, cy, r);
+    debug_assert!(
+        path.is_some(),
+        "degenerate circle at {cx}, {cy}, radius {r}"
+    );
+    path
 }
 
+/// A rectangle; a degenerate one becomes an empty one at a finite spot.
 fn rect(x: f32, y: f32, w: f32, h: f32) -> Rect {
-    Rect::from_xywh(x, y, w, h).expect("valid rect")
+    let r = Rect::from_xywh(x, y, w, h);
+    debug_assert!(r.is_some(), "degenerate rect at {x}, {y}, size {w} x {h}");
+    r.unwrap_or_else(|| {
+        let finite = |v: f32| {
+            if v.is_finite() {
+                v.clamp(-1e6, 1e6)
+            } else {
+                0.0
+            }
+        };
+        let (x, y, w, h) = (finite(x), finite(y), finite(w), finite(h));
+        Rect::from_xywh(x, y, w.max(0.0), h.max(0.0)).expect("finite and bounded")
+    })
 }
 
 fn text(x: f32, baseline: f32, size: f32, medium: bool, color: [u8; 4], s: &str) -> Item {
@@ -3219,7 +3247,8 @@ fn button(rect: Rect, label: &str, style: Style, action: Option<Action>) -> Item
     }
 }
 
-fn rounded(r: Rect, radius: f32) -> Path {
+/// A rounded rectangle, `None` if degenerate.
+fn rounded(r: Rect, radius: f32) -> Option<Path> {
     let rad = radius.min(r.width() / 2.0).min(r.height() / 2.0);
     let k = rad * 0.552_284_8;
     let (l, t, rt, b) = (r.left(), r.top(), r.right(), r.bottom());
@@ -3234,10 +3263,14 @@ fn rounded(r: Rect, radius: f32) -> Path {
     pb.line_to(l, t + rad);
     pb.cubic_to(l, t + rad - k, l + rad - k, t, l + rad, t);
     pb.close();
-    pb.finish().expect("valid path")
+    let path = pb.finish();
+    debug_assert!(path.is_some(), "degenerate rounded rect {r:?}");
+    path
 }
 
-fn stroke(pixmap: &mut Pixmap, path: Path, [r, g, b, a]: [u8; 4], width: f32) {
+/// Outlines `path`; nothing when there is none (a degenerate shape).
+fn stroke(pixmap: &mut Pixmap, path: Option<Path>, [r, g, b, a]: [u8; 4], width: f32) {
+    let Some(path) = path else { return };
     let mut paint = Paint::default();
     paint.set_color_rgba8(r, g, b, a);
     paint.anti_alias = true;
@@ -3248,7 +3281,9 @@ fn stroke(pixmap: &mut Pixmap, path: Path, [r, g, b, a]: [u8; 4], width: f32) {
     pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
 }
 
-fn fill(pixmap: &mut Pixmap, path: Path, [r, g, b, a]: [u8; 4]) {
+/// Fills `path`; nothing when there is none (a degenerate shape).
+fn fill(pixmap: &mut Pixmap, path: Option<Path>, [r, g, b, a]: [u8; 4]) {
+    let Some(path) = path else { return };
     let mut paint = Paint::default();
     paint.set_color_rgba8(r, g, b, a);
     paint.anti_alias = true;
@@ -3483,5 +3518,124 @@ mod tests {
         }
         problems.dedup();
         assert!(problems.is_empty(), "{}", problems.join("\n"));
+    }
+
+    /// The Monitors tab for `monitors` (id, width, height, desktop centre in pixels)
+    /// and the laptop screen (centre), standing on a flat wall as on the desktop and
+    /// mapped the way the headset maps them, drawn with each monitor picked in turn.
+    fn pick_each(
+        panel: &mut Panel,
+        monitors: &[(u8, u32, u32, f32, f32)],
+        mirror: Option<(f32, f32)>,
+        primary: u8,
+    ) {
+        use crate::layout::{Placement, desktop_spots};
+        use glam::{Quat, Vec3};
+        use prostir_proto::MIRROR_ID;
+        const METRES_PER_PX: f32 = 0.0003;
+        let mirror = mirror.map(|(x, y)| (MIRROR_ID, 1920, 1080, x, y));
+        let all: Vec<_> = monitors.iter().copied().chain(mirror).collect();
+        let placements: HashMap<u8, Placement> = all
+            .iter()
+            .map(|&(id, w, _, x, y)| {
+                let place = Placement {
+                    position: Vec3::new(x * METRES_PER_PX, -y * METRES_PER_PX, -2.0),
+                    rotation: Quat::IDENTITY,
+                    width: w as f32 * METRES_PER_PX,
+                };
+                (id, place)
+            })
+            .collect();
+        let sizes: Vec<(u8, u32, u32)> = all.iter().map(|&(id, w, h, ..)| (id, w, h)).collect();
+        let spots = desktop_spots(&placements, &sizes, Some(primary));
+        let mut st = sample_state();
+        st.tab = Tab::Monitors;
+        st.primary = Some(primary);
+        st.mirror_seen = spots.get(&MIRROR_ID).copied();
+        st.monitors = monitors
+            .iter()
+            .map(|&(id, width, height, ..)| MonitorEntry {
+                id,
+                width,
+                height,
+                place: Place::Center,
+                seen: spots.get(&id).copied(),
+            })
+            .collect();
+        for selected in std::iter::once(None).chain(monitors.iter().map(|m| Some(m.0))) {
+            st.selected = selected;
+            panel.set_state(&st);
+            // Every shape is still made, only next to no pixels are filled: fast.
+            panel.pixmap = Pixmap::new(1, 1).expect("1x1 is a valid size");
+            panel.render_if_dirty();
+        }
+    }
+
+    /// Six monitors that overlapped and then spread out, the primary a narrow
+    /// portrait one: picking another one on the map closed the app.
+    #[test]
+    fn picking_on_a_spread_out_map() {
+        // As in monitors.txt: top-left corners, the third one primary.
+        let corners = [
+            (3440, 1440, 7600, 5600),
+            (3440, 1440, -1720, 1280),
+            (1440, 2560, 720, 1280),
+            (2560, 1440, 2720, 1280),
+            (3440, 1440, 4024, 2720),
+            (2560, 1440, 5120, 4160),
+        ];
+        let monitors: Vec<_> = corners
+            .iter()
+            .enumerate()
+            .map(|(id, &(w, h, x, y))| {
+                let centre = |at: i32, size: u32| (at + size as i32 / 2) as f32;
+                (id as u8, w, h, centre(x, w), centre(y, h))
+            })
+            .collect();
+        let laptop = Some((192.0 + 960.0, 3840.0 + 540.0));
+        pick_each(&mut Panel::new(), &monitors, laptop, 2);
+    }
+
+    /// Random arrangements of 1 to 6 monitors of the sizes the menu adds, close
+    /// together, overlapping or far apart, with and without the laptop screen: the
+    /// map draws whichever monitor is picked.
+    #[test]
+    fn picking_on_any_map() {
+        const SIZES: [(u32, u32); 5] = [
+            (1920, 1080),
+            (2560, 1440),
+            (3840, 2160),
+            (3440, 1440),
+            (1440, 2560),
+        ];
+        // xorshift64*, so every run tries the same arrangements.
+        struct Rng(u64);
+        impl Rng {
+            fn below(&mut self, n: u64) -> u64 {
+                self.0 ^= self.0 >> 12;
+                self.0 ^= self.0 << 25;
+                self.0 ^= self.0 >> 27;
+                (self.0.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 32) % n
+            }
+            fn within(&mut self, spread: u64) -> f32 {
+                self.below(2 * spread) as f32 - spread as f32
+            }
+        }
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+        let mut panel = Panel::new();
+        for _ in 0..500 {
+            // Centres (pixels) all within a few pixels, near each other, or far apart.
+            let spread = [1, 2_000, 20_000, 2_000_000][rng.below(4) as usize];
+            let count = 1 + rng.below(6) as u8;
+            let monitors: Vec<_> = (0..count)
+                .map(|id| {
+                    let (w, h) = SIZES[rng.below(5) as usize];
+                    (id, w, h, rng.within(spread), rng.within(spread))
+                })
+                .collect();
+            let laptop = (rng.below(2) == 0).then(|| (rng.within(spread), rng.within(spread)));
+            let primary = rng.below(u64::from(count)) as u8;
+            pick_each(&mut panel, &monitors, laptop, primary);
+        }
     }
 }
