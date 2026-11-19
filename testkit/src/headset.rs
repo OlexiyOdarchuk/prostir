@@ -1,15 +1,16 @@
 use std::collections::BTreeMap;
-use std::io::{BufReader, Write};
-use std::net::{Shutdown, SocketAddr, TcpStream};
+use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
-use prostir_proto::secure::{
-    self, Identity, Pairing, SecureReader, SecureWriter, TrustStore, confirmation, tags_match,
+use prostir_proto::link::tcp::{NoiseTcp, Plain};
+use prostir_proto::link::{
+    Closer, Link, PeerInfo, RecordReceiver, RecordSender, StreamReader, StreamWriter,
 };
+use prostir_proto::secure::{Identity, Pairing, TrustStore, confirmation, tags_match};
 use prostir_proto::stats::Gaps;
 use prostir_proto::{ClientMsg, Codec, HostMsg, PROTOCOL_VERSION, PcSettings};
 
@@ -251,8 +252,8 @@ fn monotonic_ns() -> u64 {
 /// PC never waits on this side) and acknowledges shown frames like the Quest app;
 /// [`FakeHeadset::recv`] and [`FakeHeadset::wait`] go through what it took.
 pub struct FakeHeadset {
-    stream: TcpStream,
-    writer: Arc<Mutex<SecureWriter>>,
+    closer: Closer,
+    writer: Arc<Mutex<Box<dyn RecordSender>>>,
     incoming: Receiver<Arrived>,
     view: View,
     /// The PC's protocol version and language, from its welcome.
@@ -271,52 +272,26 @@ impl FakeHeadset {
         mut pairing: Option<&mut dyn FnMut() -> String>,
     ) -> Result<Self, ConnectError> {
         let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))?;
-        stream.set_nodelay(true)?;
         stream.set_read_timeout(Some(REPLY))?;
-        // Kept for the session: a PC that stops reading fails a send instead of
-        // holding it forever.
-        stream.set_write_timeout(Some(REPLY))?;
-        let (reader, mut w, peer) = secure::handshake(&stream, &keys.identity, true)?;
-        let mut r = BufReader::new(reader);
-        // Versions first, before pairing.
-        hello(&mut w)?;
-        let (version, language) = loop {
-            match HostMsg::read_setup(&mut r)? {
-                HostMsg::Welcome { version, language } => break (version, language),
-                HostMsg::Incompatible { protocol, app } => {
-                    return Err(ConnectError::Incompatible { protocol, app });
-                }
-                // Older headsets show this text; `Incompatible` follows.
-                HostMsg::Error { .. } => {}
-                other => return Err(anyhow!("unexpected {other:?} before welcome").into()),
-            }
-        };
-        if !keys.trusted.contains(&peer.key)
-            && let Some(code) = pairing.as_mut()
-        {
-            pair(&stream, &mut r, &mut w, &keys.identity, &peer, &code())?;
-            keys.trusted.add(peer.key, &addr.to_string())?;
-        }
-        ClientMsg::Open.write(&mut w)?;
-        loop {
-            match HostMsg::read_setup(&mut r)? {
-                HostMsg::Opened => break,
-                HostMsg::PairingRequired => {
-                    let Some(code) = pairing.as_mut() else {
-                        return Err(ConnectError::NotPaired);
-                    };
-                    pair(&stream, &mut r, &mut w, &keys.identity, &peer, &code())?;
-                    keys.trusted.add(peer.key, &addr.to_string())?;
-                    ClientMsg::Open.write(&mut w)?;
-                }
-                other => return Err(anyhow!("unexpected {other:?} before the session").into()),
-            }
-        }
-        stream.set_read_timeout(None)?;
-        let writer = Arc::new(Mutex::new(w));
-        let incoming = spawn_reader(r, writer.clone())?;
+        let Link {
+            mut sender,
+            mut receiver,
+            closer,
+            peer,
+        } = NoiseTcp::connect(stream, &keys.identity, Arc::new(Plain))?;
+        let (version, language) = open(
+            &mut *receiver,
+            &mut *sender,
+            keys,
+            &peer,
+            addr,
+            &mut pairing,
+        )?;
+        receiver.set_idle_limit(None);
+        let writer = Arc::new(Mutex::new(sender));
+        let incoming = spawn_reader(receiver, writer.clone())?;
         Ok(Self {
-            stream,
+            closer,
             writer,
             incoming,
             view: View::default(),
@@ -328,8 +303,7 @@ impl FakeHeadset {
     /// Sends `msg` to the PC.
     pub fn send(&mut self, msg: &ClientMsg) -> Result<()> {
         let mut w = self.writer.lock().unwrap();
-        msg.write(&mut *w)?;
-        w.flush()?;
+        msg.write(&mut StreamWriter(&mut **w))?;
         Ok(())
     }
 
@@ -421,36 +395,81 @@ impl FakeHeadset {
 
     /// Hangs up, as a headset that lost the network would.
     pub fn disconnect(self) {
-        let _ = self.stream.shutdown(Shutdown::Both);
+        self.closer.close();
     }
 }
 
 impl Drop for FakeHeadset {
     fn drop(&mut self) {
-        let _ = self.stream.shutdown(Shutdown::Both);
+        self.closer.close();
     }
 }
 
-fn hello(w: &mut SecureWriter) -> std::io::Result<()> {
+/// Says hello, pairs if asked to and possible, and opens the session: the PC's protocol
+/// version and language.
+fn open(
+    receiver: &mut dyn RecordReceiver,
+    sender: &mut dyn RecordSender,
+    keys: &mut Keys,
+    peer: &PeerInfo,
+    addr: SocketAddr,
+    pairing: &mut Option<&mut dyn FnMut() -> String>,
+) -> Result<(u32, String), ConnectError> {
+    let mut r = StreamReader::new(receiver);
+    let mut w = StreamWriter(sender);
+    // Versions first, before pairing.
     ClientMsg::Hello {
         version: PROTOCOL_VERSION,
         min: prostir_proto::MIN_PROTOCOL,
         app: env!("CARGO_PKG_VERSION").into(),
     }
-    .write(w)
+    .write(&mut w)?;
+    let (version, language) = loop {
+        match HostMsg::read_setup(&mut r)? {
+            HostMsg::Welcome { version, language } => break (version, language),
+            HostMsg::Incompatible { protocol, app } => {
+                return Err(ConnectError::Incompatible { protocol, app });
+            }
+            // Older headsets show this text; `Incompatible` follows.
+            HostMsg::Error { .. } => {}
+            other => return Err(anyhow!("unexpected {other:?} before welcome").into()),
+        }
+    };
+    if !keys.trusted.contains(&peer.key)
+        && let Some(code) = pairing.as_mut()
+    {
+        pair(&mut r, &mut w, &keys.identity, peer, &code())?;
+        keys.trusted.add(peer.key, &addr.to_string())?;
+    }
+    ClientMsg::Open.write(&mut w)?;
+    loop {
+        match HostMsg::read_setup(&mut r)? {
+            HostMsg::Opened => return Ok((version, language)),
+            HostMsg::PairingRequired => {
+                let Some(code) = pairing.as_mut() else {
+                    return Err(ConnectError::NotPaired);
+                };
+                pair(&mut r, &mut w, &keys.identity, peer, &code())?;
+                keys.trusted.add(peer.key, &addr.to_string())?;
+                ClientMsg::Open.write(&mut w)?;
+            }
+            other => return Err(anyhow!("unexpected {other:?} before the session").into()),
+        }
+    }
 }
 
 /// Reads everything the PC sends on a thread of its own, acknowledging frames as
 /// shown (at most every [`ACK_EVERY`] per stream). The channel closes with the
 /// connection.
 fn spawn_reader(
-    mut r: BufReader<SecureReader>,
-    writer: Arc<Mutex<SecureWriter>>,
+    mut receiver: Box<dyn RecordReceiver>,
+    writer: Arc<Mutex<Box<dyn RecordSender>>>,
 ) -> std::io::Result<Receiver<Arrived>> {
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new()
         .name("fake-headset".into())
         .spawn(move || {
+            let mut r = StreamReader::new(&mut *receiver);
             let mut acked: BTreeMap<u8, Instant> = BTreeMap::new();
             while let Ok(msg) = HostMsg::read(&mut r) {
                 let (at, monotonic_ns) = (Instant::now(), monotonic_ns());
@@ -463,7 +482,7 @@ fn spawn_reader(
                         id: *id,
                         pts_us: *pts_us,
                     };
-                    let _ = shown.write(&mut *w).and_then(|()| w.flush());
+                    let _ = shown.write(&mut StreamWriter(&mut **w));
                 }
                 let arrived = Arrived {
                     msg,
@@ -481,24 +500,23 @@ fn spawn_reader(
 /// Pairs with the code this headset shows (the person at the PC types it), waiting
 /// for the PC's answers as long as a person may take.
 fn pair(
-    stream: &TcpStream,
-    r: &mut BufReader<SecureReader>,
-    w: &mut SecureWriter,
+    r: &mut StreamReader,
+    w: &mut StreamWriter,
     identity: &Identity,
-    peer: &secure::Peer,
+    peer: &PeerInfo,
     code: &str,
 ) -> Result<(), ConnectError> {
-    stream.set_read_timeout(Some(PAIRING))?;
+    r.receiver().set_idle_limit(Some(PAIRING));
     let paired = exchange_codes(r, w, identity, peer, code);
-    stream.set_read_timeout(Some(REPLY))?;
+    r.receiver().set_idle_limit(Some(REPLY));
     paired
 }
 
 fn exchange_codes(
-    r: &mut BufReader<SecureReader>,
-    w: &mut SecureWriter,
+    r: &mut StreamReader,
+    w: &mut StreamWriter,
     identity: &Identity,
-    peer: &secure::Peer,
+    peer: &PeerInfo,
     code: &str,
 ) -> Result<(), ConnectError> {
     ClientMsg::PairBegin {

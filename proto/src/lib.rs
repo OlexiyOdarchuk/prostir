@@ -2,7 +2,7 @@
 //!
 //! The client connects over TCP (USB via `adb reverse`, or Wi-Fi after discovering the
 //! host through a UDP broadcast beacon), and both sides run an encrypted handshake
-//! ([`secure`]). After it every message is framed as
+//! ([`link::tcp`]); who trusts whom is [`secure`]. After it every message is framed as
 //! `[tag: u8][len: u32 LE][payload: len bytes]`. A payload is the message's fields
 //! encoded as [`wire`] describes, and must be read whole: bytes left over are an error.
 //! A message with a tag a reader does not know is skipped, so a newer peer can add
@@ -25,6 +25,7 @@
 // Everything here parses data from the network: no unsafe code at all.
 #![forbid(unsafe_code)]
 
+pub mod link;
 pub mod secure;
 pub mod stats;
 pub mod wire;

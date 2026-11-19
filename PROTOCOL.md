@@ -5,8 +5,9 @@ talk to each other. It is meant for anyone who wants to understand the connectio
 write their own client or host.
 
 The source of truth is the code: [`proto/src/lib.rs`](proto/src/lib.rs) (messages),
-[`proto/src/wire.rs`](proto/src/wire.rs) (how values are encoded) and
-[`proto/src/secure.rs`](proto/src/secure.rs) (encryption and pairing).
+[`proto/src/wire.rs`](proto/src/wire.rs) (how values are encoded),
+[`proto/src/link/tcp.rs`](proto/src/link/tcp.rs) (encryption) and
+[`proto/src/secure.rs`](proto/src/secure.rs) (keys and pairing).
 
 Version 2 (Prostir 0.2) is a clean break from version 1 (Prostir 0.1.x): only the
 version handshake is the same, so the two can tell the user which side to update
@@ -213,7 +214,7 @@ Host (implementation-defined values from `host/src/pairing.rs`):
 
 | Limit | Value |
 |---|---|
-| Handshake, `Hello` and `Open` | Must be done within 10 s in total; each read waits at most 5 s; each write at most 3 s |
+| Handshake, `Hello` and `Open` | Must be done within 10 s in total; each read waits at most 5 s; each write at most 5 s |
 | While pairing | The deadline and the read timeout become 300 s, and go back to 10 s and 5 s after the attempt |
 | `PairBegin` per connection | At most 3; a 4th closes the connection |
 | Failed attempts in a row (all connections) | The first 3 are free. After the 4th, the next attempt has to wait 30 s, then 60 s, 120 s, 240 s, 480 s, and at most 900 s. A success resets the count |
@@ -439,7 +440,8 @@ Either side closes the TCP connection. Implementation-defined details of the cur
 apps:
 
 - Host: TCP keepalive (idle 4 s, interval 2 s, 3 probes) and `TCP_USER_TIMEOUT` 10 s
-  notice a headset that vanished; a write blocked for 10 s also ends the session.
+  notice a headset that vanished; a write blocked for 5 s also ends the session (on
+  both sides).
 - Host: a headset reported as not worn (`Presence{0}`) for 10 s ends the session; the
   host then removes its virtual monitors until the headset connects again.
 - Host: after a session it keeps the virtual monitors for 30 s (`--linger`).

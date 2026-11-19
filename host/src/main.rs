@@ -9,8 +9,8 @@ mod pairing;
 mod platform;
 mod usage;
 
-use std::io::{BufReader, BufWriter, ErrorKind, Write};
-use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream, UdpSocket};
+use std::io::{BufWriter, ErrorKind, Write};
+use std::net::{Ipv4Addr, TcpListener, UdpSocket};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use clap::Parser;
 use log::{debug, error, info, warn};
-use prostir_proto::secure::{SecureReader, SecureWriter};
+use prostir_proto::link::{Closer, Link, StreamReader, StreamWriter, Via};
 use prostir_proto::{ClientMsg, Codec, HostMsg};
 
 use displays::{Displays, SavedMonitors};
@@ -177,45 +177,52 @@ fn store(change: impl FnOnce(&mut SavedMonitors)) {
 /// nothing more and the connection closes, so the reader and the headset notice at once.
 struct EndSession {
     outbox: Arc<outbox::Outbox>,
-    stream: TcpStream,
+    closer: Closer,
 }
 
 impl Drop for EndSession {
     fn drop(&mut self) {
         self.outbox.close();
-        let _ = self.stream.shutdown(Shutdown::Both);
+        self.closer.close();
     }
 }
 
 /// Taken off for this long, the headset counts as gone.
 const TAKEN_OFF_GRACE: Duration = Duration::from_secs(10);
 
-fn serve_client(
-    stream: TcpStream,
-    mut reader: BufReader<SecureReader>,
-    writer: SecureWriter,
-    displays: &mut Displays,
-    control: &mut Control,
-    via: &'static str,
-) -> Result<()> {
-    // A small buffer: anything waiting belongs in the outbox, where old video frames
-    // can still be dropped, not in a buffer where they can only be sent late.
-    let mut writer = BufWriter::with_capacity(64 * 1024, writer);
-    // A short Wi-Fi stall drops frames (see the outbox) instead of ending the session;
-    // TCP_USER_TIMEOUT notices a headset that is really gone.
-    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+/// How the tray names the way the headset is connected.
+fn via_name(via: Via) -> &'static str {
+    match via {
+        Via::Usb => "USB",
+        Via::Network => "Wi-Fi",
+    }
+}
+
+fn serve_client(link: Link, displays: &mut Displays, control: &mut Control) -> Result<()> {
+    let Link {
+        mut sender,
+        mut receiver,
+        closer,
+        peer,
+    } = link;
+    let via = via_name(peer.via);
     let outbox = Arc::new(outbox::Outbox::default());
     let writer_thread = {
-        let stream = stream.try_clone()?;
+        let closer = closer.clone();
         let outbox = outbox.clone();
         std::thread::Builder::new()
             .name("net-writer".into())
             .spawn(move || {
                 let _end = EndSession {
                     outbox: outbox.clone(),
-                    stream,
+                    closer,
                 };
                 let result = (|| -> std::io::Result<()> {
+                    // A small buffer: anything waiting belongs in the outbox, where old
+                    // video frames can still be dropped, not in a buffer where they can
+                    // only be sent late.
+                    let mut writer =
+                        BufWriter::with_capacity(64 * 1024, StreamWriter(&mut *sender));
                     while let Some(msg) = outbox.next() {
                         msg.write(&mut writer)?;
                         if outbox.is_idle() {
@@ -238,6 +245,7 @@ fn serve_client(
     std::thread::Builder::new()
         .name("net-reader".into())
         .spawn(move || {
+            let mut reader = StreamReader::new(&mut *receiver);
             loop {
                 let msg = ClientMsg::read(&mut reader);
                 let stop = msg.is_err();
@@ -462,7 +470,7 @@ fn serve_client(
     tray::set_battery(control.tray.as_ref(), None);
     displays.router.detach();
     outbox.close();
-    let _ = stream.shutdown(Shutdown::Both);
+    closer.close();
     let _ = writer_thread.join();
     result
 }
@@ -650,9 +658,9 @@ fn main() -> Result<()> {
                     warn!("connection from {addr}: {e}");
                     continue;
                 }
-                let (reader, writer) =
-                    match pairing::accept(&stream, &mut control.security, control.tray.as_ref()) {
-                        Ok(halves) => halves,
+                let mut link =
+                    match pairing::accept(stream, &mut control.security, control.tray.as_ref()) {
+                        Ok(link) => link,
                         Err(e) if e.is::<pairing::TurnedAwayAgain>() => {
                             debug!("rejected connection from {addr}: {e:#}");
                             continue;
@@ -662,12 +670,10 @@ fn main() -> Result<()> {
                             continue;
                         }
                     };
-                let via = if addr.ip().is_loopback() {
-                    "USB"
-                } else {
-                    "Wi-Fi"
-                };
-                info!("headset connected via {via} from {addr}");
+                info!(
+                    "headset connected via {} from {addr}",
+                    via_name(link.peer.via)
+                );
                 if displays.as_ref().is_some_and(|d| !d.healthy()) {
                     displays = None;
                 }
@@ -677,24 +683,19 @@ fn main() -> Result<()> {
                         Err(e) => {
                             error!("{e:#}");
                             // Tell the headset why, instead of just hanging up.
-                            let mut writer = writer;
                             let _ = HostMsg::Error {
                                 text: format!("{e:#}"),
                             }
-                            .write(&mut writer);
-                            let _ = writer.flush();
+                            .write(&mut StreamWriter(&mut *link.sender));
+                            link.closer.close();
                             continue;
                         }
                     }
                 }
-                platform::set_keepalive(&stream);
                 if let Err(e) = serve_client(
-                    stream,
-                    reader,
-                    writer,
+                    link,
                     displays.as_mut().expect("made above if it was missing"),
                     &mut control,
-                    via,
                 ) {
                     warn!("session ended: {e:#}");
                 } else {

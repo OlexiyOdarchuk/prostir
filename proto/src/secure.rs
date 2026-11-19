@@ -1,31 +1,22 @@
-//! Encrypted, authenticated connections between the PC and the headset.
+//! Who the PC and the headset are to each other.
 //!
-//! * Every device has a long-term Curve25519 key ([`Identity`]).
-//! * Each connection starts with a Noise `XX` handshake (mutual, encrypted); after it
-//!   the byte stream is encrypted with AES-256-GCM ([`SecureReader`], [`SecureWriter`]).
+//! * Every device has a long-term Curve25519 key ([`Identity`]); each connection
+//!   proves it with a Noise `XX` handshake (see [`crate::link::tcp`]).
 //! * Devices trust each other's keys after pairing once ([`TrustStore`]): one side shows a
 //!   6-digit code, the user types it on the other side, and SPAKE2 turns it into a shared
 //!   key without exposing it to offline guessing. A confirmation tag bound to this
 //!   connection's handshake hash proves both sides used the same code over the same
 //!   channel, which defeats a man in the middle.
 
-use std::io::{self, Read, Write};
-use std::net::TcpStream;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
-use snow::StatelessTransportState;
 use spake2::{Ed25519Group, Identity as SpakeId, Password, Spake2};
 
-/// AES-GCM rather than ChaChaPoly: both CPUs have hardware AES (AES-NI, ARMv8 crypto),
-/// while ChaCha20 and Poly1305 run in plain software on the headset.
-const NOISE: &str = "Noise_XX_25519_AESGCM_BLAKE2s";
-const MAX_NOISE: usize = 65535;
-const TAG: usize = 16;
-/// Largest plaintext per encrypted chunk.
-const CHUNK: usize = MAX_NOISE - TAG;
+use crate::link::PeerInfo;
+use crate::link::tcp::NOISE;
 
 fn err(e: impl std::fmt::Display) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, e.to_string())
@@ -33,7 +24,7 @@ fn err(e: impl std::fmt::Display) -> io::Error {
 
 /// A device's long-term key pair.
 pub struct Identity {
-    private: [u8; 32],
+    pub(crate) private: [u8; 32],
     pub public: [u8; 32],
 }
 
@@ -181,153 +172,6 @@ impl TrustStore {
     }
 }
 
-/// What the handshake established about the other side.
-pub struct Peer {
-    /// The peer's long-term key.
-    pub key: [u8; 32],
-    /// Unique to this connection; pairing confirmations are bound to it.
-    pub handshake_hash: Vec<u8>,
-}
-
-/// Runs the Noise XX handshake. `initiator` is the headset (the side that connects).
-pub fn handshake(
-    stream: &TcpStream,
-    identity: &Identity,
-    initiator: bool,
-) -> io::Result<(SecureReader, SecureWriter, Peer)> {
-    let builder = snow::Builder::new(NOISE.parse().map_err(err)?)
-        .local_private_key(&identity.private)
-        .map_err(err)?;
-    let mut hs = if initiator {
-        builder.build_initiator()
-    } else {
-        builder.build_responder()
-    }
-    .map_err(err)?;
-    let mut s = stream;
-    let mut buf = vec![0u8; MAX_NOISE];
-    let mut payload = vec![0u8; MAX_NOISE];
-    // XX: -> e ; <- e, ee, s, es ; -> s, se
-    for step in 0..3 {
-        let writing = (step % 2 == 0) == initiator;
-        if writing {
-            let n = hs.write_message(&[], &mut buf).map_err(err)?;
-            write_frame(&mut s, &buf[..n])?;
-        } else {
-            let msg = read_frame(&mut s)?;
-            hs.read_message(&msg, &mut payload).map_err(err)?;
-        }
-    }
-    let key: [u8; 32] = hs
-        .get_remote_static()
-        .and_then(|k| k.try_into().ok())
-        .ok_or_else(|| err("peer sent no static key"))?;
-    let handshake_hash = hs.get_handshake_hash().to_vec();
-    let transport = Arc::new(hs.into_stateless_transport_mode().map_err(err)?);
-    let reader = SecureReader {
-        inner: stream.try_clone()?,
-        transport: transport.clone(),
-        nonce: 0,
-        plain: Vec::new(),
-        pos: 0,
-    };
-    let writer = SecureWriter {
-        inner: stream.try_clone()?,
-        transport,
-        nonce: 0,
-        buf: vec![0u8; MAX_NOISE],
-    };
-    Ok((
-        reader,
-        writer,
-        Peer {
-            key,
-            handshake_hash,
-        },
-    ))
-}
-
-fn write_frame(w: &mut impl Write, data: &[u8]) -> io::Result<()> {
-    let len = u16::try_from(data.len()).map_err(err)?;
-    w.write_all(&len.to_be_bytes())?;
-    w.write_all(data)
-}
-
-fn read_frame(r: &mut impl Read) -> io::Result<Vec<u8>> {
-    let mut len = [0u8; 2];
-    r.read_exact(&mut len)?;
-    let mut data = vec![0u8; u16::from_be_bytes(len) as usize];
-    r.read_exact(&mut data)?;
-    Ok(data)
-}
-
-/// Decrypting half of a connection (usable from its own thread).
-pub struct SecureReader {
-    inner: TcpStream,
-    transport: Arc<StatelessTransportState>,
-    nonce: u64,
-    plain: Vec<u8>,
-    pos: usize,
-}
-
-impl Read for SecureReader {
-    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
-        // An empty chunk carries nothing: read on, so `Ok(0)` only ever means the
-        // stream ended.
-        while self.pos >= self.plain.len() {
-            let mut len = [0u8; 2];
-            // A clean end of stream between chunks is a normal close.
-            match self.inner.read(&mut len[..1])? {
-                0 => return Ok(0),
-                _ => self.inner.read_exact(&mut len[1..])?,
-            }
-            let mut cipher = vec![0u8; u16::from_be_bytes(len) as usize];
-            self.inner.read_exact(&mut cipher)?;
-            self.plain.resize(MAX_NOISE, 0);
-            let n = self
-                .transport
-                .read_message(self.nonce, &cipher, &mut self.plain)
-                .map_err(|_| err("decryption failed (tampered or out-of-order data)"))?;
-            self.nonce += 1;
-            self.plain.truncate(n);
-            self.pos = 0;
-        }
-        let n = out.len().min(self.plain.len() - self.pos);
-        out[..n].copy_from_slice(&self.plain[self.pos..self.pos + n]);
-        self.pos += n;
-        Ok(n)
-    }
-}
-
-/// Encrypting half of a connection (usable from its own thread).
-pub struct SecureWriter {
-    inner: TcpStream,
-    transport: Arc<StatelessTransportState>,
-    nonce: u64,
-    buf: Vec<u8>,
-}
-
-impl Write for SecureWriter {
-    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-        let chunk = &data[..data.len().min(CHUNK)];
-        let n = self
-            .transport
-            .write_message(self.nonce, chunk, &mut self.buf)
-            .map_err(err)?;
-        self.nonce += 1;
-        // One write per chunk: header and ciphertext leave together.
-        let mut frame = Vec::with_capacity(n + 2);
-        frame.extend_from_slice(&(n as u16).to_be_bytes());
-        frame.extend_from_slice(&self.buf[..n]);
-        self.inner.write_all(&frame)?;
-        Ok(chunk.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.inner.flush()
-    }
-}
-
 /// Bytes of a SPAKE2 message (Ed25519 group, symmetric: a marker byte and a point).
 pub const PAIR_MSG_LEN: usize = 33;
 /// Bytes of a pairing confirmation tag (HMAC-SHA256).
@@ -367,11 +211,16 @@ impl Pairing {
 }
 
 /// Tag proving knowledge of the pairing key, bound to this connection and to `role`.
-pub fn confirmation(key: &[u8], role: &str, peer: &Peer, own_key: &[u8; 32]) -> [u8; CONFIRM_LEN] {
+pub fn confirmation(
+    key: &[u8],
+    role: &str,
+    peer: &PeerInfo,
+    own_key: &[u8; 32],
+) -> [u8; CONFIRM_LEN] {
     let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("any key length");
     mac.update(b"prostir confirm v1");
     mac.update(role.as_bytes());
-    mac.update(&peer.handshake_hash);
+    mac.update(&peer.binding);
     // Both long-term keys, in a fixed (sorted) order so both sides compute the same.
     let (a, b) = if own_key <= &peer.key {
         (own_key, &peer.key)
@@ -391,7 +240,7 @@ pub fn tags_match(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::TcpListener;
+    use crate::link::Via;
 
     fn identity(tag: &str) -> Identity {
         let dir = std::env::temp_dir().join(format!("prostir-test-{}-{tag}", std::process::id()));
@@ -405,76 +254,66 @@ mod tests {
         id
     }
 
-    fn connect() -> (TcpStream, TcpStream) {
-        let l = TcpListener::bind("127.0.0.1:0").unwrap();
-        let c = TcpStream::connect(l.local_addr().unwrap()).unwrap();
-        let (s, _) = l.accept().unwrap();
-        (c, s)
+    /// What each side of one connection knows of the other.
+    fn peers(a: &Identity, b: &Identity, binding: &[u8]) -> (PeerInfo, PeerInfo) {
+        let info = |key| PeerInfo {
+            key,
+            binding: binding.to_vec(),
+            via: Via::Network,
+        };
+        (info(b.public), info(a.public))
     }
 
     #[test]
-    fn encrypted_stream_and_pairing() {
+    fn the_same_code_confirms_both_ways() {
         let (headset, pc) = (identity("h"), identity("p"));
-        let pc_public = pc.public;
-        let (cs, ss) = connect();
-        let server = std::thread::spawn(move || {
-            let (mut r, mut w, peer) = handshake(&ss, &pc, false).unwrap();
-            let mut big = vec![0u8; 200_000];
-            r.read_exact(&mut big).unwrap();
-            assert!(big.iter().enumerate().all(|(i, b)| *b == (i % 251) as u8));
-            w.write_all(b"pong").unwrap();
-            // Pairing, PC side.
-            let (p, msg) = Pairing::start("123 456");
-            write_frame(&mut w, &msg).unwrap();
-            let theirs = read_frame(&mut r).unwrap();
-            let key = p.finish(&theirs).unwrap();
-            let tag = read_frame(&mut r).unwrap();
-            assert!(tags_match(
-                &tag,
-                &confirmation(&key, "headset", &peer, &pc.public)
-            ));
-            write_frame(&mut w, &confirmation(&key, "pc", &peer, &pc.public)).unwrap();
-            peer.key
-        });
-        let (mut r, mut w, peer) = handshake(&cs, &headset, true).unwrap();
-        let big: Vec<u8> = (0..200_000).map(|i| (i % 251) as u8).collect();
-        w.write_all(&big).unwrap();
-        let mut pong = [0u8; 4];
-        r.read_exact(&mut pong).unwrap();
-        assert_eq!(&pong, b"pong");
-        let (p, msg) = Pairing::start("123456");
-        let theirs = read_frame(&mut r).unwrap();
-        write_frame(&mut w, &msg).unwrap();
-        let key = p.finish(&theirs).unwrap();
-        write_frame(
-            &mut w,
-            &confirmation(&key, "headset", &peer, &headset.public),
-        )
-        .unwrap();
-        let tag = read_frame(&mut r).unwrap();
+        // `of_pc`: what the headset knows of the PC, and the other way round.
+        let (of_pc, of_headset) = peers(&headset, &pc, &[3; 32]);
+        let (h, h_msg) = Pairing::start("123 456");
+        let (p, p_msg) = Pairing::start("123456");
+        let h_key = h.finish(&p_msg).unwrap();
+        let p_key = p.finish(&h_msg).unwrap();
+        let from_headset = confirmation(&h_key, "headset", &of_pc, &headset.public);
         assert!(tags_match(
-            &tag,
-            &confirmation(&key, "pc", &peer, &headset.public)
+            &from_headset,
+            &confirmation(&p_key, "headset", &of_headset, &pc.public)
         ));
-        assert_eq!(server.join().unwrap(), headset.public);
-        assert_eq!(peer.key, pc_public);
+        let from_pc = confirmation(&p_key, "pc", &of_headset, &pc.public);
+        assert!(tags_match(
+            &from_pc,
+            &confirmation(&h_key, "pc", &of_pc, &headset.public)
+        ));
+        // Not one role for the other.
+        assert!(!tags_match(&from_headset, &from_pc));
     }
 
     #[test]
     fn wrong_code_does_not_confirm() {
         let (a, b) = (identity("a"), identity("b"));
-        let b_public = b.public;
-        let (cs, ss) = connect();
-        let t = std::thread::spawn(move || handshake(&ss, &b, false).map(|x| x.2).unwrap());
-        let peer_a = handshake(&cs, &a, true).unwrap().2;
-        let peer_b = t.join().unwrap();
+        let (of_b, of_a) = peers(&a, &b, &[5; 32]);
         let (pa, ma) = Pairing::start("111111");
         let (pb, mb) = Pairing::start("222222");
         let ka = pa.finish(&mb).unwrap();
         let kb = pb.finish(&ma).unwrap();
         assert!(!tags_match(
-            &confirmation(&ka, "headset", &peer_a, &a.public),
-            &confirmation(&kb, "headset", &peer_b, &b_public)
+            &confirmation(&ka, "headset", &of_b, &a.public),
+            &confirmation(&kb, "headset", &of_a, &b.public)
+        ));
+    }
+
+    /// The same code over another connection (a man in the middle runs two) does not
+    /// confirm.
+    #[test]
+    fn a_confirmation_is_bound_to_its_connection() {
+        let (a, b) = (identity("c"), identity("d"));
+        let (of_b, _) = peers(&a, &b, &[1; 32]);
+        let (_, of_a_elsewhere) = peers(&a, &b, &[2; 32]);
+        let (pa, ma) = Pairing::start("333333");
+        let (pb, mb) = Pairing::start("333333");
+        let (ka, kb) = (pa.finish(&mb).unwrap(), pb.finish(&ma).unwrap());
+        assert!(!tags_match(
+            &confirmation(&ka, "headset", &of_b, &a.public),
+            &confirmation(&kb, "headset", &of_a_elsewhere, &b.public)
         ));
     }
 

@@ -1,7 +1,7 @@
 //! Finds the PC host, keeps the TCP connection alive and fans frames out to decoders.
 
 use std::collections::HashMap;
-use std::io::{BufReader, Write};
+use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpStream, UdpSocket};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -10,9 +10,9 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use log::{info, warn};
-use prostir_proto::secure::{
-    self, Identity, Pairing, SecureReader, SecureWriter, TrustStore, confirmation, tags_match,
-};
+use prostir_proto::link::tcp::{NoiseTcp, Plain};
+use prostir_proto::link::{Closer, Link, PeerInfo, RecordSender, StreamReader, StreamWriter};
+use prostir_proto::secure::{self, Identity, Pairing, TrustStore, confirmation, tags_match};
 use prostir_proto::stats::{Gaps, Period};
 use prostir_proto::{ClientMsg, Codec, HostMsg, PROTOCOL_VERSION};
 
@@ -67,14 +67,13 @@ fn droppable(msg: &ClientMsg) -> bool {
 }
 
 impl Feedback {
-    /// Starts the writer thread for one session. It ends (and shuts the socket down,
+    /// Starts the writer thread for one session. It ends (and closes the connection,
     /// which ends the session) when a write fails or times out.
-    fn start(mut writer: SecureWriter, stream: TcpStream) -> std::io::Result<Self> {
+    fn start(mut sender: Box<dyn RecordSender>, closer: Closer) -> std::io::Result<Self> {
         use std::sync::atomic::Ordering;
         let (tx, rx) = mpsc::channel::<ClientMsg>();
         let lossy = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counted = lossy.clone();
-        stream.set_write_timeout(Some(Duration::from_secs(3)))?;
         std::thread::Builder::new()
             .name("net-writer".into())
             .spawn(move || {
@@ -86,13 +85,13 @@ impl Feedback {
                     msg.write(buf)
                 };
                 // However this thread stops, the session ends with it.
-                struct Close(TcpStream);
+                struct Close(Closer);
                 impl Drop for Close {
                     fn drop(&mut self) {
-                        let _ = self.0.shutdown(Shutdown::Both);
+                        self.0.close();
                     }
                 }
-                let _close = Close(stream);
+                let _close = Close(closer);
                 while let Ok(msg) = rx.recv() {
                     // Everything already waiting goes out as one encrypted chunk.
                     buf.clear();
@@ -103,7 +102,7 @@ impl Feedback {
                     {
                         sent = put(more, &mut buf);
                     }
-                    if let Err(e) = sent.and_then(|()| writer.write_all(&buf)) {
+                    if let Err(e) = sent.and_then(|()| StreamWriter(&mut *sender).write_all(&buf)) {
                         warn!("sending to the PC failed: {e}");
                         return;
                     }
@@ -228,7 +227,7 @@ struct Steer {
     choice: Option<SocketAddr>,
     /// "Change PC": do not reconnect on our own until the user picks one.
     picking: bool,
-    current: Option<TcpStream>,
+    current: Option<Current>,
     /// Pairing the other way round: the PC shows the code, the headset asks for it.
     pc_shows_code: bool,
     /// Code typed in the menu while pairing.
@@ -249,6 +248,12 @@ struct Steer {
 
 type PeerKey = [u8; 32];
 
+/// The connection in use: which PC, and how to drop it.
+struct Current {
+    addr: SocketAddr,
+    closer: Closer,
+}
+
 /// How long a "Pair" answer holds for reconnecting and typing the code.
 const APPROVAL: Duration = Duration::from_secs(600);
 /// Wrong codes in a row before the headset stops and asks again.
@@ -265,9 +270,9 @@ impl Steering {
         s.choice = Some(addr);
         s.picking = false;
         if let Some(cur) = &s.current
-            && cur.peer_addr().ok() != Some(addr)
+            && cur.addr != addr
         {
-            let _ = cur.shutdown(Shutdown::Both);
+            cur.closer.close();
         }
     }
 
@@ -277,7 +282,7 @@ impl Steering {
         s.choice = None;
         s.picking = true;
         if let Some(cur) = s.current.take() {
-            let _ = cur.shutdown(Shutdown::Both);
+            cur.closer.close();
         }
         self.0.1.notify_all();
     }
@@ -310,7 +315,7 @@ impl Steering {
         let mut s = self.lock();
         s.quit = true;
         if let Some(cur) = &s.current {
-            let _ = cur.shutdown(Shutdown::Both);
+            cur.closer.close();
         }
         self.0.1.notify_all();
     }
@@ -364,7 +369,7 @@ impl Steering {
         s.pc_shows_code = !s.pc_shows_code;
         s.typed_code = None;
         if let Some(cur) = &s.current {
-            let _ = cur.shutdown(Shutdown::Both);
+            cur.closer.close();
         }
         self.0.1.notify_all();
     }
@@ -380,6 +385,7 @@ impl Steering {
     }
 
     /// Waits for a typed code; `None` if the connection was dropped meanwhile.
+    /// `stream` is only looked at, to tell whether the PC is still there.
     fn wait_code(&self, stream: &TcpStream) -> Option<String> {
         self.lock().typed_code = None;
         let deadline = Instant::now() + Duration::from_secs(300);
@@ -392,7 +398,7 @@ impl Steering {
                 // Dropped by "change PC" or "the other way round".
                 if s.current
                     .as_ref()
-                    .is_none_or(|c| c.peer_addr().ok() != stream.peer_addr().ok())
+                    .is_none_or(|c| Some(c.addr) != stream.peer_addr().ok())
                 {
                     return None;
                 }
@@ -450,7 +456,7 @@ pub fn spawn(events: Sender<NetEvent>, discovery: Discovery, steering: Steering)
                     }
                     let peer = stream.peer_addr().ok();
                     let name = peer.and_then(|p| finder.name_of(p));
-                    steering.lock().current = stream.try_clone().ok();
+                    steering.lock().current = current(&stream);
                     let mut ended = Ended::default();
                     match run_session(
                         stream,
@@ -489,6 +495,16 @@ pub fn spawn(events: Sender<NetEvent>, discovery: Discovery, steering: Steering)
             }
         })
         .expect("spawn net thread");
+}
+
+/// What steering needs of a connection that is being opened.
+fn current(stream: &TcpStream) -> Option<Current> {
+    let addr = stream.peer_addr().ok()?;
+    let socket = stream.try_clone().ok()?;
+    let closer = Closer::new(move || {
+        let _ = socket.shutdown(Shutdown::Both);
+    });
+    Some(Current { addr, closer })
 }
 
 /// The PC's name with its address, so a look-alike name from the network stands out.
@@ -685,18 +701,19 @@ fn scan_subnet() -> Option<TcpStream> {
 }
 
 /// What pairing needs from the current connection.
-struct Session<'a> {
+struct Session<'a, 'r> {
+    /// Only looked at, to tell whether the PC is still there while the user types.
     stream: &'a TcpStream,
-    reader: &'a mut BufReader<SecureReader>,
+    reader: &'a mut StreamReader<'r>,
     feedback: &'a Feedback,
     events: &'a Sender<NetEvent>,
     steering: &'a Steering,
     identity: &'a Identity,
-    peer: &'a secure::Peer,
+    peer: &'a PeerInfo,
     host: &'a str,
 }
 
-impl Session<'_> {
+impl Session<'_, '_> {
     /// Pairs if the user agreed to; otherwise asks them and closes the connection
     /// (the PC must not be held waiting for an answer).
     fn pair_if_approved(&mut self, trusted: &mut TrustStore) -> std::io::Result<()> {
@@ -717,8 +734,9 @@ impl Session<'_> {
     /// Pairs with the PC: up to [`PAIR_ATTEMPTS`] codes, then asks the user again.
     fn pair(&mut self, trusted: &mut TrustStore) -> std::io::Result<()> {
         // The user needs time to read and type the code.
-        self.stream
-            .set_read_timeout(Some(Duration::from_secs(300)))?;
+        self.reader
+            .receiver()
+            .set_idle_limit(Some(Duration::from_secs(300)));
         for _ in 0..PAIR_ATTEMPTS {
             let pc_shows = self.steering.pc_shows_code();
             // The PC makes its code only when asked, so ask first and then wait for
@@ -779,8 +797,9 @@ impl Session<'_> {
                         secure::fingerprint(&self.peer.key)
                     );
                     let _ = self.events.send(NetEvent::Paired);
-                    self.stream
-                        .set_read_timeout(Some(Duration::from_secs(10)))?;
+                    self.reader
+                        .receiver()
+                        .set_idle_limit(Some(Duration::from_secs(10)));
                     return Ok(());
                 }
                 HostMsg::PairResult { .. } => {
@@ -827,26 +846,34 @@ fn run_session(
     trusted: &mut TrustStore,
     ended: &mut Ended,
 ) -> std::io::Result<()> {
-    stream.set_nodelay(true)?;
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-    let (reader, writer, peer) = secure::handshake(&stream, identity, true)?;
-    let mut reader = BufReader::with_capacity(1 << 20, reader);
-    let feedback = Feedback::start(writer, stream.try_clone()?)?;
-    // However the session ends, the socket closes: nothing stays blocked on it.
-    struct CloseOnExit<'a>(&'a TcpStream);
-    impl Drop for CloseOnExit<'_> {
+    let watch = stream.try_clone()?;
+    let addr = stream.peer_addr()?;
+    let Link {
+        sender,
+        mut receiver,
+        closer,
+        peer,
+    } = NoiseTcp::connect(stream, identity, Arc::new(Plain))?;
+    let mut reader = StreamReader::new(&mut *receiver);
+    let feedback = Feedback::start(sender, closer.clone())?;
+    // However the session ends, the connection closes: nothing stays blocked on it.
+    struct CloseOnExit(Closer);
+    impl Drop for CloseOnExit {
         fn drop(&mut self) {
-            let _ = self.0.shutdown(Shutdown::Both);
+            self.0.close();
         }
     }
-    let _close = CloseOnExit(&stream);
-    let host = name.clone().unwrap_or_else(|| match stream.peer_addr() {
-        Ok(a) if a.ip().is_loopback() => crate::i18n::current().t("ПК (USB)", "PC (USB)").into(),
-        Ok(a) => a.ip().to_string(),
-        Err(_) => crate::i18n::current().t("ПК", "PC").into(),
+    let _close = CloseOnExit(closer);
+    let host = name.clone().unwrap_or_else(|| {
+        if addr.ip().is_loopback() {
+            crate::i18n::current().t("ПК (USB)", "PC (USB)").into()
+        } else {
+            addr.ip().to_string()
+        }
     });
     let mut session = Session {
-        stream: &stream,
+        stream: &watch,
         reader: &mut reader,
         feedback: &feedback,
         events,
@@ -897,15 +924,15 @@ fn run_session(
     }
     ended.opened = true;
     // The host re-sends the last frame every 500 ms, so 10 s of silence means a dead link.
-    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-    if let Ok(peer) = stream.peer_addr() {
-        let _ = events.send(NetEvent::Connected {
-            addr: peer,
-            name,
-            feedback: feedback.clone(),
-            language,
-        });
-    }
+    reader
+        .receiver()
+        .set_idle_limit(Some(Duration::from_secs(10)));
+    let _ = events.send(NetEvent::Connected {
+        addr,
+        name,
+        feedback: feedback.clone(),
+        language,
+    });
 
     let mut streams: HashMap<u8, StreamSlot> = HashMap::new();
     // Started on the first sound slice, stopped with the session.
