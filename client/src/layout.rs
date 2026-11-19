@@ -1736,6 +1736,252 @@ mod tests {
         same(&back, "profile and back");
     }
 
+    /// A small seeded generator, so a failing case comes back the same.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0 >> 33
+        }
+
+        /// `lo..hi`.
+        fn float(&mut self, lo: f32, hi: f32) -> f32 {
+            lo + (hi - lo) * (self.next() as f32 / (1u64 << 31) as f32)
+        }
+    }
+
+    /// `placements` with monitor `id` turned `right` radians around the eye (to the
+    /// right when positive) and moved `up` metres.
+    fn moved(
+        placements: &HashMap<u8, Placement>,
+        id: u8,
+        right: f32,
+        up: f32,
+    ) -> HashMap<u8, Placement> {
+        let turn = Quat::from_rotation_y(-right);
+        let mut out = placements.clone();
+        let p = out.get_mut(&id).unwrap();
+        p.position = turn * p.position + Vec3::Y * up;
+        p.rotation = (turn * p.rotation).normalize();
+        out
+    }
+
+    /// 2026-11-20, the owner's drag: 2560x1440 | 1440x2560 primary | 2560x1440 in one
+    /// row, each moved by hand up to 8 cm up and down and 1.5° into its neighbour or
+    /// away, with a 2 mm tremor. In every frame, as the headset sends it (rows after
+    /// the rows sent before), one row: no flipping, and the PC puts the portrait
+    /// between the two, side by side, as the map shows.
+    #[test]
+    fn a_portrait_between_two_stays_in_their_row_while_they_move() {
+        let center = (Vec3::ZERO, 0.0);
+        let three = [(0, 2560, 1440), (1, 1440, 2560), (2, 2560, 1440)];
+        let start = arrange(Preset::Arc, &three, Some(1), None, None);
+        let mut rng = Rng(0x0f11);
+        let mut at: HashMap<u8, (f32, f32)> = HashMap::new();
+        let mut sent: Option<Desktop> = None;
+        let mut flips = 0;
+        for drag in 0..60 {
+            let id = (drag % 3) as u8;
+            let from = at.get(&id).copied().unwrap_or_default();
+            let to = (rng.float(-1.5, 1.5).to_radians(), rng.float(-0.08, 0.08));
+            for f in 1..=20 {
+                let t = f as f32 / 20.0;
+                let now = (
+                    from.0 + (to.0 - from.0) * t + rng.float(-0.002, 0.002) / 1.1,
+                    from.1 + (to.1 - from.1) * t + rng.float(-0.002, 0.002),
+                );
+                at.insert(id, now);
+                let mut p = start.clone();
+                for (&k, &(r, u)) in &at {
+                    p = moved(&p, k, r, u);
+                }
+                let desktop = Desktop::of(&p, &three, center, Preset::Arc, Some(1), sent.as_ref());
+                assert_eq!(desktop.rows, vec![vec![0, 1, 2]], "drag {drag} frame {f}");
+                if sent.as_ref().is_some_and(|s| s.rows != desktop.rows) {
+                    flips += 1;
+                }
+                let pc = on_the_pc(&desktop, &three, Some(1));
+                let spot = |id: u8| pc.iter().find(|s| s.id == id).copied().unwrap();
+                assert_eq!(
+                    spot(0).crossing(&spot(1)),
+                    Some(prostir_layout::space::Side::Right)
+                );
+                assert_eq!(
+                    spot(1).crossing(&spot(2)),
+                    Some(prostir_layout::space::Side::Right)
+                );
+                same_on_the_pc(&desktop, &three, Some(1));
+                sent = Some(desktop);
+            }
+        }
+        assert_eq!(flips, 0);
+    }
+
+    /// `placements` turned by `turn` about the eye at `eye`.
+    fn turned_about(
+        placements: &HashMap<u8, Placement>,
+        eye: Vec3,
+        turn: Quat,
+    ) -> HashMap<u8, Placement> {
+        placements
+            .iter()
+            .map(|(id, p)| {
+                let q = Placement {
+                    position: eye + turn * (p.position - eye),
+                    rotation: (turn * p.rotation).normalize(),
+                    width: p.width,
+                };
+                (*id, q)
+            })
+            .collect()
+    }
+
+    /// The owner's rows of 2026-11-20 tilted back as a whole by 10°, 20° and 35° for a
+    /// reclined pose: "Line up" keeps them tilted where they are, and after a hand
+    /// disturbed one (a gap, a step, a monitor turned or hanging crooked) gives the
+    /// tilted row back, seams closed, the tilt kept, one row on the desktop.
+    #[test]
+    fn line_up_keeps_a_row_tilted_back() {
+        let eye = Vec3::new(0.3, 1.2, -0.4);
+        let center = (eye, 0.4);
+        for m in [
+            [(0u8, 2560u32, 1440u32), (1, 2560, 1440), (2, 2560, 1440)],
+            [(0, 2560, 1440), (1, 1440, 2560), (2, 2560, 1440)],
+        ] {
+            let upright = {
+                let turn = Quat::from_rotation_y(center.1);
+                turned_about(
+                    &arrange(Preset::Arc, &m, Some(1), None, None),
+                    Vec3::ZERO,
+                    turn,
+                )
+                .into_iter()
+                .map(|(id, mut p)| {
+                    p.position += eye;
+                    (id, p)
+                })
+                .collect::<HashMap<u8, Placement>>()
+            };
+            for back in [10.0f32, 20.0, 35.0] {
+                let yaw = Quat::from_rotation_y(center.1);
+                let turn = yaw * Quat::from_rotation_x(-back.to_radians()) * yaw.inverse();
+                let tilted = turned_about(&upright, eye, turn);
+                let out = line_up(&tilted, &m, center, Preset::Arc, Some(1), &[], None);
+                for (id, p) in &tilted {
+                    assert!(
+                        out[id].position.distance(p.position) < 1e-3,
+                        "{back}°: {id} moved"
+                    );
+                }
+                let mut hand = tilted.clone();
+                let axis = turn * (yaw * Vec3::Y);
+                let left = turn * (yaw * Vec3::NEG_X);
+                hand.get_mut(&0).unwrap().position += left * 0.03;
+                let p = hand.get_mut(&2).unwrap();
+                p.position += axis * 0.04;
+                p.rotation =
+                    (Quat::from_axis_angle(axis, 2f32.to_radians()) * p.rotation).normalize();
+                let p = hand.get_mut(&1).unwrap();
+                p.rotation = (Quat::from_axis_angle(p.rotation * Vec3::Z, 5f32.to_radians())
+                    * p.rotation)
+                    .normalize();
+                let out = line_up(&hand, &m, center, Preset::Arc, Some(1), &[], None);
+                for id in [0u8, 1, 2] {
+                    let up = out[&id].rotation * Vec3::Y;
+                    assert!(
+                        up.angle_between(axis).to_degrees() < 0.1,
+                        "{back}°: {id} leans"
+                    );
+                }
+                for (a, b) in [(0u8, 1u8), (1, 2)] {
+                    let h = |id: u8| {
+                        let s = m.iter().find(|x| x.0 == id).unwrap();
+                        out[&id].width * s.2 as f32 / s.1 as f32
+                    };
+                    let (ca, cb) = (corners(&out[&a], h(a)), corners(&out[&b], h(b)));
+                    // `corners`: bottom left, bottom right, top right, top left.
+                    let right_of_a = (ca[1] + ca[2]) / 2.0;
+                    let left_of_b = (cb[0] + cb[3]) / 2.0;
+                    assert!(
+                        right_of_a.distance(left_of_b) < 1e-3,
+                        "{back}°: seam {a}-{b}"
+                    );
+                }
+                let desktop = Desktop::of(&out, &m, center, Preset::Arc, Some(1), None);
+                assert_eq!(desktop.rows, vec![vec![0, 1, 2]], "{back}°");
+                rows_on_a_line(&desktop);
+                same_on_the_pc(&desktop, &m, Some(1));
+            }
+        }
+    }
+
+    /// `p` mirrored in the vertical plane through the origin at azimuth `at` (0 ahead,
+    /// positive right).
+    fn mirrored(p: &Placement, at: f32) -> Placement {
+        let n = Vec3::new(at.cos(), 0.0, at.sin());
+        let m = |v: Vec3| v - 2.0 * v.dot(n) * n;
+        let right = -m(p.rotation * Vec3::X);
+        let up = m(p.rotation * Vec3::Y);
+        let face = m(p.rotation * Vec3::Z);
+        Placement {
+            position: m(p.position),
+            rotation: Quat::from_mat3(&glam::Mat3::from_cols(right, up, face)).normalize(),
+            width: p.width,
+        }
+    }
+
+    /// Two 3440 monitors standing mirror-symmetric (each a little off and crooked the
+    /// same way, mirrored), no primary: lined up they are still mirror images. Step 4
+    /// kept the one nearest straight ahead and moved the other, up to 3.8 m.
+    #[test]
+    fn line_up_keeps_a_symmetric_pair_symmetric() {
+        let center = (Vec3::ZERO, 0.0);
+        let two = [(0u8, 3440u32, 1440u32), (1, 3440, 1440)];
+        for at in [0.0f32, 0.5, -2.84] {
+            let plane = Quat::from_rotation_y(-at);
+            let start = arrange(Preset::Arc, &two, None, None, None);
+            // The left one turned towards the plane's direction, then disturbed.
+            let mut a = start[&0];
+            a.position = plane * a.position + Vec3::new(0.0, 0.03, 0.0);
+            a.rotation = (Quat::from_rotation_z(0.04) * plane * a.rotation).normalize();
+            a.position += plane * Vec3::new(-0.02, 0.0, 0.01);
+            let placements = HashMap::from([(0, a), (1, mirrored(&a, at))]);
+            let out = line_up(&placements, &two, center, Preset::Arc, None, &[], None);
+            let back = mirrored(&out[&0], at);
+            assert!(
+                back.position.distance(out[&1].position) < 1e-3,
+                "{at}: {back:?} {:?}",
+                out[&1]
+            );
+            assert!(back.rotation.angle_between(out[&1].rotation) < 1e-3, "{at}");
+        }
+    }
+
+    /// One monitor of a row hanging crooked (rolled 6°): "Line up" straightens it about
+    /// its own centre and leaves the others where they are.
+    #[test]
+    fn line_up_straightens_a_crooked_monitor_in_place() {
+        let center = (Vec3::ZERO, 0.0);
+        let three = [(0u8, 2560u32, 1440u32), (1, 2560, 1440), (2, 2560, 1440)];
+        let start = arrange(Preset::Arc, &three, Some(1), None, None);
+        let mut crooked = start.clone();
+        let p = crooked.get_mut(&2).unwrap();
+        p.rotation = (Quat::from_axis_angle(p.rotation * Vec3::Z, 6f32.to_radians()) * p.rotation)
+            .normalize();
+        let out = line_up(&crooked, &three, center, Preset::Arc, Some(1), &[], None);
+        for (id, p) in &start {
+            assert!(out[id].position.distance(p.position) < 1e-3, "{id} moved");
+            assert!(
+                out[id].rotation.angle_between(p.rotation) < 1e-3,
+                "{id} turned"
+            );
+        }
+    }
+
     /// The memo gives what `Desktop::of` gives, and follows a moved monitor.
     #[test]
     fn the_desktop_memo_follows_the_arrangement() {
