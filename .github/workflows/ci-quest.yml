@@ -1,0 +1,52 @@
+name: CI headset
+
+# The headset's Android build, only when its code (or the shared protocol) changed;
+# its desktop-buildable parts are tested by ci.yml. Checks only: the APK is built by
+# release.yml for a tag.
+on:
+  push:
+    branches: [main, "dev/**"]
+    paths:
+      - "proto/**"
+      - "client/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/ci-quest.yml"
+  pull_request:
+    paths:
+      - "proto/**"
+      - "client/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/ci-quest.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quest:
+    runs-on: ubuntu-24.04
+    # A stuck mirror or runner fails the job instead of holding it for hours.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch
+        with:
+          toolchain: stable
+          targets: aarch64-linux-android
+          components: clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Clippy for the headset
+        run: |
+          TC="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TC/aarch64-linux-android32-clang"
+          export CC_aarch64_linux_android="$TC/aarch64-linux-android32-clang"
+          export AR_aarch64_linux_android="$TC/llvm-ar"
+          cargo clippy -p prostir-client --target aarch64-linux-android -- -D warnings

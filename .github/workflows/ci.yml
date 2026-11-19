@@ -1,11 +1,26 @@
 name: CI
 
+# Only code: the site, plans and texts need no build.
 on:
   push:
-    branches: [main]
-    paths-ignore: ["**.md", "docs/**", "LICENSE"]
+    branches: [main, "dev/**"]
+    paths:
+      - "host/**"
+      - "proto/**"
+      - "client/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/third-party-licenses.py"
+      - ".github/workflows/ci.yml"
   pull_request:
-    paths-ignore: ["**.md", "docs/**", "LICENSE"]
+    paths:
+      - "host/**"
+      - "proto/**"
+      - "client/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/third-party-licenses.py"
+      - ".github/workflows/ci.yml"
   workflow_dispatch:
 
 permissions:
@@ -27,9 +42,11 @@ jobs:
           persist-credentials: false
       - name: System libraries
         run: |
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y --no-install-recommends \
-            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev pkg-config
+          # The runner image's package lists are usually fresh enough: update them
+          # only when installing without that fails (it is the slow, flaky part).
+          apt="sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
+          pkgs="libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev pkg-config"
+          $apt install -y --no-install-recommends $pkgs || { $apt update && $apt install -y --no-install-recommends $pkgs; }
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch
         with:
           toolchain: stable
@@ -41,26 +58,3 @@ jobs:
       # Fails when a dependency ships no license text we can put in the release.
       - name: Third-party licenses
         run: python3 scripts/third-party-licenses.py -o "$RUNNER_TEMP/THIRD-PARTY-LICENSES.txt"
-
-  # Checks only: the APK (and the PC packages) are built by release.yml for a tag.
-  quest:
-    runs-on: ubuntu-24.04
-    # A stuck mirror or runner fails the job instead of holding it for hours.
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch
-        with:
-          toolchain: stable
-          targets: aarch64-linux-android
-          components: clippy
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - name: Clippy for the headset
-        run: |
-          TC="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TC/aarch64-linux-android32-clang"
-          export CC_aarch64_linux_android="$TC/aarch64-linux-android32-clang"
-          export AR_aarch64_linux_android="$TC/llvm-ar"
-          cargo clippy -p prostir-client --target aarch64-linux-android -- -D warnings
