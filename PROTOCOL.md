@@ -728,10 +728,12 @@ Keyframes are never dropped for being late, and a keyframe queued drops the fram
 its stream still waiting before it (it replaces them). If more than 16 MiB of video is
 waiting, new non-key frames are refused the same way. Other streams are not affected.
 
-The host also paces the connection (`SO_MAX_PACING_RATE`): it sends at most 1.5 times
-what its encoders make plus 4 Mbit/s, and never less than 20 Mbit/s, so a keyframe
-does not land in the Wi-Fi access point's queue all at once with sound stuck behind
-it, where nothing can overtake it any more. It keeps little unsent data in the kernel
+The host also paces the connection (`SO_MAX_PACING_RATE`, `host/src/pacing.rs`): at
+about 90 % of what TCP measured the network delivering while the network held the
+host back (a keyframe going out, say), never under 20 Mbit/s, so a keyframe does not
+land in the Wi-Fi access point's queue all at once with sound stuck behind it, where
+nothing can overtake it any more. It paces only once it measured such a stretch,
+and never over USB. Paced, it tries now and then whether the link carries more. It keeps little unsent data in the kernel
 (`TCP_NOTSENT_LOWAT` 32 KiB) for the same reason.
 
 These values are implementation-defined; the rule a client can rely on is that

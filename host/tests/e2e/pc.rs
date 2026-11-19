@@ -216,6 +216,12 @@ impl Pc {
         }
     }
 
+    /// Every log line containing `needle`, in order.
+    pub fn lines(&self, needle: &str) -> Vec<String> {
+        let log = self.log.lock().unwrap();
+        log.iter().filter(|l| l.contains(needle)).cloned().collect()
+    }
+
     /// How many log lines contain `needle`.
     pub fn count_log(&self, needle: &str) -> usize {
         self.log

@@ -50,7 +50,13 @@ fn sound_under_keyframes_on_a_shaped_link() {
     let dir = TestDir::new("link");
     dir.save_monitors(THREE_MONITORS);
     let mut keys = dir.pair();
-    let pc = Pc::start(&dir, &options);
+    let mut pc = Pc::start(&dir, &options);
+    // Over the network, as on Wi-Fi: the script gives the loopback an address of
+    // that kind (127.0.0.1 is how a headset on USB comes, and that is not paced).
+    if let Ok(ip) = std::env::var("PROSTIR_LINK_IP") {
+        pc.addr
+            .set_ip(ip.parse().expect("PROSTIR_LINK_IP: an IP address"));
+    }
     let mut headset = connect(&pc, &mut keys);
     headset
         .wait(START, "every monitor showing", View::all_monitors_show)
@@ -59,6 +65,7 @@ fn sound_under_keyframes_on_a_shaped_link() {
     headset.take_for(Duration::from_secs(2)).unwrap();
     headset.reset_counts();
     let ids = headset.view().order.clone();
+    let reports_before = pc.count_log(": sent ");
     let start = Instant::now();
     let mut next_keyframes = start;
     while start.elapsed() < MEASURE {
@@ -102,6 +109,18 @@ fn sound_under_keyframes_on_a_shaped_link() {
         keyframe_bytes as f64 / keyframes.max(1) as f64 / 1024.0,
         keyframe_max as f64 / 1024.0,
     );
+    // How the frames fared, from the PC's reports (every 10 s): the ones from the
+    // measurement on, up to one logged after it.
+    let last = pc.count_log("Prostir-3: sent");
+    pc.wait_log_after(Duration::from_secs(15), "Prostir-3: sent", last);
+    for line in pc.lines(": sent ").iter().skip(reports_before) {
+        let report = line.split_once("] ").map_or(line.as_str(), |(_, r)| r);
+        eprintln!("  {report}");
+    }
+    for line in pc.lines("the link carries about") {
+        let report = line.split_once("] ").map_or(line.as_str(), |(_, r)| r);
+        eprintln!("  {report}");
+    }
     // Only the default link has targets; another rate or delay is for looking.
     if std::env::var("PROSTIR_LINK").is_ok_and(|l| l == "100mbit 2ms") {
         assert!(

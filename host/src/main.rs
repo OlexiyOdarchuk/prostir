@@ -5,6 +5,7 @@ mod encoder;
 mod i18n;
 mod layout;
 mod outbox;
+mod pacing;
 mod pairing;
 mod platform;
 mod usage;
@@ -197,6 +198,9 @@ impl Drop for EndSession {
     }
 }
 
+/// How often the writer reads how fast the network delivers, while it sends.
+const LOOK_AT_THE_LINK: Duration = Duration::from_millis(20);
+
 /// After a goodbye, how long the headset has to read it and close the connection.
 const GOODBYE_WAIT: Duration = Duration::from_secs(1);
 
@@ -255,12 +259,51 @@ fn serve_client(
                     outbox: outbox.clone(),
                     closer: Some(closer),
                 };
-                // The only one sending: it takes packet after packet, most important first.
+                // The only one sending: it takes packet after packet, most important first,
+                // and paces the connection by what the network is measured to deliver.
                 let mut lanes = outbox::Lanes::default();
+                let mut pacer = pacing::Pacer::new(peer.via);
+                let mut next_look = Instant::now();
+                // The pace last logged: changes of a quarter or more go into the log.
+                let mut logged = 0u64;
+                // How long sending waited on the socket since the last look: most of the
+                // time means the network (or the pace) held the PC back.
+                let mut waited = Duration::ZERO;
+                let mut sent = 0;
+                let mut last_look = Instant::now();
                 while let Some(pick) = outbox.next(&mut lanes) {
-                    if let Err(e) = lanes.send(pick, &mut *sender) {
-                        info!("connection closed while sending: {e}");
-                        return;
+                    let sending = Instant::now();
+                    match lanes.send(pick, &mut *sender) {
+                        Ok(bytes) => sent += bytes,
+                        Err(e) => {
+                            info!("connection closed while sending: {e}");
+                            return;
+                        }
+                    }
+                    let now = Instant::now();
+                    waited += now - sending;
+                    if now >= next_look {
+                        next_look = now + LOOK_AT_THE_LINK;
+                        let held_back = waited * 2 >= now - last_look;
+                        let bytes = std::mem::take(&mut sent);
+                        (waited, last_look) = (Duration::ZERO, now);
+                        if let Some(rate) = sender.delivery_rate()
+                            && let Some(pace) = pacer.sample(rate, held_back, bytes)
+                        {
+                            sender.set_pace(pace);
+                            let mbit = |b: u64| b * 8 / 1_000_000;
+                            let line = format!(
+                                "the link carries about {} Mbit/s: pacing at {}",
+                                mbit(pacer.estimate().unwrap_or(0)),
+                                mbit(pace)
+                            );
+                            if pace.abs_diff(logged) > logged / 4 {
+                                logged = pace;
+                                info!("{line}");
+                            } else {
+                                debug!("{line}");
+                            }
+                        }
                     }
                 }
                 // After the goodbye nothing more goes out, but what the headset sends

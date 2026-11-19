@@ -35,6 +35,10 @@ pub trait RecordSender: Send {
     /// How many bytes a second to give the network at most (0: no limit), so a big
     /// burst does not fill the queue of a Wi-Fi access point at once.
     fn set_pace(&mut self, bytes_per_sec: u64);
+
+    /// How fast the network delivered what this side sent, in bytes a second, as last
+    /// measured (TCP's delivery rate); `None` where the transport cannot tell.
+    fn delivery_rate(&mut self) -> Option<u64>;
 }
 
 /// The receiving half of a link.

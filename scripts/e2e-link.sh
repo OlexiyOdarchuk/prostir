@@ -22,13 +22,16 @@ cd "$ROOT"
 # Built here: the namespace has no network to fetch anything with.
 "${TEST[@]}" --no-run
 # Inside: loopback up, the size of a Wi-Fi frame, and the shaped link (both directions
-# share it). The queue of 200 packets is about what a Wi-Fi access point holds.
+# share it). The queue of 200 packets is about what a Wi-Fi access point holds. The
+# fake headset connects to an address of the local network's kind, as over Wi-Fi
+# (one of 127.0.0.0/8 would count as USB).
 unshare -rn bash -euo pipefail -c '
     ip link set lo up
     ip link set lo mtu 1500
+    ip addr add 10.77.0.1/32 dev lo
     tc qdisc add dev lo root netem rate "$1" delay "$2" limit 200
     link="$1 $2"
     shift 2
-    PROSTIR_LINK="$link" "$@" --offline -- --ignored --exact \
+    PROSTIR_LINK="$link" PROSTIR_LINK_IP=10.77.0.1 "$@" --offline -- --ignored --exact \
         link::sound_under_keyframes_on_a_shaped_link --nocapture
 ' link "$RATE" "$DELAY" "${TEST[@]}"

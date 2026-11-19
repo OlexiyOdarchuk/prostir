@@ -19,6 +19,10 @@ impl RecordSender for Capture {
     }
 
     fn set_pace(&mut self, _bytes_per_sec: u64) {}
+
+    fn delivery_rate(&mut self) -> Option<u64> {
+        None
+    }
 }
 
 /// No bytes kept apart from the body.

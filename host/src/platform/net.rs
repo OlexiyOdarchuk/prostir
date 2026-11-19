@@ -63,4 +63,51 @@ impl SocketOptions for TcpOptions {
             );
         }
     }
+
+    /// From `TCP_INFO`.
+    fn delivery_rate(&self, stream: &TcpStream) -> Option<u64> {
+        use std::os::fd::AsRawFd;
+        let mut info = TcpInfo::default();
+        let mut len = std::mem::size_of::<TcpInfo>() as libc::socklen_t;
+        // SAFETY: a valid socket, and a buffer of `len` bytes the kernel fills (at
+        // most that many; `len` says how many).
+        let ok = unsafe {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::IPPROTO_TCP,
+                libc::TCP_INFO,
+                (&mut info as *mut TcpInfo).cast(),
+                &mut len,
+            ) == 0
+        };
+        // An older kernel fills less: no delivery rate then.
+        (ok && len as usize >= std::mem::size_of::<TcpInfo>()).then_some(info.delivery_rate)
+    }
 }
+
+/// The start of Linux's `struct tcp_info` (`linux/tcp.h`), up to the delivery rate.
+#[cfg(target_os = "linux")]
+#[repr(C)]
+#[derive(Default)]
+struct TcpInfo {
+    state: u8,
+    ca_state: u8,
+    retransmits: u8,
+    probes: u8,
+    backoff: u8,
+    options: u8,
+    wscale: u8,
+    /// `tcpi_delivery_rate_app_limited` and `tcpi_fastopen_client_fail`.
+    flags: u8,
+    /// From `tcpi_rto` to `tcpi_total_retrans`.
+    counters: [u32; 24],
+    /// `tcpi_pacing_rate`, `tcpi_max_pacing_rate`, `tcpi_bytes_acked`,
+    /// `tcpi_bytes_received`.
+    totals: [u64; 4],
+    /// From `tcpi_segs_out` to `tcpi_data_segs_out`.
+    segments: [u32; 6],
+    delivery_rate: u64,
+}
+
+#[cfg(target_os = "linux")]
+const _: () = assert!(std::mem::offset_of!(TcpInfo, delivery_rate) == 160);

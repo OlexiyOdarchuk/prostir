@@ -224,6 +224,11 @@ impl Outgoing {
         self.lane
     }
 
+    /// The bytes of the message not sent yet.
+    pub fn remaining(&self) -> usize {
+        self.msg.len() - self.sent
+    }
+
     /// Sends its next packet, of at most `fragment` body bytes (but never so few that
     /// the first one lacks the message header). `true` when that was the last one.
     pub fn send_next(&mut self, tx: &mut dyn RecordSender, fragment: usize) -> io::Result<bool> {

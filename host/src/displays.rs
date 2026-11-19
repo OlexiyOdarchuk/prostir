@@ -107,19 +107,6 @@ fn stream_name(id: u8) -> String {
     }
 }
 
-/// How many bytes a second the connection may send for `streams` encoders of
-/// `kbps_each`: one and a half times what they make, plus 4 Mbit/s for sound and
-/// control, and never under 20 Mbit/s. Without a limit TCP pushes a whole keyframe at
-/// once into the queue of the Wi-Fi access point, and sound waits behind it there,
-/// where nothing on the PC can overtake it; paced, a keyframe takes some 30 to 50 ms,
-/// and sound goes between its packets. A rule of thumb until the link is measured
-/// (an estimate of the link replaces it later).
-pub fn pace_for(streams: usize, kbps_each: u32) -> u64 {
-    let video = streams as u64 * u64::from(kbps_each) * 1000;
-    let bits = (video * 3 / 2 + 4_000_000).max(20_000_000);
-    bits / 8
-}
-
 /// Delivers encoder output to whichever client is connected.
 pub struct Router {
     /// A screenshot waiting for the next keyframe of stream `id` (see `screenshot`).
@@ -220,13 +207,6 @@ impl Router {
 
     pub fn detach(&self) {
         self.inner.lock().unwrap().tx = None;
-    }
-
-    /// How fast the connection may send (see [`pace_for`]).
-    pub fn set_pace(&self, bytes_per_sec: u64) {
-        if let Some(tx) = &self.inner.lock().unwrap().tx {
-            tx.set_pace(bytes_per_sec);
-        }
     }
 
     /// Sends a control message to the connected client, if any. Never blocks.
@@ -745,7 +725,6 @@ impl Displays {
     /// laptop lid closes and comes back when it opens).
     pub fn tick(&mut self) {
         self.router.report();
-        self.router.set_pace(self.pace());
         self.sync_audio();
         self.check_primary();
         self.check_window_panels();
@@ -1029,7 +1008,6 @@ impl Displays {
     /// says otherwise, and every stream starts over once, so each monitor sends its
     /// picture now, monitors kept from the last session too.
     pub fn headset_connected(&mut self) {
-        self.router.set_pace(self.pace());
         self.taken_off_at = None;
         // Paused ones (kept from before) start over as `set_streaming` resumes them;
         // running ones (just made) are resumed here, which starts them over too.
@@ -1039,11 +1017,6 @@ impl Displays {
             }
         }
         self.set_streaming(true);
-    }
-
-    /// How fast the connection may send, from what the encoders make now.
-    fn pace(&self) -> u64 {
-        pace_for(self.encoders().count(), self.cfg.bitrate_kbps)
     }
 
     /// The headset reports being put on or taken off.
@@ -1846,17 +1819,6 @@ mod tests {
         router.add_stream(1, Codec::H265);
         router.remove_stream(1);
         assert!(sent(&outbox).is_empty());
-    }
-
-    /// One and a half times what the encoders make plus room for sound, never under
-    /// 20 Mbit/s.
-    #[test]
-    fn the_pace_follows_the_bitrate() {
-        let mbit = |bits: u64| bits * 1_000_000 / 8;
-        assert_eq!(pace_for(3, 30_000), mbit(139));
-        assert_eq!(pace_for(1, 8_000), mbit(20));
-        assert_eq!(pace_for(0, 30_000), mbit(20));
-        assert_eq!(pace_for(6, 50_000), mbit(454));
     }
 
     fn spec(s: &str) -> Result<MonitorSpec, String> {

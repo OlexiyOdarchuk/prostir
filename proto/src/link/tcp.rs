@@ -43,6 +43,12 @@ pub trait SocketOptions: Send + Sync {
 
     /// Sends at most `bytes_per_sec` (0: no limit), spreading packets out evenly.
     fn set_pace(&self, stream: &TcpStream, bytes_per_sec: u64);
+
+    /// The socket's latest delivery rate in bytes a second (`TCP_INFO`), if the
+    /// system says.
+    fn delivery_rate(&self, _stream: &TcpStream) -> Option<u64> {
+        None
+    }
 }
 
 /// No settings beyond what the transport makes itself (`TCP_NODELAY`, timeouts).
@@ -217,6 +223,10 @@ impl RecordSender for TcpSender {
             self.pace = bytes_per_sec;
             self.options.set_pace(&self.stream, bytes_per_sec);
         }
+    }
+
+    fn delivery_rate(&mut self) -> Option<u64> {
+        self.options.delivery_rate(&self.stream)
     }
 }
 
