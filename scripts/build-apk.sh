@@ -70,6 +70,23 @@ if [[ ! -f "$AAR" ]]; then
 fi
 unzip -p "$AAR" jni/arm64-v8a/libopenxr_loader.so > "$STAGE/lib/arm64-v8a/libopenxr_loader.so"
 APK=prostir.apk
+PACKAGE=dev.prostir.client
+MANIFEST="$ROOT/client/AndroidManifest.xml"
+# PROSTIR_PREVIEW=1: a test build of an unreleased version that installs next to the
+# released app (its own package and name), so testing never replaces the daily one.
+if [[ "${PROSTIR_PREVIEW:-}" == 1 ]]; then
+    [[ "${PROSTIR_STORE:-}" == 1 ]] && { echo "!! a preview build is never a store build" >&2; exit 1; }
+    MANIFEST="$OUT/AndroidManifest.preview.xml"
+    sed -e 's/package="dev\.prostir\.client"/package="dev.prostir.client.preview"/' \
+        -e 's/android:label="Prostir"/android:label="Prostir (preview)"/' \
+        "$ROOT/client/AndroidManifest.xml" > "$MANIFEST"
+    grep -q 'package="dev.prostir.client.preview"' "$MANIFEST" \
+        && grep -q 'android:label="Prostir (preview)"' "$MANIFEST" \
+        || { echo "!! could not make the preview manifest" >&2; exit 1; }
+    APK=prostir-preview.apk
+    PACKAGE=dev.prostir.client.preview
+    echo ">> preview build: dev.prostir.client.preview"
+fi
 rm -f "$STAGE/lib/arm64-v8a/libovrplatformloader.so"
 if [[ "${PROSTIR_STORE:-}" == 1 ]]; then
     cp "$PROSTIR_PLATFORM_SDK/Android/libs/arm64-v8a/libovrplatformloader.so" "$STAGE/lib/arm64-v8a/"
@@ -101,7 +118,7 @@ if [[ "${PROSTIR_DEBUG:-}" == 1 ]]; then
     link_flags+=(--debug-mode)
     echo ">> debuggable build"
 fi
-"$BUILD_TOOLS/aapt2" link -o "$OUT/unaligned.apk" --manifest "$ROOT/client/AndroidManifest.xml" \
+"$BUILD_TOOLS/aapt2" link -o "$OUT/unaligned.apk" --manifest "$MANIFEST" \
     -I "$PLATFORM/android.jar" -A "$OUT/assets" "$OUT"/res/*.flat "${link_flags[@]}"
 (cd "$STAGE" && zip -q -r "$OUT/unaligned.apk" lib)
 "$BUILD_TOOLS/zipalign" -f -p 4 "$OUT/unaligned.apk" "$OUT/aligned.apk"
@@ -155,5 +172,5 @@ echo ">> $OUT/$APK"
 
 if [[ "${1:-}" == "--install" ]]; then
     adb install -r "$OUT/$APK"
-    adb shell am start -n dev.prostir.client/android.app.NativeActivity
+    adb shell am start -n "$PACKAGE/android.app.NativeActivity"
 fi
