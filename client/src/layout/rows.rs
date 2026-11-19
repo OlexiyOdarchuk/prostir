@@ -3,7 +3,9 @@
 //!
 //! One function says which monitors make a row ([`rows_of`]): those whose heights, as
 //! seen from where the arrangement faces, overlap by at least half the shorter one
-//! (and any joined through such a pair). Everything else goes by it.
+//! (and any joined through such a pair), and that are seen side by side rather than
+//! over one another. Two that were in one row stay in it until one is clearly moved
+//! out ([`rows_after`]). Everything else goes by it.
 
 use std::collections::HashMap;
 
@@ -16,6 +18,14 @@ use super::{
     wall_width,
 };
 use crate::settings::Preset;
+
+/// Two monitors whose heights as seen overlap by at least this much of the shorter one
+/// make a row.
+const JOIN: f32 = 0.5;
+/// Two that were in one row stay in it while they share at least this much: between
+/// the two nothing changes, so a monitor leaves its row only when moved clearly out of
+/// it (a quarter of the shorter height past where it would join).
+const KEEP: f32 = 0.25;
 
 /// A monitor as seen from where the arrangement faces: the middle of it across and up
 /// (radians) and half its size there.
@@ -43,6 +53,15 @@ impl Seen {
         let top = (self.elevation + self.half_height).min(o.elevation + o.half_height);
         let bottom = (self.elevation - self.half_height).max(o.elevation - o.half_height);
         (top - bottom) / (2.0 * self.half_height.min(o.half_height)).max(1e-6)
+    }
+
+    /// Whether the two are seen over one another rather than side by side: they
+    /// overlap across by more of the narrower one's width than they share of the
+    /// shorter one's height. Side neighbours a hand left overlapping a little (or a
+    /// portrait monitor and the shorter one beside it) are side by side.
+    fn over(&self, o: &Seen) -> bool {
+        let across = self.half_width + o.half_width - (self.yaw - o.yaw).abs();
+        across / (2.0 * self.half_width.min(o.half_width)).max(1e-6) > self.shared_height(o)
     }
 }
 
@@ -95,17 +114,33 @@ pub fn seen(
         .collect()
 }
 
-/// The rows: monitors whose heights as seen overlap by half the shorter one at least,
-/// and those joined through them, but never two over one another (overlapping
-/// across). Pairs that share more of their height are joined first. Rows from the
-/// top, monitors left to right.
+/// The rows: monitors whose heights as seen overlap by half the shorter one at least
+/// ([`JOIN`]), and those joined through them, but never two seen over one another (see
+/// `Seen::over`). Pairs that share more of their height are joined first. Rows from
+/// the top, monitors left to right.
 pub fn rows_of(seen: &[Seen]) -> Vec<Vec<Seen>> {
-    let across = |a: &Seen, b: &Seen| (a.yaw - b.yaw).abs() < a.half_width + b.half_width - 1e-3;
+    rows_after(seen, &[])
+}
+
+/// [`rows_of`], after `previous` (rows of ids, as last sent to the PC): two monitors
+/// that were in one row there stay joined while they share [`KEEP`] of the shorter
+/// height, so small moves never take a monitor from one row to another.
+pub fn rows_after(seen: &[Seen], previous: &[Vec<u8>]) -> Vec<Vec<Seen>> {
+    let together = |a: &Seen, b: &Seen| {
+        previous
+            .iter()
+            .any(|r| r.contains(&a.id) && r.contains(&b.id))
+    };
     let mut pairs: Vec<(f32, usize, usize)> = Vec::new();
     for i in 0..seen.len() {
         for j in i + 1..seen.len() {
             let shared = seen[i].shared_height(&seen[j]);
-            if shared >= 0.5 && !across(&seen[i], &seen[j]) {
+            let least = if together(&seen[i], &seen[j]) {
+                KEEP
+            } else {
+                JOIN
+            };
+            if shared >= least && !seen[i].over(&seen[j]) {
                 pairs.push((shared, i, j));
             }
         }
@@ -119,7 +154,7 @@ pub fn rows_of(seen: &[Seen]) -> Vec<Vec<Seen>> {
             continue;
         }
         let clash = (0..seen.len()).any(|a| {
-            row[a] == ri && (0..seen.len()).any(|b| row[b] == rj && across(&seen[a], &seen[b]))
+            row[a] == ri && (0..seen.len()).any(|b| row[b] == rj && seen[a].over(&seen[b]))
         });
         if !clash {
             for r in &mut row {
@@ -164,11 +199,12 @@ fn px_per_rad(seen: &[Seen]) -> f32 {
 /// `primary`) where it is seen over it: a monitor's angle across that row maps to the
 /// pixel at that angle on the monitor there. Seen on a circle, a wide monitor takes
 /// fewer degrees for its pixels than a narrow one, so one scale for all would put a
-/// row above off its place. Down, the angles times pixels per radian.
-pub fn layout_rows(seen: &[Seen], primary: Option<u8>) -> Vec<LayoutRow> {
+/// row above off its place. Down, the angles times pixels per radian. `previous`: the rows last sent (see
+/// [`rows_after`]).
+pub fn layout_rows(seen: &[Seen], primary: Option<u8>, previous: &[Vec<u8>]) -> Vec<LayoutRow> {
     let scale = px_per_rad(seen);
     let snap = |v: f32| (v / 8.0).round() as i32 * 8;
-    let rows = rows_of(seen);
+    let rows = rows_after(seen, previous);
     let main = rows
         .iter()
         .position(|r| r.iter().any(|m| Some(m.id) == primary))
@@ -260,8 +296,13 @@ pub fn layout_rows(seen: &[Seen], primary: Option<u8>) -> Vec<LayoutRow> {
 
 /// The monitors for the map in the menu, as the PC lays its desktop out from these
 /// rows (`prostir_layout::desk`): centre and half size in pixels, up positive.
-pub fn desktop_spots(seen: &[Seen], primary: Option<u8>) -> HashMap<u8, [f32; 4]> {
-    let rows = layout_rows(seen, primary);
+/// `previous`: the rows last sent (see [`rows_after`]).
+pub fn desktop_spots(
+    seen: &[Seen],
+    primary: Option<u8>,
+    previous: &[Vec<u8>],
+) -> HashMap<u8, [f32; 4]> {
+    let rows = layout_rows(seen, primary, previous);
     let sizes: HashMap<u8, (u32, u32)> = seen.iter().map(|m| (m.id, m.px)).collect();
     let plan = desk::plan(
         &desk::Desk {
@@ -688,7 +729,7 @@ mod tests {
         primary: Option<u8>,
     ) -> Result<(), String> {
         let all = seen(placements, m, CENTER, Preset::Arc);
-        let spots = desktop_spots(&all, primary);
+        let spots = desktop_spots(&all, primary, &[]);
         let rows = rows_of(&all);
         let row_of = |id: u8| rows.iter().position(|r| r.iter().any(|s| s.id == id));
         // Left, top, right, bottom on the desktop (down positive).
@@ -854,12 +895,13 @@ mod tests {
             yaw += a;
         }
         assert!(overlapping(&p, &m).is_some(), "they did overlap");
-        // Those over one another as seen go to two rows; each row lies on one line,
-        // side by side, the second one stacked on the first: no staircase.
+        // All at one height, they are one row even where they cover one another (seen
+        // one in front of the other, not over it): it lies on one line, side by side,
+        // no staircase.
         let all = seen(&p, &m, CENTER, Preset::Arc);
         let rows = rows_of(&all);
-        assert_eq!(rows.len(), 2, "{rows:?}");
-        let spots = desktop_spots(&all, Some(2));
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let spots = desktop_spots(&all, Some(2), &[]);
         for row in &rows {
             let mut xs: Vec<[f32; 4]> = row.iter().map(|s| spots[&s.id]).collect();
             xs.sort_by(|a, b| a[0].total_cmp(&b[0]));
@@ -878,15 +920,6 @@ mod tests {
                 );
             }
         }
-        // The second row stacked on the first: touching it.
-        let touch = rows[0].iter().any(|a| {
-            rows[1].iter().any(|b| {
-                let (a, b) = (spots[&a.id], spots[&b.id]);
-                (a[1] - a[3] - (b[1] + b[3])).abs() <= 1.0
-                    && (a[0] - b[0]).abs() < a[2] + b[2] - 200.0
-            })
-        });
-        assert!(touch, "the rows touch: {spots:?}");
         // Laid out again by the preset now: two rows, nothing overlapping.
         let fresh = arrange(Preset::Arc, &m, Some(2), None);
         assert_eq!(overlapping(&fresh, &m), None);
@@ -919,11 +952,11 @@ mod tests {
         let p = tidy(&p, four, CENTER, Some(0));
         let rows = row_ids(&p, four);
         assert_eq!(rows.len(), 2, "{rows:?}");
-        let desk = desktop_spots(&seen(&p, four, CENTER, Preset::Arc), Some(0));
+        let desk = desktop_spots(&seen(&p, four, CENTER, Preset::Arc), Some(0), &[]);
         let same = |q: &HashMap<u8, Placement>, what: &str| {
             assert_eq!(row_ids(q, four), rows, "{what}: rows");
             assert_eq!(
-                desktop_spots(&seen(q, four, CENTER, Preset::Arc), Some(0)),
+                desktop_spots(&seen(q, four, CENTER, Preset::Arc), Some(0), &[]),
                 desk,
                 "{what}: desktop"
             );
@@ -979,5 +1012,102 @@ mod tests {
             .zip(text[0].places.clone())
             .collect();
         same(&back, "profile and back");
+    }
+    /// `placements` with monitor `id` turned `right` radians around the eye (to the
+    /// right when positive) and moved `up` metres.
+    fn moved(
+        placements: &HashMap<u8, Placement>,
+        id: u8,
+        right: f32,
+        up: f32,
+    ) -> HashMap<u8, Placement> {
+        let turn = Quat::from_rotation_y(-right);
+        let mut out = placements.clone();
+        let p = out.get_mut(&id).unwrap();
+        p.position = turn * p.position + Vec3::Y * up;
+        p.rotation = (turn * p.rotation).normalize();
+        out
+    }
+
+    /// 2026-11-20 in the headset: 2560x1440 | 1440x2560 primary | 2560x1440 in one row.
+    /// Moved a little by hand (a side monitor a hair into the portrait), the rows split
+    /// into [1] / [0, 2] or [1, 2] / [0], flipping back and forth, and the desktop ended
+    /// with the portrait alone under the other two. A drag of each of them, a few
+    /// centimetres up and down and up to 1.5° into its neighbour or away, keeps one row
+    /// in every frame, worked out afresh or after the frame before.
+    #[test]
+    fn a_portrait_between_two_stays_in_their_row_while_they_move() {
+        let three = [(0, 2560, 1440), (1, 1440, 2560), (2, 2560, 1440)];
+        let start = arrange(Preset::Arc, &three, Some(1), None);
+        let ids = |rows: &[Vec<Seen>]| -> Vec<Vec<u8>> {
+            rows.iter()
+                .map(|r| r.iter().map(|s| s.id).collect())
+                .collect()
+        };
+        let mut frames: Vec<HashMap<u8, Placement>> = Vec::new();
+        for id in [0u8, 1, 2] {
+            for step in 0..=40 {
+                // Into the neighbour and back out, up and down, with a tremor.
+                let t = step as f32 / 40.0 * std::f32::consts::TAU;
+                let right = 1.5f32.to_radians() * t.sin() * if id == 2 { -1.0 } else { 1.0 };
+                let up = 0.08 * (2.0 * t).sin() + 0.002 * (17.0 * t).sin();
+                frames.push(moved(&start, id, right, up));
+            }
+        }
+        // Both side monitors into the portrait at once.
+        for step in 0..=20 {
+            let right = 1.5f32.to_radians() * step as f32 / 20.0;
+            frames.push(moved(&moved(&start, 0, right, 0.03), 2, -right, -0.03));
+        }
+        // The rows of every frame, worked out afresh and after the frame before.
+        let mut fresh: Vec<Vec<Vec<u8>>> = Vec::new();
+        let mut after: Vec<Vec<Vec<u8>>> = vec![Vec::new()];
+        for (i, p) in frames.iter().enumerate() {
+            let all = seen(p, &three, CENTER, Preset::Arc);
+            fresh.push(ids(&rows_of(&all)));
+            let next = ids(&rows_after(&all, &after[after.len() - 1]));
+            after.push(next);
+            assert_eq!(fresh[i], vec![vec![0, 1, 2]], "frame {i}");
+            assert_eq!(after[i + 1], vec![vec![0, 1, 2]], "frame {i}");
+        }
+        let flips = |rows: &[Vec<Vec<u8>>]| rows.windows(2).filter(|w| w[0] != w[1]).count();
+        assert_eq!((flips(&fresh), flips(&after[1..])), (0, 0));
+    }
+
+    /// A portrait monitor whose height as seen covers that of a landscape monitor beside
+    /// it is in its row: every landscape size, on either side, touching, a little apart
+    /// or overlapping by up to a tenth of the narrower, anywhere up and down within the
+    /// portrait's height, near and far.
+    #[test]
+    fn a_portrait_covering_its_neighbour_is_in_its_row() {
+        let portrait = (0u8, 1440u32, 2560u32);
+        let wp = portrait.1 as f32 * METRES_PER_PIXEL;
+        let hp = portrait.2 as f32 * METRES_PER_PIXEL;
+        for &(w, h) in SIZES.iter().filter(|s| s.0 > s.1) {
+            let (wl, hl) = (w as f32 * METRES_PER_PIXEL, h as f32 * METRES_PER_PIXEL);
+            for radius in [RADIUS, 1.5] {
+                let radius = radius.max(wl / 2.0 / 60f32.to_radians().sin());
+                let half = |w: f32| (w / 2.0 / radius).asin();
+                for side in [-1.0f32, 1.0] {
+                    for gap in [-0.10f32, -0.05, -0.01, 0.0, 0.02, 0.05] {
+                        for k in [-1.0f32, -0.5, 0.0, 0.5, 1.0] {
+                            let narrower = 2.0 * half(wl).min(half(wp));
+                            let yaw = side * (half(wp) + half(wl) + gap * narrower);
+                            let dy = k * (hp - hl) / 2.0;
+                            let p = HashMap::from([
+                                (0, on_cylinder(0.0, 0.0, wp, radius)),
+                                (1, on_cylinder(yaw, dy, wl, radius)),
+                            ]);
+                            let m = [portrait, (1, w, h)];
+                            assert_eq!(
+                                row_ids(&p, &m).len(),
+                                1,
+                                "{w}x{h} at {radius} m, side {side}, gap {gap}, up {k}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 }

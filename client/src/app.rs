@@ -503,8 +503,9 @@ impl Scene {
         if !complete {
             return;
         }
-        // The laptop screen too: the PC puts it where it stands here.
-        let rows = layout::layout_rows(&self.seen(), self.primary);
+        // The laptop screen too: the PC puts it where it stands here. Monitors stay in
+        // the rows the PC has until clearly moved out of them.
+        let rows = layout::layout_rows(&self.seen(), self.primary, &self.sent_rows());
         if rows.is_empty() || self.sent_layout.as_ref() == Some(&rows) {
             self.pending_layout = None;
             return;
@@ -865,7 +866,16 @@ impl Scene {
     /// The monitors on the map: as the PC lays its desktop out from the rows it gets
     /// (see `layout::desktop_spots`).
     fn map_spots(&self) -> HashMap<u8, [f32; 4]> {
-        layout::desktop_spots(&self.seen(), self.primary)
+        layout::desktop_spots(&self.seen(), self.primary, &self.sent_rows())
+    }
+
+    /// The rows last sent to the PC, by id: what its desktop is laid out by now.
+    fn sent_rows(&self) -> Vec<Vec<u8>> {
+        self.sent_layout
+            .iter()
+            .flatten()
+            .map(|r| r.ids().collect())
+            .collect()
     }
 
     /// The monitors and the laptop screen as seen from where the arrangement faces.

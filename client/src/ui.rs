@@ -3552,6 +3552,7 @@ mod tests {
         let spots = desktop_spots(
             &seen(&placements, &sizes, center, Preset::Arc),
             Some(primary),
+            &[],
         );
         let mut st = sample_state();
         st.tab = Tab::Monitors;

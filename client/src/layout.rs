@@ -1417,7 +1417,7 @@ mod tests {
     fn rows_follow_what_the_user_sees() {
         let center = (Vec3::ZERO, 0.0);
         let rows_ids = |p: &HashMap<u8, Placement>, m: &[(u8, u32, u32)]| {
-            layout_rows(&seen(p, m, center, Preset::Arc), None)
+            layout_rows(&seen(p, m, center, Preset::Arc), None, &[])
                 .iter()
                 .map(|r| r.ids().collect::<Vec<_>>())
                 .collect::<Vec<_>>()
@@ -1438,7 +1438,7 @@ mod tests {
         top.position = Vec3::new(mid.position.x, mid.position.y + 1.0, mid.position.z);
         top.rotation = facing(top.position, Vec3::ZERO);
         lifted.insert(2, top);
-        let rows = layout_rows(&seen(&lifted, &three, center, Preset::Arc), Some(1));
+        let rows = layout_rows(&seen(&lifted, &three, center, Preset::Arc), Some(1), &[]);
         assert_eq!(rows_ids(&lifted, &three), vec![vec![2], vec![0, 1]]);
         // It is seen right over the middle monitor, not over the right edge.
         let seen_at = |row: usize, i: usize| rows[row].entries[i].center.unwrap();
@@ -1530,7 +1530,11 @@ mod tests {
         let center = (Vec3::ZERO, 0.0);
         let three = [(0, 2560, 1440), (1, 2560, 1440), (2, 2560, 1440)];
         let overhead = arrange(Preset::Overhead, &three, None, None);
-        let rows = layout_rows(&seen(&overhead, &three, center, Preset::Overhead), None);
+        let rows = layout_rows(
+            &seen(&overhead, &three, center, Preset::Overhead),
+            None,
+            &[],
+        );
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].ids().collect::<Vec<_>>(), vec![0, 1, 2]);
     }
