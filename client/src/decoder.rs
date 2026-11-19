@@ -305,16 +305,20 @@ impl Timing {
             return;
         }
         let (sum, max, taken) = std::mem::take(&mut self.queue);
+        let wait = std::mem::take(&mut self.wait);
+        let decode = std::mem::take(&mut self.decode);
+        // Quiet while no frames come (headset taken off, say).
+        if taken == 0 && decode.count() == 0 {
+            return;
+        }
         info!(
             "decoder {}: {} frames decoded; net → decoder {}; decode {}; waiting for the decoder avg {:.1} max {max}; inside the decoder {}",
             self.id,
-            self.decode.count(),
-            self.wait.summary_ms(),
-            self.decode.summary_ms(),
+            decode.count(),
+            wait.summary_ms(),
+            decode.summary_ms(),
             sum as f64 / f64::from(taken.max(1)),
             self.in_flight.len()
         );
-        self.wait = Histogram::default();
-        self.decode = Histogram::default();
     }
 }
