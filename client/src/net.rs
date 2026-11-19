@@ -1,7 +1,6 @@
 //! Finds the PC host, keeps the TCP connection alive and fans frames out to decoders.
 
-use std::collections::HashMap;
-use std::io::Write;
+use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpStream, UdpSocket};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -10,11 +9,16 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use log::{info, warn};
+use prostir_proto::handshake::{self, Answer};
 use prostir_proto::link::tcp::{NoiseTcp, Plain};
-use prostir_proto::link::{Closer, Link, PeerInfo, RecordSender, StreamReader, StreamWriter};
+use prostir_proto::link::{Closer, Link, PeerInfo, RecordReceiver, RecordSender};
+use prostir_proto::packet::{self, Assembler, FRAGMENT, lane};
 use prostir_proto::secure::{self, Identity, Pairing, TrustStore, confirmation, tags_match};
 use prostir_proto::stats::{Gaps, Period};
 use prostir_proto::{ClientMsg, Codec, HostMsg, PROTOCOL_VERSION};
+
+/// While the user types a code, the connection is looked at this often.
+const LOOK_EVERY: Duration = Duration::from_millis(500);
 
 /// How often the session logs what it received.
 const REPORT_EVERY: Duration = Duration::from_secs(10);
@@ -77,12 +81,15 @@ impl Feedback {
         std::thread::Builder::new()
             .name("net-writer".into())
             .spawn(move || {
-                let mut buf = Vec::with_capacity(4096);
-                let put = |msg: ClientMsg, buf: &mut Vec<u8>| {
+                let mut put = |msg: ClientMsg| {
                     if droppable(&msg) {
                         counted.fetch_sub(1, Ordering::Relaxed);
                     }
-                    msg.write(buf)
+                    let lane = match msg {
+                        ClientMsg::Mic { .. } => lane::SOUND,
+                        _ => lane::CONTROL,
+                    };
+                    packet::send_whole(&mut *sender, lane, msg.encode()?, FRAGMENT)
                 };
                 // However this thread stops, the session ends with it.
                 struct Close(Closer);
@@ -93,16 +100,7 @@ impl Feedback {
                 }
                 let _close = Close(closer);
                 while let Ok(msg) = rx.recv() {
-                    // Everything already waiting goes out as one encrypted chunk.
-                    buf.clear();
-                    let mut sent = put(msg, &mut buf);
-                    while sent.is_ok()
-                        && buf.len() < 64 * 1024
-                        && let Ok(more) = rx.try_recv()
-                    {
-                        sent = put(more, &mut buf);
-                    }
-                    if let Err(e) = sent.and_then(|()| StreamWriter(&mut *sender).write_all(&buf)) {
+                    if let Err(e) = put(msg) {
                         warn!("sending to the PC failed: {e}");
                         return;
                     }
@@ -384,9 +382,10 @@ impl Steering {
         self.lock().pc_shows_code
     }
 
-    /// Waits for a typed code; `None` if the connection was dropped meanwhile.
-    /// `stream` is only looked at, to tell whether the PC is still there.
-    fn wait_code(&self, stream: &TcpStream) -> Option<String> {
+    /// Waits for a code typed for the PC at `addr`; `None` if the connection was
+    /// dropped meanwhile. `alive` looks at the connection for a moment (at most
+    /// [`LOOK_EVERY`]) and says whether the PC is still there.
+    fn wait_code(&self, addr: SocketAddr, mut alive: impl FnMut() -> bool) -> Option<String> {
         self.lock().typed_code = None;
         let deadline = Instant::now() + Duration::from_secs(300);
         loop {
@@ -396,17 +395,12 @@ impl Steering {
                     return Some(code);
                 }
                 // Dropped by "change PC" or "the other way round".
-                if s.current
-                    .as_ref()
-                    .is_none_or(|c| Some(c.addr) != stream.peer_addr().ok())
-                {
+                if s.current.as_ref().is_none_or(|c| c.addr != addr) {
                     return None;
                 }
-                let _ = self.0.1.wait_timeout(s, Duration::from_millis(500));
             }
-            // Checked without holding the lock (the menu takes it every frame), and
-            // without blocking: the socket's read timeout is minutes long here.
-            if !alive(stream) || Instant::now() >= deadline {
+            // Looked at without holding the lock (the menu takes it every frame).
+            if !alive() || Instant::now() >= deadline {
                 return None;
             }
         }
@@ -514,20 +508,6 @@ fn offer_label(host: &str, addr: SocketAddr) -> String {
         host.to_owned()
     } else {
         format!("{host} {ip}")
-    }
-}
-
-/// Whether the PC is still connected, without waiting for anything to arrive.
-fn alive(stream: &TcpStream) -> bool {
-    if stream.take_error().ok().flatten().is_some() || stream.set_nonblocking(true).is_err() {
-        return false;
-    }
-    let peeked = stream.peek(&mut [0u8; 1]);
-    let _ = stream.set_nonblocking(false);
-    match peeked {
-        Ok(0) => false,
-        Ok(_) => true,
-        Err(e) => e.kind() == std::io::ErrorKind::WouldBlock,
     }
 }
 
@@ -701,10 +681,12 @@ fn scan_subnet() -> Option<TcpStream> {
 }
 
 /// What pairing needs from the current connection.
-struct Session<'a, 'r> {
-    /// Only looked at, to tell whether the PC is still there while the user types.
-    stream: &'a TcpStream,
-    reader: &'a mut StreamReader<'r>,
+struct Session<'a> {
+    addr: SocketAddr,
+    receiver: &'a mut dyn RecordReceiver,
+    packets: &'a mut Assembler,
+    /// Messages read while waiting for the user, not handled yet.
+    pending: VecDeque<HostMsg>,
     feedback: &'a Feedback,
     events: &'a Sender<NetEvent>,
     steering: &'a Steering,
@@ -713,14 +695,48 @@ struct Session<'a, 'r> {
     host: &'a str,
 }
 
-impl Session<'_, '_> {
+impl Session<'_> {
+    /// The next message from the PC before the session.
+    fn read(&mut self) -> std::io::Result<HostMsg> {
+        match self.pending.pop_front() {
+            Some(msg) => Ok(msg),
+            None => HostMsg::recv(self.receiver, self.packets),
+        }
+    }
+
+    /// Whether the PC is still there, looking at the connection for a moment: what
+    /// arrives meanwhile is kept for [`Session::read`].
+    fn alive(
+        receiver: &mut dyn RecordReceiver,
+        packets: &mut Assembler,
+        pending: &mut VecDeque<HostMsg>,
+    ) -> bool {
+        receiver.set_idle_limit(Some(LOOK_EVERY));
+        let alive = match receiver.recv() {
+            Ok(record) => match packets.push(record).map_err(std::io::Error::from) {
+                Ok(Some(m)) => match HostMsg::from_message(m) {
+                    Ok(msg) => {
+                        pending.extend(msg);
+                        true
+                    }
+                    Err(_) => false,
+                },
+                Ok(None) => true,
+                Err(_) => false,
+            },
+            Err(e) => e.kind() == std::io::ErrorKind::TimedOut,
+        };
+        receiver.set_idle_limit(Some(Duration::from_secs(300)));
+        alive
+    }
+
     /// Pairs if the user agreed to; otherwise asks them and closes the connection
     /// (the PC must not be held waiting for an answer).
     fn pair_if_approved(&mut self, trusted: &mut TrustStore) -> std::io::Result<()> {
         if self.steering.approved(&self.peer.key) {
             return self.pair(trusted);
         }
-        let addr = self.stream.peer_addr()?;
+        let addr = self.addr;
         self.steering.offer(self.peer.key, addr);
         let _ = self.events.send(NetEvent::PairOffer {
             host: offer_label(self.host, addr),
@@ -734,9 +750,7 @@ impl Session<'_, '_> {
     /// Pairs with the PC: up to [`PAIR_ATTEMPTS`] codes, then asks the user again.
     fn pair(&mut self, trusted: &mut TrustStore) -> std::io::Result<()> {
         // The user needs time to read and type the code.
-        self.reader
-            .receiver()
-            .set_idle_limit(Some(Duration::from_secs(300)));
+        self.receiver.set_idle_limit(Some(Duration::from_secs(300)));
         for _ in 0..PAIR_ATTEMPTS {
             let pc_shows = self.steering.pc_shows_code();
             // The PC makes its code only when asked, so ask first and then wait for
@@ -750,8 +764,16 @@ impl Session<'_, '_> {
                     host: self.host.to_owned(),
                     code: None,
                 });
-                self.steering
-                    .wait_code(self.stream)
+                let Session {
+                    addr,
+                    receiver,
+                    packets,
+                    pending,
+                    steering,
+                    ..
+                } = self;
+                steering
+                    .wait_code(*addr, || Self::alive(&mut **receiver, packets, pending))
                     .ok_or_else(|| std::io::Error::other("pairing interrupted"))?
             } else {
                 let code = secure::pairing_code();
@@ -764,7 +786,7 @@ impl Session<'_, '_> {
             let (pairing, msg) = Pairing::start(&code);
             self.feedback.send(&ClientMsg::PairMsg { msg })?;
             let theirs = loop {
-                match HostMsg::read_setup(self.reader)? {
+                match self.read()? {
                     HostMsg::PairMsg { msg } => break Some(msg),
                     // The PC gave up this attempt (e.g. its dialog was cancelled).
                     HostMsg::PairResult { .. } => break None,
@@ -786,7 +808,7 @@ impl Session<'_, '_> {
             self.feedback.send(&ClientMsg::PairConfirm {
                 tag: confirmation(&key, "headset", self.peer, own),
             })?;
-            match HostMsg::read_setup(self.reader)? {
+            match self.read()? {
                 HostMsg::PairResult { tag: Some(tag) }
                     if tags_match(&tag, &confirmation(&key, "pc", self.peer, own)) =>
                 {
@@ -797,9 +819,7 @@ impl Session<'_, '_> {
                         secure::fingerprint(&self.peer.key)
                     );
                     let _ = self.events.send(NetEvent::Paired);
-                    self.reader
-                        .receiver()
-                        .set_idle_limit(Some(Duration::from_secs(10)));
+                    self.receiver.set_idle_limit(Some(Duration::from_secs(10)));
                     return Ok(());
                 }
                 HostMsg::PairResult { .. } => {
@@ -810,7 +830,7 @@ impl Session<'_, '_> {
             }
         }
         // Several wrong codes: stop and let the user decide whether to go on.
-        let addr = self.stream.peer_addr()?;
+        let addr = self.addr;
         self.steering.offer(self.peer.key, addr);
         let _ = self.events.send(NetEvent::PairOffer {
             host: offer_label(self.host, addr),
@@ -847,16 +867,13 @@ fn run_session(
     ended: &mut Ended,
 ) -> std::io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-    let watch = stream.try_clone()?;
     let addr = stream.peer_addr()?;
     let Link {
-        sender,
+        mut sender,
         mut receiver,
         closer,
         peer,
     } = NoiseTcp::connect(stream, identity, Arc::new(Plain))?;
-    let mut reader = StreamReader::new(&mut *receiver);
-    let feedback = Feedback::start(sender, closer.clone())?;
     // However the session ends, the connection closes: nothing stays blocked on it.
     struct CloseOnExit(Closer);
     impl Drop for CloseOnExit {
@@ -864,7 +881,7 @@ fn run_session(
             self.0.close();
         }
     }
-    let _close = CloseOnExit(closer);
+    let _close = CloseOnExit(closer.clone());
     let host = name.clone().unwrap_or_else(|| {
         if addr.ip().is_loopback() {
             crate::i18n::current().t("ПК (USB)", "PC (USB)").into()
@@ -872,61 +889,58 @@ fn run_session(
             addr.ip().to_string()
         }
     });
-    let mut session = Session {
-        stream: &watch,
-        reader: &mut reader,
-        feedback: &feedback,
-        events,
-        steering,
-        identity,
-        peer: &peer,
-        host: &host,
-    };
     // Versions first, before pairing: this exchange is the same in every version, so
     // a PC of any version says which side to update.
-    feedback.send(&ClientMsg::Hello {
-        version: PROTOCOL_VERSION,
-        min: prostir_proto::MIN_PROTOCOL,
-        app: env!("CARGO_PKG_VERSION").into(),
-    })?;
-    let language = loop {
-        match HostMsg::read_setup(session.reader)? {
-            HostMsg::Welcome { language, .. } => break crate::i18n::Lang::from_code(&language),
-            // The text is for headsets that predate `Incompatible`; this one shows a page.
-            HostMsg::Error { .. } => {}
-            HostMsg::Incompatible { protocol, app } => {
-                let _ = events.send(NetEvent::Incompatible {
-                    pc_newer: protocol > PROTOCOL_VERSION,
-                    pc_app: app,
-                });
-                // Nothing changes until one side is updated: try again only now and then.
-                std::thread::sleep(Duration::from_secs(10));
-                return Ok(());
-            }
-            other => return Err(std::io::Error::other(format!("unexpected {other:?}"))),
+    handshake::send_hello(&mut *sender, env!("CARGO_PKG_VERSION"))?;
+    let language = match handshake::read_answer(&mut *receiver)? {
+        Answer::Welcome { language, .. } => crate::i18n::Lang::from_code(&language),
+        Answer::Incompatible { protocol, app } => {
+            let _ = events.send(NetEvent::Incompatible {
+                pc_newer: protocol > PROTOCOL_VERSION,
+                pc_app: app,
+            });
+            // Nothing changes until one side is updated: try again only now and then.
+            std::thread::sleep(Duration::from_secs(10));
+            return Ok(());
         }
     };
-    // A PC we have never paired with: pair only once the user said so in the menu,
-    // and never on our own (a hostile PC on the network could keep guessing codes).
-    if !trusted.contains(&peer.key) {
-        session.pair_if_approved(trusted)?;
-    }
-    feedback.send(&ClientMsg::Open)?;
-    loop {
-        match HostMsg::read_setup(session.reader)? {
-            HostMsg::Opened => break,
-            HostMsg::PairingRequired => {
-                session.pair_if_approved(trusted)?;
-                feedback.send(&ClientMsg::Open)?;
+    // From here on, packets.
+    let feedback = Feedback::start(sender, closer.clone())?;
+    let mut packets = HostMsg::assembler();
+    {
+        let mut session = Session {
+            addr,
+            receiver: &mut *receiver,
+            packets: &mut packets,
+            pending: VecDeque::new(),
+            feedback: &feedback,
+            events,
+            steering,
+            identity,
+            peer: &peer,
+            host: &host,
+        };
+        // A PC we have never paired with: pair only once the user said so in the menu,
+        // and never on our own (a hostile PC on the network could keep guessing codes).
+        if !trusted.contains(&peer.key) {
+            session.pair_if_approved(trusted)?;
+        }
+        feedback.send(&ClientMsg::Open)?;
+        loop {
+            match session.read()? {
+                HostMsg::Opened => break,
+                HostMsg::PairingRequired => {
+                    session.pair_if_approved(trusted)?;
+                    feedback.send(&ClientMsg::Open)?;
+                }
+                other => return Err(std::io::Error::other(format!("unexpected {other:?}"))),
             }
-            other => return Err(std::io::Error::other(format!("unexpected {other:?}"))),
         }
     }
     ended.opened = true;
+    packets.set_limits(HostMsg::limits(true));
     // The host re-sends the last frame every 500 ms, so 10 s of silence means a dead link.
-    reader
-        .receiver()
-        .set_idle_limit(Some(Duration::from_secs(10)));
+    receiver.set_idle_limit(Some(Duration::from_secs(10)));
     let _ = events.send(NetEvent::Connected {
         addr,
         name,
@@ -947,7 +961,7 @@ fn run_session(
     let mut media_bytes = 0u64;
     let mut report = Period::new(REPORT_EVERY);
     let result = loop {
-        let msg = match HostMsg::read(&mut reader) {
+        let msg = match HostMsg::recv(&mut *receiver, &mut packets) {
             Ok(m) => m,
             Err(e) => break Err(e),
         };

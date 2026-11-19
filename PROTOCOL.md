@@ -6,6 +6,8 @@ write their own client or host.
 
 The source of truth is the code: [`proto/src/lib.rs`](proto/src/lib.rs) (messages),
 [`proto/src/wire.rs`](proto/src/wire.rs) (how values are encoded),
+[`proto/src/packet.rs`](proto/src/packet.rs) (packets),
+[`proto/src/handshake.rs`](proto/src/handshake.rs) (the version handshake on records),
 [`proto/src/link/tcp.rs`](proto/src/link/tcp.rs) (encryption) and
 [`proto/src/secure.rs`](proto/src/secure.rs) (keys and pairing).
 
@@ -108,7 +110,7 @@ client -> host   s, se
 
 Each handshake message is sent as a 2-byte **big-endian** length followed by the Noise
 message (at most 65535 bytes). After the third message both sides switch to transport
-mode (see [Encrypted transport frames](#encrypted-transport-frames)).
+mode (see [Records](#records)).
 
 The implementation uses the Rust crate `snow` 0.10.
 
@@ -239,8 +241,91 @@ discovery beacon (magic, port, host name) and the Noise handshake messages thems
 
 ## 3. Framing
 
-There are two layers. Protocol messages form a byte stream; that byte stream is cut
-into encrypted transport frames.
+There are three layers. The transport carries encrypted **records**; each record after
+the version handshake is one **packet**; packets carry **messages**, cut into pieces
+when they are big, so that something urgent (sound, a menu answer) never waits behind
+a whole video frame.
+
+### Records
+
+After the Noise handshake, everything travels in records:
+
+```
++---------------------+---------------------------------------------+
+| length u16 BE       | ciphertext = AES-256-GCM(plaintext) + 16-B tag |
++---------------------+---------------------------------------------+
+```
+
+- `length` is **big-endian** (unlike everything inside) and counts the ciphertext
+  including its 16-byte tag; at most 65535.
+- So one record holds at most 65519 bytes of plaintext.
+- Nonces are not sent. Each direction has its own Noise cipher state, and the nonce is
+  a counter starting at 0 for the first record in that direction and growing by 1 per
+  record (standard Noise nonce encoding). There is no rekeying. A record that does not
+  decrypt ends the connection.
+- No associated data.
+- The TCP connection closing between two records is a normal end of session; closing in
+  the middle of a record is an error.
+
+The version handshake comes first, in the stream format of protocol 1 (see
+[The version handshake](#the-version-handshake-frozen)); every record after it is a
+packet.
+
+### Packets
+
+```
++----------+---------+------------------------------------+
+| flags u8 | lane u8 | body: the next bytes of a message  |
++----------+---------+------------------------------------+
+```
+
+- `flags`: bit 0 `FIRST` (the message's first packet), bit 1 `LAST` (its last one); a
+  message in one packet has both. The other bits must be 0.
+- `lane`: where the message is put back together. A lane holds at most one message at
+  a time: its packets follow one another in that lane, and the next message in the
+  lane starts only after the last packet of the one before. Packets of other lanes may
+  come in between. A lane says nothing about what a message is (the tag does).
+- `body`: the next bytes of the message, at least one. The first packet's body starts
+  with the message's 5-byte header (tag and length, see
+  [Protocol messages](#protocol-messages)), whole, so the receiver knows the length at
+  once. The bodies of a message's packets joined are exactly its bytes.
+- Order: the messages of one lane arrive in order; messages of different lanes in the
+  order of their last packets.
+- The sender chooses the lanes and how big each packet is (the current apps: 16 KiB of
+  body, lane `0` for control messages, `1` for PC sound and the microphone, and `2 +
+  id` for video stream `id`). A receiver accepts any body size from 1 byte to the size
+  of a record and any lane.
+- A message with a tag the receiver does not know is put together and skipped.
+
+The transport is reliable and ordered, so a packet out of place is a bug or an attack,
+never a loss. Each of these ends the connection:
+
+- flag bits other than `FIRST` and `LAST`, or a record too short for the 2-byte packet
+  header;
+- a packet with an empty body;
+- a packet without `FIRST` in a lane that holds no message;
+- `FIRST` in a lane that holds a message;
+- a first packet whose body is shorter than the 5-byte message header;
+- a message longer than the receiver's limit (below), checked on the first packet,
+  before anything is allocated;
+- bytes beyond the length the header says;
+- `LAST` before the message's end, or a packet that completes the message without
+  `LAST`;
+- more lanes holding a message at once than the limit.
+
+Limits:
+
+| What | Before `Opened` | In the session |
+|---|---|---|
+| Payload of a message from the host | 64 KiB | 64 MiB |
+| Payload of a message from the headset | 64 KiB | 64 KiB |
+| Lanes holding a message being put together at once | 1 | 32 |
+
+Before `Opened` the host may not be trusted yet, and the headset is not trusted until
+it pairs, so what either can make the other allocate stays small. The biggest headset
+message in use, a slice of microphone sound, is under 1 KiB. A message complete in one
+packet takes no lane. The host applies the session column once it has sent `Opened`,
+the headset once it has read it.
 
 ### Protocol messages
 
@@ -252,14 +337,7 @@ into encrypted transport frames.
 
 - `tag`: which message (see [Message reference](#5-message-reference)). Host→client tags
   are 1 to 24, client→host tags 101 to 127.
-- `length`: payload length in bytes, **little-endian**.
-- Maximum payload: 64 MiB (`64 * 1024 * 1024`) for a message from the host once the
-  session is open (after `Opened`) and 64 KiB (`64 * 1024`) before, when the host may
-  not be trusted yet; 64 KiB for a message from the headset, before and after trust. A reader rejects
-  a larger length and the connection ends, also for a message it would skip. The
-  biggest headset message in use, a slice of microphone sound, is under 1 KiB; the
-  lower limit keeps what a peer that is not trusted yet can make the host allocate
-  small.
+- `length`: payload length in bytes, **little-endian**, at most the limit above.
 
 ### Encoding
 
@@ -296,32 +374,6 @@ Reading is strict, and any of these ends the connection:
 A message with a tag the reader does not know is skipped whole (its length is known),
 see [Forward compatibility](#forward-compatibility). Unknown values inside a known
 message are not skipped: they are errors.
-
-### Encrypted transport frames
-
-After the handshake, the byte stream of protocol messages is sent in chunks:
-
-```
-+---------------------+---------------------------------------------+
-| length u16 BE       | ciphertext = AES-256-GCM(plaintext) + 16-B tag |
-+---------------------+---------------------------------------------+
-```
-
-- `length` is **big-endian** (unlike the protocol messages inside) and counts the
-  ciphertext including its 16-byte tag; at most 65535.
-- So one chunk holds at most 65519 bytes of plaintext.
-- Chunk boundaries are unrelated to message boundaries: a message may span many chunks,
-  and one chunk may hold several messages or parts of them. A receiver concatenates the
-  plaintexts and parses messages from that stream.
-- Nonces are not sent. Each direction has its own Noise cipher state, and the nonce is
-  a counter starting at 0 for the first chunk in that direction and growing by 1 per
-  chunk (standard Noise nonce encoding). There is no rekeying. A chunk that does not
-  decrypt ends the connection.
-- No associated data.
-- A chunk with an empty plaintext carries nothing; a reader skips it and reads on (the
-  current apps never send one).
-- The TCP connection closing between two chunks is a normal end of session; closing in
-  the middle of a chunk is an error.
 
 ## 4. Session flow
 
@@ -364,6 +416,21 @@ other messages.
 
 For example `Hello{version: 2, min: 2, app: "0.2.0"}` is
 `65 0d 00 00 00 02 00 00 00 02 00 00 00 30 2e 32 2e 30`.
+
+**In records.** These four go in the stream format of protocol 1, as every version
+wrote them: the records joined into one byte stream, the messages one after the other
+in it, across record boundaries (an empty record carries nothing here). What decides
+where the stream ends:
+
+- the client puts `Hello` in a record of its own, with nothing else in it; once the
+  versions fit, the host requires that (a `Hello` that shares its record closes the
+  connection);
+- the host puts `Welcome` in a record of its own; a `Welcome` that shares its record
+  closes the connection;
+- the next record from the client after `Hello`, and from the host after `Welcome`, is
+  the first [packet](#packets); everything from then on is packets, pairing included;
+- `Error` and `Incompatible` end a connection whose versions do not fit, so they stay
+  in the stream format; a client reads them across any record boundaries.
 
 **Hello.** The client sends its newest protocol (`version` = `PROTOCOL_VERSION`), the
 oldest it still understands (`min` = `MIN_PROTOCOL`) and its app version (for example

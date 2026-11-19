@@ -209,6 +209,7 @@ impl Outbox {
     }
 
     /// Nothing is waiting to be sent.
+    #[cfg(test)]
     pub fn is_idle(&self) -> bool {
         let s = self.state.lock().unwrap();
         s.control.is_empty() && s.audio.is_empty() && s.video.is_empty()

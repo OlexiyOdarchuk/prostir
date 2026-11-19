@@ -93,7 +93,7 @@ pub struct Link {
 }
 
 /// Reads records as one byte stream, the way protocol 1 framed everything. Only the
-/// frozen version handshake still is (see the crate root): its messages may run
+/// frozen version handshake still is (see [`crate::handshake`]): its messages may run
 /// across record boundaries, and an empty record carries nothing.
 pub struct StreamReader<'a> {
     receiver: &'a mut dyn RecordReceiver,
@@ -115,14 +115,10 @@ impl<'a> StreamReader<'a> {
     pub fn at_record_end(&self) -> bool {
         self.pos == self.record.len()
     }
-
-    /// The records underneath (to change how long it may stay silent).
-    pub fn receiver(&mut self) -> &mut dyn RecordReceiver {
-        &mut *self.receiver
-    }
 }
 
-/// Writes a byte stream as records, one per write of at most [`MAX_RECORD`] bytes.
+/// Writes a byte stream as records, one per write of at most [`MAX_RECORD`] bytes (the
+/// frozen version handshake, see [`crate::handshake`]).
 pub struct StreamWriter<'a>(pub &'a mut dyn RecordSender);
 
 impl Write for StreamWriter<'_> {

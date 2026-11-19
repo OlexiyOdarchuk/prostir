@@ -6,13 +6,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
+use prostir_proto::handshake::{self, Answer};
 use prostir_proto::link::tcp::{NoiseTcp, Plain};
-use prostir_proto::link::{
-    Closer, Link, PeerInfo, RecordReceiver, RecordSender, StreamReader, StreamWriter,
-};
+use prostir_proto::link::{Closer, Link, PeerInfo, RecordReceiver, RecordSender};
+use prostir_proto::packet::{self, Assembler, FRAGMENT, lane};
 use prostir_proto::secure::{Identity, Pairing, TrustStore, confirmation, tags_match};
 use prostir_proto::stats::Gaps;
-use prostir_proto::{ClientMsg, Codec, HostMsg, PROTOCOL_VERSION, PcSettings};
+use prostir_proto::{ClientMsg, Codec, HostMsg, PcSettings};
 
 use crate::nal;
 
@@ -279,17 +279,17 @@ impl FakeHeadset {
             closer,
             peer,
         } = NoiseTcp::connect(stream, &keys.identity, Arc::new(Plain))?;
-        let (version, language) = open(
-            &mut *receiver,
-            &mut *sender,
-            keys,
-            &peer,
-            addr,
-            &mut pairing,
-        )?;
+        let mut packets = HostMsg::assembler();
+        let mut ends = Ends {
+            rx: &mut *receiver,
+            tx: &mut *sender,
+            packets: &mut packets,
+        };
+        let (version, language) = open(&mut ends, keys, &peer, addr, &mut pairing)?;
         receiver.set_idle_limit(None);
+        packets.set_limits(HostMsg::limits(true));
         let writer = Arc::new(Mutex::new(sender));
-        let incoming = spawn_reader(receiver, writer.clone())?;
+        let incoming = spawn_reader(receiver, packets, writer.clone())?;
         Ok(Self {
             closer,
             writer,
@@ -302,8 +302,7 @@ impl FakeHeadset {
 
     /// Sends `msg` to the PC.
     pub fn send(&mut self, msg: &ClientMsg) -> Result<()> {
-        let mut w = self.writer.lock().unwrap();
-        msg.write(&mut StreamWriter(&mut **w))?;
+        send(&mut **self.writer.lock().unwrap(), msg.clone())?;
         Ok(())
     }
 
@@ -405,53 +404,67 @@ impl Drop for FakeHeadset {
     }
 }
 
+/// Sends `msg` whole: microphone sound in its lane, everything else in the control one.
+fn send(tx: &mut dyn RecordSender, msg: ClientMsg) -> std::io::Result<()> {
+    let lane = match msg {
+        ClientMsg::Mic { .. } => lane::SOUND,
+        _ => lane::CONTROL,
+    };
+    packet::send_whole(tx, lane, msg.encode()?, FRAGMENT)
+}
+
+/// The two halves of a connection before the session, and the PC's packets put
+/// together so far.
+struct Ends<'a> {
+    rx: &'a mut dyn RecordReceiver,
+    tx: &'a mut dyn RecordSender,
+    packets: &'a mut Assembler,
+}
+
+impl Ends<'_> {
+    fn send(&mut self, msg: ClientMsg) -> std::io::Result<()> {
+        send(self.tx, msg)
+    }
+
+    fn recv(&mut self) -> std::io::Result<HostMsg> {
+        HostMsg::recv(self.rx, self.packets)
+    }
+}
+
 /// Says hello, pairs if asked to and possible, and opens the session: the PC's protocol
 /// version and language.
 fn open(
-    receiver: &mut dyn RecordReceiver,
-    sender: &mut dyn RecordSender,
+    ends: &mut Ends,
     keys: &mut Keys,
     peer: &PeerInfo,
     addr: SocketAddr,
     pairing: &mut Option<&mut dyn FnMut() -> String>,
 ) -> Result<(u32, String), ConnectError> {
-    let mut r = StreamReader::new(receiver);
-    let mut w = StreamWriter(sender);
     // Versions first, before pairing.
-    ClientMsg::Hello {
-        version: PROTOCOL_VERSION,
-        min: prostir_proto::MIN_PROTOCOL,
-        app: env!("CARGO_PKG_VERSION").into(),
-    }
-    .write(&mut w)?;
-    let (version, language) = loop {
-        match HostMsg::read_setup(&mut r)? {
-            HostMsg::Welcome { version, language } => break (version, language),
-            HostMsg::Incompatible { protocol, app } => {
-                return Err(ConnectError::Incompatible { protocol, app });
-            }
-            // Older headsets show this text; `Incompatible` follows.
-            HostMsg::Error { .. } => {}
-            other => return Err(anyhow!("unexpected {other:?} before welcome").into()),
+    handshake::send_hello(ends.tx, env!("CARGO_PKG_VERSION"))?;
+    let (version, language) = match handshake::read_answer(ends.rx)? {
+        Answer::Welcome { version, language } => (version, language),
+        Answer::Incompatible { protocol, app } => {
+            return Err(ConnectError::Incompatible { protocol, app });
         }
     };
     if !keys.trusted.contains(&peer.key)
         && let Some(code) = pairing.as_mut()
     {
-        pair(&mut r, &mut w, &keys.identity, peer, &code())?;
+        pair(ends, &keys.identity, peer, &code())?;
         keys.trusted.add(peer.key, &addr.to_string())?;
     }
-    ClientMsg::Open.write(&mut w)?;
+    ends.send(ClientMsg::Open)?;
     loop {
-        match HostMsg::read_setup(&mut r)? {
+        match ends.recv()? {
             HostMsg::Opened => return Ok((version, language)),
             HostMsg::PairingRequired => {
                 let Some(code) = pairing.as_mut() else {
                     return Err(ConnectError::NotPaired);
                 };
-                pair(&mut r, &mut w, &keys.identity, peer, &code())?;
+                pair(ends, &keys.identity, peer, &code())?;
                 keys.trusted.add(peer.key, &addr.to_string())?;
-                ClientMsg::Open.write(&mut w)?;
+                ends.send(ClientMsg::Open)?;
             }
             other => return Err(anyhow!("unexpected {other:?} before the session").into()),
         }
@@ -463,26 +476,25 @@ fn open(
 /// connection.
 fn spawn_reader(
     mut receiver: Box<dyn RecordReceiver>,
+    mut packets: Assembler,
     writer: Arc<Mutex<Box<dyn RecordSender>>>,
 ) -> std::io::Result<Receiver<Arrived>> {
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new()
         .name("fake-headset".into())
         .spawn(move || {
-            let mut r = StreamReader::new(&mut *receiver);
             let mut acked: BTreeMap<u8, Instant> = BTreeMap::new();
-            while let Ok(msg) = HostMsg::read(&mut r) {
+            while let Ok(msg) = HostMsg::recv(&mut *receiver, &mut packets) {
                 let (at, monotonic_ns) = (Instant::now(), monotonic_ns());
                 if let HostMsg::Frame { id, pts_us, .. } = &msg
                     && acked.get(id).is_none_or(|t| t.elapsed() >= ACK_EVERY)
                 {
                     acked.insert(*id, Instant::now());
-                    let mut w = writer.lock().unwrap();
                     let shown = ClientMsg::FrameShown {
                         id: *id,
                         pts_us: *pts_us,
                     };
-                    let _ = shown.write(&mut StreamWriter(&mut **w));
+                    let _ = send(&mut **writer.lock().unwrap(), shown);
                 }
                 let arrived = Arrived {
                     msg,
@@ -500,35 +512,32 @@ fn spawn_reader(
 /// Pairs with the code this headset shows (the person at the PC types it), waiting
 /// for the PC's answers as long as a person may take.
 fn pair(
-    r: &mut StreamReader,
-    w: &mut StreamWriter,
+    ends: &mut Ends,
     identity: &Identity,
     peer: &PeerInfo,
     code: &str,
 ) -> Result<(), ConnectError> {
-    r.receiver().set_idle_limit(Some(PAIRING));
-    let paired = exchange_codes(r, w, identity, peer, code);
-    r.receiver().set_idle_limit(Some(REPLY));
+    ends.rx.set_idle_limit(Some(PAIRING));
+    let paired = exchange_codes(ends, identity, peer, code);
+    ends.rx.set_idle_limit(Some(REPLY));
     paired
 }
 
 fn exchange_codes(
-    r: &mut StreamReader,
-    w: &mut StreamWriter,
+    ends: &mut Ends,
     identity: &Identity,
     peer: &PeerInfo,
     code: &str,
 ) -> Result<(), ConnectError> {
-    ClientMsg::PairBegin {
+    ends.send(ClientMsg::PairBegin {
         headset_shows: true,
         name: "prostir-testkit".into(),
-    }
-    .write(w)?;
+    })?;
     let (pairing, msg) = Pairing::start(code);
-    ClientMsg::PairMsg { msg }.write(w)?;
+    ends.send(ClientMsg::PairMsg { msg })?;
     let mut said = String::new();
     let theirs = loop {
-        match HostMsg::read_setup(r)? {
+        match ends.recv()? {
             HostMsg::PairMsg { msg } => break msg,
             HostMsg::PairResult { .. } => {
                 return Err(ConnectError::PairingFailed(format!(
@@ -540,11 +549,10 @@ fn exchange_codes(
         }
     };
     let key = pairing.finish(&theirs)?;
-    ClientMsg::PairConfirm {
+    ends.send(ClientMsg::PairConfirm {
         tag: confirmation(&key, "headset", peer, &identity.public),
-    }
-    .write(w)?;
-    match HostMsg::read_setup(r)? {
+    })?;
+    match ends.recv()? {
         HostMsg::PairResult { tag: Some(tag) }
             if tags_match(&tag, &confirmation(&key, "pc", peer, &identity.public)) =>
         {

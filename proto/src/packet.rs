@@ -46,8 +46,14 @@ pub mod lane {
     pub const CONTROL: u8 = 0;
     /// PC sound, or the headset's microphone.
     pub const SOUND: u8 = 1;
-    /// The first lane of video: stream `id` goes in `VIDEO + id`.
+    /// The first lane of video (see [`video`]).
     pub const VIDEO: u8 = 2;
+
+    /// The lane of video stream `id`: one each, from [`VIDEO`] on. Stream ids above
+    /// 253 would share the last lane, and the apps make none.
+    pub const fn video(id: u8) -> u8 {
+        VIDEO.saturating_add(id)
+    }
 }
 
 /// What a receiver accepts.

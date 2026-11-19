@@ -9,7 +9,7 @@ mod pairing;
 mod platform;
 mod usage;
 
-use std::io::{BufWriter, ErrorKind, Write};
+use std::io::ErrorKind;
 use std::net::{Ipv4Addr, TcpListener, UdpSocket};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -18,7 +18,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use clap::Parser;
 use log::{debug, error, info, warn};
-use prostir_proto::link::{Closer, Link, StreamReader, StreamWriter, Via};
+use prostir_proto::link::{Closer, Link, Via};
+use prostir_proto::packet::{self, FRAGMENT, lane};
 use prostir_proto::{ClientMsg, Codec, HostMsg};
 
 use displays::{Displays, SavedMonitors};
@@ -198,13 +199,21 @@ fn via_name(via: Via) -> &'static str {
     }
 }
 
-fn serve_client(link: Link, displays: &mut Displays, control: &mut Control) -> Result<()> {
-    let Link {
-        mut sender,
-        mut receiver,
-        closer,
-        peer,
-    } = link;
+fn serve_client(
+    conn: pairing::Connection,
+    displays: &mut Displays,
+    control: &mut Control,
+) -> Result<()> {
+    let pairing::Connection {
+        link:
+            Link {
+                mut sender,
+                mut receiver,
+                closer,
+                peer,
+            },
+        mut packets,
+    } = conn;
     let via = via_name(peer.via);
     let outbox = Arc::new(outbox::Outbox::default());
     let writer_thread = {
@@ -218,16 +227,13 @@ fn serve_client(link: Link, displays: &mut Displays, control: &mut Control) -> R
                     closer,
                 };
                 let result = (|| -> std::io::Result<()> {
-                    // A small buffer: anything waiting belongs in the outbox, where old
-                    // video frames can still be dropped, not in a buffer where they can
-                    // only be sent late.
-                    let mut writer =
-                        BufWriter::with_capacity(64 * 1024, StreamWriter(&mut *sender));
                     while let Some(msg) = outbox.next() {
-                        msg.write(&mut writer)?;
-                        if outbox.is_idle() {
-                            writer.flush()?;
-                        }
+                        let lane = match &msg {
+                            HostMsg::Audio { .. } => lane::SOUND,
+                            HostMsg::Frame { id, .. } => lane::video(*id),
+                            _ => lane::CONTROL,
+                        };
+                        packet::send_whole(&mut *sender, lane, msg.encode()?, FRAGMENT)?;
                     }
                     Ok(())
                 })();
@@ -245,9 +251,8 @@ fn serve_client(link: Link, displays: &mut Displays, control: &mut Control) -> R
     std::thread::Builder::new()
         .name("net-reader".into())
         .spawn(move || {
-            let mut reader = StreamReader::new(&mut *receiver);
             loop {
-                let msg = ClientMsg::read(&mut reader);
+                let msg = ClientMsg::recv(&mut *receiver, &mut packets);
                 let stop = msg.is_err();
                 if msg_tx.send(msg).is_err() || stop {
                     break;
@@ -658,9 +663,9 @@ fn main() -> Result<()> {
                     warn!("connection from {addr}: {e}");
                     continue;
                 }
-                let mut link =
+                let mut conn =
                     match pairing::accept(stream, &mut control.security, control.tray.as_ref()) {
-                        Ok(link) => link,
+                        Ok(conn) => conn,
                         Err(e) if e.is::<pairing::TurnedAwayAgain>() => {
                             debug!("rejected connection from {addr}: {e:#}");
                             continue;
@@ -672,7 +677,7 @@ fn main() -> Result<()> {
                     };
                 info!(
                     "headset connected via {} from {addr}",
-                    via_name(link.peer.via)
+                    via_name(conn.link.peer.via)
                 );
                 if displays.as_ref().is_some_and(|d| !d.healthy()) {
                     displays = None;
@@ -683,17 +688,20 @@ fn main() -> Result<()> {
                         Err(e) => {
                             error!("{e:#}");
                             // Tell the headset why, instead of just hanging up.
-                            let _ = HostMsg::Error {
+                            let why = HostMsg::Error {
                                 text: format!("{e:#}"),
+                            };
+                            if let Ok(why) = why.encode() {
+                                let tx = &mut *conn.link.sender;
+                                let _ = packet::send_whole(tx, lane::CONTROL, why, FRAGMENT);
                             }
-                            .write(&mut StreamWriter(&mut *link.sender));
-                            link.closer.close();
+                            conn.link.closer.close();
                             continue;
                         }
                     }
                 }
                 if let Err(e) = serve_client(
-                    link,
+                    conn,
                     displays.as_mut().expect("made above if it was missing"),
                     &mut control,
                 ) {
