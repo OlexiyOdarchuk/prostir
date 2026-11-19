@@ -3,23 +3,22 @@
 //!
 //! One plan for every input (with or without the positions seen in the headset):
 //!
-//! 1. The row with the main monitor goes left to right by where each monitor is seen
-//!    across (`center`), side by side. Vertically each one goes where it is seen
-//!    (`middle`), lined up with its neighbour's top, bottom or middle when within
-//!    [`LINE_UP`]; it stays in the row (it overlaps the main monitor's height by at
-//!    least half the shorter one) and shares at least [`REACH`] of its edge with the
-//!    neighbour, so the mouse crosses.
-//! 2. Every other row, outwards from that one, is one block of monitors side by side.
-//!    The monitor that overlaps the next row inwards most, as seen, keeps its offset
-//!    from the one it overlaps; the block overlaps that row by at least [`REACH`].
-//!    Each monitor of a row above touches the nearest monitor under it (one of a row
-//!    below, the nearest over it), so the mouse leaves one monitor where the eyes see
-//!    the next; one over nothing lines up with its row. Where a monitor would rest on
-//!    only a sliver of a taller one, the block moves by less than [`REACH`] so it
-//!    rests on enough of it or clears it.
+//! 1. Every row lies on one line, side by side, so neighbours in it share the whole
+//!    edge of the shorter one: no staircase from small differences in height. The
+//!    row with the main monitor goes left to right by where each monitor is seen
+//!    across (`center`), its line (tops, middles or bottoms lined up with the main
+//!    monitor) the one closest to where they are seen (`middle`); middles without
+//!    one.
+//! 2. Every other row, outwards from that one, is one block side by side, bottoms
+//!    lined up above the main row and tops below it. The monitor that overlaps the
+//!    next row inwards most, as seen, keeps its offset from the one it overlaps; the
+//!    block overlaps that row by at least [`REACH`] and touches the nearest monitor
+//!    under (over) it. Where it would touch a sliver of an edge, it moves by less
+//!    than [`REACH`] to where the mouse crosses every edge it shares, or at least
+//!    one (a row of other widths can leave a sliver at a seam).
 //! 3. The laptop screen goes under the main monitor unless the headset put it in a
-//!    row; other real displays next to it; window panels in a column right of
-//!    everything.
+//!    row; other real displays next to it, the same way; window panels in a column
+//!    right of everything, from the top of what is rightmost.
 //! 4. The whole plan starts at `0,0`, as KDE wants.
 //!
 //! Nothing overlaps, whatever the input.
@@ -29,8 +28,6 @@ use std::collections::BTreeSet;
 /// Shared edge the mouse needs to cross from one monitor to the next (or all of a
 /// shorter edge).
 pub const REACH: i32 = 200;
-/// Within this, a monitor lines up with its neighbour's top, bottom or middle.
-pub const LINE_UP: i32 = 24;
 /// Seen positions further out than this are nonsense (and would overflow).
 pub const FAR: i32 = 100_000;
 
@@ -120,16 +117,31 @@ impl<K> Spot<K> {
         self.y < o.bottom() && o.y < self.bottom()
     }
 
-    /// How long an edge the two share where they touch (0 when they do not).
-    pub fn shared_edge<L>(&self, o: &Spot<L>) -> i32 {
-        let span = |a0: i32, a1: i32, b0: i32, b1: i32| (a1.min(b1) - a0.max(b0)).max(0);
-        if self.right() == o.x || o.right() == self.x {
-            span(self.y, self.bottom(), o.y, o.bottom())
+    /// Where the two touch: the length of the edge they share and how much of it the
+    /// mouse needs to cross ([`reach`] of the two edges). `None` when they do not touch
+    /// (a corner is not touching).
+    pub fn touching<L>(&self, o: &Spot<L>) -> Option<(i32, i32)> {
+        let span = |a0: i32, a1: i32, b0: i32, b1: i32| a1.min(b1) - a0.max(b0);
+        let (shared, need) = if self.right() == o.x || o.right() == self.x {
+            (
+                span(self.y, self.bottom(), o.y, o.bottom()),
+                reach(self.h, o.h),
+            )
         } else if self.bottom() == o.y || o.bottom() == self.y {
-            span(self.x, self.right(), o.x, o.right())
+            (
+                span(self.x, self.right(), o.x, o.right()),
+                reach(self.w, o.w),
+            )
         } else {
-            0
-        }
+            return None;
+        };
+        (shared > 0).then_some((shared, need))
+    }
+
+    /// Whether the mouse can cross where the two touch, if they do: not on a corner or
+    /// a sliver of an edge.
+    pub fn crossable<L>(&self, o: &Spot<L>) -> bool {
+        self.touching(o).is_none_or(|(shared, need)| shared >= need)
     }
 }
 
@@ -194,7 +206,7 @@ pub fn plan<K: Copy + Ord>(desk: &Desk<K>, size: impl Fn(K) -> Option<Size>) -> 
         .position(|r| r.iter().any(|m| Some(m.id) == desk.main))
         .or_else(|| (!rows.is_empty()).then_some(0))
     {
-        place_main_row(&rows[main_row], desk.main, &mut placed);
+        placed.extend(main_row_spots(&rows[main_row], desk.main));
         for r in (0..main_row).rev() {
             place_row(&rows[r], &rows[r + 1], true, &mut placed);
         }
@@ -208,8 +220,7 @@ pub fn plan<K: Copy + Ord>(desk: &Desk<K>, size: impl Fn(K) -> Option<Size>) -> 
         listed.insert(id).then_some(size).flatten().map(|s| (id, s))
     };
     // The laptop screen under the main monitor and other real displays right of it,
-    // side by side, each under whatever is over it (level with its neighbour when
-    // nothing is).
+    // a block under whatever is over it.
     let main_spot = desk
         .main
         .and_then(|m| placed.iter().find(|p| p.id == m))
@@ -229,16 +240,18 @@ pub fn plan<K: Copy + Ord>(desk: &Desk<K>, size: impl Fn(K) -> Option<Size>) -> 
     );
     let floor = placed.iter().map(Spot::bottom).max().unwrap_or(0);
     // Anywhere along the bottom: nothing says where they are seen.
-    let spots = settle_block(&placed, block, false, floor, (-FAR, FAR));
+    let spots = settle_block(&placed, &block, false, floor, (-FAR, FAR));
     placed.extend(spots);
-    // Window panels in a column right of everything.
-    let right = placed.iter().map(Spot::right).max().unwrap_or(0);
-    let mut y = placed.iter().map(|p| p.y).min().unwrap_or(0);
+    // Window panels in a column right of everything, from the top of what is
+    // rightmost.
+    let rightmost = placed.iter().max_by_key(|p| (p.right(), -p.y)).copied();
+    let x = rightmost.map_or(0, |p| p.right());
+    let mut y = rightmost.map_or(0, |p| p.y);
     for &id in &desk.column {
         if let Some((id, s)) = extra(id) {
             placed.push(Spot {
                 id,
-                x: right,
+                x,
                 y,
                 w: s.w,
                 h: s.h,
@@ -256,73 +269,54 @@ pub fn plan<K: Copy + Ord>(desk: &Desk<K>, size: impl Fn(K) -> Option<Size>) -> 
     placed
 }
 
-/// The value nearest `v` among `options` within [`LINE_UP`] and inside `lo..=hi`, or
-/// `v`.
-fn line_up(v: i32, options: [i32; 3], lo: i32, hi: i32) -> i32 {
-    options
-        .into_iter()
-        .filter(|o| (o - v).abs() <= LINE_UP && (lo..=hi).contains(o))
-        .min_by_key(|o| (o - v).abs())
-        .unwrap_or(v)
+/// The line a row lies on, against its main monitor.
+#[derive(Debug, Clone, Copy)]
+enum Line {
+    Middles,
+    Tops,
+    Bottoms,
 }
 
-/// The main row: side by side from `x = 0`, heights as seen (see the module's
-/// description).
-fn place_main_row<K: Copy + Ord>(row: &[Seat<K>], main: Option<K>, placed: &mut Vec<Spot<K>>) {
+/// The main row: side by side from `x = 0`, on the line closest to where the
+/// monitors are seen (see the module's description).
+fn main_row_spots<K: Copy + Ord>(row: &[Seat<K>], main: Option<K>) -> Vec<Spot<K>> {
     let tallest = row.iter().map(|m| m.size.h).max().unwrap_or(0);
-    // Heights as seen when all are known, else centred in the row.
-    let known = row.iter().all(|m| m.middle.is_some());
-    let wanted = |m: &Seat<K>| match m.middle {
-        Some(middle) if known => middle - m.size.h / 2,
-        _ => (tallest - m.size.h) / 2,
-    };
-    let mut spots: Vec<Spot<K>> = Vec::with_capacity(row.len());
-    let mut x = 0;
-    for m in row {
-        spots.push(Spot {
-            id: m.id,
-            x,
-            y: 0,
-            w: m.size.w,
-            h: m.size.h,
-        });
-        x += m.size.w;
-    }
-    // The main monitor stays where it is seen (the tallest one without a main); the
-    // others follow outwards from it.
-    let first = row
+    let reference = row
         .iter()
-        .position(|m| Some(m.id) == main)
-        .or_else(|| row.iter().position(|m| m.size.h == tallest))
-        .unwrap_or(0);
-    spots[first].y = wanted(&row[first]);
-    let reference = spots[first];
-    let settle = |m: &Seat<K>, s: &Spot<K>, n: &Spot<K>| {
-        // In the row: overlapping the main monitor's height by half the shorter one.
-        let half = s.h.min(reference.h) / 2;
-        let (band_lo, band_hi) = (reference.y - s.h + half, reference.bottom() - half);
-        // Sharing enough of the edge with the neighbour.
-        let k = reach(s.h, n.h);
-        let (lo, hi) = (n.y - s.h + k, n.bottom() - k);
-        let v = wanted(m).clamp(band_lo, band_hi).clamp(lo, hi);
-        line_up(
-            v,
-            [n.y, n.bottom() - s.h, n.y + (n.h - s.h) / 2],
-            band_lo.max(lo).min(hi),
-            band_hi.min(hi).max(lo),
-        )
+        .find(|m| Some(m.id) == main)
+        .or_else(|| row.iter().find(|m| m.size.h == tallest))
+        .unwrap_or(&row[0]);
+    let top = reference.middle.unwrap_or(0) - reference.size.h / 2;
+    let y = |line: Line, h: i32| match line {
+        Line::Middles => top + (reference.size.h - h) / 2,
+        Line::Tops => top,
+        Line::Bottoms => top + reference.size.h - h,
     };
-    for i in first + 1..row.len() {
-        spots[i].y = settle(&row[i], &spots[i], &spots[i - 1]);
+    // Middles first: when lines fit as well, or heights are not known.
+    let line = if row.iter().all(|m| m.middle.is_some()) {
+        [Line::Middles, Line::Tops, Line::Bottoms]
+            .into_iter()
+            .min_by_key(|&line| {
+                row.iter()
+                    .filter_map(|m| {
+                        let seen = m.middle? - m.size.h / 2;
+                        Some(i64::from((seen - y(line, m.size.h)).abs()))
+                    })
+                    .sum::<i64>()
+            })
+            .unwrap_or(Line::Middles)
+    } else {
+        Line::Middles
+    };
+    let mut spots = side_by_side(row.iter().map(|m| (m.id, m.size)), 0);
+    for s in &mut spots {
+        s.y = y(line, s.h);
     }
-    for i in (0..first).rev() {
-        spots[i].y = settle(&row[i], &spots[i], &spots[i + 1]);
-    }
-    placed.extend(spots);
+    spots
 }
 
 /// A row above (`above`) or below the row `next_to`, already placed: one block side by
-/// side, offset as seen, every monitor touching the nearest one under (or over) it.
+/// side, offset as seen, touching the nearest monitors under (or over) it.
 fn place_row<K: Copy + Ord>(
     row: &[Seat<K>],
     next_to: &[Seat<K>],
@@ -355,29 +349,20 @@ fn place_row<K: Copy + Ord>(
         return;
     };
     // Side by side from the anchor.
-    let mut xs = vec![0; row.len()];
-    xs[anchor] = n_spot.x + (row[anchor].left() - n.left());
-    for i in anchor + 1..row.len() {
-        xs[i] = xs[i - 1] + row[i - 1].size.w;
-    }
-    for i in (0..anchor).rev() {
-        xs[i] = xs[i + 1] - row[i].size.w;
-    }
+    let from = n_spot.x + (row[anchor].left() - n.left())
+        - row[..anchor].iter().map(|m| m.size.w).sum::<i32>();
+    let block = side_by_side(row.iter().map(|m| (m.id, m.size)), from);
     // Overlapping the next row by enough for the mouse.
-    let (left, right) = (xs[0], xs[row.len() - 1] + row[row.len() - 1].size.w);
+    let (left, right) = (block[0].x, block[block.len() - 1].right());
     let lo = neighbours.iter().map(|(_, s)| s.x).min().unwrap_or(0);
     let hi = neighbours.iter().map(|(_, s)| s.right()).max().unwrap_or(0);
     let k = REACH.min(right - left).min(hi - lo);
     let shift = 0.clamp(lo + k - right, hi - k - left);
-    let block: Vec<Spot<K>> = row
-        .iter()
-        .zip(&xs)
-        .map(|(m, x)| Spot {
-            id: m.id,
-            x: x + shift,
-            y: 0,
-            w: m.size.w,
-            h: m.size.h,
+    let block: Vec<Spot<K>> = block
+        .into_iter()
+        .map(|b| Spot {
+            x: b.x + shift,
+            ..b
         })
         .collect();
     let edge = if above {
@@ -391,7 +376,7 @@ fn place_row<K: Copy + Ord>(
         (lo + k - right - shift).max(1 - REACH),
         (hi - k - left - shift).min(REACH - 1),
     );
-    let spots = settle_block(placed, block, above, edge, nudge);
+    let spots = settle_block(placed, &block, above, edge, nudge);
     placed.extend(spots);
 }
 
@@ -413,20 +398,49 @@ fn side_by_side<K>(outputs: impl IntoIterator<Item = (K, Size)>, mut x: i32) -> 
         .collect()
 }
 
-/// `block`, outputs side by side, over (`above`) or under what is `placed`: each
-/// touches the nearest placed output under (over) it, one over nothing lines up with
-/// the nearest of the block that is over something (or with `edge`, the far side of
-/// what it hangs from, when none is). Moved across within `nudge`, as little as can
-/// be, when that keeps every output off a sliver of a taller one.
+/// `block`, outputs side by side, over (`above`, bottoms lined up) or under (tops
+/// lined up) what is `placed`, touching the nearest placed output under (over) it; at
+/// `edge` when it is over nothing. Moved across within `nudge`, as little as can be,
+/// to where the mouse crosses every edge it shares with what is placed (no corners,
+/// no slivers), or else at least one.
 fn settle_block<K: Copy>(
     placed: &[Spot<K>],
-    block: Vec<Spot<K>>,
+    block: &[Spot<K>],
     above: bool,
     edge: i32,
     nudge: (i32, i32),
 ) -> Vec<Spot<K>> {
+    let at = |shift: i32| {
+        let mut spots: Vec<Spot<K>> = block
+            .iter()
+            .map(|b| Spot {
+                x: b.x + shift,
+                ..*b
+            })
+            .collect();
+        let across = placed.iter().filter(|p| spots.iter().any(|s| s.across(*p)));
+        let line = if above {
+            across.map(|p| p.y).min()
+        } else {
+            across.map(Spot::bottom).max()
+        }
+        .unwrap_or(edge);
+        for s in &mut spots {
+            s.y = if above { line - s.h } else { line };
+        }
+        spots
+    };
+    // Every edge it shares crossable; else at least one it touches, so it is reached.
+    let crossable = |spots: &[Spot<K>]| spots.iter().all(|s| placed.iter().all(|p| s.crossable(p)));
+    let reached = |spots: &[Spot<K>]| {
+        spots.iter().any(|s| {
+            placed
+                .iter()
+                .any(|p| s.touching(p).is_some_and(|(shared, need)| shared >= need))
+        })
+    };
     let mut shifts: Vec<i32> = vec![0];
-    for b in &block {
+    for b in block {
         for p in placed {
             let r = reach(b.w, p.w);
             shifts.extend([
@@ -440,123 +454,13 @@ fn settle_block<K: Copy>(
     shifts.retain(|s| (nudge.0..=nudge.1).contains(s));
     shifts.sort_by_key(|s| (s.abs(), *s));
     shifts.dedup();
-    // Where it was put when no move keeps it off slivers.
-    shifts
-        .into_iter()
-        .map(|s| heights(placed, &block, s, above, edge))
-        .find(|(_, slivers)| !slivers)
-        .unwrap_or_else(|| heights(placed, &block, 0, above, edge))
-        .0
-}
-
-/// The block moved by `shift`, at its heights; and whether an output there rests on
-/// too little of what is under (over) it for the mouse to cross.
-fn heights<K: Copy>(
-    placed: &[Spot<K>],
-    block: &[Spot<K>],
-    shift: i32,
-    above: bool,
-    edge: i32,
-) -> (Vec<Spot<K>>, bool) {
-    let mut spots: Vec<Spot<K>> = block
+    let tried: Vec<Vec<Spot<K>>> = shifts.into_iter().map(at).collect();
+    tried
         .iter()
-        .map(|b| Spot {
-            x: b.x + shift,
-            ..*b
-        })
-        .collect();
-    // How each one would rest on what it is over.
-    let rests: Vec<Rest> = spots
-        .iter()
-        .map(|s| {
-            let across: Vec<&Spot<K>> = placed.iter().filter(|p| p.across(s)).collect();
-            let line = if above {
-                across.iter().map(|p| p.y).min()
-            } else {
-                across.iter().map(|p| p.bottom()).max()
-            };
-            let Some(line) = line else {
-                return Rest::Free;
-            };
-            let y = if above { line - s.h } else { line };
-            // Enough of an edge with one it touches for the mouse.
-            let enough = across.iter().any(|p| {
-                let touches = if above {
-                    p.y == line
-                } else {
-                    p.bottom() == line
-                };
-                let shared = s.right().min(p.right()) - s.x.max(p.x);
-                touches && shared >= reach(s.w, p.w)
-            });
-            if enough {
-                Rest::Firm(y)
-            } else {
-                Rest::Sliver(y)
-            }
-        })
-        .collect();
-    let slivers = rests.iter().any(|r| matches!(r, Rest::Sliver(_)));
-    // Those resting firmly stay; the others line up with the neighbour next to them
-    // nearer one that does (bottoms above, tops below), as near as they can without
-    // going into what they are over. With none resting firmly, slivers stay too.
-    let mut ys: Vec<Option<i32>> = rests
-        .iter()
-        .map(|r| match r {
-            Rest::Firm(y) => Some(*y),
-            _ => None,
-        })
-        .collect();
-    if ys.iter().all(Option::is_none) {
-        ys = rests
-            .iter()
-            .map(|r| match r {
-                Rest::Sliver(y) => Some(*y),
-                _ => None,
-            })
-            .collect();
-    }
-    loop {
-        let before = ys.clone();
-        for i in 0..spots.len() {
-            if before[i].is_some() {
-                continue;
-            }
-            let next = [i.checked_sub(1), Some(i + 1)]
-                .into_iter()
-                .flatten()
-                .find_map(|j| Some((j, (*before.get(j)?)?)));
-            let Some((j, y)) = next else { continue };
-            let lined = if above {
-                y + spots[j].h - spots[i].h
-            } else {
-                y
-            };
-            ys[i] = Some(match rests[i] {
-                Rest::Sliver(limit) if above => lined.min(limit),
-                Rest::Sliver(limit) => lined.max(limit),
-                _ => lined,
-            });
-        }
-        if ys == before {
-            break;
-        }
-    }
-    for (s, y) in spots.iter_mut().zip(ys) {
-        s.y = y.unwrap_or(if above { edge - s.h } else { edge });
-    }
-    (spots, slivers)
-}
-
-/// How an output would rest on what it is over (see [`heights`]).
-#[derive(Debug, Clone, Copy)]
-enum Rest {
-    /// Over nothing.
-    Free,
-    /// Touching enough of an output to cross over, at this height.
-    Firm(i32),
-    /// Touching too little of an output, at this height; never further in.
-    Sliver(i32),
+        .find(|spots| crossable(spots))
+        .or_else(|| tried.iter().find(|spots| reached(spots)))
+        .cloned()
+        .unwrap_or_else(|| at(0))
 }
 
 #[cfg(test)]

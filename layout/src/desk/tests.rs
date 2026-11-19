@@ -132,20 +132,13 @@ fn no_overlaps(plan: &[Spot<u8>]) -> Result<(), String> {
     Ok(())
 }
 
-/// Every output reaches every other through edges the mouse can cross.
+/// Every output reaches every other through edges the mouse can cross: never a
+/// corner, nor a sliver of an edge.
 fn reachable(plan: &[Spot<u8>]) -> Result<(), String> {
     let Some(first) = plan.first() else {
         return Ok(());
     };
-    let crosses = |a: &Spot<u8>, b: &Spot<u8>| {
-        let side = a.right() == b.x || b.right() == a.x;
-        let need = if side {
-            reach(a.h, b.h)
-        } else {
-            reach(a.w, b.w)
-        };
-        a.shared_edge(b) >= need.max(1)
-    };
+    let crosses = |a: &Spot<u8>, b: &Spot<u8>| a.touching(b).is_some_and(|(s, need)| s >= need);
     let mut reached = vec![first.id];
     let mut i = 0;
     while i < reached.len() {
@@ -167,6 +160,40 @@ fn reachable(plan: &[Spot<u8>]) -> Result<(), String> {
             .collect();
         Err(format!("{lost:?} cannot be reached from {}", first.id))
     }
+}
+
+/// Every row lies on one line (tops, middles or bottoms), side by side, neighbours
+/// sharing the whole edge of the shorter one.
+fn rows_on_lines(desk: &Desk<u8>, plan: &[Spot<u8>]) -> Result<(), String> {
+    for row in &desk.rows {
+        let mut spots: Vec<Spot<u8>> = row
+            .iter()
+            .filter_map(|e| plan.iter().find(|p| p.id == e.id).copied())
+            .collect();
+        // A monitor listed in an earlier row too counts there.
+        spots.retain(|s| {
+            desk.rows
+                .iter()
+                .position(|r| r.iter().any(|e| e.id == s.id))
+                .is_some_and(|r| std::ptr::eq(&desk.rows[r], row))
+        });
+        spots.sort_by_key(|s| s.x);
+        let same = |f: &dyn Fn(&Spot<u8>) -> i32, slack: i32| {
+            spots
+                .windows(2)
+                .all(|w| (f(&w[0]) - f(&w[1])).abs() <= slack)
+        };
+        if !(same(&|s| s.y, 0) || same(&|s| s.bottom(), 0) || same(&|s| s.y + s.h / 2, 1)) {
+            return Err(format!("row {spots:?} is not on one line"));
+        }
+        for w in spots.windows(2) {
+            let shared = w[0].touching(&w[1]).map(|t| t.0);
+            if w[0].right() != w[1].x || shared != Some(w[0].h.min(w[1].h)) {
+                return Err(format!("{:?} and {:?} are not side by side", w[0], w[1]));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The plan's rows again, with what the plan shows as where they are seen.
@@ -213,6 +240,7 @@ fn check(case: &Case) -> Result<Vec<Spot<u8>>, String> {
         .filter(|p| !desk.column.contains(&p.id))
         .collect();
     reachable(&laid).map_err(|e| format!("{e}\nplan {plan:?}"))?;
+    rows_on_lines(desk, &plan).map_err(|e| format!("{e}\nplan {plan:?}"))?;
     // A row above another is above it.
     let row_of = |id: u8| desk.rows.iter().position(|r| r.iter().any(|e| e.id == id));
     for a in &plan {
@@ -314,8 +342,7 @@ fn seen_case(rng: &mut Rng) -> Case {
 }
 
 /// Laid out as seen, the desktop is no wider than its widest row and a monitor, nor
-/// taller than its rows' tallest monitors on top of each other (give or take the
-/// tremor, which lines up only with a neighbour).
+/// taller than its rows' tallest monitors on top of each other.
 #[test]
 fn a_desk_as_seen_does_not_spread() {
     let mut rng = Rng::new(0x5eed_0002);
@@ -337,10 +364,8 @@ fn a_desk_as_seen_does_not_spread() {
             .sum();
         let width = plan.iter().map(Spot::right).max().unwrap();
         let height = plan.iter().map(Spot::bottom).max().unwrap();
-        // Up to 10 px off each, and lined up with a neighbour that is off too.
-        let tremor = 20 * sizes.len() as i32;
         assert!(
-            width <= widest_row + widest && height <= tallest + tremor,
+            width <= widest_row + widest && height <= tallest,
             "case {i}: {width}x{height} for rows {widest_row} wide, {tallest} tall\n{case:?}\n{plan:?}"
         );
     }
@@ -373,7 +398,7 @@ fn a_row_keeps_how_monitors_line_up_vertically() {
         main: Some(1),
         ..Desk::default()
     };
-    let p = run(&(desk, sizes.clone()));
+    let p = check(&(desk, sizes.clone())).unwrap();
     assert_eq!(spot_of(&p, 0).y, spot_of(&p, 1).y);
     // Unknown heights: centred.
     let desk = Desk {
@@ -385,8 +410,9 @@ fn a_row_keeps_how_monitors_line_up_vertically() {
     assert_eq!(spot_of(&p, 0).y - spot_of(&p, 1).y, (2560 - 1440) / 2);
 }
 
-/// A portrait primary in the middle; a landscape on its left, tops lined up; a
-/// landscape on its right, lower down; the laptop screen under the primary.
+/// A portrait primary in the middle, a landscape on its left with tops lined up, one
+/// on its right a little lower, and the laptop screen under the primary: the row lies
+/// on the line closest to what is seen (tops), neighbours share whole edges.
 #[test]
 fn the_desktop_is_what_the_eyes_see() {
     let sizes = sized(&[
@@ -399,13 +425,13 @@ fn the_desktop_is_what_the_eyes_see() {
         rows: vec![vec![
             at(0, Some(-2000), Some(-560)),
             at(1, Some(0), Some(0)),
-            at(2, Some(1950), Some(300)),
+            at(2, Some(1950), Some(-400)),
         ]],
         main: Some(1),
         under_main: Some(100),
         ..Desk::default()
     };
-    let p = run(&(desk, sizes));
+    let p = check(&(desk, sizes)).unwrap();
     let (s0, s1, s2, m) = (
         spot_of(&p, 0),
         spot_of(&p, 1),
@@ -413,8 +439,7 @@ fn the_desktop_is_what_the_eyes_see() {
         spot_of(&p, 100),
     );
     assert_eq!((s0.right(), s0.y), (s1.x, s1.y), "touching, tops lined up");
-    assert_eq!(s1.right(), s2.x);
-    assert!(s2.y > s1.y + 200 && s2.y < s1.bottom() - 200, "{s2:?}");
+    assert_eq!((s1.right(), s2.y), (s2.x, s1.y));
     assert_eq!(m.y, s1.bottom(), "the laptop screen under the primary");
     assert!(m.across(&s1));
 }
@@ -522,7 +547,7 @@ fn panels_and_other_displays() {
     assert_eq!((m.x, m.y), (s1.x + (2560 - 1920) / 2, s1.bottom()));
     assert_eq!((o.x, o.y), (m.right(), s1.bottom()));
     let (a, b) = (spot_of(&p, 10), spot_of(&p, 11));
-    assert_eq!((a.x, a.y), (o.right(), 0));
+    assert_eq!((a.x, a.y), (o.right(), o.y));
     assert_eq!((b.x, b.y), (a.x, a.bottom()));
 }
 
