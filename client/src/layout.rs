@@ -8,10 +8,13 @@ use prostir_proto::{LayoutEntry, LayoutRow, is_window_panel};
 
 use crate::settings::Preset;
 
+mod arc;
+pub use arc::{MAX_ARC, MAX_RADIUS, Rows, angular_width, arc_radius, split, wall_width};
+
 /// Monitor size in metres per stream pixel: every monitor gets the same pixel
 /// density, so neighbours line up like one big screen (2560 px ≈ 1.25 m).
 pub const METRES_PER_PIXEL: f32 = 1.25 / 2560.0;
-/// Distance from the head to the monitors' edges.
+/// Distance from the head to the monitors' edges, nearest (see [`arc`]).
 pub const RADIUS: f32 = 1.1;
 /// The main row sits a little below eye height.
 const EYE_DROP: f32 = 0.08;
@@ -36,11 +39,11 @@ pub fn facing(position: Vec3, target: Vec3) -> Quat {
     Quat::from_rotation_y(yaw) * Quat::from_rotation_x(-pitch)
 }
 
-/// An upright monitor on the cylinder around the head, its edges on the cylinder,
-/// centred at `yaw` (0 = straight ahead, positive = right) and height `y`.
-fn on_cylinder(yaw: f32, y: f32, width: f32) -> Placement {
-    let half = (width / 2.0 / RADIUS).min(0.95).asin();
-    let r = RADIUS * half.cos();
+/// An upright monitor on the cylinder of `radius` around the head, its edges on the
+/// cylinder, centred at `yaw` (0 = straight ahead, positive = right) and height `y`.
+fn on_cylinder(yaw: f32, y: f32, width: f32, radius: f32) -> Placement {
+    let half = angular_width(width, radius) / 2.0;
+    let r = radius * half.cos();
     let position = Vec3::new(r * yaw.sin(), y, -r * yaw.cos());
     Placement {
         position,
@@ -49,17 +52,14 @@ fn on_cylinder(yaw: f32, y: f32, width: f32) -> Placement {
     }
 }
 
-fn angular_width(width: f32) -> f32 {
-    2.0 * (width / 2.0 / RADIUS).min(0.95).asin()
-}
-
-/// `(id, width_m, height_m)` side by side without gaps, centred straight ahead.
-fn row(items: &[(u8, f32, f32)], y: f32, out: &mut HashMap<u8, Placement>) {
-    let total: f32 = items.iter().map(|m| angular_width(m.1)).sum();
+/// `(id, width_m, centre height)` side by side without gaps on the cylinder of
+/// `radius`, centred straight ahead.
+fn row(items: &[(u8, f32, f32)], radius: f32, out: &mut HashMap<u8, Placement>) {
+    let total: f32 = items.iter().map(|m| angular_width(m.1, radius)).sum();
     let mut yaw = -total / 2.0;
-    for &(id, w, _) in items {
-        let a = angular_width(w);
-        out.insert(id, on_cylinder(yaw + a / 2.0, y, w));
+    for &(id, w, y) in items {
+        let a = angular_width(w, radius);
+        out.insert(id, on_cylinder(yaw + a / 2.0, y, w, radius));
         yaw += a;
     }
 }
@@ -776,6 +776,15 @@ pub fn cinema(monitors: &[(u8, u32, u32)], pick: Option<u8>) -> HashMap<u8, Plac
     out
 }
 
+/// How far from the head `preset` puts `monitors` (see [`arc`]).
+pub fn preset_radius(preset: Preset, monitors: &[(u8, u32, u32)]) -> f32 {
+    let widths: Vec<f32> = monitors
+        .iter()
+        .map(|m| m.1 as f32 * METRES_PER_PIXEL)
+        .collect();
+    split(preset, &widths, None).radius
+}
+
 pub fn arrange(
     preset: Preset,
     monitors: &[(u8, u32, u32)],
@@ -801,29 +810,53 @@ pub fn arrange_curved(
     let height_of = |id: u8| sorted.iter().find(|m| m.0 == id).map_or(0.0, |m| m.2);
 
     let mut out = HashMap::new();
-    match preset {
-        Preset::Arc | Preset::Overhead => {
-            let y = if preset == Preset::Arc {
-                -EYE_DROP
-            } else {
-                0.0
-            };
-            row(&sorted, y, &mut out);
+    let widths: Vec<f32> = sorted.iter().map(|m| m.1).collect();
+    let rows = split(
+        preset,
+        &widths,
+        sorted.iter().position(|m| Some(m.0) == primary),
+    );
+    let radius = rows.radius;
+    // The main row at eye level, its middles lined up; the others above it in order,
+    // bottoms lined up on the top of the tallest monitor under them.
+    let main_y = if preset == Preset::Overhead {
+        0.0
+    } else {
+        -EYE_DROP
+    };
+    let tallest =
+        |r: &std::ops::Range<usize>| sorted[r.clone()].iter().map(|m| m.2).fold(0.0, f32::max);
+    let mut levels: Vec<(std::ops::Range<usize>, Option<f32>)> = Vec::new();
+    let mut line = main_y + tallest(&rows.groups[rows.main]) / 2.0;
+    levels.push((rows.groups[rows.main].clone(), None));
+    for (i, g) in rows.groups.iter().enumerate().rev() {
+        if i != rows.main {
+            levels.push((g.clone(), Some(line)));
+            line += tallest(g);
         }
-        Preset::Wall => {
-            // Side by side in one plane straight ahead, all facing the same way.
-            let total: f32 = sorted.iter().map(|m| m.1).sum();
-            let mut x = -total / 2.0;
-            for &(id, w, _) in &sorted {
-                out.insert(
-                    id,
-                    Placement {
-                        position: Vec3::new(x + w / 2.0, -EYE_DROP, -RADIUS),
-                        rotation: Quat::IDENTITY,
-                        width: w,
-                    },
-                );
-                x += w;
+    }
+    for (group, bottom) in levels {
+        let items: Vec<(u8, f32, f32)> = sorted[group]
+            .iter()
+            .map(|&(id, w, h)| (id, w, bottom.map_or(main_y, |b| b + h / 2.0)))
+            .collect();
+        match preset {
+            Preset::Arc | Preset::Overhead => row(&items, radius, &mut out),
+            Preset::Wall => {
+                // Side by side in one plane straight ahead, all facing the same way.
+                let total: f32 = items.iter().map(|m| m.1).sum();
+                let mut x = -total / 2.0;
+                for &(id, w, y) in &items {
+                    out.insert(
+                        id,
+                        Placement {
+                            position: Vec3::new(x + w / 2.0, y, -radius),
+                            rotation: Quat::IDENTITY,
+                            width: w,
+                        },
+                    );
+                    x += w;
+                }
             }
         }
     }
@@ -842,12 +875,12 @@ pub fn arrange_curved(
             });
         let yaw = anchor.map_or(0.0, |(p, _)| yaw_of(&p));
         // Below every monitor it could cover: those whose arc overlaps its own.
-        let reach = angular_width(w) / 2.0;
+        let reach = angular_width(w, radius) / 2.0;
         let bottom = sorted
             .iter()
             .filter_map(|m| {
                 let p = out.get(&m.0)?;
-                let overlaps = (yaw_of(p) - yaw).abs() < reach + angular_width(m.1) / 2.0;
+                let overlaps = (yaw_of(p) - yaw).abs() < reach + angular_width(m.1, radius) / 2.0;
                 overlaps.then_some(p.position.y - m.2 / 2.0)
             })
             .fold(f32::INFINITY, f32::min);
@@ -880,7 +913,7 @@ pub fn arrange_curved(
         // and tilted back towards the eyes like a laptop lid, since it sits below them.
         let top = match anchor {
             Some((p, _)) => Vec3::new(p.position.x, bottom, p.position.z),
-            None => on_cylinder(yaw, bottom, w).position,
+            None => on_cylinder(yaw, bottom, w, radius).position,
         };
         let mut position = top - Vec3::Y * h / 2.0;
         let mut rotation = facing(position, Vec3::ZERO);
@@ -1191,6 +1224,8 @@ pub struct Arrangement {
     /// The eye and the yaw the arrangement was laid out around. Files from 0.1.0 have
     /// none.
     pub center: Option<(Vec3, f32)>,
+    /// The circle it stands on. Files from before 0.2.0 have none ([`RADIUS`]).
+    pub radius: Option<f32>,
 }
 
 impl Desk {
@@ -1207,6 +1242,12 @@ impl Desk {
         for line in text.lines() {
             if let Some(center) = parse_center(line) {
                 saved.center = Some(center);
+            } else if let Some(r) = line
+                .strip_prefix("radius ")
+                .and_then(|r| r.trim().parse::<f32>().ok())
+                .filter(|r| r.is_finite() && *r > 0.1)
+            {
+                saved.radius = Some(r);
             } else if let Some((id, p, size)) = parse_placement(line)
                 && !is_window_panel(id)
             {
@@ -1219,20 +1260,24 @@ impl Desk {
         saved
     }
 
-    /// Keeps `placements` (made for the stream `sizes`, around `center`) as the desk
-    /// arrangement, unless they are the cinema view.
+    /// Keeps `placements` (made for the stream `sizes`, around `center`, on the circle
+    /// of `radius`) as the desk arrangement, unless they are the cinema view. Older
+    /// readers skip the `radius` line.
     pub fn save(
         &self,
         placements: &HashMap<u8, Placement>,
         sizes: &HashMap<u8, PixelSize>,
-        center: (Vec3, f32),
+        (center, radius): ((Vec3, f32), f32),
         cinema: bool,
     ) {
         if cinema {
             return;
         }
         let (eye, yaw) = center;
-        let mut text = format!("center {} {} {} {yaw}\n", eye.x, eye.y, eye.z);
+        let mut text = format!(
+            "center {} {} {} {yaw}\nradius {radius}\n",
+            eye.x, eye.y, eye.z
+        );
         let mut ids: Vec<_> = placements.keys().copied().collect();
         ids.sort();
         for id in ids {
@@ -1379,6 +1424,75 @@ mod tests {
             );
         }
         assert!(l[&0].position.x < l[&1].position.x && l[&1].position.x < l[&2].position.x);
+    }
+
+    /// Where each monitor is seen from the head: yaw span and height span.
+    fn seen_spans(p: &Placement, h: f32) -> ((f32, f32), (f32, f32)) {
+        let flat = Vec2::new(p.position.x, p.position.z).length();
+        let yaw = yaw_of(p);
+        let half = (p.width / 2.0 / flat.max(0.1)).atan();
+        (
+            (yaw - half, yaw + half),
+            (p.position.y - h / 2.0, p.position.y + h / 2.0),
+        )
+    }
+
+    /// Any monitors in a preset: none in front of another as seen from the head, every
+    /// row within the arc.
+    #[test]
+    fn presets_never_overlap() {
+        let sizes = [
+            (1920, 1080),
+            (2560, 1440),
+            (3440, 1440),
+            (5120, 1440),
+            (3840, 2160),
+            (1440, 2560),
+        ];
+        let mut seed = 0x1234_u64;
+        for case in 0..2000 {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let n = 1 + (seed >> 33) as usize % 10;
+            let mons: Vec<(u8, u32, u32)> = (0..n)
+                .map(|i| {
+                    let (w, h) = sizes[(seed >> (i * 3 % 30 + 2)) as usize % sizes.len()];
+                    (i as u8, w, h)
+                })
+                .collect();
+            let primary = Some(((seed >> 7) as usize % n) as u8);
+            let l = arrange(Preset::Arc, &mons, primary, None);
+            let spans: Vec<_> = mons
+                .iter()
+                .map(|&(id, w, h)| {
+                    let p = l[&id];
+                    seen_spans(&p, p.width * h as f32 / w as f32)
+                })
+                .collect();
+            for i in 0..n {
+                for j in i + 1..n {
+                    let ((a0, a1), (b0, b1)) = spans[i];
+                    let ((c0, c1), (d0, d1)) = spans[j];
+                    let across = a0 < c1 - 1e-3 && c0 < a1 - 1e-3;
+                    let up = b0 < d1 - 1e-4 && d0 < b1 - 1e-4;
+                    assert!(
+                        !(across && up),
+                        "case {case}: {mons:?}: {i} and {j} overlap"
+                    );
+                }
+            }
+            let radius = preset_radius(Preset::Arc, &mons);
+            let rows = split(
+                Preset::Arc,
+                &mons
+                    .iter()
+                    .map(|m| m.1 as f32 * METRES_PER_PIXEL)
+                    .collect::<Vec<_>>(),
+                None,
+            );
+            assert_eq!(radius, rows.radius);
+        }
     }
 
     #[test]
@@ -1867,8 +1981,8 @@ mod tests {
         let center = (Vec3::ZERO, 0.0);
         let mut arranged = arrange(Preset::Arc, &two, Some(0), None);
         arranged.get_mut(&1).unwrap().position += Vec3::new(0.1, 0.3, 0.0);
-        desk.save(&arranged, &sizes, center, false);
-        desk.save(&cinema(&two, None), &sizes, center, true);
+        desk.save(&arranged, &sizes, (center, RADIUS), false);
+        desk.save(&cinema(&two, None), &sizes, (center, RADIUS), true);
         let kept = desk.load().placements;
         assert_eq!(kept.len(), 2);
         for (id, p) in &arranged {
@@ -1877,7 +1991,7 @@ mod tests {
         // Window panels are placed afresh, not kept.
         let mut with_panel = arranged.clone();
         with_panel.insert(prostir_proto::WINDOW_IDS.start, arranged[&0]);
-        desk.save(&with_panel, &sizes, center, false);
+        desk.save(&with_panel, &sizes, (center, RADIUS), false);
         assert_eq!(desk.load().placements.len(), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1890,9 +2004,10 @@ mod tests {
         let arranged = arrange(Preset::Arc, &two, Some(0), None);
         let sizes = HashMap::from([(0, (2560, 1440)), (1, (1440, 2560))]);
         let center = (Vec3::new(0.1, 0.0, -0.2), 0.7);
-        desk.save(&arranged, &sizes, center, false);
+        desk.save(&arranged, &sizes, (center, RADIUS), false);
         let saved = desk.load();
         assert_eq!(saved.sizes, sizes);
+        assert_eq!(saved.radius, Some(RADIUS));
         let (eye, yaw) = saved.center.unwrap();
         assert!(eye.distance(center.0) < 1e-6 && (yaw - center.1).abs() < 1e-6);
         assert_eq!(saved.placements.len(), 2);
@@ -1915,7 +2030,7 @@ mod tests {
         assert!((saved.placements[&1].width - 1.03).abs() < 1e-6);
 
         let sizes = HashMap::from([(0, (2560, 1440))]);
-        desk.save(&saved.placements, &sizes, (Vec3::ZERO, 0.3), false);
+        desk.save(&saved.placements, &sizes, ((Vec3::ZERO, 0.3), 1.3), false);
         let text = std::fs::read_to_string(dir.join("layout.txt")).unwrap();
         let old_reader = |line: &str| {
             line.split_whitespace()

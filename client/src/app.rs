@@ -422,6 +422,9 @@ struct Scene {
     update_needed: Option<(bool, String)>,
     /// Where layouts are centred and which way they face (head position, yaw).
     center: (Vec3, f32),
+    /// The circle around the head the arrangement stands on (it grows for many
+    /// monitors, see `layout::split`).
+    radius: f32,
     /// The arrangement last sent to the PC.
     sent_layout: Option<Vec<prostir_proto::LayoutRow>>,
     /// A changed arrangement waiting to settle before it is sent.
@@ -657,7 +660,7 @@ impl Scene {
         self.desk.save(
             &self.placements,
             &self.placed_for,
-            self.center,
+            (self.center, self.radius),
             self.settings.cinema,
         );
     }
@@ -670,6 +673,7 @@ impl Scene {
         self.placements.retain(|id, _| is_window_panel(*id));
         self.placements.extend(saved.placements);
         self.placed_for = saved.sizes;
+        self.radius = saved.radius.unwrap_or(layout::RADIUS);
         let live: Vec<(u8, layout::PixelSize)> = self
             .monitors
             .iter()
@@ -738,6 +742,7 @@ impl Scene {
             return;
         }
         let mirror_place = self.placements.get(&MIRROR_ID).copied();
+        self.radius = layout::preset_radius(self.settings.preset, &self.quest_sizes());
         self.placements = self.around_user(layout::arrange_curved(
             self.settings.preset,
             &self.quest_sizes(),
@@ -769,8 +774,8 @@ impl Scene {
             .keys()
             .filter(|k| is_window_panel(**k) && **k != id)
             .count();
-        let width = (m.width_px as f32 * layout::METRES_PER_PIXEL * DISTANCE / layout::RADIUS)
-            .clamp(0.2, 1.2);
+        let width =
+            (m.width_px as f32 * layout::METRES_PER_PIXEL * DISTANCE / self.radius).clamp(0.2, 1.2);
         let position = head + flat * DISTANCE - Vec3::Y * 0.12 + right * (0.15 * others as f32);
         self.placements.insert(
             id,
@@ -1108,10 +1113,7 @@ impl Scene {
         if !self.curve_supported {
             return None;
         }
-        self.settings
-            .curve
-            .radius_factor()
-            .map(|f| f * layout::RADIUS)
+        self.settings.curve.radius_factor().map(|f| f * self.radius)
     }
 
     fn height_of(&self, id: u8) -> f32 {
@@ -1757,6 +1759,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         finder: None,
         toast: None,
         center: (Vec3::ZERO, 0.0),
+        radius: layout::RADIUS,
         sent_layout: None,
         pending_layout: None,
         head: (Vec3::ZERO, -Vec3::Z),
