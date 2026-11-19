@@ -185,10 +185,25 @@ impl Pc {
 
     /// The first log line containing `needle`, waiting up to `timeout` for it.
     pub fn wait_log(&mut self, timeout: Duration, needle: &str) -> String {
+        self.wait_log_after(timeout, needle, 0)
+    }
+
+    /// The log line containing `needle` after the first `skip` such lines (taken with
+    /// [`Pc::count_log`] before something happened, to wait for a line logged after
+    /// it), waiting up to `timeout` for it.
+    pub fn wait_log_after(&mut self, timeout: Duration, needle: &str, skip: usize) -> String {
         let until = Instant::now() + timeout;
         loop {
-            if let Some(line) = self.log.lock().unwrap().iter().find(|l| l.contains(needle)) {
-                return line.clone();
+            let found = self
+                .log
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|l| l.contains(needle))
+                .nth(skip)
+                .cloned();
+            if let Some(line) = found {
+                return line;
             }
             if let Ok(Some(status)) = self.child.try_wait() {
                 panic!("the PC app ended ({status}) before logging {needle:?}");

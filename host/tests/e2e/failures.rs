@@ -23,6 +23,8 @@ fn busy() -> Options {
 #[test]
 fn a_short_stall_keeps_the_session() {
     let (_dir, mut pc, _keys, mut headset) = session("stall-short", &busy());
+    // The stream reports logged so far are from before the stall.
+    let reports = pc.count_log("Prostir-1: sent");
     headset.reset_counts();
     headset.stall(Duration::from_secs(2));
     // Without a loss no keyframe would come for 40 s (600 frames at 15 a second).
@@ -34,10 +36,12 @@ fn a_short_stall_keeps_the_session() {
     headset.take_for(Duration::from_secs(1)).unwrap();
     assert!(!headset.view().closed);
     assert_eq!(pc.count_log("session ended"), 0);
-    let line = pc.wait_log(Duration::from_secs(15), "Prostir-1: sent");
+    // The next two reports (10 s apart) cover the stall, however the first one falls.
+    let next = pc.wait_log_after(Duration::from_secs(15), "Prostir-1: sent", reports);
+    let after = pc.wait_log_after(Duration::from_secs(15), "Prostir-1: sent", reports + 1);
     assert!(
-        !line.contains("dropped 0 late"),
-        "frames were dropped late: {line}"
+        !(next.contains("dropped 0 late") && after.contains("dropped 0 late")),
+        "frames were dropped late: {next} / {after}"
     );
 }
 
