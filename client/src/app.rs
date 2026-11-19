@@ -63,15 +63,6 @@ const POKE_RELEASE: f32 = 0.025;
 /// A finger further behind the menu than this is not touching it (reaching past).
 const POKE_BEHIND: f32 = -0.06;
 
-/// A window being resized by a corner handle: how far the pointer was from its
-/// centre, and its width, when the corner was taken.
-#[derive(Clone, Copy)]
-struct Resize {
-    id: u8,
-    from: f32,
-    width: f32,
-}
-
 /// A monitor held with both hands: the distance between them sets its width.
 #[derive(Clone, Copy)]
 struct Scaling {
@@ -1063,34 +1054,6 @@ impl Scene {
         }
     }
 
-    /// The window a pick is on, with what its handles need: id, placement, half size,
-    /// curve, and whether it can be resized by its corners (the menu cannot).
-    fn frame_of(&self, target: Target) -> Option<(u8, Placement, Vec2, Option<f32>, bool)> {
-        match target {
-            Target::Panel => self.frame_of_id(PANEL_ID),
-            Target::Monitor(id) => self.frame_of_id(id),
-            _ => None,
-        }
-    }
-
-    fn frame_of_id(&self, id: u8) -> Option<(u8, Placement, Vec2, Option<f32>, bool)> {
-        if id == PANEL_ID {
-            let p = self.panel_place;
-            return self
-                .panel_open
-                .then(|| (id, p, Vec2::new(p.width, panel_height()) / 2.0, None, false));
-        }
-        let p = *self.shown.get(&id).or_else(|| self.placements.get(&id))?;
-        let curve = self.curve_radius().filter(|_| !is_window_panel(id));
-        Some((
-            id,
-            p,
-            Vec2::new(p.width, self.height_of(id)) / 2.0,
-            curve,
-            true,
-        ))
-    }
-
     /// What moves with the hands now: the held monitors, and with "move all together"
     /// every monitor that goes along (drawn where it is, not catching up, or the
     /// arrangement would tear apart while it moves).
@@ -1713,10 +1676,6 @@ fn run(app: &AndroidApp) -> Result<()> {
     };
 
     let mut hold_since: [Option<Instant>; 2] = [None, None];
-    // Handles on a window's frame: a corner being pulled, or an edge taken with the
-    // trigger or a pinch (it is let go the same way).
-    let mut resizing: [Option<Resize>; 2] = [None, None];
-    let mut edge_grab = [false; 2];
     // A hand's pinch on a menu button: clicked when let go, unless it was held long
     // enough to drag the menu instead (as on the Quest's own windows).
     let mut pending_click: [Option<(ui::Action, Vec3)>; 2] = [None, None];
@@ -2177,73 +2136,9 @@ fn run(app: &AndroidApp) -> Result<()> {
             {
                 input.select.pressed = false;
             }
-            if let Some(r) = resizing[hand] {
-                if !input.select.down {
-                    resizing[hand] = None;
-                    layout::save(&scene.layout_path, &scene.placements);
-                } else if let Some(ray) = input.ray
-                    && let Some(before) = scene.placements.get(&r.id).copied()
-                {
-                    // Where the pointer is on the window's plane: as far from the
-                    // centre as the corner was, the window keeps its width.
-                    let normal = before.rotation * Vec3::Z;
-                    let facing_it = ray.dir.dot(normal);
-                    if facing_it.abs() > 1e-4 {
-                        let t = (before.position - ray.origin).dot(normal) / facing_it;
-                        let at = before.rotation.inverse()
-                            * (ray.origin + ray.dir * t - before.position);
-                        if t > 0.0 {
-                            let mut after = before;
-                            after.width =
-                                (r.width * at.truncate().length() / r.from).clamp(0.2, 8.0);
-                            scene.placements.insert(r.id, after);
-                            scene.carry_all(r.id, &before, &after);
-                        }
-                    }
-                }
-            }
             if input.select.pressed {
                 let mut clicked = false;
-                // A handle under the pointer (not a button of the menu): a corner
-                // resizes, an edge takes the window.
-                let handle = picks[hand].and_then(|(target, hit)| {
-                    let (id, p, half, _, corners) = scene.frame_of(target)?;
-                    if matches!(target, Target::Panel) {
-                        panel.hover(Some(panel_point(&hit)));
-                        if panel.hovered_action().is_some() {
-                            return None;
-                        }
-                    }
-                    layout::handle_at(hit.local, half, corners).map(|h| (h, id, p, hit))
-                });
-                if let Some((h, id, p, hit)) = handle {
-                    clicked = true;
-                    controls.pulse(&session, hand);
-                    match h {
-                        layout::Handle::Corner(..) => {
-                            resizing[hand] = Some(Resize {
-                                id,
-                                from: hit.local.length().max(0.05),
-                                width: p.width,
-                            });
-                        }
-                        layout::Handle::Side(_) => {
-                            let target = if id == PANEL_ID {
-                                scene.panel_place
-                            } else {
-                                scene.placements[&id]
-                            };
-                            let g = Grab::start(id, hit.t, hit.local, &target);
-                            scene.grabs[hand] = Some(match input.ray {
-                                Some(r) if input.is_hand => g.with_reach(r.origin, head),
-                                _ => g,
-                            });
-                            edge_grab[hand] = true;
-                        }
-                    }
-                }
-                let click_pick = if handle.is_some() { None } else { picks[hand] };
-                match click_pick {
+                match picks[hand] {
                     Some((Target::Attach(id), hit)) => {
                         clicked = true;
                         rings.push((hit.point, Instant::now()));
@@ -2309,18 +2204,12 @@ fn run(app: &AndroidApp) -> Result<()> {
                     && hold_since[hand].is_some_and(|t| t.elapsed() >= HOLD_TO_DRAG);
                 (held && scene.grabs[hand].is_none(), input.select.released)
             } else {
-                (
-                    input.grab.pressed,
-                    input.grab.released || (edge_grab[hand] && input.select.released),
-                )
+                (input.grab.pressed, input.grab.released)
             };
 
             if end_grab && scene.scaling.is_some_and(|s| s.hand == hand) {
                 scene.scaling = None;
                 layout::save(&scene.layout_path, &scene.placements);
-            }
-            if end_grab {
-                edge_grab[hand] = false;
             }
             if end_grab && let Some(released) = scene.grabs[hand].take() {
                 // A monitor put somewhere new stays there until the head comes back
@@ -2480,55 +2369,6 @@ fn run(app: &AndroidApp) -> Result<()> {
 
         // Hands and rays: only rendered when there is something to show.
         let mut spheres: Vec<Sphere> = Vec::new();
-        // Handles on the frame of the window a hand points at near its edge (or is
-        // moving by one): the corners and the sides, the one under the pointer brighter.
-        let mut framed: Vec<u8> = Vec::new();
-        for hand in 0..2 {
-            let busy = resizing[hand]
-                .map(|r| r.id)
-                .or(scene.grabs[hand].filter(|_| edge_grab[hand]).map(|g| g.id));
-            let pointed = picks[hand].and_then(|(target, hit)| {
-                let (id, _, half, _, _) = scene.frame_of(target)?;
-                layout::near_frame(hit.local, half).then_some((id, hit.local))
-            });
-            let Some((id, pointer)) = busy
-                .map(|id| (id, None))
-                .or(pointed.map(|(id, at)| (id, Some(at))))
-            else {
-                continue;
-            };
-            if framed.contains(&id) {
-                continue;
-            }
-            framed.push(id);
-            let Some((_, p, half, curve, corners)) = scene.frame_of_id(id) else {
-                continue;
-            };
-            let under = pointer.and_then(|at| layout::handle_at(at, half, corners));
-            let mut handles = vec![layout::Handle::Side(-1.0), layout::Handle::Side(1.0)];
-            if corners {
-                for (x, y) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
-                    handles.push(layout::Handle::Corner(x, y));
-                }
-            }
-            let out = p.rotation * Vec3::Z * 0.004;
-            for h in handles {
-                let lit = busy.is_some() || under == Some(h);
-                let (radius, color) = if lit {
-                    (0.0055, [0.78, 0.9, 1.0, 1.0])
-                } else {
-                    (0.0035, [1.0, 1.0, 1.0, 0.8])
-                };
-                for at in layout::handle_points(h, half) {
-                    spheres.push(Sphere {
-                        center: layout::surface_point(&p, curve, at) + out,
-                        radius,
-                        color,
-                        kind: overlay::Kind::Ball,
-                    });
-                }
-            }
-        }
         // Light on the menu where a fingertip is about to touch: wide and faint from a
         // few centimetres away, small and bright right before contact.
         let place = scene.panel_place;
@@ -2738,13 +2578,7 @@ fn run(app: &AndroidApp) -> Result<()> {
             });
 
         // Far monitors first so nearer (and grabbed) ones draw on top.
-        let grabbed: Vec<u8> = scene
-            .grabs
-            .iter()
-            .flatten()
-            .map(|g| g.id)
-            .chain(resizing.iter().flatten().map(|r| r.id))
-            .collect();
+        let grabbed: Vec<u8> = scene.grabs.iter().flatten().map(|g| g.id).collect();
         let moving = scene.moving_now(&grabbed);
         scene.animate(dt, &moving);
         // Keep KDE's arrangement in step once nothing is being moved.
