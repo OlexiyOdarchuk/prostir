@@ -12,7 +12,7 @@ use log::{debug, error, info, warn};
 use prostir_proto::{Codec, HostMsg, LayoutRow, MIRROR_ID, NEXT, PcSettings, WINDOW_IDS};
 use std::sync::atomic::AtomicU8;
 
-use crate::encoder::{Encoder, EncoderConfig, EncoderEvent, Input};
+use crate::encoder::{Encoder, EncoderConfig, EncoderEvent};
 use crate::layout::{Seat, arrange, arrange_free, panel_size};
 use crate::outbox::Outbox;
 use crate::platform::audio::{AudioOut, MicIn};
@@ -561,8 +561,7 @@ impl Displays {
             .find(|id| !self.monitors.contains_key(id))
             .expect("fewer than MAX_MONITORS ids are taken");
         let mut output = self.desktop.create(u32::from(id) + 1, &spec)?;
-        let encoder = self.start_encoder(id, &output.input())?;
-        output.attach(&encoder, self.cfg.backend.takes_dmabuf())?;
+        let encoder = self.start_stream(id, &mut output)?;
         self.monitors.insert(
             id,
             Monitor {
@@ -579,11 +578,22 @@ impl Displays {
         Ok(id)
     }
 
-    fn start_encoder(&self, id: u8, input: &Input) -> Result<Encoder> {
+    /// Starts stream `id`: its slot in the router and an encoder fed by `output`. When
+    /// that fails, nothing of the stream stays registered.
+    fn start_stream(&self, id: u8, output: &mut Output) -> Result<Encoder> {
         self.router.add_stream(id);
-        let router = self.router.clone();
-        Encoder::start(input, &self.cfg, move |ev| router.on_event(id, ev))
+        self.start_encoder(id, output)
             .inspect_err(|_| self.router.remove_stream(id))
+    }
+
+    /// An encoder for stream `id`, fed by `output`.
+    fn start_encoder(&self, id: u8, output: &mut Output) -> Result<Encoder> {
+        let router = self.router.clone();
+        let encoder = Encoder::start(&output.input(), &self.cfg, move |ev| {
+            router.on_event(id, ev)
+        })?;
+        output.attach(&encoder, self.cfg.backend.takes_dmabuf())?;
+        Ok(encoder)
     }
 
     /// Keeps the mirror in step with the physical display: it disappears when the
@@ -614,8 +624,7 @@ impl Displays {
             .desktop
             .mirror(u32::from(MIRROR_ID) + 1, &name)
             .and_then(|mut output| {
-                let encoder = self.start_encoder(MIRROR_ID, &output.input())?;
-                output.attach(&encoder, self.cfg.backend.takes_dmabuf())?;
+                let encoder = self.start_stream(MIRROR_ID, &mut output)?;
                 Ok(Mirror { encoder, output })
             });
         match started {
@@ -771,8 +780,7 @@ impl Displays {
             };
             output.detach();
             drop(encoder);
-            let encoder = self.start_encoder(id, &output.input())?;
-            output.attach(&encoder, self.cfg.backend.takes_dmabuf())?;
+            let encoder = self.start_stream(id, &mut output)?;
             encoder.force_keyframe();
             self.monitors.insert(
                 id,
@@ -1368,11 +1376,7 @@ impl Displays {
             scale: window.scale,
         };
         let mut output = self.desktop.create(u32::from(id) + 1, &spec)?;
-        let encoder = self.start_encoder(id, &output.input())?;
-        if let Err(e) = output.attach(&encoder, self.cfg.backend.takes_dmabuf()) {
-            self.router.remove_stream(id);
-            return Err(e);
-        }
+        let encoder = self.start_stream(id, &mut output)?;
         let name = output.output_name().to_owned();
         self.windows.insert(
             id,
