@@ -147,23 +147,136 @@ pub fn rows_by_position(
             None => rows.push(vec![m]),
         }
     }
+    // Where on the desktop, from how the monitors stand in space (the angles above
+    // only group them into rows). Starting from the one straight ahead.
+    let ahead = rows
+        .iter()
+        .flatten()
+        .min_by(|a, b| {
+            (a.yaw.abs() + a.elevation.abs()).total_cmp(&(b.yaw.abs() + b.elevation.abs()))
+        })
+        .map(|m| m.id);
+    let rects = desktop_rects(placements, monitors, ahead);
+    // Older PCs place by angles when a monitor has no spot here (none is left out).
+    let fallback = |m: &Seen| {
+        (
+            ((m.yaw * px_per_rad) / 8.0).round() as i32 * 8,
+            ((-m.elevation * px_per_rad) / 8.0).round() as i32 * 8,
+        )
+    };
     rows.into_iter()
         .map(|mut r| {
             r.sort_by(|a, b| a.yaw.total_cmp(&b.yaw));
+            let spots: Vec<(i32, i32)> = r
+                .iter()
+                .map(|m| rects.get(&m.id).copied().unwrap_or_else(|| fallback(m)))
+                .collect();
             LayoutRow {
                 ids: r.iter().map(|m| m.id).collect(),
-                // Rounded to 8 px: a hand's tremor must not rearrange the desktop.
-                centers: r
-                    .iter()
-                    .map(|m| ((m.yaw * px_per_rad) / 8.0).round() as i32 * 8)
-                    .collect(),
-                middles: r
-                    .iter()
-                    .map(|m| ((-m.elevation * px_per_rad) / 8.0).round() as i32 * 8)
-                    .collect(),
+                centers: spots.iter().map(|s| s.0).collect(),
+                middles: spots.iter().map(|s| s.1).collect(),
             }
         })
         .collect()
+}
+
+/// Desktop centres (pixels) from where the monitors stand in space: starting from
+/// `first`, each monitor joins the nearest one already placed, on the side where it
+/// stands next to it, shifted along that edge by as much as it is shifted in space
+/// (measured in the placed monitor's own plane and pixels). A window across an edge
+/// the monitors share in the headset then continues where it does there, wherever
+/// the user's head is. Rounded to 8 px, so a hand's tremor does not rearrange the
+/// desktop.
+fn desktop_rects(
+    placements: &HashMap<u8, Placement>,
+    monitors: &[(u8, u32, u32)],
+    first: Option<u8>,
+) -> HashMap<u8, (i32, i32)> {
+    struct Screen {
+        id: u8,
+        at: Vec3,
+        right: Vec3,
+        up: Vec3,
+        out: Vec3,
+        half: Vec2,
+        px: (i32, i32),
+        metres_per_px: f32,
+    }
+    let mut rest: Vec<Screen> = monitors
+        .iter()
+        .filter_map(|&(id, w, h)| {
+            let p = placements.get(&id)?;
+            let (w, h) = (w.max(1), h.max(1));
+            let height = p.width * h as f32 / w as f32;
+            Some(Screen {
+                id,
+                at: p.position,
+                right: p.rotation * Vec3::X,
+                up: p.rotation * Vec3::Y,
+                out: p.rotation * Vec3::Z,
+                half: Vec2::new(p.width, height) / 2.0,
+                px: (w as i32, h as i32),
+                metres_per_px: p.width.max(1e-3) / w as f32,
+            })
+        })
+        .collect();
+    let mut out = HashMap::new();
+    let Some(start) = rest
+        .iter()
+        .position(|s| Some(s.id) == first)
+        .or_else(|| (!rest.is_empty()).then_some(0))
+    else {
+        return out;
+    };
+    let snap = |v: f32| (v / 8.0).round() as i32 * 8;
+    let s0 = rest.remove(start);
+    // Top-left corners.
+    let mut placed: Vec<(Screen, i32, i32)> = vec![(s0, 0, 0)];
+    // How `m` stands next to `n`, in `n`'s plane: offset of the centres and the gap
+    // between their edges (negative when they overlap), across and up.
+    let relative = |m: &Screen, n: &Screen| {
+        let d = m.at - n.at;
+        let (x, y) = (d.dot(n.right), d.dot(n.up));
+        let reach = n.half + m.half;
+        (
+            x,
+            y,
+            Vec2::new(x.abs() - reach.x, y.abs() - reach.y),
+            d.dot(n.out).abs(),
+        )
+    };
+    while !rest.is_empty() {
+        let (ri, pi) = (0..rest.len())
+            .flat_map(|ri| (0..placed.len()).map(move |pi| (ri, pi)))
+            .min_by(|&(a, b), &(c, d)| {
+                let key = |ri: usize, pi: usize| {
+                    let (_, _, gap, depth) = relative(&rest[ri], &placed[pi].0);
+                    gap.x.max(gap.y).max(0.0) + 0.5 * depth
+                };
+                key(a, b).total_cmp(&key(c, d))
+            })
+            .expect("not empty");
+        let m = rest.remove(ri);
+        let (n, nx, ny) = &placed[pi];
+        let (x, y, gap, _) = relative(&m, n);
+        let to_px = |metres: f32| snap(metres / n.metres_per_px);
+        let (mx, my) = if gap.x > gap.y {
+            // Beside it: level with where its top edge is in `n`'s plane.
+            let top = (m.at + m.up * m.half.y - n.at).dot(n.up);
+            let x = if x > 0.0 { nx + n.px.0 } else { nx - m.px.0 };
+            (x, ny + to_px(n.half.y - top))
+        } else {
+            // Above or below it: as far across as its left edge is.
+            let left = (m.at - m.right * m.half.x - n.at).dot(n.right);
+            let y = if y > 0.0 { ny - m.px.1 } else { ny + n.px.1 };
+            (nx + to_px(left + n.half.x), y)
+        };
+        placed.push((m, mx, my));
+    }
+    for (s, x, y) in &placed {
+        out.insert(s.id, (x + s.px.0 / 2, y + s.px.1 / 2));
+    }
+    out
 }
 
 /// Lines `value` (half size `half`) up with a neighbour at `other` (half size
@@ -1332,6 +1445,39 @@ mod tests {
         let rows = rows_by_position(&wall, &three, center, Preset::Arc);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].ids, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn the_desktop_follows_the_edges_in_space_not_the_head() {
+        let three = [(0, 2560, 1440), (1, 1440, 2560), (2, 2560, 1440)];
+        let mut arc = arrange(Preset::Arc, &three, Some(1), None);
+        // The right monitor hung 20 cm lower, still against the middle one.
+        arc.get_mut(&2).unwrap().position.y -= 0.2;
+        let from = |eye: Vec3| rows_by_position(&arc, &three, (eye, 0.0), Preset::Arc);
+        let spot = |rows: &[LayoutRow], id: u8| {
+            rows.iter()
+                .find_map(|r| {
+                    let i = r.ids.iter().position(|&x| x == id)?;
+                    Some((r.centers[i], r.middles[i]))
+                })
+                .unwrap()
+        };
+        let here = from(Vec3::ZERO);
+        let stood_up = from(Vec3::new(0.3, 0.4, 0.2));
+        for id in [0, 2] {
+            let (a, b) = (spot(&here, id), spot(&stood_up, id));
+            let (ma, mb) = (spot(&here, 1), spot(&stood_up, 1));
+            assert_eq!(
+                (a.0 - ma.0, a.1 - ma.1),
+                (b.0 - mb.0, b.1 - mb.1),
+                "monitor {id}"
+            );
+        }
+        // 20 cm lower is 20 cm worth of pixels lower on the desktop, edge to edge.
+        let (right, mid) = (spot(&here, 2), spot(&here, 1));
+        let expected = (0.2 / METRES_PER_PIXEL / 8.0).round() as i32 * 8;
+        assert!(((right.1 - mid.1) - expected).abs() <= 8, "{here:?}");
+        assert_eq!(right.0 - mid.0, (1440 + 2560) / 2, "{here:?}");
     }
 
     /// Placements and the monitors' pixel sizes, for the A and magnet tests.

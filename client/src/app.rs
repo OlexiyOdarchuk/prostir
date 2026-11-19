@@ -430,6 +430,9 @@ struct Scene {
     head: (Vec3, Vec3),
     /// The head's right, rolled and tilted with it (where the right ear is).
     head_right: Vec3,
+    /// Where the eyes are, for the map in the menu: moves only when the head has moved
+    /// a few centimetres (the menu redraws when its picture changes).
+    view_eye: Option<Vec3>,
     /// Tracked hands are in view this frame (the menu then opens within reach).
     hands_in_view: bool,
     /// Where the keyboard window lies (set the first time it is shown).
@@ -685,7 +688,8 @@ impl Scene {
     /// (right, up) and half size, in radians.
     fn seen_of(&self, id: u8) -> Option<[f32; 4]> {
         let p = self.placements.get(&id)?;
-        let (eye, yaw) = self.center;
+        let eye = self.view_eye.unwrap_or(self.center.0);
+        let yaw = self.center.1;
         let d = glam::Quat::from_rotation_y(-yaw) * (p.position - eye);
         let distance = d.length().max(0.3);
         // Coarse (about a tenth of a degree): the menu redraws whenever its picture
@@ -705,7 +709,8 @@ impl Scene {
         let Some(p) = self.placements.get(&id) else {
             return ui::Place::Unknown;
         };
-        let (center, yaw) = self.center;
+        let center = self.view_eye.unwrap_or(self.center.0);
+        let yaw = self.center.1;
         let to = p.position - center;
         let local = glam::Quat::from_rotation_y(-yaw) * to;
         let side = local.x.atan2(-local.z);
@@ -1657,6 +1662,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         pending_layout: None,
         head: (Vec3::ZERO, -Vec3::Z),
         head_right: Vec3::X,
+        view_eye: None,
         hands_in_view: false,
         keyboard_place: layout::load(&data_dir.join("keyboard.txt")).remove(&0),
         keyboard_path: data_dir.join("keyboard.txt"),
@@ -1854,6 +1860,9 @@ fn run(app: &AndroidApp) -> Result<()> {
 
         scene.head = (head, forward);
         scene.head_right = right;
+        if scene.view_eye.is_none_or(|e| e.distance(head) > 0.05) && head != Vec3::ZERO {
+            scene.view_eye = Some(head);
+        }
         scene.follow_head(dt);
         scene.place_sound();
         scene.remind_rest(dt);
