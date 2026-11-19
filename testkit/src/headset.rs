@@ -16,6 +16,10 @@ use crate::nal;
 
 /// The headset reports a shown frame at most this often per stream, like the Quest app.
 const ACK_EVERY: Duration = Duration::from_millis(100);
+/// The PC answers within this, and takes what is sent within this.
+const REPLY: Duration = Duration::from_secs(10);
+/// Pairing waits for a person typing the code on the PC.
+const PAIRING: Duration = Duration::from_secs(300);
 
 /// A headset's long-term key and the PCs it trusts, kept in a directory.
 pub struct Keys {
@@ -225,14 +229,16 @@ impl FakeHeadset {
     ) -> Result<Self, ConnectError> {
         let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))?;
         stream.set_nodelay(true)?;
-        // Pairing waits for a person typing the code on the PC.
-        stream.set_read_timeout(Some(Duration::from_secs(300)))?;
+        stream.set_read_timeout(Some(REPLY))?;
+        // Kept for the session: a PC that stops reading fails a send instead of
+        // holding it forever.
+        stream.set_write_timeout(Some(REPLY))?;
         let (reader, mut w, peer) = secure::handshake(&stream, &keys.identity, true)?;
         let mut r = BufReader::new(reader);
         if !keys.trusted.contains(&peer.key)
             && let Some(code) = pairing.as_mut()
         {
-            pair(&mut r, &mut w, &keys.identity, &peer, &code())?;
+            pair(&stream, &mut r, &mut w, &keys.identity, &peer, &code())?;
             keys.trusted.add(peer.key, &addr.to_string())?;
         }
         hello(&mut w)?;
@@ -243,7 +249,7 @@ impl FakeHeadset {
                     let Some(code) = pairing.as_mut() else {
                         return Err(ConnectError::NotPaired);
                     };
-                    pair(&mut r, &mut w, &keys.identity, &peer, &code())?;
+                    pair(&stream, &mut r, &mut w, &keys.identity, &peer, &code())?;
                     keys.trusted.add(peer.key, &addr.to_string())?;
                     hello(&mut w)?;
                 }
@@ -412,8 +418,23 @@ fn spawn_reader(
     Ok(rx)
 }
 
-/// Pairs with the code this headset shows (the person at the PC types it).
+/// Pairs with the code this headset shows (the person at the PC types it), waiting
+/// for the PC's answers as long as a person may take.
 fn pair(
+    stream: &TcpStream,
+    r: &mut BufReader<SecureReader>,
+    w: &mut SecureWriter,
+    identity: &Identity,
+    peer: &secure::Peer,
+    code: &str,
+) -> Result<(), ConnectError> {
+    stream.set_read_timeout(Some(PAIRING))?;
+    let paired = exchange_codes(r, w, identity, peer, code);
+    stream.set_read_timeout(Some(REPLY))?;
+    paired
+}
+
+fn exchange_codes(
     r: &mut BufReader<SecureReader>,
     w: &mut SecureWriter,
     identity: &Identity,
