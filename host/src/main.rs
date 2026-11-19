@@ -20,6 +20,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use log::{debug, error, info, warn};
 use prostir_proto::link::{Closer, Link, Via};
+use prostir_proto::stats::Period;
 use prostir_proto::{ClientMsg, Codec, HeadsetGoodbye, HostMsg, PcGoodbye};
 
 use displays::{Displays, SavedMonitors};
@@ -198,8 +199,15 @@ impl Drop for EndSession {
     }
 }
 
-/// How often the writer reads how fast the network delivers, while it sends.
+/// How often the writer looks at what TCP measures, while it sends.
 const LOOK_AT_THE_LINK: Duration = Duration::from_millis(20);
+/// How often the writer logs how it paced.
+const PACING_REPORT_EVERY: Duration = Duration::from_secs(10);
+
+/// Bytes a second in Mbit/s, for the log.
+fn mbit(bytes_per_sec: u64) -> u64 {
+    bytes_per_sec * 8 / 1_000_000
+}
 
 /// After a goodbye, how long the headset has to read it and close the connection.
 const GOODBYE_WAIT: Duration = Duration::from_secs(1);
@@ -260,52 +268,65 @@ fn serve_client(
                     closer: Some(closer),
                 };
                 // The only one sending: it takes packet after packet, most important first,
-                // and paces the connection by what the network is measured to deliver.
+                // and paces the connection by what it measures of the network.
                 let mut lanes = outbox::Lanes::default();
                 let mut pacer = pacing::Pacer::new(peer.via);
                 let mut next_look = Instant::now();
+                let mut report = Period::new(PACING_REPORT_EVERY);
                 // The pace last logged: changes of a quarter or more go into the log.
                 let mut logged = 0u64;
                 // How long sending waited on the socket since the last look: most of the
                 // time means the network (or the pace) held the PC back.
                 let mut waited = Duration::ZERO;
-                let mut sent = 0;
                 let mut last_look = Instant::now();
                 while let Some(pick) = outbox.next(&mut lanes) {
                     let sending = Instant::now();
-                    match lanes.send(pick, &mut *sender) {
-                        Ok(bytes) => sent += bytes,
-                        Err(e) => {
-                            info!("connection closed while sending: {e}");
-                            return;
-                        }
+                    if let Err(e) = lanes.send(pick, &mut *sender) {
+                        info!("connection closed while sending: {e}");
+                        return;
                     }
                     let now = Instant::now();
                     waited += now - sending;
-                    if now >= next_look {
-                        next_look = now + LOOK_AT_THE_LINK;
-                        let held_back = waited * 2 >= now - last_look;
-                        let bytes = std::mem::take(&mut sent);
-                        (waited, last_look) = (Duration::ZERO, now);
-                        let queued = outbox.take_queued();
-                        let rate = sender.link_info().map_or(0, |i| i.delivery_rate);
-                        if let Some(pace) = pacer.sample(now, rate, held_back, bytes, queued) {
-                            sender.set_pace(pace);
-                            let mbit = |b: u64| b * 8 / 1_000_000;
-                            let line = format!(
-                                "the link carries about {} Mbit/s, the streams need up to {}: \
-                                 pacing at {}",
-                                mbit(pacer.estimate().unwrap_or(0)),
-                                mbit(pacer.floor()),
-                                mbit(pace)
-                            );
-                            if pace.abs_diff(logged) > logged / 4 {
-                                logged = pace;
-                                info!("{line}");
-                            } else {
-                                debug!("{line}");
-                            }
+                    if now < next_look {
+                        continue;
+                    }
+                    next_look = now + LOOK_AT_THE_LINK;
+                    let held_back = waited * 2 >= now - last_look;
+                    (waited, last_look) = (Duration::ZERO, now);
+                    let queued = outbox.take_queued();
+                    if let Some(rtt) = outbox.take_round_trip() {
+                        pacer.pong(now, rtt);
+                    }
+                    let Some(link) = sender.link_info() else {
+                        continue;
+                    };
+                    let look = pacing::Look {
+                        now,
+                        link,
+                        held_back,
+                        queued,
+                    };
+                    if let Some(pace) = pacer.look(look) {
+                        sender.set_pace(pace);
+                        let ms = |d: Duration| d.as_secs_f64() * 1e3;
+                        let line = format!(
+                            "pacing at {} Mbit/s, {} (the streams need {}; round trip {:.1} ms, \
+                             lowest {:.1} ms)",
+                            mbit(pace),
+                            pacer.phase(),
+                            mbit(pacer.floor()),
+                            ms(link.rtt),
+                            ms(pacer.min_rtt().unwrap_or_default()),
+                        );
+                        if pace.abs_diff(logged) > logged / 4 {
+                            logged = pace;
+                            info!("{line}");
+                        } else {
+                            debug!("{line}");
                         }
+                    }
+                    if report.due(now).is_some() {
+                        info!("pacing: {}", pacer.take_stats().summary());
                     }
                 }
                 // After the goodbye nothing more goes out, but what the headset sends

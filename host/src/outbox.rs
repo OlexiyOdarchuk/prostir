@@ -155,6 +155,8 @@ struct State {
     dropped: BTreeSet<u8>,
     /// Bytes queued since the writer last asked: what the streams need.
     queued: usize,
+    /// The round trip of the latest pong, until the writer takes it.
+    round_trip: Option<Duration>,
     stats: OutboxStats,
     pings: Pings,
     /// When the next ping is due (from the writer's first look on).
@@ -193,34 +195,32 @@ pub struct Lanes {
 }
 
 impl Lanes {
-    /// Sends the next packet in `pick`'s lane: how many bytes of messages it held.
-    pub fn send(&mut self, pick: Pick, tx: &mut dyn RecordSender) -> io::Result<usize> {
+    /// Sends the next packet in `pick`'s lane.
+    pub fn send(&mut self, pick: Pick, tx: &mut dyn RecordSender) -> io::Result<()> {
         match pick {
             Pick::Control => send_next(&mut self.control, tx),
             Pick::Sound => send_next(&mut self.sound, tx),
             Pick::Video(id) => {
                 self.last_stream = Some(id);
-                let mut out = self.video.remove(&id);
-                let sent = send_next(&mut out, tx)?;
-                if let Some(out) = out {
-                    self.video.insert(id, out);
+                if let Some(o) = self.video.get_mut(&id)
+                    && o.send_next(tx, FRAGMENT)?
+                {
+                    self.video.remove(&id);
                 }
-                Ok(sent)
+                Ok(())
             }
         }
     }
 }
 
-/// Sends the next packet of `out` (gone once its last packet went): how many bytes of
-/// the message it held.
-fn send_next(out: &mut Option<Outgoing>, tx: &mut dyn RecordSender) -> io::Result<usize> {
-    let Some(o) = out else { return Ok(0) };
-    let before = o.remaining();
-    if o.send_next(tx, FRAGMENT)? {
+/// Sends the next packet of `out`; it is gone once its last packet went.
+fn send_next(out: &mut Option<Outgoing>, tx: &mut dyn RecordSender) -> io::Result<()> {
+    if let Some(o) = out
+        && o.send_next(tx, FRAGMENT)?
+    {
         *out = None;
-        return Ok(before);
     }
-    Ok(before - o.remaining())
+    Ok(())
 }
 
 /// Lets go of the queues, then frees what was dropped meanwhile.
@@ -350,6 +350,7 @@ impl Outbox {
         let mut s = self.lock();
         if let Some(rtt) = s.pings.pong(seq, Instant::now()) {
             s.stats.round_trip.add(rtt);
+            s.round_trip = Some(rtt);
         }
     }
 
@@ -362,6 +363,11 @@ impl Outbox {
     /// later count too: they are what the streams need).
     pub fn take_queued(&self) -> usize {
         std::mem::take(&mut self.lock().queued)
+    }
+
+    /// The round trip of the latest pong, if one came since the last call.
+    pub fn take_round_trip(&self) -> Option<Duration> {
+        self.lock().round_trip.take()
     }
 
     /// Streams that lost frames since the last call.

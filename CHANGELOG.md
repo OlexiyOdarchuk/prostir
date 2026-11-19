@@ -7,9 +7,10 @@
 - Sound, the microphone, focus and the menu's answers no longer wait while the PC sends
   a big frame. Frames go out in pieces of 16 KiB, and whatever is more urgent goes
   between them; the monitors take turns, so one monitor's keyframe no longer holds up
-  the others. The PC also spreads what it sends over time, a little under what it
-  measures the network to carry, instead of pushing a whole keyframe into the Wi-Fi
-  router's queue at once; a fast link is not slowed down. On a 100 Mbit/s link with
+  the others. The PC also spreads what it sends over time, a little under what the
+  network carries, instead of pushing a whole keyframe into the Wi-Fi router's queue at
+  once: it watches the round trip, which grows as that queue fills, and never sends
+  slower than the monitors need. A fast link is not slowed down. On a 100 Mbit/s link with
   keyframes on three monitors together, sound now arrives within about 10 ms (95 % of
   it) and at most about 20 ms late (before: 26 to 32 ms, and up to 90 ms), without the clicks
   of pauses over 30 ms (13 to 23 in 15 s before).

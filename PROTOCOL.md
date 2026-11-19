@@ -728,16 +728,20 @@ Keyframes are never dropped for being late, and a keyframe queued drops the fram
 its stream still waiting before it (it replaces them). If more than 16 MiB of video is
 waiting, new non-key frames are refused the same way. Other streams are not affected.
 
-The host also paces the connection (`SO_MAX_PACING_RATE`, `host/src/pacing.rs`): at
-about 90 % of what TCP measured the network delivering while the network held the
-host back (a keyframe going out, say), so a keyframe does not
-land in the Wi-Fi access point's queue all at once with sound stuck behind it, where
-nothing can overtake it any more. It paces only once it measured such a stretch,
-and never over USB. Paced, it tries now and then whether the link carries more.
-Whatever the measure says, it never paces under half as much again as what was queued
-for the headset over the last 2 s (and never under 20 Mbit/s): a link slower than the
-video is for the bitrate to adapt to, not for pacing to starve. It keeps little unsent data in the kernel
-(`TCP_NOTSENT_LOWAT` 32 KiB) for the same reason.
+The host also paces the connection (`SO_MAX_PACING_RATE`, `host/src/pacing.rs`), so
+a keyframe does not land in the Wi-Fi access point's queue all at once with sound
+stuck behind it, where nothing can overtake it any more. TCP hides lost packets behind
+retransmissions, so the sign of a full link is that queue: the round trip (TCP's, and
+the pings') rising clearly over its lowest of the last 10 s (by 10 ms, or half the
+lowest if that is more) while the pace held the host back. The host is not paced until
+that happens; then it paces 15 % under what the network delivered just then, and holds
+that. Every 3 s it tries a pace a tenth higher; once the network delivered that for
+200 ms with the round trip low, it holds the new pace and tries the next tenth, and a
+rise brings back the pace that was fine. Whatever the link seems to carry, it never
+paces under a fifth more than what was queued for the headset over the last 2 s (and
+never under 20 Mbit/s): a link slower than the video is for the bitrate to adapt to,
+not for pacing to starve. Nothing is paced over USB. It keeps little unsent data in the
+kernel (`TCP_NOTSENT_LOWAT` 32 KiB) for the same reason.
 
 These values are implementation-defined; the rule a client can rely on is that
 **after a gap in a stream, the next frame it gets for that stream is a keyframe**.

@@ -117,7 +117,7 @@ fn sound_under_keyframes_on_a_shaped_link() {
         let report = line.split_once("] ").map_or(line.as_str(), |(_, r)| r);
         eprintln!("  {report}");
     }
-    for line in pc.lines("the link carries about") {
+    for line in pc.lines("pacing") {
         let report = line.split_once("] ").map_or(line.as_str(), |(_, r)| r);
         eprintln!("  {report}");
     }
