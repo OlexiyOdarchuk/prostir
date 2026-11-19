@@ -671,6 +671,12 @@ is queued, so no other frame of the old configuration follows.
 
 The first `Frame` after a `StreamStart` is a keyframe.
 
+Messages about a stream that go in the control lane (`Order`, `Focus`,
+`PrimaryChanged`, `SoundFrom`, `MouseAt`) are not ordered with the stream's own lane:
+they can arrive before the `StreamStart` they refer to (control goes first) or after
+its `StreamEnd`. A client keeps what they say for an id it does not stream yet, or
+ignores it, but must not treat it as an error.
+
 ### Frames
 
 - `data` is exactly one access unit as an **Annex B** byte stream (start codes, no

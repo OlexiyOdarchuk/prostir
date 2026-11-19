@@ -9,9 +9,9 @@
   between them; the monitors take turns, so one monitor's keyframe no longer holds up
   the others. The PC also spreads what it sends over time instead of pushing a whole
   keyframe into the Wi-Fi router's queue at once. On a 100 Mbit/s link with keyframes
-  on three monitors together, sound now arrives within about 10 ms and never later
-  than 11 ms (before: 26 to 32 ms, and up to 90 ms), without the clicks of pauses over
-  30 ms (13 to 23 in 15 s before).
+  on three monitors together, sound now arrives within about 10 ms (95 % of it) and
+  at most about 20 ms late (before: 26 to 32 ms, and up to 90 ms), without the clicks
+  of pauses over 30 ms (13 to 23 in 15 s before).
 - A frame that waits too long is still dropped, and a new keyframe now also drops the
   older frames of its monitor still waiting, so a slow moment costs less.
 
