@@ -173,6 +173,20 @@ fn store(change: impl FnOnce(&mut SavedMonitors)) {
     saved.save();
 }
 
+/// Ends the session once the writer thread stops, however it stops: the outbox takes
+/// nothing more and the connection closes, so the reader and the headset notice at once.
+struct EndSession {
+    outbox: Arc<outbox::Outbox>,
+    stream: TcpStream,
+}
+
+impl Drop for EndSession {
+    fn drop(&mut self) {
+        self.outbox.close();
+        let _ = self.stream.shutdown(Shutdown::Both);
+    }
+}
+
 /// Taken off for this long, the headset counts as gone.
 const TAKEN_OFF_GRACE: Duration = Duration::from_secs(10);
 
@@ -197,6 +211,10 @@ fn serve_client(
         std::thread::Builder::new()
             .name("net-writer".into())
             .spawn(move || {
+                let _end = EndSession {
+                    outbox: outbox.clone(),
+                    stream,
+                };
                 let result = (|| -> std::io::Result<()> {
                     while let Some(msg) = outbox.next() {
                         msg.write(&mut writer)?;
@@ -206,11 +224,13 @@ fn serve_client(
                     }
                     Ok(())
                 })();
-                if let Err(e) = result {
-                    info!("connection closed while sending: {e}");
+                match result {
+                    Err(e) if e.kind() == ErrorKind::InvalidInput => {
+                        warn!("a message could not be sent, ending the session: {e}")
+                    }
+                    Err(e) => info!("connection closed while sending: {e}"),
+                    Ok(()) => {}
                 }
-                outbox.close();
-                let _ = stream.shutdown(Shutdown::Both);
             })?
     };
 

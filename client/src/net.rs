@@ -83,20 +83,28 @@ impl Feedback {
                     if droppable(&msg) {
                         counted.fetch_sub(1, Ordering::Relaxed);
                     }
-                    let _ = msg.write(buf);
+                    msg.write(buf)
                 };
+                // However this thread stops, the session ends with it.
+                struct Close(TcpStream);
+                impl Drop for Close {
+                    fn drop(&mut self) {
+                        let _ = self.0.shutdown(Shutdown::Both);
+                    }
+                }
+                let _close = Close(stream);
                 while let Ok(msg) = rx.recv() {
                     // Everything already waiting goes out as one encrypted chunk.
                     buf.clear();
-                    put(msg, &mut buf);
-                    while buf.len() < 64 * 1024
+                    let mut sent = put(msg, &mut buf);
+                    while sent.is_ok()
+                        && buf.len() < 64 * 1024
                         && let Ok(more) = rx.try_recv()
                     {
-                        put(more, &mut buf);
+                        sent = put(more, &mut buf);
                     }
-                    if let Err(e) = writer.write_all(&buf) {
+                    if let Err(e) = sent.and_then(|()| writer.write_all(&buf)) {
                         warn!("sending to the PC failed: {e}");
-                        let _ = stream.shutdown(Shutdown::Both);
                         return;
                     }
                 }
