@@ -71,8 +71,10 @@ const STEP_SHARE: u64 = 110;
 /// while: the pace holds the PC back only while a keyframe goes out, say) the step
 /// stays on, which costs nothing while nothing queues.
 const STEP_PROOF: Duration = Duration::from_millis(200);
-/// The network delivered the pace: at least this share of it (in hundredths).
-const CARRIED_SHARE: u64 = 90;
+/// The network delivered the pace: at least this share of it (in hundredths). A step
+/// a tenth over the link gets only the link delivered, about 91 % of the step: under
+/// this share, so such a step never holds before the round trip shows it.
+const CARRIED_SHARE: u64 = 95;
 /// A new pace that differs less than this share (in hundredths) is not worth setting.
 const CHANGE: u64 = 3;
 
