@@ -702,24 +702,12 @@ impl Scene {
         )
     }
 
-    fn seen_of(&self, id: u8) -> Option<[f32; 4]> {
-        let p = self.placements.get(&id)?;
-        let (eye, unturn) = self.map_view();
-        let d = unturn * (p.position - eye);
-        let distance = d.length().max(0.3);
-        // Coarse (about a tenth of a degree): the menu redraws whenever its picture
-        // changes, and a monitor being moved changes this every frame.
-        let coarse = |a: f32| (a * 500.0).round() / 500.0;
-        Some([
-            coarse(d.x.atan2(-d.z)),
-            coarse(d.y.atan2(Vec2::new(d.x, d.z).length())),
-            coarse((p.width / 2.0 / distance).atan()),
-            coarse((self.height_of(id) / 2.0 / distance).atan()),
-        ])
+    /// The monitors on the map: as the desktop has them, not as seen from where the
+    /// head happens to be (see `layout::desktop_spots`).
+    fn map_spots(&self) -> HashMap<u8, [f32; 4]> {
+        layout::desktop_spots(&self.placements, &self.layout_sizes(), self.primary)
     }
 
-    /// Where monitor `id` stands, seen from where the user sits: up or down first
-    /// (more than 20°), then left, middle or right (more than 15°).
     fn place_of(&self, id: u8) -> ui::Place {
         let Some(p) = self.placements.get(&id) else {
             return ui::Place::Unknown;
@@ -1290,6 +1278,7 @@ impl Scene {
     }
 
     fn ui_state(&self, room: bool, keyboard: bool, panorama: bool, custom: bool) -> UiState {
+        let spots = self.map_spots();
         UiState {
             host: self.host.clone(),
             found: self
@@ -1311,7 +1300,7 @@ impl Scene {
                     width,
                     height,
                     place: self.place_of(id),
-                    seen: self.seen_of(id),
+                    seen: spots.get(&id).copied(),
                 })
                 .collect(),
             windows: self
@@ -1331,7 +1320,7 @@ impl Scene {
             mirror_seen: self
                 .monitors
                 .contains_key(&MIRROR_ID)
-                .then(|| self.seen_of(MIRROR_ID))
+                .then(|| spots.get(&MIRROR_ID).copied())
                 .flatten(),
             mirror_wanted: self.mirror_wanted,
             audio_wanted: self.audio_wanted,

@@ -180,6 +180,23 @@ pub fn rows_by_position(
         .collect()
 }
 
+/// The monitors for the map in the menu: as they are put on the desktop (see
+/// [`desktop_rects`]), centre and half size in pixels, up positive. The same
+/// wherever the user's head is, at the monitors' own sizes.
+pub fn desktop_spots(
+    placements: &HashMap<u8, Placement>,
+    monitors: &[(u8, u32, u32)],
+    first: Option<u8>,
+) -> HashMap<u8, [f32; 4]> {
+    desktop_rects(placements, monitors, first)
+        .into_iter()
+        .filter_map(|(id, (x, y))| {
+            let &(_, w, h) = monitors.iter().find(|m| m.0 == id)?;
+            Some((id, [x as f32, -y as f32, w as f32 / 2.0, h as f32 / 2.0]))
+        })
+        .collect()
+}
+
 /// Desktop centres (pixels) from where the monitors stand in space: starting from
 /// `first`, each monitor joins the nearest one already placed, on the side where it
 /// stands next to it, shifted along that edge by as much as it is shifted in space
