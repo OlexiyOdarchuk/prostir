@@ -16,8 +16,7 @@ pub const HEIGHT: u32 = 960;
 /// The small menu by the left wrist, in pixels.
 pub const WRIST_WIDTH: u32 = 512;
 pub const WRIST_HEIGHT: u32 = 512;
-/// Same limit as the host's.
-pub const MAX_MONITORS: usize = 6;
+pub use prostir_proto::MAX_MONITORS;
 
 static REGULAR: &[u8] = include_bytes!("../assets/NotoSans-Regular.ttf");
 static MEDIUM: &[u8] = include_bytes!("../assets/NotoSans-Medium.ttf");

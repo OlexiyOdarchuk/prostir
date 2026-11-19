@@ -73,6 +73,11 @@ impl Profile {
                 _ => {}
             }
         }
+        // A file edited by hand (or cut short) may list more than a PC makes.
+        sizes.truncate(prostir_proto::MAX_MONITORS);
+        if usize::from(primary) >= sizes.len() {
+            primary = 0;
+        }
         (!sizes.is_empty()).then(|| Self {
             sizes,
             primary,
@@ -147,6 +152,15 @@ mod tests {
         save(&path, &profiles);
         assert_eq!(load(&path), profiles);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A profile never asks for more monitors than a PC makes.
+    #[test]
+    fn too_many_monitors_are_cut() {
+        let list = vec!["1920x1080"; 20].join(" ");
+        let p = Profile::parse(&format!("monitors {list} *640x480\n")).unwrap();
+        assert_eq!(p.sizes.len(), prostir_proto::MAX_MONITORS);
+        assert_eq!(p.primary, 0, "the primary one was cut off");
     }
 
     #[test]

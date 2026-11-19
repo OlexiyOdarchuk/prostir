@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use log::{debug, error, info, warn};
 use prostir_proto::stats::{Histogram, Period};
-use prostir_proto::{Codec, HostMsg, LayoutEntry, LayoutRow, MIRROR_ID, PcSettings, WINDOW_IDS};
+use prostir_proto::{
+    Codec, HostMsg, LayoutEntry, LayoutRow, MAX_MONITORS, MIRROR_ID, PcSettings, WINDOW_IDS,
+};
 
 use crate::encoder::{Encoder, EncoderConfig, EncoderEvent};
 use crate::layout::{Seat, arrange, arrange_free, panel_size};
@@ -43,9 +45,6 @@ impl Backoff {
         *self = Self::default();
     }
 }
-
-/// More streams than this overwhelm the headset's hardware decoders.
-pub const MAX_MONITORS: usize = 6;
 
 /// How often the router logs what each stream sent (see [`Router::report`]).
 const REPORT_EVERY: Duration = Duration::from_secs(10);

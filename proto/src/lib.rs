@@ -66,6 +66,10 @@ pub mod abilities {
     pub const MOVE_MOUSE: u8 = 1;
 }
 
+/// Most virtual monitors a PC makes: more streams than this overwhelm the headset's
+/// hardware decoders.
+pub const MAX_MONITORS: usize = 6;
+
 /// Stream ids of window panels: small outputs made for one window each, shown as
 /// floating panels (at most three: the headset has only so many video decoders).
 pub const WINDOW_IDS: std::ops::Range<u8> = 10..13;
