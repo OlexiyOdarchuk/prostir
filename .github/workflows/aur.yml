@@ -22,6 +22,8 @@ defaults:
 jobs:
   aur:
     runs-on: ubuntu-24.04
+    # A stuck mirror or runner fails the job instead of holding it for hours.
+    timeout-minutes: 20
     container: archlinux:base-devel
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0

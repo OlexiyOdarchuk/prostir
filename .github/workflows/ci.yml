@@ -19,14 +19,16 @@ concurrency:
 jobs:
   pc:
     runs-on: ubuntu-24.04
+    # A stuck mirror or runner fails the job instead of holding it for hours.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - name: System libraries
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y --no-install-recommends \
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev pkg-config
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch
         with:
@@ -43,6 +45,8 @@ jobs:
   # Checks only: the APK (and the PC packages) are built by release.yml for a tag.
   quest:
     runs-on: ubuntu-24.04
+    # A stuck mirror or runner fails the job instead of holding it for hours.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
