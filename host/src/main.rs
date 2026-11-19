@@ -226,23 +226,13 @@ fn serve_client(
                     outbox: outbox.clone(),
                     closer,
                 };
-                let result = (|| -> std::io::Result<()> {
-                    while let Some(msg) = outbox.next() {
-                        let lane = match &msg {
-                            HostMsg::Audio { .. } => lane::SOUND,
-                            HostMsg::Frame { id, .. } => lane::video(*id),
-                            _ => lane::CONTROL,
-                        };
-                        packet::send_whole(&mut *sender, lane, msg.encode()?, FRAGMENT)?;
+                // The only one sending: it takes packet after packet, most important first.
+                let mut lanes = outbox::Lanes::default();
+                while let Some(pick) = outbox.next(&mut lanes) {
+                    if let Err(e) = lanes.send(pick, &mut *sender) {
+                        info!("connection closed while sending: {e}");
+                        return;
                     }
-                    Ok(())
-                })();
-                match result {
-                    Err(e) if e.kind() == ErrorKind::InvalidInput => {
-                        warn!("a message could not be sent, ending the session: {e}")
-                    }
-                    Err(e) => info!("connection closed while sending: {e}"),
-                    Ok(()) => {}
                 }
             })?
     };

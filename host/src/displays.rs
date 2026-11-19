@@ -324,14 +324,13 @@ impl Router {
                     slot.skipped += 1;
                     return slot.ask_keyframe();
                 }
-                let bytes = data.len();
                 let msg = HostMsg::Frame {
                     id,
                     pts_us,
                     keyframe,
                     data,
                 };
-                if sender.video(id, keyframe, bytes, msg) {
+                if sender.video(id, keyframe, msg) {
                     slot.need_keyframe = false;
                     if keyframe {
                         slot.keyframe_asked = None;
@@ -1753,11 +1752,7 @@ mod tests {
     use super::*;
 
     fn sent(outbox: &Outbox) -> Vec<HostMsg> {
-        let mut msgs = Vec::new();
-        while !outbox.is_idle() {
-            msgs.extend(outbox.next());
-        }
-        msgs
+        outbox.sent()
     }
 
     fn keyframe(router: &Router, id: u8) {

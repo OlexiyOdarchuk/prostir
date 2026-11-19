@@ -36,9 +36,11 @@ impl SocketOptions for TcpOptions {
             && set(stream, libc::IPPROTO_TCP, libc::TCP_KEEPCNT, 3)
             // Unacknowledged data (frames) also gives up after 10 s.
             && set(stream, libc::IPPROTO_TCP, libc::TCP_USER_TIMEOUT, 10_000)
-            // Linux would let unsent data grow to megabytes: frames wait in the
-            // outbox instead, where late ones can still be dropped.
-            && set(stream, libc::IPPROTO_TCP, libc::TCP_NOTSENT_LOWAT, 256 * 1024);
+            // Linux would let unsent data grow to megabytes, and nothing can overtake
+            // what is in the kernel: two packets of 16 KiB, so it never runs dry
+            // between two wake-ups of the writer, and the rest waits in the outbox,
+            // where sound goes first and late frames can still be dropped.
+            && set(stream, libc::IPPROTO_TCP, libc::TCP_NOTSENT_LOWAT, 32 * 1024);
         if !ok {
             warn!(
                 "cannot set up the connection's socket: {}",
