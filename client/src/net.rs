@@ -4,7 +4,8 @@ use std::collections::HashMap;
 use std::io::{BufReader, Write};
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpStream, UdpSocket};
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -12,7 +13,11 @@ use log::{info, warn};
 use prostir_proto::secure::{
     self, Identity, Pairing, SecureReader, SecureWriter, TrustStore, confirmation, tags_match,
 };
+use prostir_proto::stats::{Gaps, Period};
 use prostir_proto::{ClientMsg, Codec, HostMsg, NO_FOCUS, PROTOCOL_VERSION};
+
+/// How often the session logs what it received.
+const REPORT_EVERY: Duration = Duration::from_secs(10);
 
 pub struct Frame {
     /// When the frame arrived from the network.
@@ -20,6 +25,26 @@ pub struct Frame {
     pub pts_us: u64,
     pub keyframe: bool,
     pub data: Vec<u8>,
+}
+
+/// One stream's frames on their way from the network to its decoder, counting how
+/// many wait (the decoder's input queue).
+pub struct Frames {
+    rx: Receiver<Frame>,
+    waiting: Arc<AtomicUsize>,
+}
+
+impl Frames {
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<Frame, RecvTimeoutError> {
+        let frame = self.rx.recv_timeout(timeout)?;
+        self.waiting.fetch_sub(1, Ordering::Relaxed);
+        Ok(frame)
+    }
+
+    /// Frames received from the network that the decoder has not taken yet.
+    pub fn waiting(&self) -> usize {
+        self.waiting.load(Ordering::Relaxed)
+    }
 }
 
 /// Messages to the PC. Sending only queues them: a writer thread puts them on the
@@ -127,7 +152,7 @@ pub enum NetEvent {
         width: u32,
         height: u32,
         codec: Codec,
-        frames: Receiver<Frame>,
+        frames: Frames,
         feedback: Feedback,
     },
     /// `removed`: the host took the monitor away (not just a lost connection).
@@ -772,6 +797,8 @@ impl Session<'_> {
 
 struct StreamSlot {
     tx: SyncSender<Frame>,
+    /// Shared with [`Frames`]: counted up here before sending, down when taken.
+    waiting: Arc<AtomicUsize>,
     waiting_for_keyframe: bool,
 }
 
@@ -877,11 +904,33 @@ fn run_session(
     // microphone switch on the headset is on.
     let mut recorder: Option<crate::mic::Recorder> = None;
     let mut mic_asked = false;
+    // Pauses between messages: with sound on, anything over ~10 ms is something
+    // (a frame being written, Wi-Fi) holding the rest up.
+    let mut gaps = Gaps::default();
+    let mut media_bytes = 0u64;
+    let mut report = Period::new(REPORT_EVERY);
     let result = loop {
         let msg = match HostMsg::read(&mut reader) {
             Ok(m) => m,
             Err(e) => break Err(e),
         };
+        let now = Instant::now();
+        gaps.event(now);
+        media_bytes += match &msg {
+            HostMsg::Frame { data, .. } => data.len(),
+            HostMsg::Audio { pcm } => pcm.len(),
+            _ => 0,
+        } as u64;
+        if let Some(window) = report.due(now) {
+            info!(
+                "received {} messages, {:.1} Mbit/s of video and sound; pauses {}",
+                gaps.events(),
+                media_bytes as f64 * 8.0 / window.as_secs_f64() / 1e6,
+                gaps.summary(window)
+            );
+            gaps.restart();
+            media_bytes = 0;
+        }
         match msg {
             HostMsg::StreamStart {
                 id,
@@ -895,10 +944,12 @@ fn run_session(
                     let _ = events.send(NetEvent::StreamEnd { id, removed: false });
                 }
                 let (tx, rx) = mpsc::sync_channel(32);
+                let waiting = Arc::new(AtomicUsize::new(0));
                 streams.insert(
                     id,
                     StreamSlot {
                         tx,
+                        waiting: waiting.clone(),
                         waiting_for_keyframe: true,
                     },
                 );
@@ -907,7 +958,7 @@ fn run_session(
                     width,
                     height,
                     codec,
-                    frames: rx,
+                    frames: Frames { rx, waiting },
                     feedback: feedback.clone(),
                 });
             }
@@ -923,12 +974,17 @@ fn run_session(
                 if slot.waiting_for_keyframe && !keyframe {
                     continue;
                 }
-                match slot.tx.try_send(Frame {
+                slot.waiting.fetch_add(1, Ordering::Relaxed);
+                let sent = slot.tx.try_send(Frame {
                     received: std::time::Instant::now(),
                     pts_us,
                     keyframe,
                     data,
-                }) {
+                });
+                if sent.is_err() {
+                    slot.waiting.fetch_sub(1, Ordering::Relaxed);
+                }
+                match sent {
                     Ok(()) => slot.waiting_for_keyframe = false,
                     Err(TrySendError::Full(_)) => {
                         warn!("decoder {id} is behind, dropping until next keyframe");

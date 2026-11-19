@@ -1,13 +1,18 @@
 //! Plays PC sound received over the connection through AAudio (low-latency mode).
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use log::{info, warn};
 use ndk_sys as ffi;
+use prostir_proto::stats::Period;
 use prostir_proto::{AUDIO_CHANNELS, AUDIO_RATE};
+
+/// How often the player logs underruns and dropped slices.
+const REPORT_EVERY: Duration = Duration::from_secs(10);
 
 /// Most audio kept waiting before older slices are dropped (10 ms each), so sound
 /// never drifts behind the picture after a Wi-Fi hiccup.
@@ -61,11 +66,16 @@ fn apply_gains(pcm: &mut [u8], current: &mut [f32; 2]) {
 /// Plays until dropped.
 pub struct Player {
     tx: SyncSender<Vec<u8>>,
+    /// Slices dropped because the audio thread was far behind (shared with it, which
+    /// logs them).
+    behind: Arc<AtomicU32>,
 }
 
 impl Player {
     pub fn spawn() -> Self {
         let (tx, rx) = mpsc::sync_channel(32);
+        let behind = Arc::new(AtomicU32::new(0));
+        let counted = behind.clone();
         let _ = std::thread::Builder::new()
             .name("audio".into())
             .spawn(move || {
@@ -74,7 +84,7 @@ impl Player {
                 let mut failures = 0;
                 while failures < 5 {
                     match Stream::open() {
-                        Ok(stream) => match play(&stream, &rx) {
+                        Ok(stream) => match play(&stream, &rx, &counted) {
                             Ended::Closed => return,
                             Ended::Failed => failures = 0,
                         },
@@ -87,12 +97,14 @@ impl Player {
                 }
             })
             .inspect_err(|e| warn!("no sound: {e}"));
-        Self { tx }
+        Self { tx, behind }
     }
 
     pub fn push(&self, pcm: Vec<u8>) {
         // Full means the player is far behind: drop rather than add latency.
-        let _ = self.tx.try_send(pcm);
+        if let Err(mpsc::TrySendError::Full(_)) = self.tx.try_send(pcm) {
+            self.behind.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -140,6 +152,12 @@ impl Stream {
         }
     }
 
+    /// How many times AAudio ran out of sound to play (or of room) since it opened.
+    fn xruns(&self) -> i32 {
+        // SAFETY: the stream is open.
+        unsafe { ffi::AAudioStream_getXRunCount(self.0) }.max(0)
+    }
+
     /// Writes interleaved i16 frames, waiting up to 50 ms for room.
     fn write(&self, pcm: &[u8]) -> Result<(), i32> {
         let frames = (pcm.len() / FRAME_BYTES) as i32;
@@ -171,10 +189,52 @@ enum Ended {
     Failed,
 }
 
-fn play(stream: &Stream, rx: &Receiver<Vec<u8>>) -> Ended {
+/// Logs now and then how playing went: underruns (AAudio had nothing to play: a
+/// click) and slices dropped, late ones here and ones the player was too far behind
+/// to take (`behind`).
+struct Report {
+    period: Period,
+    xruns: i32,
+    late: u32,
+    played: u32,
+}
+
+impl Report {
+    fn tick(&mut self, stream: &Stream, behind: &AtomicU32) {
+        let Some(window) = self.period.due(Instant::now()) else {
+            return;
+        };
+        let xruns = stream.xruns();
+        let behind = behind.swap(0, Ordering::Relaxed);
+        // Quiet while nothing comes (headset taken off, sound switched off). A window
+        // in which the sound stopped also counts the stop as an underrun.
+        if self.played > 0 || self.late > 0 || behind > 0 {
+            info!(
+                "sound: {} slices played in {:.0} s, {} underruns, dropped {} late and {} behind",
+                self.played,
+                window.as_secs_f64(),
+                xruns - self.xruns,
+                self.late,
+                behind
+            );
+        }
+        self.xruns = xruns;
+        self.late = 0;
+        self.played = 0;
+    }
+}
+
+fn play(stream: &Stream, rx: &Receiver<Vec<u8>>, behind: &AtomicU32) -> Ended {
     let mut queue: VecDeque<Vec<u8>> = VecDeque::new();
     let mut gains = [1.0f32; 2];
+    let mut report = Report {
+        period: Period::new(REPORT_EVERY),
+        xruns: stream.xruns(),
+        late: 0,
+        played: 0,
+    };
     loop {
+        report.tick(stream, behind);
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(pcm) => queue.push_back(pcm),
             Err(RecvTimeoutError::Timeout) => continue,
@@ -185,6 +245,7 @@ fn play(stream: &Stream, rx: &Receiver<Vec<u8>>) -> Ended {
         }
         while queue.len() > MAX_QUEUED {
             queue.pop_front();
+            report.late += 1;
         }
         while let Some(mut pcm) = queue.pop_front() {
             apply_gains(&mut pcm, &mut gains);
@@ -192,6 +253,7 @@ fn play(stream: &Stream, rx: &Receiver<Vec<u8>>) -> Ended {
                 warn!("sound output: AAudio error {e}");
                 return Ended::Failed;
             }
+            report.played += 1;
         }
     }
 }

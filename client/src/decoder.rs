@@ -3,21 +3,22 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::mpsc::RecvTimeoutError;
 use std::thread::JoinHandle;
 use std::time::Duration;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use log::{debug, error, info, warn};
+use log::{error, info, warn};
 use ndk::media::media_codec::{
     DequeuedInputBufferResult, DequeuedOutputBufferInfoResult, MediaCodec, MediaCodecDirection,
 };
 use ndk::media::media_format::MediaFormat;
 use ndk::native_window::NativeWindow;
+use prostir_proto::stats::{Histogram, Period};
 use prostir_proto::{ClientMsg, Codec};
 
-use crate::net::{Feedback, Frame};
+use crate::net::{Feedback, Frame, Frames};
 
 /// Decodes `frames` into `window` until the channel closes or `stop` is set.
 #[allow(clippy::too_many_arguments)]
@@ -27,7 +28,7 @@ pub fn spawn(
     width: u32,
     height: u32,
     window: NativeWindow,
-    frames: Receiver<Frame>,
+    frames: Frames,
     feedback: Feedback,
     stop: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
@@ -49,7 +50,7 @@ fn run(
     width: u32,
     height: u32,
     window: &NativeWindow,
-    frames: &Receiver<Frame>,
+    frames: &Frames,
     feedback: &Feedback,
     stop: &AtomicBool,
 ) -> Result<()> {
@@ -67,7 +68,11 @@ fn run(
         gate.wait();
         let result = (|| -> Result<()> {
             while !stop.load(Ordering::Relaxed) {
-                match frames.recv_timeout(Duration::from_millis(4)) {
+                let got = frames.recv_timeout(Duration::from_millis(4));
+                if got.is_ok() {
+                    timing.taken(frames.waiting());
+                }
+                match got {
                     Ok(frame) if gate.passes(&frame) => {
                         if !queue(&decoder, &frame, &mut timing)? {
                             gate.wait();
@@ -220,8 +225,11 @@ fn drain(decoder: &MediaCodec, timing: &mut Timing) -> Result<()> {
     }
 }
 
-/// Where time goes per frame: network arrival → decoder input → decoded output.
-#[derive(Default)]
+/// How often each decoder logs its timing.
+const REPORT_EVERY: Duration = Duration::from_secs(10);
+
+/// Where time goes per frame: network arrival → decoder input → decoded output, and
+/// how many frames wait for the decoder.
 struct Timing {
     id: u8,
     /// Reports shown frames so the host can measure the whole trip.
@@ -230,15 +238,39 @@ struct Timing {
     in_flight: HashMap<u64, (Instant, Instant)>,
     /// When a shown frame was last reported to the PC.
     last_ack: Option<Instant>,
-    frames: u32,
-    wait_ms: f32,
-    wait_max: f32,
-    decode_ms: f32,
-    decode_max: f32,
-    since: Option<Instant>,
+    /// Received → handed to the decoder.
+    wait: Histogram,
+    /// Handed to the decoder → decoded.
+    decode: Histogram,
+    /// Frames still waiting behind each one taken: (sum, max, taken).
+    queue: (u64, usize, u32),
+    report: Period,
+}
+
+impl Default for Timing {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            feedback: None,
+            in_flight: HashMap::new(),
+            last_ack: None,
+            wait: Histogram::default(),
+            decode: Histogram::default(),
+            queue: (0, 0, 0),
+            report: Period::new(REPORT_EVERY),
+        }
+    }
 }
 
 impl Timing {
+    /// A frame was taken from the network with `behind` more waiting.
+    fn taken(&mut self, behind: usize) {
+        let (sum, max, n) = &mut self.queue;
+        *sum += behind as u64;
+        *max = (*max).max(behind);
+        *n += 1;
+    }
+
     fn queued(&mut self, frame: &Frame) {
         if self.in_flight.len() > 64 {
             self.in_flight.clear();
@@ -264,35 +296,25 @@ impl Timing {
         let Some((received, queued)) = self.in_flight.remove(&pts_us) else {
             return;
         };
-        let wait = (queued - received).as_secs_f32() * 1e3;
-        let decode = queued.elapsed().as_secs_f32() * 1e3;
-        self.frames += 1;
-        self.wait_ms += wait;
-        self.wait_max = self.wait_max.max(wait);
-        self.decode_ms += decode;
-        self.decode_max = self.decode_max.max(decode);
+        self.wait.add(queued - received);
+        self.decode.add(queued.elapsed());
     }
 
     fn report(&mut self) {
-        let since = *self.since.get_or_insert_with(Instant::now);
-        if since.elapsed() < Duration::from_secs(2) {
+        if self.report.due(Instant::now()).is_none() {
             return;
         }
-        let n = self.frames.max(1) as f32;
-        debug!(
-            "timing: {} frames, net→decoder avg {:.1} max {:.1} ms, decode avg {:.1} max {:.1} ms, still inside decoder {}",
-            self.frames,
-            self.wait_ms / n,
-            self.wait_max,
-            self.decode_ms / n,
-            self.decode_max,
+        let (sum, max, taken) = std::mem::take(&mut self.queue);
+        info!(
+            "decoder {}: {} frames decoded; net → decoder {}; decode {}; waiting for the decoder avg {:.1} max {max}; inside the decoder {}",
+            self.id,
+            self.decode.count(),
+            self.wait.summary_ms(),
+            self.decode.summary_ms(),
+            sum as f64 / f64::from(taken.max(1)),
             self.in_flight.len()
         );
-        *self = Timing {
-            id: self.id,
-            feedback: self.feedback.take(),
-            in_flight: std::mem::take(&mut self.in_flight),
-            ..Default::default()
-        };
+        self.wait = Histogram::default();
+        self.decode = Histogram::default();
     }
 }
