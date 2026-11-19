@@ -878,14 +878,19 @@ impl Displays {
         self.sync_audio();
     }
 
-    /// Starts the streams over (if they are running), so every monitor sends its
-    /// picture now: for a headset that just connected to monitors kept from before.
-    pub fn resume_streams(&self) {
+    /// A headset just connected (the router is attached): it counts as worn until it
+    /// says otherwise, and every stream starts over once, so each monitor sends its
+    /// picture now, monitors kept from the last session too.
+    pub fn headset_connected(&mut self) {
+        self.taken_off_at = None;
+        // Paused ones (kept from before) start over as `set_streaming` resumes them;
+        // running ones (just made) are resumed here, which starts them over too.
         if self.streaming {
             for (_, e) in self.encoders() {
                 e.set_paused(false);
             }
         }
+        self.set_streaming(true);
     }
 
     /// The headset reports being put on or taken off.

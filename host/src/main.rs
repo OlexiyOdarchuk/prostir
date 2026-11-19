@@ -214,8 +214,6 @@ fn serve_client(
         })?;
 
     displays.router.attach(outbox.clone());
-    // Monitors kept from the last session send their picture again for this one.
-    displays.resume_streams();
     if let Some(id) = displays.primary() {
         displays.router.send(HostMsg::PrimaryChanged { id });
     }
@@ -232,7 +230,7 @@ fn serve_client(
         enabled: displays.mic_wanted(),
     });
     displays.announce_pc_settings();
-    displays.set_streaming(true);
+    displays.headset_connected();
     displays.force_keyframes();
     usage::headset_connected();
 
@@ -669,10 +667,6 @@ fn main() -> Result<()> {
                     }
                 }
                 platform::set_keepalive(&stream);
-                if let Some(d) = displays.as_mut() {
-                    d.set_worn(true);
-                }
-                control.show(Some(via), displays.as_ref());
                 if let Err(e) = serve_client(
                     stream,
                     reader,
