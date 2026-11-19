@@ -28,16 +28,26 @@ fn generic_host(msg: &HostMsg) -> Vec<u8> {
     framed(msg.wire_tag(), &payload)
 }
 
+/// Any message from the PC read as one stream (in the session's limits).
+fn host_read(r: &mut impl Read) -> io::Result<HostMsg> {
+    HostMsg::read_within(r, MAX_HOST_PAYLOAD)
+}
+
+/// Any message from a headset read as one stream.
+fn client_read(r: &mut impl Read) -> io::Result<ClientMsg> {
+    ClientMsg::read_within(r, MAX_CLIENT_PAYLOAD)
+}
+
 fn read_host(bytes: &[u8]) -> io::Result<HostMsg> {
     let mut r = bytes;
-    let msg = HostMsg::read(&mut r)?;
+    let msg = host_read(&mut r)?;
     assert!(r.is_empty(), "the reader took the whole message");
     Ok(msg)
 }
 
 fn read_client(bytes: &[u8]) -> io::Result<ClientMsg> {
     let mut r = bytes;
-    let msg = ClientMsg::read(&mut r)?;
+    let msg = client_read(&mut r)?;
     assert!(r.is_empty(), "the reader took the whole message");
     Ok(msg)
 }
@@ -241,7 +251,7 @@ fn every_message_round_trips() {
     }
     let mut r = stream.as_slice();
     for m in &hosts {
-        assert_eq!(&HostMsg::read(&mut r).unwrap(), m);
+        assert_eq!(&host_read(&mut r).unwrap(), m);
     }
 
     let clients = client_samples();
@@ -489,7 +499,7 @@ fn a_pc_message_before_the_session_cannot_be_huge() {
     let big = host_bytes(&HostMsg::Error {
         text: "x".repeat(100 * 1024),
     });
-    assert!(HostMsg::read(&mut big.as_slice()).is_ok());
+    assert!(host_read(&mut big.as_slice()).is_ok());
     let err = HostMsg::read_setup(&mut big.as_slice()).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     let opened = host_bytes(&HostMsg::Opened);
@@ -505,7 +515,7 @@ fn a_headset_message_cannot_be_huge() {
     big.extend_from_slice(&(1u32 << 20).to_le_bytes());
     big.extend(std::iter::repeat_n(0u8, 1 << 20));
     let too_large = |big: &[u8]| {
-        let err = ClientMsg::read(&mut &big[..]).unwrap_err();
+        let err = client_read(&mut &big[..]).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert_eq!(err.to_string(), "message too large");
     };
@@ -521,21 +531,18 @@ fn skips_unknown_messages() {
     let mut buf = framed(250, &[1, 2, 3]);
     HostMsg::Focus { id: Some(1) }.write(&mut buf).unwrap();
     let mut r = buf.as_slice();
-    assert_eq!(
-        HostMsg::read(&mut r).unwrap(),
-        HostMsg::Focus { id: Some(1) }
-    );
+    assert_eq!(host_read(&mut r).unwrap(), HostMsg::Focus { id: Some(1) });
     assert!(r.is_empty());
 
     let mut buf = framed(251, &[7; 10]);
     ClientMsg::SetMic { enabled: true }.write(&mut buf).unwrap();
     let mut r = buf.as_slice();
     assert_eq!(
-        ClientMsg::read(&mut r).unwrap(),
+        client_read(&mut r).unwrap(),
         ClientMsg::SetMic { enabled: true }
     );
     // An unknown message cut off is an error, not a skip past the end.
-    let err = HostMsg::read(&mut framed(250, &[1, 2, 3])[..6].as_ref()).unwrap_err();
+    let err = host_read(&mut framed(250, &[1, 2, 3])[..6].as_ref()).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
 }
 
@@ -639,7 +646,7 @@ fn damaged_messages_never_panic_and_read_back_exactly() {
         let pick = rng.below(hosts.len());
         let bytes = mutate(&mut rng, &hosts[pick]);
         let mut r = bytes.as_slice();
-        match HostMsg::read(&mut r) {
+        match host_read(&mut r) {
             Ok(msg) => {
                 read += 1;
                 let taken = &bytes[..bytes.len() - r.len()];
@@ -653,7 +660,7 @@ fn damaged_messages_never_panic_and_read_back_exactly() {
         let pick = rng.below(clients.len());
         let bytes = mutate(&mut rng, &clients[pick]);
         let mut r = bytes.as_slice();
-        match ClientMsg::read(&mut r) {
+        match client_read(&mut r) {
             Ok(msg) => {
                 read += 1;
                 let taken = &bytes[..bytes.len() - r.len()];

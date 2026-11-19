@@ -477,37 +477,6 @@ fn unsendable(e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Err
     io::Error::new(io::ErrorKind::InvalidInput, e)
 }
 
-/// The 5 bytes before a payload of `len` bytes.
-fn header(tag: u8, len: usize) -> io::Result<[u8; 5]> {
-    let len = u32::try_from(len).map_err(|_| unsendable("message too large"))?;
-    let mut header = [0u8; 5];
-    header[0] = tag;
-    header[1..].copy_from_slice(&len.to_le_bytes());
-    Ok(header)
-}
-
-/// A media message: its header, then its parts as they are (no copy of the data).
-fn write_media(w: &mut impl Write, tag: u8, parts: &[&[u8]]) -> io::Result<()> {
-    w.write_all(&header(tag, parts.iter().map(|p| p.len()).sum())?)?;
-    for p in parts {
-        w.write_all(p)?;
-    }
-    Ok(())
-}
-
-/// Any other message, header and payload in one buffer and one write.
-fn write_fields(
-    w: &mut impl Write,
-    tag: u8,
-    put: impl FnOnce(&mut Vec<u8>) -> Result<(), WireError>,
-) -> io::Result<()> {
-    let mut out = vec![0u8; 5];
-    put(&mut out).map_err(unsendable)?;
-    let head = header(tag, out.len() - 5)?;
-    out[..5].copy_from_slice(&head);
-    w.write_all(&out)
-}
-
 /// The tag and payload length of the next message.
 fn read_header(r: &mut impl Read, max: u32) -> io::Result<(u8, usize)> {
     let mut header = [0u8; 5];
@@ -620,32 +589,15 @@ impl HostMsg {
         }
     }
 
+    /// Writes the message as one stream, the frozen handshake's format: the same bytes
+    /// its packets carry.
     pub fn write(&self, w: &mut impl Write) -> io::Result<()> {
-        match self {
-            HostMsg::Frame {
-                id,
-                keyframe,
-                pts_us,
-                data,
-            } => {
-                let mut head = [0u8; FRAME_HEAD];
-                head[0] = *id;
-                head[1] = u8::from(*keyframe);
-                head[2..].copy_from_slice(&pts_us.to_le_bytes());
-                write_media(w, tag::FRAME, &[&head, data])
-            }
-            HostMsg::Audio { pcm } => write_media(w, tag::AUDIO, &[pcm]),
-            _ => write_fields(w, self.wire_tag(), |out| self.put_fields(out)),
-        }
+        self.clone().encode()?.write_to(w)
     }
 
-    /// The next message this build knows; messages from a newer PC are skipped.
-    pub fn read(r: &mut impl Read) -> io::Result<Self> {
-        Self::read_within(r, MAX_HOST_PAYLOAD)
-    }
-
-    /// As [`HostMsg::read`], until [`HostMsg::Opened`]: the PC may not be trusted yet,
-    /// so a message over 64 KiB is an error.
+    /// The next message from the PC read as one stream, until [`HostMsg::Opened`]
+    /// (the version handshake): the PC may not be trusted yet, so a message over 64 KiB
+    /// is an error. Messages from a newer PC are skipped.
     pub fn read_setup(r: &mut impl Read) -> io::Result<Self> {
         Self::read_within(r, MAX_SETUP_PAYLOAD)
     }
@@ -653,33 +605,13 @@ impl HostMsg {
     fn read_within(r: &mut impl Read, max: u32) -> io::Result<Self> {
         loop {
             let (tag, len) = read_header(r, max)?;
-            match tag {
-                tag::FRAME => {
-                    if len < FRAME_HEAD {
-                        return Err(WireError::Truncated.into());
-                    }
-                    let mut head = [0u8; FRAME_HEAD];
-                    r.read_exact(&mut head)?;
-                    let mut h = Reader::new(&head);
-                    let (id, keyframe, pts_us) =
-                        (u8::get(&mut h)?, bool::get(&mut h)?, u64::get(&mut h)?);
-                    let data = read_bytes(r, len - FRAME_HEAD)?;
-                    return Ok(HostMsg::Frame {
-                        id,
-                        keyframe,
-                        pts_us,
-                        data,
-                    });
-                }
-                tag::AUDIO => {
-                    return Ok(HostMsg::Audio {
-                        pcm: read_bytes(r, len)?,
-                    });
-                }
-                tag if Self::TAGS.contains(&tag) => {
-                    return Ok(Self::decode(tag, &read_bytes(r, len)?)?);
-                }
-                _ => skip(r, len)?,
+            if !Self::TAGS.contains(&tag) {
+                skip(r, len)?;
+                continue;
+            }
+            let m = Message::from_payload(tag, read_bytes(r, len)?, host_head(tag));
+            if let Some(msg) = Self::from_message(m)? {
+                return Ok(msg);
             }
         }
     }
@@ -744,11 +676,10 @@ impl ClientMsg {
         }
     }
 
+    /// Writes the message as one stream, the frozen handshake's format: the same bytes
+    /// its packets carry.
     pub fn write(&self, w: &mut impl Write) -> io::Result<()> {
-        match self {
-            ClientMsg::Mic { pcm } => write_media(w, tag::MIC, &[pcm]),
-            _ => write_fields(w, self.wire_tag(), |out| self.put_fields(out)),
-        }
+        self.clone().encode()?.write_to(w)
     }
 
     /// The first message of a connection, which every headset since protocol 2 makes
@@ -764,20 +695,19 @@ impl ClientMsg {
         Ok(Some(Self::decode(tag, &read_bytes(r, len)?)?))
     }
 
-    /// The next message this build knows; messages from a newer headset are skipped.
-    pub fn read(r: &mut impl Read) -> io::Result<Self> {
+    /// Any message from a headset read as one stream, as packets would carry it: for
+    /// the tests, which compare the two formats.
+    #[cfg(test)]
+    fn read_within(r: &mut impl Read, max: u32) -> io::Result<Self> {
         loop {
-            let (tag, len) = read_header(r, MAX_CLIENT_PAYLOAD)?;
-            match tag {
-                tag::MIC => {
-                    return Ok(ClientMsg::Mic {
-                        pcm: read_bytes(r, len)?,
-                    });
-                }
-                tag if Self::TAGS.contains(&tag) => {
-                    return Ok(Self::decode(tag, &read_bytes(r, len)?)?);
-                }
-                _ => skip(r, len)?,
+            let (tag, len) = read_header(r, max)?;
+            if !Self::TAGS.contains(&tag) {
+                skip(r, len)?;
+                continue;
+            }
+            let m = Message::from_payload(tag, read_bytes(r, len)?, client_head(tag));
+            if let Some(msg) = Self::from_message(m)? {
+                return Ok(msg);
             }
         }
     }

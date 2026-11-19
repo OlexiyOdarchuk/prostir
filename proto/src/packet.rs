@@ -190,6 +190,12 @@ impl Encoded {
         false
     }
 
+    /// Writes all its bytes, as one stream (the frozen version handshake).
+    pub fn write_to(&self, w: &mut impl io::Write) -> io::Result<()> {
+        w.write_all(&self.head[..usize::from(self.head_len)])?;
+        w.write_all(&self.body)
+    }
+
     /// Its bytes from `start`, `n` of them, as two slices.
     fn range(&self, start: usize, n: usize) -> [&[u8]; 2] {
         let head = &self.head[..usize::from(self.head_len)];
@@ -261,6 +267,22 @@ pub struct Message {
 }
 
 impl Message {
+    /// The message with `tag` and `payload`, its first `head` bytes kept apart, as an
+    /// [`Assembler`] would make it.
+    pub(crate) fn from_payload(tag: u8, mut payload: Vec<u8>, head: usize) -> Self {
+        let head_len = head.min(MAX_HEAD - MESSAGE_HEADER).min(payload.len());
+        let mut msg = Message {
+            tag,
+            head: [0; MAX_HEAD],
+            head_len: head_len as u8,
+            body: Vec::new(),
+        };
+        msg.head[..head_len].copy_from_slice(&payload[..head_len]);
+        payload.drain(..head_len);
+        msg.body = payload;
+        msg
+    }
+
     /// The payload's first bytes, as many as the assembler was told to keep apart for
     /// this tag (fewer if the payload is shorter).
     pub fn head(&self) -> &[u8] {
