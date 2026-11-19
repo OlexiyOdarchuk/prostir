@@ -317,8 +317,8 @@ After the handshake, the byte stream of protocol messages is sent in chunks:
   chunk (standard Noise nonce encoding). There is no rekeying. A chunk that does not
   decrypt ends the connection.
 - No associated data.
-- Do not send a chunk with an empty plaintext: the current reader would return 0 bytes
-  for it, which reads as the end of the stream.
+- A chunk with an empty plaintext carries nothing; a reader skips it and reads on (the
+  current apps never send one).
 - The TCP connection closing between two chunks is a normal end of session; closing in
   the middle of a chunk is an error.
 
@@ -411,7 +411,8 @@ closes the connection.
 | Peer | What happens |
 |---|---|
 | 0.1.x client, trusts the host | Sends `Hello{1, 1}`. The host sends `Error` ("Update Prostir in the headset…") and `Incompatible{2, …}`; the client shows its "update the headset" page. |
-| 0.1.x client, pairing first | Sends `PairBegin` first. The host sends the same `Error` and `Incompatible` and closes. The client shows the error text, treats `Incompatible` during pairing as unexpected and reconnects. |
+| 0.1.x client, pairing first, code shown in the headset (its default) | Sends `PairBegin` and its `PairMsg` first. The host sends the same `Error` and `Incompatible` and closes. The client shows the error text, treats `Incompatible` during pairing as unexpected and reconnects, every few hundred milliseconds while the user's approval holds (10 min). |
+| 0.1.x client, pairing first, code shown on the PC | Sends `PairBegin`, then waits for the user to type the code the PC would show, up to 300 s; the host shows none, only its "update the headset" notification, and closes. Once a code is typed the client reads the `Error` text, shows it and reconnects as above; after 300 s without one it gives up the attempt and reconnects. |
 | 0.1.x host | Gets `Hello{2, 2}` and answers `Error` ("Update Prostir on the PC…") and `Incompatible{1, …}`; the client shows "update the PC". The host also shows a desktop notification. |
 
 ### Steady state
