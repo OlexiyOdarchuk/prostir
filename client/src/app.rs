@@ -1291,12 +1291,12 @@ impl Scene {
     /// Tells the PC whether the headset is worn (quietly: nothing to show the user).
     fn tell_presence(&self) {
         if let Some(f) = &self.feedback {
-            let _ = f.send(&ClientMsg::Presence { worn: self.worn });
+            let _ = f.send(ClientMsg::Presence { worn: self.worn });
         }
     }
 
     fn send(&mut self, msg: ClientMsg) {
-        let sent = self.feedback.as_ref().map(|f| f.send(&msg));
+        let sent = self.feedback.as_ref().map(|f| f.send(msg));
         match sent {
             Some(Ok(())) => {}
             Some(Err(e)) => {

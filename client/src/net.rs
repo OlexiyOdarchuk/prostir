@@ -12,10 +12,12 @@ use log::{info, warn};
 use prostir_proto::handshake::{self, Answer};
 use prostir_proto::link::tcp::{NoiseTcp, Plain};
 use prostir_proto::link::{Closer, Link, PeerInfo, RecordReceiver, RecordSender};
-use prostir_proto::packet::{self, Assembler, FRAGMENT, lane};
+use prostir_proto::packet::Assembler;
 use prostir_proto::secure::{self, Identity, Pairing, TrustStore, confirmation, tags_match};
 use prostir_proto::stats::{Gaps, Period};
 use prostir_proto::{ClientMsg, Codec, HostMsg, PROTOCOL_VERSION};
+
+use crate::outbox::{Lanes, Outbox};
 
 /// While the user types a code, the connection is looked at this often.
 const LOOK_EVERY: Duration = Duration::from_millis(500);
@@ -51,76 +53,52 @@ impl Frames {
     }
 }
 
-/// Messages to the PC. Sending only queues them: a writer thread puts them on the
-/// network, so the frame loop, the microphone and the decoders never wait on Wi-Fi.
+/// Messages to the PC (see [`crate::outbox`]). Sending only queues them.
 #[derive(Clone)]
 pub struct Feedback {
-    tx: Sender<ClientMsg>,
-    /// Queued messages that may be dropped (see [`droppable`]).
-    lossy: Arc<std::sync::atomic::AtomicUsize>,
-}
-
-/// About 2.5 s of microphone sound: more than that waiting means the network is stuck.
-const MAX_LOSSY: usize = 256;
-
-/// Messages it costs little to lose when the network is stuck: microphone sound (it
-/// would be late anyway) and the "frame shown" acknowledgements (latency figures only).
-/// Everything else (settings, layout, pairing) is always sent.
-fn droppable(msg: &ClientMsg) -> bool {
-    matches!(msg, ClientMsg::Mic { .. } | ClientMsg::FrameShown { .. })
+    outbox: Arc<Outbox>,
 }
 
 impl Feedback {
     /// Starts the writer thread for one session. It ends (and closes the connection,
-    /// which ends the session) when a write fails or times out.
+    /// which ends the session) when a write fails or times out, or once the outbox is
+    /// closed.
     fn start(mut sender: Box<dyn RecordSender>, closer: Closer) -> std::io::Result<Self> {
-        use std::sync::atomic::Ordering;
-        let (tx, rx) = mpsc::channel::<ClientMsg>();
-        let lossy = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let counted = lossy.clone();
+        let outbox = Arc::new(Outbox::default());
+        let queued = outbox.clone();
         std::thread::Builder::new()
             .name("net-writer".into())
             .spawn(move || {
-                let mut put = |msg: ClientMsg| {
-                    if droppable(&msg) {
-                        counted.fetch_sub(1, Ordering::Relaxed);
-                    }
-                    let lane = match msg {
-                        ClientMsg::Mic { .. } => lane::SOUND,
-                        _ => lane::CONTROL,
-                    };
-                    packet::send_whole(&mut *sender, lane, msg.encode()?, FRAGMENT)
-                };
                 // However this thread stops, the session ends with it.
-                struct Close(Closer);
+                struct Close(Closer, Arc<Outbox>);
                 impl Drop for Close {
                     fn drop(&mut self) {
+                        self.1.close();
                         self.0.close();
                     }
                 }
-                let _close = Close(closer);
-                while let Ok(msg) = rx.recv() {
-                    if let Err(e) = put(msg) {
+                let _close = Close(closer, queued.clone());
+                let mut lanes = Lanes::default();
+                while let Some(pick) = queued.next(&mut lanes) {
+                    if let Err(e) = lanes.send(pick, &mut *sender) {
                         warn!("sending to the PC failed: {e}");
                         return;
                     }
                 }
             })?;
-        Ok(Self { tx, lossy })
+        Ok(Self { outbox })
     }
 
     /// Queues a message. While the network is stuck, microphone sound and frame
     /// acknowledgements beyond a couple of seconds are dropped; nothing else is. An
     /// error means the session is over.
-    pub fn send(&self, msg: &ClientMsg) -> std::io::Result<()> {
-        use std::sync::atomic::Ordering;
-        if droppable(msg) && self.lossy.fetch_add(1, Ordering::Relaxed) >= MAX_LOSSY {
-            self.lossy.fetch_sub(1, Ordering::Relaxed);
-            return Ok(());
-        }
-        self.tx
-            .send(msg.clone())
-            .map_err(|_| std::io::ErrorKind::BrokenPipe.into())
+    pub fn send(&self, msg: ClientMsg) -> std::io::Result<()> {
+        self.outbox.push(msg)
+    }
+
+    /// The session is over: the writer stops.
+    fn close(&self) {
+        self.outbox.close();
     }
 }
 
@@ -755,7 +733,7 @@ impl Session<'_> {
             let pc_shows = self.steering.pc_shows_code();
             // The PC makes its code only when asked, so ask first and then wait for
             // the user to type what it shows.
-            self.feedback.send(&ClientMsg::PairBegin {
+            self.feedback.send(ClientMsg::PairBegin {
                 headset_shows: !pc_shows,
                 name: "Meta Quest".into(),
             })?;
@@ -784,7 +762,7 @@ impl Session<'_> {
                 code
             };
             let (pairing, msg) = Pairing::start(&code);
-            self.feedback.send(&ClientMsg::PairMsg { msg })?;
+            self.feedback.send(ClientMsg::PairMsg { msg })?;
             let theirs = loop {
                 match self.read()? {
                     HostMsg::PairMsg { msg } => break Some(msg),
@@ -805,7 +783,7 @@ impl Session<'_> {
             };
             let key = pairing.finish(&theirs)?;
             let own = &self.identity.public;
-            self.feedback.send(&ClientMsg::PairConfirm {
+            self.feedback.send(ClientMsg::PairConfirm {
                 tag: confirmation(&key, "headset", self.peer, own),
             })?;
             match self.read()? {
@@ -906,6 +884,14 @@ fn run_session(
     };
     // From here on, packets.
     let feedback = Feedback::start(sender, closer.clone())?;
+    // Nor does its writer outlive it.
+    struct StopOnExit(Feedback);
+    impl Drop for StopOnExit {
+        fn drop(&mut self) {
+            self.0.close();
+        }
+    }
+    let _stop = StopOnExit(feedback.clone());
     let mut packets = HostMsg::assembler();
     {
         let mut session = Session {
@@ -925,13 +911,13 @@ fn run_session(
         if !trusted.contains(&peer.key) {
             session.pair_if_approved(trusted)?;
         }
-        feedback.send(&ClientMsg::Open)?;
+        feedback.send(ClientMsg::Open)?;
         loop {
             match session.read()? {
                 HostMsg::Opened => break,
                 HostMsg::PairingRequired => {
                     session.pair_if_approved(trusted)?;
-                    feedback.send(&ClientMsg::Open)?;
+                    feedback.send(ClientMsg::Open)?;
                 }
                 other => return Err(std::io::Error::other(format!("unexpected {other:?}"))),
             }
@@ -1040,7 +1026,7 @@ fn run_session(
                     Err(TrySendError::Full(_)) => {
                         warn!("decoder {id} is behind, dropping until next keyframe");
                         slot.waiting_for_keyframe = true;
-                        feedback.send(&ClientMsg::RequestKeyframe { id })?;
+                        feedback.send(ClientMsg::RequestKeyframe { id })?;
                     }
                     Err(TrySendError::Disconnected(_)) => {}
                 }

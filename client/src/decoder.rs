@@ -164,7 +164,7 @@ impl KeyframeGate {
             self.asked = Some(Instant::now());
             let _ = self
                 .feedback
-                .send(&ClientMsg::RequestKeyframe { id: self.id });
+                .send(ClientMsg::RequestKeyframe { id: self.id });
         }
     }
 
@@ -288,7 +288,7 @@ impl Timing {
                 .is_none_or(|t| t.elapsed() >= Duration::from_millis(100))
         {
             self.last_ack = Some(Instant::now());
-            let _ = f.send(&ClientMsg::FrameShown {
+            let _ = f.send(ClientMsg::FrameShown {
                 id: self.id,
                 pts_us,
             });

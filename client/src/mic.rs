@@ -104,7 +104,7 @@ fn record(input: &Input, feedback: &Feedback, stop: &AtomicBool) -> bool {
                     .iter()
                     .flat_map(|s| s.to_le_bytes())
                     .collect();
-                if feedback.send(&ClientMsg::Mic { pcm }).is_err() {
+                if feedback.send(ClientMsg::Mic { pcm }).is_err() {
                     break;
                 }
             }
