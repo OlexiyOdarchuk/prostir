@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 pub mod secure;
+pub mod stats;
 
 use std::io::{self, Read, Write};
 
