@@ -29,6 +29,7 @@ fn none(_tag: u8) -> usize {
 const ANY: Limits = Limits {
     message: u32::MAX,
     lanes: 256,
+    in_flight: usize::MAX,
 };
 
 /// The packets of `msg` in `lane`, `fragment` bytes of it each.
@@ -245,6 +246,7 @@ fn every_broken_packet_is_refused() {
         Limits {
             message: 10,
             lanes: 1,
+            in_flight: 10,
         },
         none,
     );
@@ -289,6 +291,19 @@ fn limits_before_and_in_the_session() {
     assert_eq!(
         from_pc.push(&first(32, 10)),
         Err(PacketError::TooManyLanes { max: 32 })
+    );
+    // A few small first packets cannot make it set aside gigabytes: the messages
+    // being put together hold at most twice the largest one.
+    let mut from_pc = HostMsg::assembler();
+    from_pc.set_limits(HostMsg::limits(true));
+    let max = HostMsg::limits(true).message;
+    assert_eq!(from_pc.push(&first(0, max)), Ok(None));
+    assert_eq!(from_pc.push(&first(1, max)), Ok(None));
+    assert_eq!(
+        from_pc.push(&first(2, 1)),
+        Err(PacketError::TooMuchAtOnce {
+            max: 2 * max as usize
+        })
     );
     let mut from_headset = ClientMsg::assembler();
     from_headset.set_limits(ClientMsg::limits(true));

@@ -63,6 +63,9 @@ pub struct Limits {
     pub message: u32,
     /// How many lanes may hold a message being put together at once.
     pub lanes: usize,
+    /// How many bytes all the messages being put together may say they hold, together:
+    /// what a peer can make the receiver set aside with a few small first packets.
+    pub in_flight: usize,
 }
 
 /// Why packets cannot be put together into messages.
@@ -90,6 +93,8 @@ pub enum PacketError {
     NotLast { lane: u8 },
     /// More lanes at once than the receiver accepts.
     TooManyLanes { max: usize },
+    /// The messages being put together would hold more than the receiver accepts.
+    TooMuchAtOnce { max: usize },
 }
 
 impl fmt::Display for PacketError {
@@ -122,6 +127,12 @@ impl fmt::Display for PacketError {
                 )
             }
             Self::TooManyLanes { max } => write!(f, "more than {max} lanes at once"),
+            Self::TooMuchAtOnce { max } => {
+                write!(
+                    f,
+                    "messages of more than {max} bytes being put together at once"
+                )
+            }
         }
     }
 }
@@ -288,6 +299,8 @@ impl Partial {
 pub struct Assembler {
     lanes: Vec<Option<Partial>>,
     open: usize,
+    /// The bytes the messages being put together say they hold.
+    open_bytes: usize,
     limits: Limits,
     /// For a tag, how many first bytes of the payload to keep apart from the body.
     head: fn(u8) -> usize,
@@ -301,6 +314,7 @@ impl Assembler {
         Self {
             lanes: (0..=u8::MAX).map(|_| None).collect(),
             open: 0,
+            open_bytes: 0,
             limits,
             head,
         }
@@ -346,12 +360,23 @@ impl Assembler {
                 });
             }
             let len = len as usize;
-            if rest.len() > len {
-                return Err(PacketError::Overrun { lane });
+            // Checked before anything is allocated.
+            match (last, rest.len().cmp(&len)) {
+                (_, std::cmp::Ordering::Greater) => return Err(PacketError::Overrun { lane }),
+                (true, std::cmp::Ordering::Less) => {
+                    return Err(PacketError::EndedEarly { lane });
+                }
+                (false, std::cmp::Ordering::Equal) => return Err(PacketError::NotLast { lane }),
+                _ => {}
             }
             if !last && self.open >= self.limits.lanes {
                 return Err(PacketError::TooManyLanes {
                     max: self.limits.lanes,
+                });
+            }
+            if !last && self.open_bytes + len > self.limits.in_flight {
+                return Err(PacketError::TooMuchAtOnce {
+                    max: self.limits.in_flight,
                 });
             }
             let head_want = (self.head)(tag).min(MAX_HEAD - MESSAGE_HEADER).min(len);
@@ -374,6 +399,7 @@ impl Assembler {
                 return Err(PacketError::NotStarted { lane });
             };
             self.open -= 1;
+            self.open_bytes -= partial.len;
             if partial.got + body.len() > partial.len {
                 return Err(PacketError::Overrun { lane });
             }
@@ -385,6 +411,7 @@ impl Assembler {
             (true, false) => Err(PacketError::EndedEarly { lane }),
             (false, true) => Err(PacketError::NotLast { lane }),
             (false, false) => {
+                self.open_bytes += partial.len;
                 self.lanes[usize::from(lane)] = Some(partial);
                 self.open += 1;
                 Ok(None)

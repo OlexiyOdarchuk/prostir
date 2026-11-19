@@ -310,11 +310,13 @@ never a loss. Each of these ends the connection:
 - `FIRST` in a lane that holds a message;
 - a first packet whose body is shorter than the 5-byte message header;
 - a message longer than the receiver's limit (below), checked on the first packet,
-  before anything is allocated;
+  before anything is allocated (as are a first packet with more bytes than the
+  message, or one marked `LAST` with fewer);
 - bytes beyond the length the header says;
 - `LAST` before the message's end, or a packet that completes the message without
   `LAST`;
-- more lanes holding a message at once than the limit.
+- more lanes holding a message at once than the limit, or more bytes in the messages
+  being put together than the limit.
 
 Limits:
 
@@ -323,6 +325,7 @@ Limits:
 | Payload of a message from the host | 64 KiB | 64 MiB |
 | Payload of a message from the headset | 64 KiB | 64 KiB |
 | Lanes holding a message being put together at once | 1 | 32 |
+| Bytes those messages say they hold, together | 64 KiB | 128 MiB from the host, 2 MiB from the headset |
 
 Before `Opened` the host may not be trusted yet, and the headset is not trusted until
 it pairs, so what either can make the other allocate stays small. The biggest headset

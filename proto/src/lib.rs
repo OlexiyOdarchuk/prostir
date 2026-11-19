@@ -546,10 +546,13 @@ impl HostMsg {
             false => Limits {
                 message: MAX_SETUP_PAYLOAD,
                 lanes: 1,
+                in_flight: MAX_SETUP_PAYLOAD as usize,
             },
+            // Room for the largest frame and another one beside it.
             true => Limits {
                 message: MAX_HOST_PAYLOAD,
                 lanes: SESSION_LANES,
+                in_flight: 2 * MAX_HOST_PAYLOAD as usize,
             },
         }
     }
@@ -695,9 +698,11 @@ impl HostMsg {
 impl ClientMsg {
     /// What the PC accepts from a headset: before the session, or in it (`opened`).
     pub fn limits(opened: bool) -> Limits {
+        let lanes = if opened { SESSION_LANES } else { 1 };
         Limits {
             message: MAX_CLIENT_PAYLOAD,
-            lanes: if opened { SESSION_LANES } else { 1 },
+            lanes,
+            in_flight: lanes * MAX_CLIENT_PAYLOAD as usize,
         }
     }
 
