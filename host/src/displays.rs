@@ -1241,7 +1241,7 @@ impl Displays {
             self.mic = None;
         }
         // The headset records only while some PC app listens.
-        let recording = self.mic.as_ref().is_some_and(MicIn::in_use);
+        let recording = self.mic.as_ref().is_some_and(MicIn::recording);
         if recording != self.mic_recording {
             self.mic_recording = recording;
             self.router.send(HostMsg::MicActive { active: recording });

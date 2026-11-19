@@ -21,8 +21,8 @@
 //!   `move_to`, `put_back`, `forget_panel`, `vacated`, `screenshot`, `screenshot_path`.
 //! - `focus::ActiveOutput` (`new`, `get`): the output the user works on.
 //! - `audio`: `AudioOut` (PC sound to the headset, as a default output device while it
-//!   exists), `MicIn` (the headset microphone as the default input: `push`, `in_use`),
-//!   `restore_after_crash`.
+//!   exists), `MicIn` (the headset microphone as the default input: `push`,
+//!   `recording`), `restore_after_crash`.
 //! - `sound_source::Watcher` (`start`, `output`): the output whose window plays sound.
 //! - `notifications::watch`: the PC's desktop notifications, as text.
 //! - `tray`: `spawn`, `Handle`, `set_status`, `set_battery`, `set_encoding`,

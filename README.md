@@ -173,8 +173,8 @@ has not been paired with.
   configs both work). KWin streams its virtual outputs itself; on Hyprland Prostir
   creates headless outputs and captures them with `wlr-screencopy` straight into GPU
   buffers.
-- PipeWire with its PulseAudio server (`pipewire-pulse`), `pw-cli`, `pw-loopback` and
-  `pactl`.
+- PipeWire with its PulseAudio server (`pipewire-pulse`), `pw-cli`, `pw-loopback`,
+  `pactl` and `pacat`.
 - GStreamer 1.24 or newer with the `va` plugin (hardware encoding), `h264parse` and
   `h265parse`, and the PipeWire and PulseAudio plugins.
 - For hardware encoding, a GPU with a VA-API H.265 or H.264 encoder and its VA driver:

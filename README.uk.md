@@ -171,8 +171,8 @@ Prostir кодує процесором через x264, і це працює б
 - KDE Plasma 6 на Wayland або Hyprland (перевірено на 0.57, працюють і конфіги Lua, і
   `hyprland.conf`). KWin транслює віртуальні виходи сам; у Hyprland Prostir створює
   headless-виходи й захоплює їх через `wlr-screencopy` просто в буфери відеокарти.
-- PipeWire з його сервером PulseAudio (`pipewire-pulse`), `pw-cli`, `pw-loopback` і
-  `pactl`.
+- PipeWire з його сервером PulseAudio (`pipewire-pulse`), `pw-cli`, `pw-loopback`,
+  `pactl` і `pacat`.
 - GStreamer 1.24 або новіший із плагіном `va` (апаратне кодування), `h264parse` і
   `h265parse` та плагінами PipeWire і PulseAudio.
 - Для апаратного кодування відеокарта з VA-API-кодером H.265 або H.264 і її драйвер
