@@ -21,7 +21,7 @@ use log::{debug, error, info, warn};
 use prostir_proto::secure::{SecureReader, SecureWriter};
 use prostir_proto::{ClientMsg, Codec, HostMsg, NO_FOCUS};
 
-use displays::{Displays, SavedMonitors};
+use displays::Displays;
 use encoder::EncoderConfig;
 use platform::MonitorSpec;
 use platform::{TrayCommand, TrayStatus, focus, notifications, sound_source, tray};
@@ -519,34 +519,17 @@ fn create_displays(args: &Args, bitrate: u32, sharp: bool) -> Result<Displays> {
         backend,
         sharp,
     };
-    let mirror = stored.as_ref().is_none_or(|s| s.mirror);
-    let saved = match stored {
-        Some(saved) if args.monitors.is_empty() => saved,
-        _ if !args.monitors.is_empty() => SavedMonitors {
-            specs: args.monitors.clone(),
-            primary: None,
-            mirror,
-            audio: true,
-            mic: true,
-            bitrate: None,
-            sharp,
-            codec: None,
-            software,
-            rows: Vec::new(),
-        },
-        _ => SavedMonitors {
-            specs: vec![parse_monitor("2560x1440").expect("valid default")],
-            primary: None,
-            mirror,
-            audio: true,
-            mic: true,
-            bitrate: None,
-            sharp,
-            codec: None,
-            software,
-            rows: Vec::new(),
-        },
-    };
+    let mut saved = stored.unwrap_or_default();
+    // Monitors from the command line replace the saved set and where it stood; the
+    // other choices (sound, microphone, mirror) stay as saved.
+    if !args.monitors.is_empty() {
+        saved.specs = args.monitors.clone();
+        saved.primary = None;
+        saved.rows = Vec::new();
+    }
+    if saved.specs.is_empty() {
+        saved.specs = vec![parse_monitor("2560x1440").expect("valid default")];
+    }
     let displays = Displays::create(&saved, cfg, !args.keep_primary)?;
     displays.save();
     Ok(displays)
