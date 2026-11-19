@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use log::{debug, error, info, warn};
+use prostir_proto::stats::{Histogram, Period};
 use prostir_proto::{Codec, HostMsg, LayoutRow, MIRROR_ID, NEXT, PcSettings, WINDOW_IDS};
 
 use crate::encoder::{Encoder, EncoderConfig, EncoderEvent};
@@ -46,6 +47,9 @@ impl Backoff {
 /// More streams than this overwhelm the headset's hardware decoders.
 pub const MAX_MONITORS: usize = 6;
 
+/// How often the router logs what each stream sent (see [`Router::report`]).
+const REPORT_EVERY: Duration = Duration::from_secs(10);
+
 /// Per-stream delivery state for the currently connected client.
 struct StreamSlot {
     size: Option<(u32, u32)>,
@@ -62,7 +66,11 @@ struct StreamSlot {
     keyframe_asked: Option<Instant>,
     /// pts → when the encoded frame was queued for sending.
     sent: BTreeMap<u64, Instant>,
-    latency: LatencyStats,
+    /// Encoded on the PC → handed to the headset's compositor, as the headset reports
+    /// back with `FrameShown` (for some frames only).
+    shown: Histogram,
+    /// Frames not queued because the stream waited for a keyframe.
+    skipped: u32,
 }
 
 impl StreamSlot {
@@ -86,35 +94,8 @@ impl StreamSlot {
             need_keyframe: true,
             keyframe_asked: None,
             sent: BTreeMap::new(),
-            latency: LatencyStats::default(),
-        }
-    }
-}
-
-/// Encoded on the PC → handed to the headset's compositor, as reported back by the headset.
-#[derive(Default)]
-struct LatencyStats {
-    frames: u32,
-    sum_ms: f64,
-    max_ms: f64,
-    since: Option<Instant>,
-}
-
-impl LatencyStats {
-    fn add(&mut self, monitor: u8, ms: f64) {
-        self.frames += 1;
-        self.sum_ms += ms;
-        self.max_ms = self.max_ms.max(ms);
-        let since = *self.since.get_or_insert_with(Instant::now);
-        if since.elapsed() >= Duration::from_secs(5) {
-            info!(
-                "{}: encoded → shown in headset avg {:.1} ms, max {:.1} ms ({} frames)",
-                stream_name(monitor),
-                self.sum_ms / f64::from(self.frames),
-                self.max_ms,
-                self.frames
-            );
-            *self = Self::default();
+            shown: Histogram::default(),
+            skipped: 0,
         }
     }
 }
@@ -139,6 +120,7 @@ pub struct Router {
 struct RouterInner {
     tx: Option<Arc<Outbox>>,
     streams: BTreeMap<u8, StreamSlot>,
+    report: Period,
 }
 
 impl Router {
@@ -147,6 +129,7 @@ impl Router {
             inner: Mutex::new(RouterInner {
                 tx: None,
                 streams: BTreeMap::new(),
+                report: Period::new(REPORT_EVERY),
             }),
             failed: AtomicBool::new(false),
             mirror_failed: AtomicBool::new(false),
@@ -157,10 +140,53 @@ impl Router {
     pub fn attach(&self, tx: Arc<Outbox>) {
         let mut inner = self.inner.lock().unwrap();
         inner.tx = Some(tx);
+        inner.report = Period::new(REPORT_EVERY);
         for s in inner.streams.values_mut() {
             s.announced = false;
             s.known = false;
             s.need_keyframe = true;
+            s.shown = Histogram::default();
+            s.skipped = 0;
+        }
+    }
+
+    /// Logs, every [`REPORT_EVERY`] while a headset is connected, one line per stream:
+    /// what the outbox sent and dropped, how long frames waited there, keyframes, and
+    /// encoded → shown in the headset. Then one line for sound.
+    pub fn report(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        let RouterInner {
+            tx,
+            streams,
+            report,
+        } = &mut *inner;
+        let Some(tx) = tx else { return };
+        let Some(window) = report.due(Instant::now()) else {
+            return;
+        };
+        let mut stats = tx.take_stats();
+        for (id, slot) in streams.iter_mut() {
+            let video = stats.video.remove(id).unwrap_or_default();
+            let shown = std::mem::take(&mut slot.shown);
+            let skipped = std::mem::take(&mut slot.skipped);
+            if video.frames == 0 && video.dropped.total() == 0 && skipped == 0 {
+                continue;
+            }
+            info!(
+                "{}: {}; {skipped} skipped waiting for a keyframe; encoded → shown in headset {} ({} reports)",
+                stream_name(*id),
+                video.summary(window),
+                shown.summary_ms(),
+                shown.count()
+            );
+        }
+        if stats.audio_wait.count() > 0 || stats.audio_dropped > 0 {
+            info!(
+                "sound: sent {} slices, waited in outbox {}; dropped {}",
+                stats.audio_wait.count(),
+                stats.audio_wait.summary_ms(),
+                stats.audio_dropped
+            );
         }
     }
 
@@ -210,7 +236,7 @@ impl Router {
             return;
         };
         match slot.sent.remove(&pts_us) {
-            Some(sent) => slot.latency.add(id, sent.elapsed().as_secs_f64() * 1e3),
+            Some(sent) => slot.shown.add(sent.elapsed()),
             None => debug!(
                 "shown frame {pts_us} of Prostir-{} is unknown",
                 u32::from(id) + 1
@@ -223,7 +249,7 @@ impl Router {
     /// Returns `true` when the encoder should produce a keyframe.
     fn on_event(&self, id: u8, event: EncoderEvent) -> bool {
         let mut inner = self.inner.lock().unwrap();
-        let RouterInner { tx, streams } = &mut *inner;
+        let RouterInner { tx, streams, .. } = &mut *inner;
         // Streams whose queued frames were too late to send: they need a keyframe.
         if let Some(outbox) = tx {
             for lost in outbox.take_dropped() {
@@ -286,6 +312,7 @@ impl Router {
                     slot.known = true;
                 }
                 if slot.need_keyframe && !keyframe {
+                    slot.skipped += 1;
                     return slot.ask_keyframe();
                 }
                 let bytes = data.len();
@@ -683,9 +710,11 @@ impl Displays {
         Ok(encoder)
     }
 
-    /// Keeps the mirror in step with the physical display: it disappears when the
-    /// laptop lid closes and comes back when it opens.
+    /// Housekeeping, about twice a second: logs what the streams sent now and then,
+    /// and keeps the mirror in step with the physical display (it disappears when the
+    /// laptop lid closes and comes back when it opens).
     pub fn tick(&mut self) {
+        self.router.report();
         self.sync_audio();
         self.check_primary();
         self.check_window_panels();
