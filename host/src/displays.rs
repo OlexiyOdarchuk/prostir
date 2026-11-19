@@ -330,8 +330,10 @@ struct Mirror {
     output: Output,
 }
 
-/// Saved monitor set: one `WIDTHxHEIGHT[@scale]` per line, `*` marks the primary one;
-/// a `mirror on|off` line remembers the physical display mirror.
+/// Saved monitor set: `row` starts a row (top to bottom), then one
+/// `WIDTHxHEIGHT[@scale][ at CENTER[ MIDDLE]][ *]` per monitor, left to right: where
+/// the headset showed it (`next` for an unknown centre) and `*` for the primary one.
+/// Lines like `mirror on|off` keep the other choices.
 pub struct SavedMonitors {
     pub specs: Vec<MonitorSpec>,
     pub primary: Option<usize>,
@@ -348,9 +350,26 @@ pub struct SavedMonitors {
     pub codec: Option<Codec>,
     /// Encode on the CPU, chosen in the headset menu.
     pub software: bool,
-    /// Rows from top to bottom, covering `specs` in order: the seen centre of each
-    /// monitor in it ([`NEXT`] if unknown). Empty: one row.
-    pub rows: Vec<Vec<i32>>,
+    /// Rows from top to bottom, covering `specs` in order: where each monitor in it is
+    /// seen, (centre, middle) as in [`LayoutRow`] ([`NEXT`] if unknown). Empty: one row.
+    pub rows: Vec<Vec<(i32, i32)>>,
+}
+
+impl Default for SavedMonitors {
+    fn default() -> Self {
+        Self {
+            specs: Vec::new(),
+            primary: None,
+            mirror: true,
+            audio: true,
+            mic: true,
+            bitrate: None,
+            sharp: false,
+            codec: None,
+            software: false,
+            rows: Vec::new(),
+        }
+    }
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -366,84 +385,149 @@ fn config_path() -> Option<PathBuf> {
 
 pub fn load_saved(parse: impl Fn(&str) -> Result<MonitorSpec, String>) -> Option<SavedMonitors> {
     let text = std::fs::read_to_string(config_path()?).ok()?;
-    let mut specs = Vec::new();
-    let mut primary = None;
-    let mut mirror = true;
-    let mut audio = true;
-    let mut mic = true;
-    let mut bitrate = None;
-    let mut sharp = false;
-    let mut codec = None;
-    let mut software = false;
-    let mut rows: Vec<Vec<i32>> = Vec::new();
-    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        if line == "row" || line.starts_with("row ") {
-            rows.push(Vec::new());
-            continue;
-        }
-        if let Some(v) = line.strip_prefix("sharp ") {
-            sharp = v.trim() == "on";
-            continue;
-        }
-        if let Some(v) = line.strip_prefix("codec ") {
-            codec = match v.trim() {
-                "h264" => Some(Codec::H264),
-                "h265" => Some(Codec::H265),
-                _ => None,
+    let saved = SavedMonitors::parse(&text, parse);
+    (!saved.specs.is_empty()).then_some(saved)
+}
+
+impl SavedMonitors {
+    fn parse(text: &str, parse: impl Fn(&str) -> Result<MonitorSpec, String>) -> Self {
+        let mut saved = Self::default();
+        let on = |v: &str| v.trim() == "on";
+        for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            if line == "row" || line.starts_with("row ") {
+                saved.rows.push(Vec::new());
+                continue;
+            }
+            if let Some(v) = line.strip_prefix("sharp ") {
+                saved.sharp = on(v);
+                continue;
+            }
+            if let Some(v) = line.strip_prefix("codec ") {
+                saved.codec = match v.trim() {
+                    "h264" => Some(Codec::H264),
+                    "h265" => Some(Codec::H265),
+                    _ => None,
+                };
+                continue;
+            }
+            if let Some(v) = line.strip_prefix("software ") {
+                saved.software = on(v);
+                continue;
+            }
+            if let Some(v) = line.strip_prefix("bitrate ") {
+                saved.bitrate = v.trim().parse().ok();
+                continue;
+            }
+            if let Some(v) = line.strip_prefix("mic ") {
+                saved.mic = v.trim() != "off";
+                continue;
+            }
+            if let Some(v) = line.strip_prefix("audio ") {
+                saved.audio = v.trim() != "off";
+                continue;
+            }
+            if let Some(v) = line.strip_prefix("mirror ") {
+                saved.mirror = v.trim() != "off";
+                continue;
+            }
+            let (line, star) = match line.strip_suffix('*') {
+                Some(s) => (s.trim(), true),
+                None => (line, false),
             };
-            continue;
-        }
-        if let Some(v) = line.strip_prefix("software ") {
-            software = v.trim() == "on";
-            continue;
-        }
-        if let Some(v) = line.strip_prefix("bitrate ") {
-            bitrate = v.trim().parse().ok();
-            continue;
-        }
-        if let Some(v) = line.strip_prefix("mic ") {
-            mic = v.trim() != "off";
-            continue;
-        }
-        if let Some(v) = line.strip_prefix("audio ") {
-            audio = v.trim() != "off";
-            continue;
-        }
-        if let Some(v) = line.strip_prefix("mirror ") {
-            mirror = v.trim() != "off";
-            continue;
-        }
-        let (line, star) = match line.strip_suffix('*') {
-            Some(s) => (s.trim(), true),
-            None => (line, false),
-        };
-        // `2560x1440 at -1300`: where the headset showed it.
-        let (spec, center) = match line.split_once(" at ") {
-            Some((spec, c)) => (spec.trim(), c.trim().parse().unwrap_or(NEXT)),
-            None => (line, NEXT),
-        };
-        if let Ok(spec) = parse(spec) {
-            if star {
-                primary = Some(specs.len());
+            // `2560x1440 at -1300 200`: where the headset showed it (files from before
+            // 0.1.2 have no middle).
+            let (spec, seen) = match line.split_once(" at ") {
+                Some((spec, at)) => {
+                    let mut v = at.split_whitespace().map(|v| v.parse().unwrap_or(NEXT));
+                    (
+                        spec.trim(),
+                        (v.next().unwrap_or(NEXT), v.next().unwrap_or(NEXT)),
+                    )
+                }
+                None => (line, (NEXT, NEXT)),
+            };
+            if let Ok(spec) = parse(spec) {
+                if star {
+                    saved.primary = Some(saved.specs.len());
+                }
+                if let Some(r) = saved.rows.last_mut() {
+                    r.push(seen);
+                }
+                saved.specs.push(spec);
             }
-            if let Some(r) = rows.last_mut() {
-                r.push(center);
+        }
+        saved
+    }
+
+    fn to_text(&self) -> String {
+        let on = |v: bool| if v { "on" } else { "off" };
+        let mut text = String::new();
+        let mut specs = self.specs.iter().enumerate();
+        // Monitors not in a row: one more row of them.
+        let rest = self.specs.len()
+            - self
+                .rows
+                .iter()
+                .map(Vec::len)
+                .sum::<usize>()
+                .min(self.specs.len());
+        let rows = self
+            .rows
+            .iter()
+            .cloned()
+            .chain((rest > 0).then(|| vec![(NEXT, NEXT); rest]));
+        for row in rows {
+            text.push_str("row\n");
+            for ((center, middle), (i, spec)) in row.into_iter().zip(specs.by_ref()) {
+                text.push_str(&spec.to_string());
+                if center != NEXT || middle != NEXT {
+                    let center = if center == NEXT {
+                        "next".to_owned()
+                    } else {
+                        center.to_string()
+                    };
+                    text.push_str(&format!(" at {center}"));
+                    if middle != NEXT {
+                        text.push_str(&format!(" {middle}"));
+                    }
+                }
+                if self.primary == Some(i) {
+                    text.push_str(" *");
+                }
+                text.push('\n');
             }
-            specs.push(spec);
+        }
+        text.push_str(&format!(
+            "mirror {}\naudio {}\nmic {}\n",
+            on(self.mirror),
+            on(self.audio),
+            on(self.mic)
+        ));
+        if let Some(mbps) = self.bitrate {
+            text.push_str(&format!("bitrate {mbps}\n"));
+        }
+        text.push_str(&format!("sharp {}\n", on(self.sharp)));
+        if let Some(codec) = self.codec {
+            let name = match codec {
+                Codec::H264 => "h264",
+                Codec::H265 => "h265",
+            };
+            text.push_str(&format!("codec {name}\n"));
+        }
+        text.push_str(&format!("software {}\n", on(self.software)));
+        text
+    }
+
+    pub fn save(&self) {
+        let Some(path) = config_path() else { return };
+        let result = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| prostir_proto::secure::write_atomic(&path, self.to_text().as_bytes()));
+        if let Err(e) = result {
+            warn!("cannot save {}: {e}", path.display());
         }
     }
-    (!specs.is_empty()).then_some(SavedMonitors {
-        specs,
-        primary,
-        mirror,
-        audio,
-        mic,
-        bitrate,
-        sharp,
-        codec,
-        software,
-        rows,
-    })
 }
 
 pub struct Displays {
@@ -527,14 +611,14 @@ impl Displays {
         let ids = displays.order.clone();
         // Rebuild the saved rows over the new ids (same order as the saved specs).
         let mut rest = ids.as_slice();
-        for centers in &saved.rows {
-            let (row, tail) = rest.split_at(centers.len().min(rest.len()));
+        for seen in &saved.rows {
+            let (row, tail) = rest.split_at(seen.len().min(rest.len()));
             rest = tail;
             if !row.is_empty() {
                 displays.rows.push(LayoutRow {
                     ids: row.to_vec(),
-                    centers: centers[..row.len()].to_vec(),
-                    middles: vec![NEXT; row.len()],
+                    centers: seen[..row.len()].iter().map(|s| s.0).collect(),
+                    middles: seen[..row.len()].iter().map(|s| s.1).collect(),
                 });
             }
         }
@@ -1585,52 +1669,39 @@ impl Displays {
 
     /// Remembers the set for the next session.
     pub fn save(&self) {
-        let Some(path) = config_path() else { return };
-        let text: String = self
-            .effective_rows()
-            .iter()
-            .flat_map(|row| {
-                std::iter::once("row\n".to_owned()).chain(
-                    row.ids
-                        .iter()
-                        .zip(&row.centers)
-                        .filter_map(|(id, c)| Some((id, c, self.monitors.get(id)?)))
-                        .map(|(id, c, m)| {
-                            let star = if self.primary == Some(*id) { " *" } else { "" };
-                            let at = if *c == NEXT {
-                                String::new()
-                            } else {
-                                format!(" at {c}")
-                            };
-                            format!("{}{at}{star}\n", m.spec)
-                        }),
-                )
-            })
-            .chain(std::iter::once(format!(
-                "mirror {}\naudio {}\nmic {}\nbitrate {}\nsharp {}\ncodec {}\nsoftware {}\n",
-                if self.mirror_wanted { "on" } else { "off" },
-                if self.audio_wanted { "on" } else { "off" },
-                if self.mic_wanted { "on" } else { "off" },
-                self.cfg.bitrate_kbps / 1000,
-                if self.cfg.sharp { "on" } else { "off" },
-                match self.cfg.codec {
-                    Codec::H264 => "h264",
-                    Codec::H265 => "h265",
-                },
-                if self.cfg.backend == crate::encoder::Backend::X264 {
-                    "on"
-                } else {
-                    "off"
+        self.saved().save();
+    }
+
+    /// The set and the choices as they are now, to save.
+    fn saved(&self) -> SavedMonitors {
+        let mut saved = SavedMonitors {
+            mirror: self.mirror_wanted,
+            audio: self.audio_wanted,
+            mic: self.mic_wanted,
+            bitrate: Some(self.cfg.bitrate_kbps / 1000),
+            sharp: self.cfg.sharp,
+            codec: Some(self.cfg.codec),
+            software: self.cfg.backend == crate::encoder::Backend::X264,
+            ..SavedMonitors::default()
+        };
+        for row in self.effective_rows() {
+            let mut seen = Vec::new();
+            for ((id, center), middle) in row.ids.iter().zip(&row.centers).zip(&row.middles) {
+                // The laptop screen is not part of the set.
+                let Some(m) = self.monitors.get(id) else {
+                    continue;
+                };
+                if self.primary == Some(*id) {
+                    saved.primary = Some(saved.specs.len());
                 }
-            )))
-            .collect();
-        let result = path
-            .parent()
-            .map_or(Ok(()), std::fs::create_dir_all)
-            .and_then(|()| prostir_proto::secure::write_atomic(&path, text.as_bytes()));
-        if let Err(e) = result {
-            warn!("cannot save {}: {e}", path.display());
+                saved.specs.push(m.spec.clone());
+                seen.push((*center, *middle));
+            }
+            if !seen.is_empty() {
+                saved.rows.push(seen);
+            }
         }
+        saved
     }
 }
 
@@ -1704,5 +1775,53 @@ mod tests {
         router.add_stream(1, Codec::H265);
         router.remove_stream(1);
         assert!(sent(&outbox).is_empty());
+    }
+
+    fn spec(s: &str) -> Result<MonitorSpec, String> {
+        let (w, h) = s.split_once('x').ok_or("no x")?;
+        Ok(MonitorSpec {
+            width: w.parse().map_err(|_| "width")?,
+            height: h.parse().map_err(|_| "height")?,
+            scale: 1.0,
+        })
+    }
+
+    /// Where the headset showed each monitor, across and up and down, survives a
+    /// restart of the PC app: the desktop is then laid out as before at once.
+    #[test]
+    fn saved_set_keeps_where_monitors_were_seen() {
+        let saved = SavedMonitors {
+            specs: vec![spec("2560x1440").unwrap(), spec("1440x2560").unwrap()],
+            primary: Some(1),
+            rows: vec![vec![(-1300, 200)], vec![(NEXT, -40)]],
+            mic: false,
+            bitrate: Some(40),
+            codec: Some(Codec::H264),
+            ..SavedMonitors::default()
+        };
+        let text = saved.to_text();
+        let back = SavedMonitors::parse(&text, spec);
+        assert_eq!(back.specs.len(), 2);
+        assert_eq!(back.primary, Some(1));
+        assert_eq!(back.rows, saved.rows);
+        assert!(!back.mic && back.audio && back.mirror);
+        assert_eq!(back.bitrate, Some(40));
+        assert_eq!(back.codec, Some(Codec::H264));
+        assert_eq!(back.to_text(), text);
+    }
+
+    /// Files from before vertical positions were kept still load.
+    #[test]
+    fn old_saved_sets_load() {
+        let old = "row\n2560x1440 at -1300 *\n1920x1080\nmirror off\nbitrate 30\n";
+        let saved = SavedMonitors::parse(old, spec);
+        assert_eq!(saved.specs.len(), 2);
+        assert_eq!(saved.primary, Some(0));
+        assert_eq!(saved.rows, vec![vec![(-1300, NEXT), (NEXT, NEXT)]]);
+        assert!(!saved.mirror);
+        // Before rows were saved at all: one row.
+        let older = SavedMonitors::parse("2560x1440\n1920x1080\n", spec);
+        assert!(older.rows.is_empty());
+        assert_eq!(SavedMonitors::parse(&older.to_text(), spec).specs.len(), 2);
     }
 }
