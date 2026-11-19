@@ -47,6 +47,18 @@ fn wire_error(e: &io::Error) -> Option<&WireError> {
     e.get_ref()?.downcast_ref()
 }
 
+/// Reading failed with exactly `expected`.
+#[track_caller]
+fn assert_wire<T: std::fmt::Debug>(read: io::Result<T>, expected: WireError) {
+    let err = read.unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    assert_eq!(wire_error(&err), Some(&expected));
+}
+
+fn too_long(len: usize, max: usize) -> WireError {
+    WireError::TooLong { len, max }
+}
+
 fn settings() -> PcSettings {
     PcSettings {
         quality: 30,
@@ -268,9 +280,12 @@ fn media_by_hand_matches_the_declared_fields() {
     // A frame whose keyframe byte is not a boolean.
     let mut bad = host_bytes(&frame);
     bad[6] = 2;
-    assert!(read_host(&bad).is_err());
+    assert_wire(read_host(&bad), WireError::BadBool(2));
     // Shorter than its header.
-    assert!(read_host(&framed(tag::FRAME, &[4, 0])).is_err());
+    assert_wire(
+        read_host(&framed(tag::FRAME, &[4, 0])),
+        WireError::Truncated,
+    );
 }
 
 /// The version handshake keeps the bytes of protocol 1 forever, so every version can
@@ -347,7 +362,7 @@ fn messages_are_read_strictly() {
     let mut longer = host_bytes(&HostMsg::StreamEnd { id: 1 });
     longer[1] = 2;
     longer.push(0);
-    assert!(read_host(&longer).is_err());
+    assert_wire(read_host(&longer), WireError::Trailing(1));
     // A codec this build does not know, inside the settings.
     let mut payload = Vec::new();
     HostMsg::PcSettings {
@@ -357,20 +372,35 @@ fn messages_are_read_strictly() {
     .put_fields(&mut payload)
     .unwrap();
     payload[4] = 9;
-    assert!(read_host(&framed(18, &payload)).is_err());
+    assert_wire(
+        read_host(&framed(18, &payload)),
+        WireError::UnknownTag {
+            what: "Codec",
+            tag: 9,
+        },
+    );
     // A boolean that is neither 0 nor 1.
-    assert!(read_client(&framed(115, &[2])).is_err());
+    assert_wire(read_client(&framed(115, &[2])), WireError::BadBool(2));
     // `Option` with a tag other than 0 or 1.
-    assert!(read_host(&framed(16, &[2, 0])).is_err());
+    assert_wire(
+        read_host(&framed(16, &[2, 0])),
+        WireError::UnknownTag {
+            what: "Option",
+            tag: 2,
+        },
+    );
     // A name that is not UTF-8.
     let mut payload = vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     payload.extend_from_slice(&[2, 0, 0xff, 0xfe]);
-    assert!(read_host(&framed(2, &payload)).is_err());
+    assert_wire(read_host(&framed(2, &payload)), WireError::BadUtf8);
     // Frozen text is UTF-8 too.
-    assert!(read_host(&framed(6, &[0xc3])).is_err());
+    assert_wire(read_host(&framed(6, &[0xc3])), WireError::BadUtf8);
     // A set of monitors cut off in the middle of a size: one size, its width, half
     // its height.
-    assert!(read_client(&framed(116, &[1, 0, 1, 0, 0, 0, 2, 0])).is_err());
+    assert_wire(
+        read_client(&framed(116, &[1, 0, 1, 0, 0, 0, 2, 0])),
+        WireError::Truncated,
+    );
 }
 
 #[test]
@@ -378,17 +408,17 @@ fn lists_cannot_hold_more_than_there_can_be() {
     // 17 ids in an order: one more than a layout may hold.
     let mut payload = vec![17, 0];
     payload.extend(0..17);
-    assert!(read_host(&framed(8, &payload)).is_err());
-    assert!(read_client(&framed(108, &payload)).is_err());
+    assert_wire(read_host(&framed(8, &payload)), too_long(17, 16));
+    assert_wire(read_client(&framed(108, &payload)), too_long(17, 16));
     // 17 sizes.
     let mut payload = vec![17, 0];
     payload.extend(std::iter::repeat_n(0, 17 * 8));
     payload.push(0);
-    assert!(read_client(&framed(116, &payload)).is_err());
+    assert_wire(read_client(&framed(116, &payload)), too_long(17, 16));
     // 100 empty rows: small on the wire, but not a layout.
     let mut payload = vec![100, 0];
     payload.extend(std::iter::repeat_n(0, 200));
-    assert!(read_client(&framed(117, &payload)).is_err());
+    assert_wire(read_client(&framed(117, &payload)), too_long(100, 16));
     // Each row within its limit, but 18 monitors in all.
     let entry = LayoutEntry {
         id: 0,
@@ -400,7 +430,7 @@ fn lists_cannot_hold_more_than_there_can_be() {
     };
     let mut payload = Vec::new();
     wire::Limited::put(&vec![row.clone(), row], &mut payload, 16).unwrap();
-    assert!(read_client(&framed(117, &payload)).is_err());
+    assert_wire(read_client(&framed(117, &payload)), too_long(18, 16));
     // A monitor in two places.
     let entry = |id| LayoutEntry {
         id,
@@ -422,7 +452,7 @@ fn lists_cannot_hold_more_than_there_can_be() {
     // A name longer than a name may be.
     let mut payload = vec![1, 65, 0];
     payload.extend(std::iter::repeat_n(b'a', 65));
-    assert!(read_client(&framed(109, &payload)).is_err());
+    assert_wire(read_client(&framed(109, &payload)), too_long(65, 64));
 }
 
 /// A message over its limits is not sent: an error for this connection, not a crash.
@@ -468,10 +498,15 @@ fn a_headset_message_cannot_be_huge() {
     let mut big = vec![117];
     big.extend_from_slice(&(1u32 << 20).to_le_bytes());
     big.extend(std::iter::repeat_n(0u8, 1 << 20));
-    assert!(ClientMsg::read(&mut big.as_slice()).is_err());
+    let too_large = |big: &[u8]| {
+        let err = ClientMsg::read(&mut &big[..]).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(err.to_string(), "message too large");
+    };
+    too_large(&big);
     // Not even one this build would skip.
     big[0] = 250;
-    assert!(ClientMsg::read(&mut big.as_slice()).is_err());
+    too_large(&big);
 }
 
 /// A message from a newer peer is skipped and the next one still reads.
@@ -494,7 +529,8 @@ fn skips_unknown_messages() {
         ClientMsg::SetMic { enabled: true }
     );
     // An unknown message cut off is an error, not a skip past the end.
-    assert!(HostMsg::read(&mut framed(250, &[1, 2, 3])[..6].as_ref()).is_err());
+    let err = HostMsg::read(&mut framed(250, &[1, 2, 3])[..6].as_ref()).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
 }
 
 #[test]
@@ -507,4 +543,99 @@ fn version_ranges() {
     // An older peer than we still support: 0.1.x speaks protocol 1.
     assert!(!compatible(MIN_PROTOCOL - 1, 0));
     assert!(!compatible(1, 1));
+}
+
+/// A small random number generator, the same numbers on every run.
+struct Seeded(u64);
+
+impl Seeded {
+    fn next(&mut self) -> u64 {
+        // xorshift64
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+
+    fn below(&mut self, n: usize) -> usize {
+        (self.next() % n.max(1) as u64) as usize
+    }
+}
+
+/// `bytes` changed a little: bytes overwritten, flipped, cut off or added.
+fn mutate(rng: &mut Seeded, bytes: &[u8]) -> Vec<u8> {
+    let mut b = bytes.to_vec();
+    for _ in 0..1 + rng.below(3) {
+        match rng.below(5) {
+            0 if !b.is_empty() => {
+                let i = rng.below(b.len());
+                b[i] = rng.next() as u8;
+            }
+            1 if !b.is_empty() => {
+                let i = rng.below(b.len());
+                b[i] ^= 1 << rng.below(8);
+            }
+            2 => b.truncate(rng.below(b.len() + 1)),
+            3 => {
+                let i = rng.below(b.len() + 1);
+                b.insert(i, rng.next() as u8);
+            }
+            // The length field, where most of the framing is decided.
+            _ if b.len() >= 5 => {
+                let i = 1 + rng.below(4);
+                b[i] = rng.next() as u8;
+            }
+            _ => {}
+        }
+    }
+    b
+}
+
+/// Damaged messages never crash a reader, and whatever still reads is written back
+/// to exactly the bytes it was read from: there is one encoding for each message.
+#[test]
+fn damaged_messages_never_panic_and_read_back_exactly() {
+    let mut rng = Seeded(0x5eed_1234_abcd_0001);
+    let hosts: Vec<Vec<u8>> = host_samples().iter().map(host_bytes).collect();
+    let clients: Vec<Vec<u8>> = client_samples().iter().map(client_bytes).collect();
+    let (mut read, mut refused) = (0, 0);
+    for _ in 0..20_000 {
+        let pick = rng.below(hosts.len());
+        let bytes = mutate(&mut rng, &hosts[pick]);
+        let mut r = bytes.as_slice();
+        match HostMsg::read(&mut r) {
+            Ok(msg) => {
+                read += 1;
+                let taken = &bytes[..bytes.len() - r.len()];
+                // An unknown message skipped before it is not written back.
+                assert!(taken.ends_with(&host_bytes(&msg)), "{msg:?} from {bytes:?}");
+            }
+            Err(_) => refused += 1,
+        }
+        let _ = HostMsg::read_setup(&mut bytes.as_slice());
+
+        let pick = rng.below(clients.len());
+        let bytes = mutate(&mut rng, &clients[pick]);
+        let mut r = bytes.as_slice();
+        match ClientMsg::read(&mut r) {
+            Ok(msg) => {
+                read += 1;
+                let taken = &bytes[..bytes.len() - r.len()];
+                assert!(
+                    taken.ends_with(&client_bytes(&msg)),
+                    "{msg:?} from {bytes:?}"
+                );
+            }
+            Err(_) => refused += 1,
+        }
+        let mut r = bytes.as_slice();
+        if let Ok(Some(msg)) = ClientMsg::read_first(&mut r) {
+            assert_eq!(&bytes[..bytes.len() - r.len()], client_bytes(&msg));
+        }
+    }
+    // Both happen, or the mutations test nothing.
+    assert!(
+        read > 1000 && refused > 1000,
+        "{read} read, {refused} refused"
+    );
 }
