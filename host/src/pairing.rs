@@ -198,15 +198,32 @@ pub fn accept(
     security: &mut Security,
     tray: Option<&tray::Handle>,
 ) -> Result<Connection> {
+    accept_within(stream, security, tray, SETUP_TIME)
+}
+
+/// As [`accept`], with `setup` for everything up to `Opened` (but pairing).
+fn accept_within(
+    stream: TcpStream,
+    security: &mut Security,
+    tray: Option<&tray::Handle>,
+    setup: Duration,
+) -> Result<Connection> {
     // A vanished headset does not hold the PC (the transport also gives up a write
     // after a few seconds, and the deadline closes a setup that drags on).
     stream.set_read_timeout(Some(READ_TIME))?;
+    // The deadline covers the Noise handshake too: a peer that sends a byte now and
+    // then, each within the read timeout, must not hold the PC for hours. Until the
+    // link exists, the deadline closes the socket itself.
+    let socket = stream.try_clone()?;
+    let closer = Closer::new(move || {
+        let _ = socket.shutdown(std::net::Shutdown::Both);
+    });
+    let deadline = Deadline::new(&closer, setup)?;
     let mut link = NoiseTcp::accept(
         stream,
         &security.identity,
         Arc::new(crate::platform::TcpOptions),
     )?;
-    let deadline = Deadline::new(&link.closer, SETUP_TIME)?;
     // However this connection ends, the tray stops showing a code for it.
     let _clear_code = ClearTrayCode(tray);
     let peer = link.peer.clone();
@@ -317,7 +334,7 @@ pub fn accept(
                     .map(|_| None),
                 };
                 conn.set_idle_limit(READ_TIME);
-                deadline.extend(SETUP_TIME);
+                deadline.extend(setup);
                 // The headset sent its half of the exchange with its request: with no
                 // attempt made, it is read and dropped so the next request can follow.
                 if headset_shows && matches!(paired, Ok(None)) {
@@ -846,6 +863,34 @@ mod tests {
         assert!(l.wait().unwrap() <= Duration::from_secs(900));
         l.succeeded();
         assert!(l.wait().is_none());
+    }
+
+    /// A peer that trickles its Noise handshake (a long length, then a byte now and
+    /// then, each within the read timeout) is cut off at the setup deadline: it cannot
+    /// hold the PC, which accepts one connection at a time.
+    #[test]
+    fn a_trickling_peer_is_cut_off_in_time() {
+        use std::io::Write;
+        let mut pc = TestPc::new("trickle");
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let peer = std::thread::spawn(move || {
+            let mut s = TcpStream::connect(addr).unwrap();
+            s.write_all(&[0xff, 0xff]).unwrap();
+            while s.write_all(&[0]).is_ok() {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+        let (s, _) = l.accept().unwrap();
+        let start = Instant::now();
+        let refused = accept_within(s, &mut pc.security, None, Duration::from_millis(500));
+        assert!(refused.is_err(), "no session");
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            start.elapsed()
+        );
+        peer.join().unwrap();
     }
 
     /// A headset the PC trusts still opens the session first: a session message before

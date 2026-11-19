@@ -216,7 +216,7 @@ Host (implementation-defined values from `host/src/pairing.rs`):
 
 | Limit | Value |
 |---|---|
-| Handshake, `Hello` and `Open` | Must be done within 10 s in total; each read waits at most 5 s; each write at most 5 s |
+| Noise handshake, `Hello` and `Open` | Must be done within 10 s in total, from the TCP connection on; each read waits at most 5 s; each write at most 5 s |
 | While pairing | The deadline and the read timeout become 300 s, and go back to 10 s and 5 s after the attempt |
 | `PairBegin` per connection | At most 3; a 4th closes the connection |
 | Failed attempts in a row (all connections) | The first 3 are free. After the 4th, the next attempt has to wait 30 s, then 60 s, 120 s, 240 s, 480 s, and at most 900 s. A success resets the count |
