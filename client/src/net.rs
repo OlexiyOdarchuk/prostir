@@ -1005,6 +1005,12 @@ fn run_session(
                     session.pair_if_approved(trusted)?;
                     feedback.send(ClientMsg::Open)?;
                 }
+                // The PC cannot open the session (no encoder, say), and closes the
+                // connection after saying why.
+                HostMsg::Error { text } => {
+                    ended.refused = Some(Instant::now());
+                    let _ = events.send(NetEvent::HostError(text));
+                }
                 other => return Err(std::io::Error::other(format!("unexpected {other:?}"))),
             }
         }

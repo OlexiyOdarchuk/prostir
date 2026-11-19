@@ -106,6 +106,21 @@ fn a_cut_in_the_middle_of_a_frame_leaves_nothing_behind() {
     assert_eq!(pc.count_log("panicked"), 0);
 }
 
+/// Monitors that take long to make (7 s here, longer than 5 s of silence ends a
+/// session) do not cost the session: the PC opens it once it can serve it, so the
+/// headset does not count that time as silence.
+#[test]
+fn slow_monitors_do_not_end_the_session() {
+    let options = Options {
+        slow_monitors: Duration::from_millis(3500),
+        ..Options::default()
+    };
+    let (_dir, pc, _keys, mut headset) = session("slow-monitors", &options);
+    headset.take_for(Duration::from_secs(1)).unwrap();
+    assert!(!headset.view().closed);
+    assert_eq!(pc.count_log("headset connected"), 1, "one connection");
+}
+
 /// A broken packet ends the session with a line in the log, not a crash.
 #[test]
 fn a_broken_packet_ends_the_session() {

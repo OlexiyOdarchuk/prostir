@@ -83,6 +83,8 @@ pub struct Options {
     pub noise: bool,
     /// `--bitrate`: Mbit/s per monitor.
     pub bitrate: u32,
+    /// How long making each fake monitor takes.
+    pub slow_monitors: Duration,
     /// `--linger`: seconds the monitors stay after the headset leaves.
     pub linger: u32,
     /// The pairing code the person at the PC types, if asked.
@@ -95,6 +97,7 @@ impl Default for Options {
             fps: 0,
             noise: false,
             bitrate: 8,
+            slow_monitors: Duration::ZERO,
             linger: 30,
             typed_code: None,
         }
@@ -126,6 +129,10 @@ impl Pc {
             .env("PROSTIR_FAKE_DESKTOP", "1")
             .env("PROSTIR_NO_COUNT", "1")
             .env("PROSTIR_FAKE_FPS", options.fps.to_string())
+            .env(
+                "PROSTIR_FAKE_SLOW_MONITORS_MS",
+                options.slow_monitors.as_millis().to_string(),
+            )
             .env(
                 "PROSTIR_FAKE_PICTURE",
                 if options.noise { "noise" } else { "bands" },

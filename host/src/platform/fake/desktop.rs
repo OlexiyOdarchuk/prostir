@@ -25,6 +25,8 @@ pub struct FakeDesktop {
     /// Picture changes per second on every output (0: still).
     fps: u32,
     picture: Picture,
+    /// How long making a monitor takes (KScreen can take seconds).
+    slow: Duration,
 }
 
 impl DesktopBackend for FakeDesktop {
@@ -38,11 +40,18 @@ impl DesktopBackend for FakeDesktop {
             Ok("bands") | Err(_) => Picture::Bands,
             Ok(other) => anyhow::bail!("PROSTIR_FAKE_PICTURE: bands or noise, not {other:?}"),
         };
+        let slow = match std::env::var("PROSTIR_FAKE_SLOW_MONITORS_MS") {
+            Ok(v) => v
+                .parse()
+                .context("PROSTIR_FAKE_SLOW_MONITORS_MS: a whole number")?,
+            Err(_) => 0,
+        };
         info!("desktop: fake, the picture ({picture:?}) changes {fps} times a second");
         Ok(Self {
             layout: Layout::default(),
             fps,
             picture,
+            slow: Duration::from_millis(slow),
         })
     }
 
@@ -51,6 +60,7 @@ impl DesktopBackend for FakeDesktop {
     }
 
     fn create(&self, number: u32, spec: &MonitorSpec) -> Result<FakeOutput> {
+        std::thread::sleep(self.slow);
         let name = format!("{PREFIX}{number}");
         let output = FakeOutput::start(
             name.clone(),

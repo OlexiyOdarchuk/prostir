@@ -9,6 +9,7 @@
 //!   only when the picture changes (`PROSTIR_FAKE_FPS` times a second; 0, the
 //!   default, is a still screen). `PROSTIR_FAKE_PICTURE=noise` makes the picture
 //!   random pixels instead of grey bands, so frames are as big as on a busy screen.
+//!   `PROSTIR_FAKE_SLOW_MONITORS_MS` makes each monitor take that long to make.
 //! - Sound is silence, 10 ms at a time, each slice starting with the time it was
 //!   made (see [`audio`]), so a fake headset can tell how late it arrives; the
 //!   microphone goes nowhere.

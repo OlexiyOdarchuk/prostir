@@ -19,7 +19,6 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use log::{debug, error, info, warn};
 use prostir_proto::link::{Closer, Link, Via};
-use prostir_proto::packet::{self, FRAGMENT, lane};
 use prostir_proto::{ClientMsg, Codec, HeadsetGoodbye, HostMsg, PcGoodbye};
 
 use displays::{Displays, SavedMonitors};
@@ -242,6 +241,10 @@ fn serve_client(
     } = conn;
     let via = via_name(peer.via);
     let outbox = Arc::new(outbox::Outbox::default());
+    // The session opens now that it can be served: the monitors exist, and the writer
+    // (which also pings) starts below. The headset counts silence from here.
+    outbox.control(HostMsg::Opened);
+    packets.set_limits(ClientMsg::limits(true));
     let writer_thread = {
         let closer = closer.clone();
         let outbox = outbox.clone();
@@ -760,19 +763,10 @@ fn main() -> Result<()> {
                         Ok(d) => displays = Some(d),
                         Err(e) => {
                             error!("{e:#}");
-                            // Tell the headset why, instead of just hanging up.
-                            let why = HostMsg::Error {
+                            // Tell the headset why, instead of Opened.
+                            let _ = conn.send(HostMsg::Error {
                                 text: format!("{e:#}"),
-                            };
-                            let goodbye = HostMsg::Goodbye {
-                                reason: PcGoodbye::Failed.code(),
-                            };
-                            for msg in [why, goodbye] {
-                                if let Ok(msg) = msg.encode() {
-                                    let tx = &mut *conn.link.sender;
-                                    let _ = packet::send_whole(tx, lane::CONTROL, msg, FRAGMENT);
-                                }
-                            }
+                            });
                             pairing::close_gently(&mut conn.link);
                             continue;
                         }

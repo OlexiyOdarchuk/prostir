@@ -60,6 +60,8 @@ pub enum ConnectError {
         protocol: u32,
         app: String,
     },
+    /// The PC cannot open the session, and said why.
+    Refused(String),
     Other(anyhow::Error),
 }
 
@@ -67,6 +69,7 @@ impl std::fmt::Display for ConnectError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotPaired => write!(f, "the PC does not know this headset"),
+            Self::Refused(why) => write!(f, "the PC cannot open the session: {why}"),
             Self::PairingFailed(why) => write!(f, "pairing failed: {why}"),
             Self::Incompatible { protocol, app } => {
                 write!(f, "the PC speaks protocol v{protocol} (app {app})")
@@ -599,9 +602,21 @@ fn open(
         keys.trusted.add(peer.key, &addr.to_string())?;
     }
     ends.send(ClientMsg::Open)?;
+    let mut refused = None;
     loop {
-        match ends.recv()? {
+        let msg = match ends.recv() {
+            Ok(msg) => msg,
+            // Said why, then closed the connection.
+            Err(e) => {
+                return Err(match refused {
+                    Some(why) => ConnectError::Refused(why),
+                    None => e.into(),
+                });
+            }
+        };
+        match msg {
             HostMsg::Opened => return Ok((version, language)),
+            HostMsg::Error { text } => refused = Some(text),
             HostMsg::PairingRequired => {
                 let Some(code) = pairing.as_mut() else {
                     return Err(ConnectError::NotPaired);

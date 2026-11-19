@@ -177,7 +177,8 @@ impl Connection {
         ClientMsg::recv(&mut *self.link.receiver, &mut self.packets)
     }
 
-    fn send(&mut self, msg: HostMsg) -> io::Result<()> {
+    /// Sends `msg` whole in the control lane (before the session's writer runs).
+    pub fn send(&mut self, msg: HostMsg) -> io::Result<()> {
         packet::send_whole(
             &mut *self.link.sender,
             lane::CONTROL,
@@ -192,7 +193,9 @@ impl Connection {
 }
 
 /// Encrypts the connection, checks the versions, pairs the headset if either side asks,
-/// and returns the connection once the headset is trusted and opened the session.
+/// and returns the connection once the headset is trusted and asked to open the
+/// session. The caller answers `Opened` once it can serve the session (its monitors
+/// made, its writer running), or an `Error` saying why it cannot.
 pub fn accept(
     stream: TcpStream,
     security: &mut Security,
@@ -272,8 +275,6 @@ fn accept_within(
     loop {
         match conn.recv()? {
             ClientMsg::Open if security.trusted.contains(&peer.key) => {
-                conn.send(HostMsg::Opened)?;
-                conn.packets.set_limits(ClientMsg::limits(true));
                 conn.link.receiver.set_idle_limit(None);
                 drop(deadline);
                 return Ok(conn);
@@ -742,7 +743,11 @@ mod tests {
         });
         let (s, _) = l.accept().unwrap();
         // The headset reads until the PC hangs up.
-        let accepted = accept(s, &mut pc.security, None).map(|conn| conn.link.closer.close());
+        // Opened, as the session would send it, then the PC hangs up.
+        let accepted = accept(s, &mut pc.security, None).map(|mut conn| {
+            let _ = conn.send(HostMsg::Opened);
+            conn.link.closer.close();
+        });
         (accepted, h.join().unwrap())
     }
 

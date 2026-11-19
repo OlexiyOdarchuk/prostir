@@ -470,12 +470,13 @@ Nothing else starts yet.
 **Trust.** If the client does not trust the host's key, it pairs now (only after the
 user agreed in its menu; otherwise it closes the connection and asks the user). Then it
 sends `Open`. The host answers `PairingRequired` if it does not trust the client: the
-client may pair and send `Open` again. Once the host trusts the client it answers
-`Opened`, and the session starts. Until then the host accepts only `Open` and
+client may pair and send `Open` again. Once the host trusts the client, it makes its
+monitors and encoders (which can take a few seconds) and answers `Opened`, and the
+session starts: from then on both sides ping and count silence. Until then the host accepts only `Open` and
 `PairBegin` (and skips unknown tags), and closes the connection on anything else.
 
-If the host then cannot set up its monitors or encoders, it sends `Error{text}` and
-closes the connection.
+If the host cannot set up its monitors or encoders, it answers `Error{text}` instead
+of `Opened` and closes the connection.
 
 ### What a version 1 peer sees
 
@@ -633,7 +634,7 @@ Payload notation: fields in order, `name:type`, with the types of
 | 124 | `MouseTo` | `id:u8, x:u16, y:u16` | Put the mouse on stream `id` at `x`, `y` across its picture (`0` to `65535`). Only if `Abilities` has `MOVE_MOUSE`. No answer. |
 | 125 | `SetNotifications` | `enabled:bool` | Pass the PC's desktop notifications to the headset as `Notice`. |
 | 126 | `SetSoundFromScreen` | `enabled:bool` | Report which stream the sound comes from (`SoundFrom`). |
-| 127 | `Open` | (empty) | Start the session, once the headset trusts the host. Answered with `Opened` or `PairingRequired`. |
+| 127 | `Open` | (empty) | Start the session, once the headset trusts the host. Answered with `Opened`, `PairingRequired`, or `Error` when the host cannot serve a session. |
 | 128 | `Ping` | `seq:u32` | Sent every second in the session; answer with `Pong{seq}` at once. |
 | 129 | `Pong` | `seq:u32` | The answer to the host's `Ping{seq}`. |
 | 130 | `Goodbye` | `reason:u8` | The headset ends the session on purpose, for `reason`; nothing follows. |
