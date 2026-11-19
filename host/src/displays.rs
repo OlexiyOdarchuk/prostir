@@ -648,6 +648,8 @@ pub struct Displays {
     primary: Option<u8>,
     /// Whether to pick KDE's primary monitor ourselves.
     manage_primary: bool,
+    /// The tip to share a window rather than a monitor was shown in this run.
+    sharing_tip_shown: bool,
 }
 
 impl Displays {
@@ -681,6 +683,7 @@ impl Displays {
             cfg,
             primary: None,
             manage_primary,
+            sharing_tip_shown: false,
         };
         for spec in saved.specs.iter().take(MAX_MONITORS) {
             displays.add(spec.clone())?;
@@ -836,6 +839,22 @@ impl Displays {
                     if let Err(e) = self.restart_monitor(id, None) {
                         error!("{}: {e:#}", stream_name(id));
                     }
+                    if !self.sharing_tip_shown {
+                        self.sharing_tip_shown = true;
+                        let body = format!(
+                            "{} {}. {}",
+                            t(
+                                "Програма, що показує екран, змінила розмір монітора",
+                                "A screen sharing program changed the size of monitor"
+                            ),
+                            u32::from(id) + 1,
+                            t(
+                                "Розмір повернено, але показ може стрибати. Щоб цього не було, показуйте вікно програми, а не монітор.",
+                                "Its size is back, but the share may jump. To avoid that, share an app window instead of the monitor."
+                            )
+                        );
+                        platform::dialogs::notify(t("Показ екрана", "Screen sharing"), &body);
+                    }
                 }
                 SizeAction::Recreate => {
                     warn!("{name} is still {w}x{h}: making it again at {spec}");
@@ -852,8 +871,8 @@ impl Displays {
                         ),
                         u32::from(id) + 1,
                         t(
-                            "Припиніть показувати цей монітор у ній, а тоді зніміть і знову вдягніть шолом.",
-                            "Stop sharing that monitor in it, then take the headset off and put it on again."
+                            "Покажіть у ній вікно програми замість монітора, а тоді зніміть і знову вдягніть шолом.",
+                            "Share an app window in it instead of the monitor, then take the headset off and put it on again."
                         )
                     );
                     platform::dialogs::notify(t("Розмір монітора", "Monitor size"), &body);
