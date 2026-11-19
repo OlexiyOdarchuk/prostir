@@ -68,7 +68,7 @@ fn settings() -> PcSettings {
     }
 }
 
-fn host_samples() -> Vec<HostMsg> {
+pub(crate) fn host_samples() -> Vec<HostMsg> {
     vec![
         HostMsg::Welcome {
             version: 2,
@@ -130,7 +130,7 @@ fn host_samples() -> Vec<HostMsg> {
     ]
 }
 
-fn client_samples() -> Vec<ClientMsg> {
+pub(crate) fn client_samples() -> Vec<ClientMsg> {
     vec![
         ClientMsg::Hello {
             version: 2,
@@ -546,10 +546,10 @@ fn version_ranges() {
 }
 
 /// A small random number generator, the same numbers on every run.
-struct Seeded(u64);
+pub(crate) struct Seeded(pub(crate) u64);
 
 impl Seeded {
-    fn next(&mut self) -> u64 {
+    pub(crate) fn next(&mut self) -> u64 {
         // xorshift64
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
@@ -557,13 +557,13 @@ impl Seeded {
         self.0
     }
 
-    fn below(&mut self, n: usize) -> usize {
+    pub(crate) fn below(&mut self, n: usize) -> usize {
         (self.next() % n.max(1) as u64) as usize
     }
 }
 
 /// `bytes` changed a little: bytes overwritten, flipped, cut off or added.
-fn mutate(rng: &mut Seeded, bytes: &[u8]) -> Vec<u8> {
+pub(crate) fn mutate(rng: &mut Seeded, bytes: &[u8]) -> Vec<u8> {
     let mut b = bytes.to_vec();
     for _ in 0..1 + rng.below(3) {
         match rng.below(5) {

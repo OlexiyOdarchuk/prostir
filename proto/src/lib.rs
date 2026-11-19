@@ -26,12 +26,15 @@
 #![forbid(unsafe_code)]
 
 pub mod link;
+pub mod packet;
 pub mod secure;
 pub mod stats;
 pub mod wire;
 
 use std::io::{self, Read, Write};
 
+use link::RecordReceiver;
+use packet::{Assembler, Encoded, Limits, Message};
 use wire::{Reader, Wire, WireError, wire_enum, wire_struct};
 
 pub const TCP_PORT: u16 = 47830;
@@ -94,6 +97,10 @@ const MAX_SETUP_PAYLOAD: u32 = 64 * 1024;
 /// sound (under 1 KiB). A peer is not trusted yet when its first messages arrive, so
 /// this keeps what it can make the PC allocate small.
 const MAX_CLIENT_PAYLOAD: u32 = 64 * 1024;
+/// Lanes that may hold a message being put together at once, in the session: one for
+/// control, one for sound and one for each stream, with room to spare. Before the
+/// session one is enough.
+const SESSION_LANES: usize = 32;
 /// Most rows, or monitors in all rows, a layout may list (there are at most six
 /// monitors, a laptop screen and three window panels). Also the most monitors in an
 /// order or a set of monitors.
@@ -374,6 +381,17 @@ mod tag {
 /// [`HostMsg::Frame`] before its data: id, keyframe, pts_us.
 const FRAME_HEAD: usize = 1 + 1 + 8;
 
+/// The first payload bytes of a message from the PC kept apart from its data, so
+/// the data of a frame is the body as it came (see [`packet::Assembler`]).
+fn host_head(tag: u8) -> usize {
+    if tag == tag::FRAME { FRAME_HEAD } else { 0 }
+}
+
+/// Messages from the headset carry nothing before their data.
+fn client_head(_tag: u8) -> usize {
+    0
+}
+
 /// A message this side cannot send: a field over its limit, or too large as a whole.
 /// The sender's mistake, so it ends this connection and nothing else.
 fn unsendable(e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
@@ -442,6 +460,84 @@ fn skip(r: &mut impl Read, len: usize) -> io::Result<()> {
 }
 
 impl HostMsg {
+    /// What a headset accepts from the PC: before the session (when the PC may not
+    /// be trusted yet), or in it (`opened`).
+    pub fn limits(opened: bool) -> Limits {
+        match opened {
+            false => Limits {
+                message: MAX_SETUP_PAYLOAD,
+                lanes: 1,
+            },
+            true => Limits {
+                message: MAX_HOST_PAYLOAD,
+                lanes: SESSION_LANES,
+            },
+        }
+    }
+
+    /// Puts messages from the PC together, with the limits from before the session.
+    pub fn assembler() -> Assembler {
+        Assembler::new(Self::limits(false), host_head)
+    }
+
+    /// The message's bytes, to send in packets. Frame data and sound move into them
+    /// as they are.
+    pub fn encode(self) -> io::Result<Encoded> {
+        match self {
+            HostMsg::Frame {
+                id,
+                keyframe,
+                pts_us,
+                data,
+            } => {
+                let mut head = [0u8; FRAME_HEAD];
+                head[0] = id;
+                head[1] = u8::from(keyframe);
+                head[2..].copy_from_slice(&pts_us.to_le_bytes());
+                Encoded::new(tag::FRAME, &head, data)
+            }
+            HostMsg::Audio { pcm } => Encoded::new(tag::AUDIO, &[], pcm),
+            other => {
+                let mut fields = Vec::new();
+                other.put_fields(&mut fields).map_err(unsendable)?;
+                Encoded::new(other.wire_tag(), &[], fields)
+            }
+        }
+    }
+
+    /// The message put together in `m`; `None` for a tag this build does not know
+    /// (skipped, so a newer PC can add messages).
+    pub fn from_message(m: Message) -> io::Result<Option<Self>> {
+        Ok(Some(match m.tag {
+            tag::FRAME => {
+                let mut h = Reader::new(m.head());
+                let (id, keyframe, pts_us) =
+                    (u8::get(&mut h)?, bool::get(&mut h)?, u64::get(&mut h)?);
+                HostMsg::Frame {
+                    id,
+                    keyframe,
+                    pts_us,
+                    data: m.body,
+                }
+            }
+            tag::AUDIO => HostMsg::Audio { pcm: m.body },
+            tag if Self::TAGS.contains(&tag) => Self::decode(tag, &m.body)?,
+            _ => return Ok(None),
+        }))
+    }
+
+    /// The next message from the PC this build knows: records from `rx`, put
+    /// together by `packets`.
+    pub fn recv(rx: &mut dyn RecordReceiver, packets: &mut Assembler) -> io::Result<Self> {
+        loop {
+            if let Some(m) = packets.push(rx.recv()?)?
+                && let Some(msg) = Self::from_message(m)?
+            {
+                return Ok(msg);
+            }
+        }
+    }
+
     pub fn write(&self, w: &mut impl Write) -> io::Result<()> {
         match self {
             HostMsg::Frame {
@@ -518,6 +614,52 @@ impl HostMsg {
 }
 
 impl ClientMsg {
+    /// What the PC accepts from a headset: before the session, or in it (`opened`).
+    pub fn limits(opened: bool) -> Limits {
+        Limits {
+            message: MAX_CLIENT_PAYLOAD,
+            lanes: if opened { SESSION_LANES } else { 1 },
+        }
+    }
+
+    /// Puts messages from a headset together, with the limits from before the session.
+    pub fn assembler() -> Assembler {
+        Assembler::new(Self::limits(false), client_head)
+    }
+
+    /// The message's bytes, to send in packets. Microphone sound moves into them as
+    /// it is.
+    pub fn encode(self) -> io::Result<Encoded> {
+        match self {
+            ClientMsg::Mic { pcm } => Encoded::new(tag::MIC, &[], pcm),
+            other => {
+                let mut fields = Vec::new();
+                other.put_fields(&mut fields).map_err(unsendable)?;
+                Encoded::new(other.wire_tag(), &[], fields)
+            }
+        }
+    }
+
+    /// The message put together in `m`; `None` for a tag this build does not know.
+    pub fn from_message(m: Message) -> io::Result<Option<Self>> {
+        Ok(Some(match m.tag {
+            tag::MIC => ClientMsg::Mic { pcm: m.body },
+            tag if Self::TAGS.contains(&tag) => Self::decode(tag, &m.body)?,
+            _ => return Ok(None),
+        }))
+    }
+
+    /// The next message from the headset this build knows.
+    pub fn recv(rx: &mut dyn RecordReceiver, packets: &mut Assembler) -> io::Result<Self> {
+        loop {
+            if let Some(m) = packets.push(rx.recv()?)?
+                && let Some(msg) = Self::from_message(m)?
+            {
+                return Ok(msg);
+            }
+        }
+    }
+
     pub fn write(&self, w: &mut impl Write) -> io::Result<()> {
         match self {
             ClientMsg::Mic { pcm } => write_media(w, tag::MIC, &[pcm]),
