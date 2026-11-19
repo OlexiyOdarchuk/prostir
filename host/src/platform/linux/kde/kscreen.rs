@@ -7,19 +7,30 @@ use log::{info, warn};
 
 use crate::platform::{Geometry, run};
 
-/// KScreen answers within a second; applying a layout can take a little longer.
-const TIMEOUT: Duration = Duration::from_secs(5);
+/// KScreen answers a question within a second.
+const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+/// Applying a layout waits for KWin to reconfigure its outputs, which on a busy
+/// desktop (outputs just made, a mode change on the panel) takes longer.
+const APPLY_TIMEOUT: Duration = Duration::from_secs(15);
 
-fn kscreen_doctor(args: &[impl AsRef<std::ffi::OsStr>]) -> std::io::Result<std::process::Output> {
+fn kscreen_doctor(
+    args: &[impl AsRef<std::ffi::OsStr>],
+    timeout: Duration,
+) -> std::io::Result<std::process::Output> {
     run(
         std::process::Command::new("kscreen-doctor").args(args),
-        TIMEOUT,
+        timeout,
     )
+}
+
+/// What a failed kscreen-doctor said, for the log.
+fn said(out: &std::process::Output) -> String {
+    String::from_utf8_lossy(&out.stderr).trim().to_owned()
 }
 
 /// Logical geometry `(x, y, width, height)` of each enabled output, from KScreen.
 pub fn geometries() -> HashMap<String, Geometry> {
-    let Ok(out) = kscreen_doctor(&["-o"]) else {
+    let Ok(out) = kscreen_doctor(&["-o"], QUERY_TIMEOUT) else {
         return HashMap::new();
     };
     let text = String::from_utf8_lossy(&out.stdout);
@@ -73,7 +84,7 @@ pub fn geometries() -> HashMap<String, Geometry> {
 /// Connected real displays that KDE has switched off (e.g. the laptop panel after
 /// the lid was closed and opened again while other monitors were on).
 pub fn disabled_physical_outputs() -> Vec<String> {
-    let Ok(out) = kscreen_doctor(&["-o"]) else {
+    let Ok(out) = kscreen_doctor(&["-o"], QUERY_TIMEOUT) else {
         return Vec::new();
     };
     let text = String::from_utf8_lossy(&out.stdout);
@@ -115,38 +126,49 @@ pub fn apply(settings: &[String]) {
     if settings.is_empty() {
         return;
     }
+    let mut last = String::new();
     for _ in 0..10 {
-        match kscreen_doctor(settings) {
+        match kscreen_doctor(settings, APPLY_TIMEOUT) {
             Ok(out) if out.status.success() => {
                 info!("KDE layout: {}", settings.join(" "));
                 return;
             }
-            Ok(_) => std::thread::sleep(Duration::from_millis(300)),
+            Ok(out) => {
+                last = said(&out);
+                std::thread::sleep(Duration::from_millis(300));
+            }
             Err(e) => {
                 warn!("cannot run kscreen-doctor: {e}");
                 return;
             }
         }
     }
-    warn!("kscreen-doctor did not apply {}", settings.join(" "));
+    warn!(
+        "kscreen-doctor did not apply {} ({last})",
+        settings.join(" ")
+    );
 }
 
 /// Applies `output.<name>.<setting>` through kscreen-doctor, retrying while KScreen
 /// has not caught up with a just-created output.
 pub fn set(output: &str, setting: &str) {
     let arg = format!("output.{output}.{setting}");
+    let mut last = String::new();
     for _ in 0..10 {
-        match kscreen_doctor(&[&arg]) {
+        match kscreen_doctor(&[&arg], APPLY_TIMEOUT) {
             Ok(out) if out.status.success() => {
                 info!("{output}: {setting}");
                 return;
             }
-            Ok(_) => std::thread::sleep(Duration::from_millis(300)),
+            Ok(out) => {
+                last = said(&out);
+                std::thread::sleep(Duration::from_millis(300));
+            }
             Err(e) => {
                 warn!("cannot run kscreen-doctor for {arg}: {e}");
                 return;
             }
         }
     }
-    warn!("kscreen-doctor did not apply {arg}");
+    warn!("kscreen-doctor did not apply {arg} ({last})");
 }

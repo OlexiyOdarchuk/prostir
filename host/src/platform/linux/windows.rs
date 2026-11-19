@@ -95,13 +95,14 @@ pub fn screenshot(output: Option<&str>) -> Result<PathBuf> {
         ("spectacle", cmd)
     };
     // Saving a picture of several large screens takes a few seconds.
-    let status = match run(cmd.arg(&path), Duration::from_secs(20)) {
-        Ok(out) => out.status,
+    let out = match run(cmd.arg(&path), Duration::from_secs(20)) {
+        Ok(out) => out,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!("{tool} is not installed"),
         Err(e) => return Err(e).context(tool),
     };
-    if !status.success() || !path.exists() {
-        bail!("the screenshot tool failed ({status})");
+    if !out.status.success() || !path.exists() {
+        let said = String::from_utf8_lossy(&out.stderr);
+        bail!("{tool} failed ({}): {}", out.status, said.trim());
     }
     info!("screenshot saved to {path:?}");
     Ok(path)

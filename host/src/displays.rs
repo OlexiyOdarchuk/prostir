@@ -438,7 +438,7 @@ impl SavedMonitors {
                 None => (line, false),
             };
             // `2560x1440 at -1300 200`: where the headset showed it (files from before
-            // 0.1.2 have no middle).
+            // 0.1.1 have no middle).
             let (spec, seen) = match line.split_once(" at ") {
                 Some((spec, at)) => {
                     let mut v = at.split_whitespace().map(|v| v.parse().unwrap_or(NEXT));
