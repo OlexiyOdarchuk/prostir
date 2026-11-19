@@ -144,6 +144,10 @@ pub struct Encoder {
     sink: gst_app::AppSink,
     stop: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
+    /// The source sends nothing after a pause until the screen changes (PipeWire from
+    /// KWin): it is started over on resuming. A capture pushing its own frames
+    /// (`appsrc`) repeats the last one by itself.
+    restart_on_resume: bool,
     bus_thread: Option<JoinHandle<()>>,
 }
 
@@ -325,6 +329,7 @@ impl Encoder {
                 })?
         };
 
+        let restart_on_resume = pipeline.by_name("src").is_none();
         // Built first, so a failed start below stops the bus thread and the pipeline
         // through Drop instead of leaking them.
         let encoder = Self {
@@ -332,6 +337,7 @@ impl Encoder {
             sink,
             stop,
             paused: Arc::new(AtomicBool::new(false)),
+            restart_on_resume,
             bus_thread: Some(bus_thread),
         };
         encoder
@@ -378,6 +384,12 @@ impl Encoder {
             gst::State::Playing
         };
         self.paused.store(paused, Ordering::Relaxed);
+        if !paused && self.restart_on_resume {
+            // Resumed as it was, an idle screen would send no frame at all (the picture
+            // in the headset stays frozen, or a headset that just connected gets no
+            // monitors): connected again, the source sends the current picture at once.
+            let _ = self.pipeline.set_state(gst::State::Null);
+        }
         let _ = self.pipeline.set_state(state);
         if !paused {
             self.force_keyframe();

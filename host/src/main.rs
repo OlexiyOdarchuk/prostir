@@ -214,6 +214,8 @@ fn serve_client(
         })?;
 
     displays.router.attach(outbox.clone());
+    // Monitors kept from the last session send their picture again for this one.
+    displays.resume_streams();
     if let Some(id) = displays.primary() {
         displays.router.send(HostMsg::PrimaryChanged { id });
     }
