@@ -19,6 +19,11 @@ the headset app.
 - Moving all monitors together keeps the arrangement in one piece while it moves.
 - The map in the Monitors tab shows the monitors as the desktop has them, each at its
   own size.
+- Cinema mode no longer loses your arrangement: opening the Meta menu, resizing with
+  both hands, follow mode or a profile switch while in cinema used to save the cinema
+  screen over it. Started in cinema mode, the app shows the cinema screen.
+- After the PC part restarts, the desktop is arranged the way the monitors stood in
+  the headset straight away, above and below included.
 
 ### In the headset
 
@@ -31,6 +36,13 @@ the headset app.
 
 ### PC
 
+- A codec or encoder switch that fails leaves every monitor working with the previous
+  settings, instead of a broken set that could later crash the PC part.
+- Reconnecting starts each monitor's picture over once, not twice.
+- Monitors given with `-m` no longer reset the sound and microphone choices, and
+  quality changes in the tray are kept when no headset is connected.
+- A hung `kscreen-doctor`, `qdbus`, `pactl` or screenshot tool can no longer hang
+  Prostir.
 - The PC part is split into a shared core and a Linux layer, the groundwork for
   GNOME and other systems. Nothing changes in use.
 - The AUR package is published automatically, and release builds retry downloading
