@@ -1,8 +1,9 @@
 name: AUR
 
-# Publishing a release (not just drafting it) updates the prostir-bin package on the
-# AUR. Needs the repository secret AUR_SSH_KEY: a private key whose public half is
-# added to the AUR account that owns prostir-bin.
+# Publishing a release (not just drafting it) updates both AUR packages: prostir-bin
+# (the release's prebuilt program) and prostir (built from the tagged source). Needs the
+# repository secret AUR_SSH_KEY: a private key whose public half is added to the AUR
+# account that owns both packages.
 on:
   release:
     types: [published]
@@ -21,9 +22,14 @@ defaults:
 
 jobs:
   aur:
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [prostir-bin, prostir]
     runs-on: ubuntu-24.04
-    # A stuck mirror or runner fails the job instead of holding it for hours.
-    timeout-minutes: 20
+    # A stuck mirror or runner fails the job instead of holding it for hours. The
+    # source package is built once here to prove it builds (a few minutes).
+    timeout-minutes: 40
     container: archlinux:base-devel
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -33,6 +39,7 @@ jobs:
       - name: PKGBUILD for this release
         env:
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          PACKAGE: ${{ matrix.package }}
         run: |
           set -euo pipefail
           pacman -Syu --noconfirm --needed git openssh
@@ -47,31 +54,54 @@ jobs:
             exit 1
           fi
           base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
-          tarball="prostir-${version}-x86_64-linux.tar.gz"
           mkdir -p /tmp/dl /tmp/aur
-          curl -fL --retry 3 -o "/tmp/dl/$tarball" "$base/$tarball"
           curl -fL --retry 3 -o /tmp/dl/SHA256SUMS "$base/SHA256SUMS"
-          (cd /tmp/dl && awk -v f="$tarball" '$2 == f' SHA256SUMS | grep . | sha256sum -c -)
-          sum="$(sha256sum "/tmp/dl/$tarball" | cut -d' ' -f1)"
-          # SHA-256 of an empty file: the download produced nothing.
-          if [ "$sum" = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 ]; then
-            echo "::error::$tarball is empty"
+          # SHA-256 of an empty file: a download that produced nothing.
+          empty=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+          # A release file, checked against the release's SHA256SUMS; prints its sum.
+          fetch_release_file() {
+            curl -fL --retry 3 -o "/tmp/dl/$1" "$base/$1"
+            (cd /tmp/dl && awk -v f="$1" '$2 == f' SHA256SUMS | grep . | sha256sum -c - >&2)
+            sha256sum "/tmp/dl/$1" | cut -d' ' -f1
+          }
+          if [ "$PACKAGE" = prostir-bin ]; then
+            tarball="prostir-${version}-x86_64-linux.tar.gz"
+            sum="$(fetch_release_file "$tarball")"
+            tar -tzf "/tmp/dl/$tarball" "prostir-${version}-x86_64-linux/prostir" >/dev/null
+            sed -e "s/@VERSION@/${version}/" -e "s/@SHA256@/${sum}/" \
+              packaging/aur/prostir-bin/PKGBUILD.in > /tmp/aur/PKGBUILD
+          else
+            licenses="$(fetch_release_file THIRD-PARTY-LICENSES.txt)"
+            curl -fL --retry 3 -o /tmp/dl/source.tar.gz \
+              "https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${TAG}.tar.gz"
+            sum="$(sha256sum /tmp/dl/source.tar.gz | cut -d' ' -f1)"
+            tar -tzf /tmp/dl/source.tar.gz "prostir-${version}/Cargo.lock" >/dev/null
+            sed -e "s/@VERSION@/${version}/" -e "s/@SOURCE_SHA256@/${sum}/" \
+              -e "s/@LICENSES_SHA256@/${licenses}/" \
+              packaging/aur/prostir/PKGBUILD.in > /tmp/aur/PKGBUILD
+          fi
+          if [ "$sum" = "$empty" ]; then
+            echo "::error::the download for $PACKAGE is empty"
             exit 1
           fi
-          tar -tzf "/tmp/dl/$tarball" "prostir-${version}-x86_64-linux/prostir" >/dev/null
-          sed -e "s/@VERSION@/${version}/" -e "s/@SHA256@/${sum}/" \
-            packaging/aur/PKGBUILD.in > /tmp/aur/PKGBUILD
-          cp "/tmp/dl/$tarball" /tmp/aur/
           useradd -m builder
           chown -R builder /tmp/aur
-          # Checks the checksum in the PKGBUILD against the downloaded file.
+          # Checks the checksums in the PKGBUILD against fresh downloads.
           su builder -c "cd /tmp/aur && makepkg --verifysource && makepkg --printsrcinfo > .SRCINFO"
-          rm "/tmp/aur/$tarball"
+          if [ "$PACKAGE" = prostir ]; then
+            # Build it once, tests included, so a source package that does not build is
+            # never published.
+            deps="$(cd /tmp/aur && bash -c 'source PKGBUILD; echo "${depends[@]} ${makedepends[@]}"')"
+            pacman -S --noconfirm --needed $deps
+            su builder -c "cd /tmp/aur && makepkg --noconfirm"
+          fi
+          (cd /tmp/aur && rm -rf src pkg ./*.tar.gz ./*.txt ./*.pkg.tar.*)
           cat /tmp/aur/PKGBUILD /tmp/aur/.SRCINFO
       - name: Push to the AUR
         env:
           AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          PACKAGE: ${{ matrix.package }}
         run: |
           set -euo pipefail
           if [ -z "$AUR_SSH_KEY" ]; then
@@ -87,7 +117,8 @@ jobs:
           # In the container $HOME is /github/home, but ssh looks in root's own home: name
           # both files outright.
           export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/aur -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
-          git clone ssh://aur@aur.archlinux.org/prostir-bin.git /tmp/repo
+          # The first push of a new name creates the package on the AUR.
+          git clone "ssh://aur@aur.archlinux.org/${PACKAGE}.git" /tmp/repo
           cp /tmp/aur/PKGBUILD /tmp/aur/.SRCINFO /tmp/repo/
           cd /tmp/repo
           git config user.name "Prostir release bot"
