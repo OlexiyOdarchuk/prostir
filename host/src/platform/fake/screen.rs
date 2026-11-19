@@ -14,7 +14,6 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, LazyLock, Mutex};
-use std::time::Duration;
 
 use anyhow::Result;
 use gstreamer as gst;
@@ -243,8 +242,17 @@ mod imp {
         }
 
         fn unlock(&self) -> Result<(), gst::ErrorMessage> {
-            self.state.lock().unwrap().flushing = true;
-            if let Some(screen) = &self.state.lock().unwrap().screen {
+            // `create` takes the screen's lock and then the state's; the state's is let
+            // go here before the screen's is taken, so neither waits on the other.
+            let screen = {
+                let mut state = self.state.lock().unwrap();
+                state.flushing = true;
+                state.screen.clone()
+            };
+            if let Some(screen) = screen {
+                // Under the screen's lock, `create` is either before its look at
+                // `flushing` or already waiting: it cannot miss this wake-up.
+                let _changes = screen.changes.lock().unwrap();
                 screen.changed.notify_all();
             }
             Ok(())
@@ -286,13 +294,8 @@ mod imp {
                         ));
                     }
                 }
-                // Woken by a change or by `unlock`; the timeout only guards a missed
-                // wake-up.
-                changes = screen
-                    .changed
-                    .wait_timeout(changes, Duration::from_millis(100))
-                    .unwrap()
-                    .0;
+                // Woken by a change or by `unlock`.
+                changes = screen.changed.wait(changes).unwrap();
             }
         }
     }
