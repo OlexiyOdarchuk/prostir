@@ -154,21 +154,29 @@ impl Router {
     /// what the outbox sent and dropped, how long frames waited there, keyframes, and
     /// encoded → shown in the headset. Then one line for sound.
     pub fn report(&self) {
-        let mut inner = self.inner.lock().unwrap();
-        let RouterInner {
-            tx,
-            streams,
-            report,
-        } = &mut *inner;
-        let Some(tx) = tx else { return };
-        let Some(window) = report.due(Instant::now()) else {
-            return;
+        let (window, mut stats, streams) = {
+            let mut inner = self.inner.lock().unwrap();
+            let RouterInner {
+                tx,
+                streams,
+                report,
+            } = &mut *inner;
+            let Some(tx) = tx else { return };
+            let Some(window) = report.due(Instant::now()) else {
+                return;
+            };
+            let streams: Vec<(u8, Histogram, u32)> = streams
+                .iter_mut()
+                .map(|(id, slot)| {
+                    let shown = std::mem::take(&mut slot.shown);
+                    (*id, shown, std::mem::take(&mut slot.skipped))
+                })
+                .collect();
+            (window, tx.take_stats(), streams)
         };
-        let mut stats = tx.take_stats();
-        for (id, slot) in streams.iter_mut() {
-            let video = stats.video.remove(id).unwrap_or_default();
-            let shown = std::mem::take(&mut slot.shown);
-            let skipped = std::mem::take(&mut slot.skipped);
+        // Logged without the lock, which every encoded frame takes.
+        for (id, shown, skipped) in streams {
+            let video = stats.video.remove(&id).unwrap_or_default();
             if video.frames == 0 && video.dropped.total() == 0 && skipped == 0 {
                 continue;
             }
@@ -178,7 +186,7 @@ impl Router {
             };
             info!(
                 "{}: {}; {skipped} skipped waiting for a keyframe; encoded → shown in headset {shown}",
-                stream_name(*id),
+                stream_name(id),
                 video.summary(window),
             );
         }
