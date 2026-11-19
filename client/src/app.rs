@@ -1031,15 +1031,39 @@ impl Scene {
             return;
         }
         let turn = after.rotation * before.rotation.inverse();
-        let scale = after.width / before.width.max(1e-3);
+        // One scale for all, kept so no monitor goes past the size limits: clamping
+        // each on its own would pull the arrangement apart.
+        let mut scale = after.width / before.width.max(1e-3);
+        for (other, p) in &self.placements {
+            if *other != id && !is_window_panel(*other) {
+                scale = scale.clamp(0.2 / p.width.max(1e-3), 8.0 / p.width.max(1e-3));
+            }
+        }
         for (other, p) in self.placements.iter_mut() {
             if *other == id || is_window_panel(*other) {
                 continue;
             }
             p.position = after.position + turn * (p.position - before.position) * scale;
             p.rotation = (turn * p.rotation).normalize();
-            p.width = (p.width * scale).clamp(0.2, 8.0);
+            p.width *= scale;
         }
+    }
+
+    /// What moves with the hands now: the held monitors, and with "move all together"
+    /// every monitor that goes along (drawn where it is, not catching up, or the
+    /// arrangement would tear apart while it moves).
+    fn moving_now(&self, held: &[u8]) -> Vec<u8> {
+        let carrying = self.settings.move_all
+            && !self.settings.cinema
+            && held
+                .iter()
+                .chain(self.scaling.as_ref().map(|s| &s.id))
+                .any(|id| self.monitors.contains_key(id) && !is_window_panel(*id));
+        let mut ids = held.to_vec();
+        if carrying {
+            ids.extend(self.placements.keys().filter(|id| !is_window_panel(**id)));
+        }
+        ids
     }
 
     /// The magnet: where monitor `id`, let go now, would stick (not on a wall, where
@@ -1540,6 +1564,14 @@ fn run(app: &AndroidApp) -> Result<()> {
 
     let (net_tx, net_rx) = mpsc::channel();
     let steering = net::Steering::default();
+    // However this function ends, the network thread and its session end with it.
+    struct StopNetwork(net::Steering);
+    impl Drop for StopNetwork {
+        fn drop(&mut self) {
+            self.0.shut_down();
+        }
+    }
+    let _stop_network = StopNetwork(steering.clone());
     net::spawn(
         net_tx,
         net::Discovery {
@@ -1638,6 +1670,9 @@ fn run(app: &AndroidApp) -> Result<()> {
     };
 
     let mut hold_since: [Option<Instant>; 2] = [None, None];
+    // A hand's pinch on a menu button: clicked when let go, unless it was held long
+    // enough to drag the menu instead (as on the Quest's own windows).
+    let mut pending_click: [Option<(ui::Action, Vec3)>; 2] = [None, None];
     // Grabs started on a monitor's bar (they end when the press ends).
 
     let mut pokes = [Poke::default(); 2];
@@ -2110,10 +2145,15 @@ fn run(app: &AndroidApp) -> Result<()> {
                     Some((Target::Panel, hit)) => {
                         panel.hover(Some(panel_point(&hit)));
                         if let Some(action) = panel.hovered_action() {
-                            rings.push((hit.point, Instant::now()));
-                            clicked = true;
-                            controls.pulse(&session, hand);
-                            handle_action(&mut scene, action, &mut passthrough, &mut controls);
+                            if input.is_hand {
+                                // Decided when the pinch opens: a click, or a drag.
+                                pending_click[hand] = Some((action, hit.point));
+                            } else {
+                                rings.push((hit.point, Instant::now()));
+                                clicked = true;
+                                controls.pulse(&session, hand);
+                                handle_action(&mut scene, action, &mut passthrough, &mut controls);
+                            }
                         }
                     }
                     Some((Target::Wrist, hit)) => {
@@ -2144,6 +2184,11 @@ fn run(app: &AndroidApp) -> Result<()> {
             }
             if input.select.released {
                 hold_since[hand] = None;
+                if let Some((action, point)) = pending_click[hand].take() {
+                    rings.push((point, Instant::now()));
+                    controls.pulse(&session, hand);
+                    handle_action(&mut scene, action, &mut passthrough, &mut controls);
+                }
             }
             let (start_grab, end_grab) = if input.is_hand {
                 let held = input.select.down
@@ -2207,6 +2252,8 @@ fn run(app: &AndroidApp) -> Result<()> {
                 }
             } else if start_grab {
                 hold_since[hand] = None;
+                // Held on a button: the menu moves, the button is not pressed.
+                pending_click[hand] = None;
                 let other = scene.grabs[1 - hand].map(|g| g.id);
                 let grabbed = match picks[hand] {
                     Some((Target::Panel, hit)) if other != Some(PANEL_ID) => {
@@ -2523,7 +2570,8 @@ fn run(app: &AndroidApp) -> Result<()> {
 
         // Far monitors first so nearer (and grabbed) ones draw on top.
         let grabbed: Vec<u8> = scene.grabs.iter().flatten().map(|g| g.id).collect();
-        scene.animate(dt, &grabbed);
+        let moving = scene.moving_now(&grabbed);
+        scene.animate(dt, &moving);
         // Keep KDE's arrangement in step once nothing is being moved.
         if grabbed.is_empty() && scene.scaling.is_none() && !scene.relayout_pending() {
             scene.send_layout();

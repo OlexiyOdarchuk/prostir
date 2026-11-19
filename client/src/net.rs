@@ -210,6 +210,8 @@ struct Steer {
     approved: Option<(PeerKey, Instant)>,
     /// The trust file was changed by the menu (a PC forgotten): read it again.
     trust_changed: bool,
+    /// The app is closing: the network thread ends, and so does its session.
+    quit: bool,
 }
 
 type PeerKey = [u8; 32];
@@ -260,12 +262,28 @@ impl Steering {
 
     fn wait_until_worn(&self) {
         let mut s = self.lock();
-        if s.taken_off {
+        if s.taken_off && !s.quit {
             info!("headset not worn: not connecting");
         }
-        while s.taken_off {
+        while s.taken_off && !s.quit {
             s = self.0.1.wait(s).unwrap();
         }
+    }
+
+    /// The app is closing. Android may start it again in the same process, so the
+    /// network thread must not outlive it: its session would keep the PC busy (the PC
+    /// serves one headset at a time) and the new start could not connect.
+    pub fn shut_down(&self) {
+        let mut s = self.lock();
+        s.quit = true;
+        if let Some(cur) = &s.current {
+            let _ = cur.shutdown(Shutdown::Both);
+        }
+        self.0.1.notify_all();
+    }
+
+    fn quitting(&self) -> bool {
+        self.lock().quit
     }
 
     /// The user's answer to "Pair with this PC?".
@@ -302,7 +320,7 @@ impl Steering {
     /// While the user has not answered about an unknown PC, nothing connects.
     fn wait_for_answer(&self) {
         let mut s = self.lock();
-        while s.offer.is_some() && !s.taken_off {
+        while s.offer.is_some() && !s.taken_off && !s.quit {
             s = self.0.1.wait(s).unwrap();
         }
     }
@@ -377,6 +395,10 @@ pub fn spawn(events: Sender<NetEvent>, discovery: Discovery, steering: Steering)
             loop {
                 steering.wait_until_worn();
                 steering.wait_for_answer();
+                if steering.quitting() {
+                    info!("network stopped");
+                    return;
+                }
                 if std::mem::take(&mut steering.lock().trust_changed) {
                     trusted = TrustStore::load(&discovery.trust_file);
                 }
@@ -389,6 +411,10 @@ pub fn spawn(events: Sender<NetEvent>, discovery: Discovery, steering: Steering)
                     &events,
                     round,
                 ) {
+                    if steering.quitting() {
+                        info!("network stopped");
+                        return;
+                    }
                     let peer = stream.peer_addr().ok();
                     let name = peer.and_then(|p| finder.name_of(p));
                     steering.lock().current = stream.try_clone().ok();
@@ -413,7 +439,8 @@ pub fn spawn(events: Sender<NetEvent>, discovery: Discovery, steering: Steering)
                         let _ = std::fs::write(&discovery.last_host_file, p.to_string());
                     }
                     steering.lock().current = None;
-                    if events.send(NetEvent::Disconnected).is_err() {
+                    if events.send(NetEvent::Disconnected).is_err() || steering.quitting() {
+                        info!("network stopped");
                         return;
                     }
                     // The PC said what is wrong (no encoder, say): the message stays
