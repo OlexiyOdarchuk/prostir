@@ -44,13 +44,28 @@ cp "$ROOT/target/aarch64-linux-android/$PROFILE/libprostir.so" "$STAGE/lib/arm64
 "$TC/llvm-strip" --strip-debug "$STAGE/lib/arm64-v8a/libprostir.so"
 
 AAR="$OUT/openxr_loader_for_android-$LOADER_VERSION.aar"
+if [[ -f "$AAR" ]] && ! echo "$LOADER_SHA256  $AAR" | sha256sum -c --quiet - >/dev/null 2>&1; then
+    rm -f "$AAR"
+fi
 if [[ ! -f "$AAR" ]]; then
     echo ">> downloading Khronos OpenXR loader $LOADER_VERSION"
-    # Maven Central now and then refuses CI runners for a moment: try again.
-    curl -sSfL --retry 5 --retry-all-errors --retry-delay 5 -o "$AAR" "https://repo1.maven.org/maven2/org/khronos/openxr/openxr_loader_for_android/$LOADER_VERSION/openxr_loader_for_android-$LOADER_VERSION.aar"
+    # Maven Central and its mirrors: CI runners are sometimes refused (HTTP 429) by
+    # one of them. The SHA-256 check makes any of them as good as the first.
+    LOADER_PATH="org/khronos/openxr/openxr_loader_for_android/$LOADER_VERSION/openxr_loader_for_android-$LOADER_VERSION.aar"
+    for base in https://repo1.maven.org/maven2 \
+        https://maven-central.storage-download.googleapis.com/maven2 \
+        https://repo.maven.apache.org/maven2; do
+        if curl -sSfL --retry 3 --retry-all-errors --retry-delay 10 -o "$AAR.part" "$base/$LOADER_PATH" \
+            && echo "$LOADER_SHA256  $AAR.part" | sha256sum -c --quiet -; then
+            mv "$AAR.part" "$AAR"
+            break
+        fi
+        echo ">> $base did not give the loader, trying the next mirror"
+    done
+    rm -f "$AAR.part"
 fi
-if ! echo "$LOADER_SHA256  $AAR" | sha256sum -c --quiet -; then
-    echo "!! $AAR does not match the expected SHA-256; delete it and try again" >&2
+if [[ ! -f "$AAR" ]]; then
+    echo "!! cannot download the OpenXR loader $LOADER_VERSION with the expected SHA-256" >&2
     exit 1
 fi
 unzip -p "$AAR" jni/arm64-v8a/libopenxr_loader.so > "$STAGE/lib/arm64-v8a/libopenxr_loader.so"
