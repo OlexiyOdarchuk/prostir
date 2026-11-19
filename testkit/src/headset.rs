@@ -239,7 +239,7 @@ impl FakeHeadset {
         // Versions first, before pairing.
         hello(&mut w)?;
         let (version, language) = loop {
-            match HostMsg::read(&mut r)? {
+            match HostMsg::read_setup(&mut r)? {
                 HostMsg::Welcome { version, language } => break (version, language),
                 HostMsg::Incompatible { protocol, app } => {
                     return Err(ConnectError::Incompatible { protocol, app });
@@ -257,7 +257,7 @@ impl FakeHeadset {
         }
         ClientMsg::Open.write(&mut w)?;
         loop {
-            match HostMsg::read(&mut r)? {
+            match HostMsg::read_setup(&mut r)? {
                 HostMsg::Opened => break,
                 HostMsg::PairingRequired => {
                     let Some(code) = pairing.as_mut() else {
@@ -459,7 +459,7 @@ fn exchange_codes(
     ClientMsg::PairMsg { msg }.write(w)?;
     let mut said = String::new();
     let theirs = loop {
-        match HostMsg::read(r)? {
+        match HostMsg::read_setup(r)? {
             HostMsg::PairMsg { msg } => break msg,
             HostMsg::PairResult { .. } => {
                 return Err(ConnectError::PairingFailed(format!(
@@ -475,7 +475,7 @@ fn exchange_codes(
         tag: confirmation(&key, "headset", peer, &identity.public),
     }
     .write(w)?;
-    match HostMsg::read(r)? {
+    match HostMsg::read_setup(r)? {
         HostMsg::PairResult { tag: Some(tag) }
             if tags_match(&tag, &confirmation(&key, "pc", peer, &identity.public)) =>
         {

@@ -252,8 +252,9 @@ into encrypted transport frames.
 - `tag`: which message (see [Message reference](#5-message-reference)). Host→client tags
   are 1 to 24, client→host tags 101 to 127.
 - `length`: payload length in bytes, **little-endian**.
-- Maximum payload: 64 MiB (`64 * 1024 * 1024`) for a message from the host, 64 KiB
-  (`64 * 1024`) for a message from the headset, before and after trust. A reader rejects
+- Maximum payload: 64 MiB (`64 * 1024 * 1024`) for a message from the host once the
+  session is open (after `Opened`) and 64 KiB (`64 * 1024`) before, when the host may
+  not be trusted yet; 64 KiB for a message from the headset, before and after trust. A reader rejects
   a larger length and the connection ends, also for a message it would skip. The
   biggest headset message in use, a slice of microphone sound, is under 1 KiB; the
   lower limit keeps what a peer that is not trusted yet can make the host allocate

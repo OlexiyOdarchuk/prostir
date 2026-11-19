@@ -746,7 +746,7 @@ impl Session<'_> {
             let (pairing, msg) = Pairing::start(&code);
             self.feedback.send(&ClientMsg::PairMsg { msg })?;
             let theirs = loop {
-                match HostMsg::read(self.reader)? {
+                match HostMsg::read_setup(self.reader)? {
                     HostMsg::PairMsg { msg } => break Some(msg),
                     // The PC gave up this attempt (e.g. its dialog was cancelled).
                     HostMsg::PairResult { .. } => break None,
@@ -768,7 +768,7 @@ impl Session<'_> {
             self.feedback.send(&ClientMsg::PairConfirm {
                 tag: confirmation(&key, "headset", self.peer, own),
             })?;
-            match HostMsg::read(self.reader)? {
+            match HostMsg::read_setup(self.reader)? {
                 HostMsg::PairResult { tag: Some(tag) }
                     if tags_match(&tag, &confirmation(&key, "pc", self.peer, own)) =>
                 {
@@ -863,7 +863,7 @@ fn run_session(
         app: env!("CARGO_PKG_VERSION").into(),
     })?;
     let language = loop {
-        match HostMsg::read(session.reader)? {
+        match HostMsg::read_setup(session.reader)? {
             HostMsg::Welcome { language, .. } => break crate::i18n::Lang::from_code(&language),
             // The text is for headsets that predate `Incompatible`; this one shows a page.
             HostMsg::Error { .. } => {}
@@ -886,7 +886,7 @@ fn run_session(
     }
     feedback.send(&ClientMsg::Open)?;
     loop {
-        match HostMsg::read(session.reader)? {
+        match HostMsg::read_setup(session.reader)? {
             HostMsg::Opened => break,
             HostMsg::PairingRequired => {
                 session.pair_if_approved(trusted)?;

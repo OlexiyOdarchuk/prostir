@@ -447,6 +447,22 @@ fn a_message_over_its_limits_is_not_sent() {
     assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
 }
 
+/// Before the session is open the PC is not trusted yet: its messages are kept small.
+#[test]
+fn a_pc_message_before_the_session_cannot_be_huge() {
+    let big = host_bytes(&HostMsg::Error {
+        text: "x".repeat(100 * 1024),
+    });
+    assert!(HostMsg::read(&mut big.as_slice()).is_ok());
+    let err = HostMsg::read_setup(&mut big.as_slice()).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    let opened = host_bytes(&HostMsg::Opened);
+    assert_eq!(
+        HostMsg::read_setup(&mut opened.as_slice()).unwrap(),
+        HostMsg::Opened
+    );
+}
+
 #[test]
 fn a_headset_message_cannot_be_huge() {
     let mut big = vec![117];

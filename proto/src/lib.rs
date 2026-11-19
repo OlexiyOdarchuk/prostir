@@ -86,6 +86,9 @@ pub const BEACON_MAGIC: &[u8; 8] = b"PROSTIR1";
 
 /// Largest message from the PC (a video frame can be several megabytes).
 const MAX_HOST_PAYLOAD: u32 = 64 * 1024 * 1024;
+/// Largest message from the PC before the session is open ([`HostMsg::read_setup`]):
+/// the PC is not trusted yet, and nothing it sends then is big.
+const MAX_SETUP_PAYLOAD: u32 = 64 * 1024;
 /// Largest message from the headset: the biggest real one is a slice of microphone
 /// sound (under 1 KiB). A peer is not trusted yet when its first messages arrive, so
 /// this keeps what it can make the PC allocate small.
@@ -445,8 +448,18 @@ impl HostMsg {
 
     /// The next message this build knows; messages from a newer PC are skipped.
     pub fn read(r: &mut impl Read) -> io::Result<Self> {
+        Self::read_within(r, MAX_HOST_PAYLOAD)
+    }
+
+    /// As [`HostMsg::read`], until [`HostMsg::Opened`]: the PC may not be trusted yet,
+    /// so a message over 64 KiB is an error.
+    pub fn read_setup(r: &mut impl Read) -> io::Result<Self> {
+        Self::read_within(r, MAX_SETUP_PAYLOAD)
+    }
+
+    fn read_within(r: &mut impl Read, max: u32) -> io::Result<Self> {
         loop {
-            let (tag, len) = read_header(r, MAX_HOST_PAYLOAD)?;
+            let (tag, len) = read_header(r, max)?;
             match tag {
                 tag::FRAME => {
                     if len < FRAME_HEAD {
