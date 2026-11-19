@@ -24,7 +24,7 @@ fn client_bytes(msg: &ClientMsg) -> Vec<u8> {
 /// media path with it.
 fn generic_host(msg: &HostMsg) -> Vec<u8> {
     let mut payload = Vec::new();
-    msg.put_fields(&mut payload);
+    msg.put_fields(&mut payload).unwrap();
     framed(msg.wire_tag(), &payload)
 }
 
@@ -255,7 +255,7 @@ fn media_by_hand_matches_the_declared_fields() {
     for m in [&frame, &audio] {
         assert_eq!(host_bytes(m), generic_host(m));
         let mut payload = Vec::new();
-        m.put_fields(&mut payload);
+        m.put_fields(&mut payload).unwrap();
         assert_eq!(&HostMsg::decode(m.wire_tag(), &payload).unwrap(), m);
     }
     assert_eq!(frame.wire_tag(), tag::FRAME);
@@ -263,7 +263,7 @@ fn media_by_hand_matches_the_declared_fields() {
     let mic = ClientMsg::Mic { pcm: vec![3; 960] };
     assert_eq!(mic.wire_tag(), tag::MIC);
     let mut payload = Vec::new();
-    mic.put_fields(&mut payload);
+    mic.put_fields(&mut payload).unwrap();
     assert_eq!(client_bytes(&mic), framed(tag::MIC, &payload));
     // A frame whose keyframe byte is not a boolean.
     let mut bad = host_bytes(&frame);
@@ -354,7 +354,8 @@ fn messages_are_read_strictly() {
         settings: settings(),
         encoders: 1,
     }
-    .put_fields(&mut payload);
+    .put_fields(&mut payload)
+    .unwrap();
     payload[4] = 9;
     assert!(read_host(&framed(18, &payload)).is_err());
     // A boolean that is neither 0 nor 1.
@@ -398,7 +399,7 @@ fn lists_cannot_hold_more_than_there_can_be() {
         entries: vec![entry; 9],
     };
     let mut payload = Vec::new();
-    wire::Limited::put(&vec![row.clone(), row], &mut payload, 16);
+    wire::Limited::put(&vec![row.clone(), row], &mut payload, 16).unwrap();
     assert!(read_client(&framed(117, &payload)).is_err());
     // A monitor in two places.
     let entry = |id| LayoutEntry {
@@ -422,6 +423,28 @@ fn lists_cannot_hold_more_than_there_can_be() {
     let mut payload = vec![1, 65, 0];
     payload.extend(std::iter::repeat_n(b'a', 65));
     assert!(read_client(&framed(109, &payload)).is_err());
+}
+
+/// A message over its limits is not sent: an error for this connection, not a crash.
+#[test]
+fn a_message_over_its_limits_is_not_sent() {
+    let order = HostMsg::Order {
+        ids: (0..17).collect(),
+    };
+    let mut out = Vec::new();
+    let err = order.write(&mut out).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    assert_eq!(
+        wire_error(&err),
+        Some(&WireError::TooLong { len: 17, max: 16 })
+    );
+    assert!(out.is_empty(), "nothing half written");
+    let name = ClientMsg::PairBegin {
+        headset_shows: true,
+        name: "x".repeat(65),
+    };
+    let err = name.write(&mut out).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
 }
 
 #[test]

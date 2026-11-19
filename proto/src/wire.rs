@@ -14,7 +14,7 @@
 //!
 //! Decoding is strict: bytes left over, a `bool` or `Option` byte other than 0 or 1,
 //! a tag no variant has, a string that is not UTF-8 and a string or list over its
-//! limit are all errors.
+//! limit are all errors. Encoding fails only for a string or list over its limit.
 
 use std::fmt;
 
@@ -103,9 +103,10 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// A value with a fixed way to be written and read.
+/// A value with a fixed way to be written and read. Writing fails only for a string
+/// or list over its limit inside the value.
 pub trait Wire: Sized {
-    fn put(&self, out: &mut Vec<u8>);
+    fn put(&self, out: &mut Vec<u8>) -> Result<(), WireError>;
     fn get(r: &mut Reader<'_>) -> Result<Self, WireError>;
 }
 
@@ -113,24 +114,23 @@ pub trait Wire: Sized {
 /// the most it may hold (`#[wire(max = N)]` in [`wire_struct!`] and [`wire_enum!`]), so
 /// a field without a limit does not compile.
 pub trait Limited: Sized {
-    /// Panics if the value holds more than `max`: senders keep within the limits,
-    /// which are part of the protocol.
-    fn put(&self, out: &mut Vec<u8>, max: usize);
+    /// Fails with [`WireError::TooLong`] for more than `max` (or a `u16`) holds.
+    fn put(&self, out: &mut Vec<u8>, max: usize) -> Result<(), WireError>;
     fn get(r: &mut Reader<'_>, max: usize) -> Result<Self, WireError>;
 }
 
 /// The last field of a message, running to its end with no count (`#[wire(rest)]`).
 /// Only the frozen version handshake and the media messages use it.
 pub trait Rest: Sized {
-    fn put(&self, out: &mut Vec<u8>);
+    fn put(&self, out: &mut Vec<u8>) -> Result<(), WireError>;
     fn get(r: &mut Reader<'_>) -> Result<Self, WireError>;
 }
 
 /// The bytes of `value`.
-pub fn encode<T: Wire>(value: &T) -> Vec<u8> {
+pub fn encode<T: Wire>(value: &T) -> Result<Vec<u8>, WireError> {
     let mut out = Vec::new();
-    value.put(&mut out);
-    out
+    value.put(&mut out)?;
+    Ok(out)
 }
 
 /// The value that `bytes` hold, all of them.
@@ -144,8 +144,9 @@ pub fn decode<T: Wire>(bytes: &[u8]) -> Result<T, WireError> {
 macro_rules! int {
     ($($t:ty),*) => {$(
         impl Wire for $t {
-            fn put(&self, out: &mut Vec<u8>) {
+            fn put(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
                 out.extend_from_slice(&self.to_le_bytes());
+                Ok(())
             }
             fn get(r: &mut Reader<'_>) -> Result<Self, WireError> {
                 Ok(<$t>::from_le_bytes(r.array()?))
@@ -157,8 +158,9 @@ macro_rules! int {
 int!(u8, u16, u32, u64, i32);
 
 impl Wire for bool {
-    fn put(&self, out: &mut Vec<u8>) {
+    fn put(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
         out.push(u8::from(*self));
+        Ok(())
     }
     fn get(r: &mut Reader<'_>) -> Result<Self, WireError> {
         match u8::get(r)? {
@@ -170,12 +172,15 @@ impl Wire for bool {
 }
 
 impl<T: Wire> Wire for Option<T> {
-    fn put(&self, out: &mut Vec<u8>) {
+    fn put(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
         match self {
-            None => out.push(0),
+            None => {
+                out.push(0);
+                Ok(())
+            }
             Some(v) => {
                 out.push(1);
-                v.put(out);
+                v.put(out)
             }
         }
     }
@@ -192,8 +197,9 @@ impl<T: Wire> Wire for Option<T> {
 }
 
 impl<const N: usize> Wire for [u8; N] {
-    fn put(&self, out: &mut Vec<u8>) {
+    fn put(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
         out.extend_from_slice(self);
+        Ok(())
     }
     fn get(r: &mut Reader<'_>) -> Result<Self, WireError> {
         r.array()
@@ -201,21 +207,21 @@ impl<const N: usize> Wire for [u8; N] {
 }
 
 impl<A: Wire, B: Wire> Wire for (A, B) {
-    fn put(&self, out: &mut Vec<u8>) {
-        self.0.put(out);
-        self.1.put(out);
+    fn put(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
+        self.0.put(out)?;
+        self.1.put(out)
     }
     fn get(r: &mut Reader<'_>) -> Result<Self, WireError> {
         Ok((A::get(r)?, B::get(r)?))
     }
 }
 
-fn put_count(out: &mut Vec<u8>, len: usize, max: usize) {
-    assert!(
-        len <= max && max <= usize::from(u16::MAX),
-        "{len} items in a field that holds at most {max}"
-    );
-    (len as u16).put(out);
+fn put_count(out: &mut Vec<u8>, len: usize, max: usize) -> Result<(), WireError> {
+    let max = max.min(usize::from(u16::MAX));
+    if len > max {
+        return Err(WireError::TooLong { len, max });
+    }
+    (len as u16).put(out)
 }
 
 fn get_count(r: &mut Reader<'_>, max: usize) -> Result<usize, WireError> {
@@ -227,9 +233,10 @@ fn get_count(r: &mut Reader<'_>, max: usize) -> Result<usize, WireError> {
 }
 
 impl Limited for String {
-    fn put(&self, out: &mut Vec<u8>, max: usize) {
-        put_count(out, self.len(), max);
+    fn put(&self, out: &mut Vec<u8>, max: usize) -> Result<(), WireError> {
+        put_count(out, self.len(), max)?;
         out.extend_from_slice(self.as_bytes());
+        Ok(())
     }
     fn get(r: &mut Reader<'_>, max: usize) -> Result<Self, WireError> {
         let len = get_count(r, max)?;
@@ -239,11 +246,9 @@ impl Limited for String {
 }
 
 impl<T: Wire> Limited for Vec<T> {
-    fn put(&self, out: &mut Vec<u8>, max: usize) {
-        put_count(out, self.len(), max);
-        for item in self {
-            item.put(out);
-        }
+    fn put(&self, out: &mut Vec<u8>, max: usize) -> Result<(), WireError> {
+        put_count(out, self.len(), max)?;
+        self.iter().try_for_each(|item| item.put(out))
     }
     fn get(r: &mut Reader<'_>, max: usize) -> Result<Self, WireError> {
         let len = get_count(r, max)?;
@@ -258,8 +263,9 @@ impl<T: Wire> Limited for Vec<T> {
 }
 
 impl Rest for Vec<u8> {
-    fn put(&self, out: &mut Vec<u8>) {
+    fn put(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
         out.extend_from_slice(self);
+        Ok(())
     }
     fn get(r: &mut Reader<'_>) -> Result<Self, WireError> {
         Ok(r.rest().to_vec())
@@ -267,8 +273,9 @@ impl Rest for Vec<u8> {
 }
 
 impl Rest for String {
-    fn put(&self, out: &mut Vec<u8>) {
+    fn put(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
         out.extend_from_slice(self.as_bytes());
+        Ok(())
     }
     fn get(r: &mut Reader<'_>) -> Result<Self, WireError> {
         String::from_utf8(r.rest().to_vec()).map_err(|_| WireError::BadUtf8)
@@ -346,9 +353,10 @@ macro_rules! wire_struct {
         }
 
         impl $crate::wire::Wire for $name {
-            fn put(&self, out: &mut Vec<u8>) {
+            fn put(&self, out: &mut Vec<u8>) -> Result<(), $crate::wire::WireError> {
                 let Self { $($field),* } = self;
-                $( $crate::wire::put_field!(out, $field, $ty; $($($mode)*)?); )*
+                $( $crate::wire::put_field!(out, $field, $ty; $($($mode)*)?)?; )*
+                Ok(())
             }
 
             fn get(
@@ -418,14 +426,15 @@ macro_rules! wire_enum {
 
             // An enum without fields in any variant writes nothing here.
             #[allow(unused_variables, clippy::ptr_arg)]
-            fn put_fields(&self, out: &mut Vec<u8>) {
+            fn put_fields(&self, out: &mut Vec<u8>) -> Result<(), $crate::wire::WireError> {
                 match self {
                     $(
                         Self::$variant $({ $($field),* })? => {
-                            $($( $crate::wire::put_field!(out, $field, $ty; $($($mode)*)?); )*)?
+                            $($( $crate::wire::put_field!(out, $field, $ty; $($($mode)*)?)?; )*)?
                         }
                     )*
                 }
+                Ok(())
             }
 
             /// The variant with `tag`, its fields read from `r`; `None` for a tag no
@@ -453,9 +462,9 @@ macro_rules! wire_enum {
         $crate::wire::wire_enum!(@define $(#[$meta])* $vis enum $name { $($body)* });
 
         impl $crate::wire::Wire for $name {
-            fn put(&self, out: &mut Vec<u8>) {
+            fn put(&self, out: &mut Vec<u8>) -> Result<(), $crate::wire::WireError> {
                 out.push(self.wire_tag());
-                self.put_fields(out);
+                self.put_fields(out)
             }
 
             fn get(
@@ -520,7 +529,7 @@ mod tests {
 
     #[test]
     fn fields_in_order_with_explicit_tags() {
-        let bytes = encode(&sample());
+        let bytes = encode(&sample()).unwrap();
         #[rustfmt::skip]
         let expected = [
             3,                       // id
@@ -533,13 +542,13 @@ mod tests {
         ];
         assert_eq!(bytes, expected);
         assert_eq!(decode::<Sample>(&bytes), Ok(sample()));
-        assert_eq!(encode(&Shape::Square), [1]);
-        assert_eq!(encode(&None::<u8>), [0]);
+        assert_eq!(encode(&Shape::Square).unwrap(), [1]);
+        assert_eq!(encode(&None::<u8>).unwrap(), [0]);
     }
 
     #[test]
     fn decoding_is_strict() {
-        let good = encode(&sample());
+        let good = encode(&sample()).unwrap();
         let mut longer = good.clone();
         longer.push(0);
         assert_eq!(decode::<Sample>(&longer), Err(WireError::Trailing(1)));
@@ -565,7 +574,7 @@ mod tests {
         let utf8 = |bytes: &[u8]| {
             let mut s = sample();
             s.name = String::new();
-            let mut b = encode(&s);
+            let mut b = encode(&s).unwrap();
             // The name starts after the id.
             b.splice(
                 1..3,
@@ -583,7 +592,9 @@ mod tests {
     fn limits_hold() {
         let mut s = sample();
         s.name = "x".repeat(9);
-        // Written by hand: `put` refuses to write it.
+        // A sender cannot write it.
+        assert_eq!(encode(&s), Err(WireError::TooLong { len: 9, max: 8 }));
+        // Written by hand.
         let mut b = vec![3, 9, 0];
         b.extend_from_slice(s.name.as_bytes());
         assert_eq!(
@@ -596,17 +607,25 @@ mod tests {
             <Vec<u8> as Limited>::get(&mut r, usize::from(u16::MAX)),
             Err(WireError::Truncated)
         );
-        let too_many = std::panic::catch_unwind(|| {
-            let mut out = Vec::new();
-            Limited::put(&vec![0u8; 4], &mut out, 3);
-        });
-        assert!(too_many.is_err(), "a sender cannot write past a limit");
+        let mut out = Vec::new();
+        assert_eq!(
+            Limited::put(&vec![0u8; 4], &mut out, 3),
+            Err(WireError::TooLong { len: 4, max: 3 })
+        );
+        // Nor past what the count can say.
+        assert_eq!(
+            Limited::put(&vec![0u8; 70_000], &mut out, usize::MAX),
+            Err(WireError::TooLong {
+                len: 70_000,
+                max: 65_535
+            })
+        );
     }
 
     #[test]
     fn rest_runs_to_the_end() {
         let mut out = Vec::new();
-        Rest::put(&"héllo".to_string(), &mut out);
+        Rest::put(&"héllo".to_string(), &mut out).unwrap();
         assert_eq!(out, "héllo".as_bytes());
         let mut r = Reader::new(&out);
         assert_eq!(<String as Rest>::get(&mut r).unwrap(), "héllo");

@@ -366,10 +366,15 @@ mod tag {
 /// [`HostMsg::Frame`] before its data: id, keyframe, pts_us.
 const FRAME_HEAD: usize = 1 + 1 + 8;
 
+/// A message this side cannot send: a field over its limit, or too large as a whole.
+/// The sender's mistake, so it ends this connection and nothing else.
+fn unsendable(e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, e)
+}
+
 fn write_frame(w: &mut impl Write, tag: u8, parts: &[&[u8]]) -> io::Result<()> {
     let len: usize = parts.iter().map(|p| p.len()).sum();
-    let len = u32::try_from(len)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "message too large"))?;
+    let len = u32::try_from(len).map_err(|_| unsendable("message too large"))?;
     let mut header = [0u8; 5];
     header[0] = tag;
     header[1..].copy_from_slice(&len.to_le_bytes());
@@ -420,15 +425,15 @@ impl HostMsg {
                 data,
             } => {
                 let mut head = Vec::with_capacity(FRAME_HEAD);
-                id.put(&mut head);
-                keyframe.put(&mut head);
-                pts_us.put(&mut head);
+                id.put(&mut head).map_err(unsendable)?;
+                keyframe.put(&mut head).map_err(unsendable)?;
+                pts_us.put(&mut head).map_err(unsendable)?;
                 write_frame(w, tag::FRAME, &[&head, data])
             }
             HostMsg::Audio { pcm } => write_frame(w, tag::AUDIO, &[pcm]),
             _ => {
                 let mut payload = Vec::new();
-                self.put_fields(&mut payload);
+                self.put_fields(&mut payload).map_err(unsendable)?;
                 write_frame(w, self.wire_tag(), &[&payload])
             }
         }
@@ -486,7 +491,7 @@ impl ClientMsg {
             ClientMsg::Mic { pcm } => write_frame(w, tag::MIC, &[pcm]),
             _ => {
                 let mut payload = Vec::new();
-                self.put_fields(&mut payload);
+                self.put_fields(&mut payload).map_err(unsendable)?;
                 write_frame(w, self.wire_tag(), &[&payload])
             }
         }
