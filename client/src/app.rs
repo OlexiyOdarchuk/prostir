@@ -447,7 +447,8 @@ struct Scene {
     /// After switching profiles, monitors come and go for a few seconds: lay them
     /// out again on each change until then.
     relayout_until: Option<Instant>,
-    layout_path: PathBuf,
+    /// The desk arrangement on disk; see `save_layout`.
+    desk: layout::Desk,
     settings_path: PathBuf,
 }
 
@@ -605,6 +606,12 @@ impl Scene {
         self.relayout_until.is_some_and(|t| Instant::now() < t)
     }
 
+    /// Saves the arrangement as the desk layout. In cinema mode `placements` is the
+    /// cinema view, which is not saved: the desk layout stays as the user left it.
+    fn save_layout(&self) {
+        self.desk.save(&self.placements, self.settings.cinema);
+    }
+
     /// Lays everything out by the chosen preset.
     /// Layouts are worked out around the origin facing -Z; this moves them to where
     /// the user sat and looked when they last asked to bring everything in front.
@@ -652,7 +659,7 @@ impl Scene {
             self.placements.insert(MIRROR_ID, p);
         }
         self.grabs = [None, None];
-        layout::save(&self.layout_path, &self.placements);
+        self.save_layout();
         self.send_layout();
     }
 
@@ -915,7 +922,7 @@ impl Scene {
         self.center = (new_pos, center_yaw + step_turn);
         if turn.abs() < 0.02 && shift.length() < 0.02 {
             self.following = false;
-            layout::save(&self.layout_path, &self.placements);
+            self.save_layout();
         }
     }
 
@@ -958,7 +965,7 @@ impl Scene {
             p.rotation = turn * p.rotation;
         }
         self.center = (head, yaw);
-        layout::save(&self.layout_path, &self.placements);
+        self.save_layout();
         self.send_layout();
     }
 
@@ -1002,7 +1009,7 @@ impl Scene {
         }
         self.placements = tidy;
         self.grabs = [None, None];
-        layout::save(&self.layout_path, &self.placements);
+        self.save_layout();
         self.send_layout();
     }
 
@@ -1597,15 +1604,11 @@ fn run(app: &AndroidApp) -> Result<()> {
         .inspect_err(|e| warn!("Wi-Fi low-latency lock unavailable: {e:#}"))
         .ok();
 
-    let layout_path = data_dir.join("layout.txt");
+    let desk = layout::Desk::new(data_dir.join("layout.txt"));
     let mut scene = Scene {
         monitors: HashMap::new(),
         order: Vec::new(),
-        // Window panels are placed afresh when they appear.
-        placements: layout::load(&layout_path)
-            .into_iter()
-            .filter(|(id, _)| !is_window_panel(*id))
-            .collect(),
+        placements: desk.load(),
         primary: None,
         mirror_wanted: true,
         audio_wanted: true,
@@ -1673,7 +1676,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         profiles_path,
         active_profile: None,
         relayout_until: None,
-        layout_path,
+        desk,
         settings_path,
     };
 
@@ -1759,7 +1762,7 @@ fn run(app: &AndroidApp) -> Result<()> {
                         // A drag cannot go on under the system menu.
                         scene.grabs = [None, None];
                         scene.scaling = None;
-                        layout::save(&scene.layout_path, &scene.placements);
+                        scene.save_layout();
                     }
                     focused = now_focused;
                     // Taking the headset off hides the app (and puts the headset to
@@ -2211,7 +2214,7 @@ fn run(app: &AndroidApp) -> Result<()> {
 
             if end_grab && scene.scaling.is_some_and(|s| s.hand == hand) {
                 scene.scaling = None;
-                layout::save(&scene.layout_path, &scene.placements);
+                scene.save_layout();
             }
             if end_grab && let Some(released) = scene.grabs[hand].take() {
                 // A monitor put somewhere new stays there until the head comes back
@@ -2230,7 +2233,7 @@ fn run(app: &AndroidApp) -> Result<()> {
                         scene.placements.insert(released.id, s.placement);
                         controls.pulse(&session, hand);
                     }
-                    layout::save(&scene.layout_path, &scene.placements);
+                    scene.save_layout();
                     // Dropped somewhere else: KDE's arrangement follows what the eyes see.
                     if released.id != PANEL_ID {
                         scene.send_layout();
@@ -3054,6 +3057,11 @@ fn handle_action(
             }
         }
         Action::Cinema(on) => {
+            if on && !scene.settings.cinema {
+                // The desk layout as it is now (follow mode may have moved it), to come
+                // back to.
+                scene.save_layout();
+            }
             scene.settings.cinema = on;
             scene.settings.save(settings_path);
             if on {
@@ -3066,11 +3074,7 @@ fn handle_action(
                     .filter(|(id, _)| is_window_panel(**id))
                     .map(|(id, p)| (*id, *p))
                     .collect();
-                scene.placements = layout::load(&scene.layout_path)
-                    .into_iter()
-                    .filter(|(id, _)| !is_window_panel(*id))
-                    .chain(panels)
-                    .collect();
+                scene.placements = scene.desk.load().into_iter().chain(panels).collect();
                 if scene
                     .monitors
                     .keys()
@@ -3181,7 +3185,7 @@ fn handle_action(
             scene.follow_hold = false;
             scene.settings.save(settings_path);
             if !on {
-                layout::save(&scene.layout_path, &scene.placements);
+                scene.save_layout();
             }
         }
         Action::Hands(mode) => {

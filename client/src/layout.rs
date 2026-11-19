@@ -1,10 +1,10 @@
 //! Where monitors float in the room, how controllers move them, and persistence.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use glam::{Quat, Vec2, Vec3};
-use prostir_proto::LayoutRow;
+use prostir_proto::{LayoutRow, is_window_panel};
 
 use crate::settings::Preset;
 
@@ -1167,6 +1167,34 @@ mod grab_tests {
     }
 }
 
+/// The desk arrangement kept on disk: where the user put the monitors and the laptop
+/// screen. Cinema mode shows its own one-screen view instead, and that view never
+/// takes the desk arrangement's place here.
+pub struct Desk {
+    path: PathBuf,
+}
+
+impl Desk {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    /// The saved arrangement. Window panels are placed afresh when they appear.
+    pub fn load(&self) -> HashMap<u8, Placement> {
+        load(&self.path)
+            .into_iter()
+            .filter(|(id, _)| !is_window_panel(*id))
+            .collect()
+    }
+
+    /// Keeps `placements` as the desk arrangement, unless they are the cinema view.
+    pub fn save(&self, placements: &HashMap<u8, Placement>, cinema: bool) {
+        if !cinema {
+            save(&self.path, placements);
+        }
+    }
+}
+
 pub fn load(path: &Path) -> HashMap<u8, Placement> {
     let Ok(text) = std::fs::read_to_string(path) else {
         return HashMap::new();
@@ -1708,5 +1736,30 @@ mod tests {
         assert!(t[&0].rotation.angle_between(t[&1].rotation) < 1e-5);
         let gap = (t[&1].position.x - t[&1].width / 2.0) - (t[&0].position.x + t[&0].width / 2.0);
         assert!(gap.abs() < 1e-4, "gap {gap}");
+    }
+
+    /// The cinema view never replaces the desk arrangement: leaving cinema finds the
+    /// monitors where the user put them.
+    #[test]
+    fn cinema_view_keeps_the_desk_arrangement() {
+        let dir = std::env::temp_dir().join(format!("prostir-desk-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let desk = Desk::new(dir.join("layout.txt"));
+        let two = [(0, 2560, 1440), (1, 1920, 1080)];
+        let mut arranged = arrange(Preset::Arc, &two, Some(0), None);
+        arranged.get_mut(&1).unwrap().position += Vec3::new(0.1, 0.3, 0.0);
+        desk.save(&arranged, false);
+        desk.save(&cinema(&two, None), true);
+        let kept = desk.load();
+        assert_eq!(kept.len(), 2);
+        for (id, p) in &arranged {
+            assert!(kept[id].position.distance(p.position) < 1e-5);
+        }
+        // Window panels are placed afresh, not kept.
+        let mut with_panel = arranged.clone();
+        with_panel.insert(prostir_proto::WINDOW_IDS.start, arranged[&0]);
+        desk.save(&with_panel, false);
+        assert_eq!(desk.load().len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
