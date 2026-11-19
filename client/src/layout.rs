@@ -1150,26 +1150,121 @@ mod grab_tests {
     }
 }
 
-/// The hand's own place and turn from its joints, and whether its fingers are closed
-/// as on the edge of a tablet: the index, middle and ring fingertips all near the palm
-/// (an index finger stretched out to press, or a pinch, is not that).
-pub fn hand_hold(j: &[(Vec3, f32); 26], closed_before: bool) -> (Vec3, Quat, bool) {
-    let (palm, wrist) = (j[0].0, j[1].0);
-    let (index_base, middle_base, little_base) = (j[6].0, j[11].0, j[21].0);
-    let along = (middle_base - wrist).normalize_or(Vec3::Y);
-    let across = index_base - little_base;
-    let across = (across - along * across.dot(along)).normalize_or(Vec3::X);
-    let turn =
-        Quat::from_mat3(&glam::Mat3::from_cols(across, along, across.cross(along))).normalize();
-    // In the hand's own size: how far the fingertips are from the palm.
-    let size = wrist.distance(middle_base).max(0.03);
-    let curl = [10, 15, 20]
-        .iter()
-        .map(|&tip| j[tip].0.distance(palm))
-        .fold(0.0f32, f32::max)
-        / size;
-    let closed = curl < if closed_before { 1.15 } else { 0.95 };
-    (palm, turn, closed)
+/// A grab handle on a window's frame, as on the Quest's own windows.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Handle {
+    /// A corner (1 or -1: right or left, top or bottom): pulled, it resizes.
+    Corner(f32, f32),
+    /// The left or right edge (-1 or 1): taken, the window is carried.
+    Side(f32),
+}
+
+/// How close to the frame a pointer brings the handles out (metres).
+pub const HANDLES_NEAR: f32 = 0.12;
+
+/// The handle at `at` on a window `half` (half width and height) in size, `at` in
+/// metres from its centre along its surface. `corners`: whether it resizes at all.
+pub fn handle_at(at: Vec2, half: Vec2, corners: bool) -> Option<Handle> {
+    let corner = (0.25 * half.x.min(half.y)).clamp(0.03, 0.08);
+    let edge = (0.2 * half.x).min(0.05);
+    let (dx, dy) = (half.x - at.x.abs(), half.y - at.y.abs());
+    let side = |v: f32| if v >= 0.0 { 1.0 } else { -1.0 };
+    if corners && dx < corner && dy < corner {
+        Some(Handle::Corner(side(at.x), side(at.y)))
+    } else if dx < edge && at.y.abs() < half.y * 0.7 {
+        Some(Handle::Side(side(at.x)))
+    } else {
+        None
+    }
+}
+
+/// Whether a pointer at `at` is close enough to the frame to show the handles.
+pub fn near_frame(at: Vec2, half: Vec2) -> bool {
+    half.x - at.x.abs() < HANDLES_NEAR || half.y - at.y.abs() < HANDLES_NEAR
+}
+
+/// Points along handle `h` of a window `half` in size (along its surface, from its
+/// centre), close enough together to draw it as one line of small balls.
+pub fn handle_points(h: Handle, half: Vec2) -> Vec<Vec2> {
+    const STEP: f32 = 0.004;
+    const INSET: f32 = 0.006;
+    let line = |from: Vec2, to: Vec2| {
+        let n = ((to - from).length() / STEP).ceil().max(1.0) as usize;
+        (0..=n).map(move |i| from.lerp(to, i as f32 / n as f32))
+    };
+    match h {
+        Handle::Corner(sx, sy) => {
+            let arm = (0.25 * half.x.min(half.y)).clamp(0.03, 0.07);
+            let c = Vec2::new(sx * (half.x - INSET), sy * (half.y - INSET));
+            line(c, c - Vec2::new(sx * arm, 0.0))
+                .chain(line(c, c - Vec2::new(0.0, sy * arm)))
+                .collect()
+        }
+        Handle::Side(sx) => {
+            let len = (0.3 * half.y).min(0.12);
+            let x = sx * (half.x - INSET);
+            line(Vec2::new(x, -len), Vec2::new(x, len)).collect()
+        }
+    }
+}
+
+/// The point on a window's surface at `at`: metres from its centre, across along the
+/// chord on a curved monitor (as hits give it; its edges stay in the flat plane, the
+/// middle bows away).
+pub fn surface_point(p: &Placement, radius: Option<f32>, at: Vec2) -> Vec3 {
+    match radius {
+        Some(r) => {
+            let c = Cylinder::new(p, r);
+            let a = (at.x / c.radius).clamp(-1.0, 1.0).asin();
+            c.center + p.rotation * Vec3::new(c.radius * a.sin(), at.y, -c.radius * a.cos())
+        }
+        None => p.position + p.rotation * at.extend(0.0),
+    }
+}
+
+#[cfg(test)]
+mod handle_tests {
+    use super::*;
+
+    #[test]
+    fn handles_are_at_the_corners_and_sides() {
+        let half = Vec2::new(0.6, 0.35);
+        assert_eq!(
+            handle_at(Vec2::new(0.58, 0.33), half, true),
+            Some(Handle::Corner(1.0, 1.0))
+        );
+        assert_eq!(
+            handle_at(Vec2::new(-0.58, -0.33), half, true),
+            Some(Handle::Corner(-1.0, -1.0))
+        );
+        assert_eq!(
+            handle_at(Vec2::new(-0.58, 0.0), half, true),
+            Some(Handle::Side(-1.0))
+        );
+        assert_eq!(handle_at(Vec2::new(0.0, 0.0), half, true), None);
+        // Without resizing, a corner is just the side.
+        assert_eq!(
+            handle_at(Vec2::new(0.58, 0.2), half, false),
+            Some(Handle::Side(1.0))
+        );
+        assert!(near_frame(Vec2::new(0.5, 0.0), half) && !near_frame(Vec2::ZERO, half));
+    }
+
+    #[test]
+    fn on_a_curved_monitor_the_handles_follow_its_surface() {
+        let p = Placement {
+            position: Vec3::new(0.0, 0.0, -1.0),
+            rotation: Quat::IDENTITY,
+            width: 1.2,
+        };
+        let edge = surface_point(&p, Some(1.5), Vec2::new(0.6, 0.0));
+        let middle = surface_point(&p, Some(1.5), Vec2::ZERO);
+        assert!(
+            (edge - Vec3::new(0.6, 0.0, -1.0)).length() < 1e-4,
+            "{edge:?}"
+        );
+        assert!(middle.z < -1.0, "the middle bows away: {middle:?}");
+    }
 }
 
 pub fn load(path: &Path) -> HashMap<u8, Placement> {
@@ -1713,52 +1808,5 @@ mod tests {
         assert!(t[&0].rotation.angle_between(t[&1].rotation) < 1e-5);
         let gap = (t[&1].position.x - t[&1].width / 2.0) - (t[&0].position.x + t[&0].width / 2.0);
         assert!(gap.abs() < 1e-4, "gap {gap}");
-    }
-}
-
-#[cfg(test)]
-mod hold_tests {
-    use super::*;
-
-    /// A right hand, palm facing forward, fingers up; `tips` where the index, middle
-    /// and ring fingertips are.
-    fn hand(tips: [Vec3; 3]) -> [(Vec3, f32); 26] {
-        let mut j = [(Vec3::ZERO, 0.01); 26];
-        j[0].0 = Vec3::new(0.0, 0.04, 0.0); // palm
-        j[1].0 = Vec3::ZERO; // wrist
-        j[6].0 = Vec3::new(0.03, 0.08, 0.0); // index base
-        j[11].0 = Vec3::new(0.0, 0.08, 0.0); // middle base
-        j[21].0 = Vec3::new(-0.03, 0.07, 0.0); // little base
-        (j[10].0, j[15].0, j[20].0) = (tips[0], tips[1], tips[2]);
-        j
-    }
-
-    #[test]
-    fn closed_fingers_hold_and_a_pointing_finger_does_not() {
-        let open = hand([
-            Vec3::new(0.03, 0.17, 0.0),
-            Vec3::new(0.0, 0.18, 0.0),
-            Vec3::new(-0.02, 0.17, 0.0),
-        ]);
-        let holding = hand([
-            Vec3::new(0.03, 0.08, -0.04),
-            Vec3::new(0.0, 0.08, -0.045),
-            Vec3::new(-0.02, 0.075, -0.04),
-        ]);
-        let pointing = hand([
-            Vec3::new(0.03, 0.17, 0.0),
-            Vec3::new(0.0, 0.08, -0.045),
-            Vec3::new(-0.02, 0.075, -0.04),
-        ]);
-        assert!(!hand_hold(&open, false).2);
-        assert!(hand_hold(&holding, false).2);
-        assert!(!hand_hold(&pointing, false).2);
-        // Opening a little does not drop what is held.
-        let looser = hand([
-            Vec3::new(0.03, 0.10, -0.05),
-            Vec3::new(0.0, 0.10, -0.05),
-            Vec3::new(-0.02, 0.095, -0.05),
-        ]);
-        assert!(!hand_hold(&looser, false).2 && hand_hold(&looser, true).2);
     }
 }
