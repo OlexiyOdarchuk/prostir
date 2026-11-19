@@ -447,9 +447,13 @@ struct Scene {
     profiles_path: PathBuf,
     /// The profile last switched to, until something is changed by hand.
     active_profile: Option<usize>,
-    /// After switching profiles, monitors come and go for a few seconds: lay them
-    /// out again on each change until then.
+    /// After switching to a profile without places (from before 0.2.0, or a starting
+    /// point), monitors come and go for a few seconds: lay them out by the preset
+    /// again on each change until then.
     relayout_until: Option<Instant>,
+    /// A profile's places, by its monitors' order, until the PC says which numbers
+    /// they have now (its `Order`), and until when that may take.
+    pending_places: Option<(Vec<Placement>, Instant)>,
     /// The desk arrangement on disk; see `save_layout`.
     desk: layout::Desk,
     /// The stream size each desk placement was made for (see `fit_to_stream`). Not
@@ -491,13 +495,11 @@ impl Scene {
         if self.settings.cinema || self.feedback.is_none() {
             return;
         }
-        // Wait until every monitor the PC has is here and placed: a partial picture
-        // would make KDE rearrange (and blink) once per arriving monitor.
-        let complete = !self.order.is_empty()
-            && self
-                .order
-                .iter()
-                .all(|id| self.monitors.contains_key(id) && self.placements.contains_key(id));
+        // Wait until every monitor the PC has is placed: a partial picture would make
+        // KDE rearrange (and blink) once per arriving monitor. One whose stream could
+        // not start keeps its place and does not hold the others up.
+        let complete = self.order.iter().any(|id| self.monitors.contains_key(id))
+            && self.order.iter().all(|id| self.placements.contains_key(id));
         if !complete {
             return;
         }
@@ -596,6 +598,14 @@ impl Scene {
     /// layout and look.
     fn current_profile(&self) -> Profile {
         let sizes = self.quest_sizes();
+        // Where the monitors stand on the desk (in cinema, as saved before it).
+        let desk = if self.settings.cinema {
+            self.desk.load().placements
+        } else {
+            self.placements.clone()
+        };
+        let places: Option<Vec<Placement>> =
+            sizes.iter().map(|m| desk.get(&m.0).copied()).collect();
         Profile {
             primary: sizes
                 .iter()
@@ -604,7 +614,65 @@ impl Scene {
             sizes: sizes.iter().map(|m| (m.1, m.2)).collect(),
             mirror: self.mirror_wanted,
             settings: self.settings,
+            places: places.unwrap_or_default(),
         }
+    }
+
+    /// Monitors without a place get one: all by the preset when none has any (the
+    /// first start), else each next to the others (see `layout::place_new`), which
+    /// stay where they are. The laptop screen goes under the primary monitor.
+    fn place_missing(&mut self) {
+        if self.settings.cinema || self.places_pending() {
+            return;
+        }
+        let sizes = self.quest_sizes();
+        if sizes.is_empty() {
+            return;
+        }
+        if !sizes.iter().any(|m| self.placements.contains_key(&m.0)) {
+            self.arrange_all();
+            return;
+        }
+        let mut placed = false;
+        for m in sizes {
+            if self.placements.contains_key(&m.0) {
+                continue;
+            }
+            let at = layout::place_new(
+                &self.placements,
+                &self.layout_sizes(),
+                m,
+                self.center,
+                self.settings.preset,
+                self.head.1,
+            );
+            match at {
+                Some(p) => {
+                    info!("monitor {} placed next to the others", m.0);
+                    self.placements.insert(m.0, p);
+                    placed = true;
+                }
+                // Nowhere to put it: laid out by the preset.
+                None => {
+                    self.arrange_all();
+                    return;
+                }
+            }
+        }
+        if self.monitors.contains_key(&MIRROR_ID) && !self.placements.contains_key(&MIRROR_ID) {
+            self.place_mirror();
+            placed = true;
+        }
+        if placed {
+            self.save_layout();
+        }
+    }
+
+    /// A profile's places wait for the PC's new numbers.
+    fn places_pending(&self) -> bool {
+        self.pending_places
+            .as_ref()
+            .is_some_and(|(_, until)| Instant::now() < *until)
     }
 
     /// Turns cinema mode on or off. The one place that switches it: the desk layout is
@@ -623,13 +691,7 @@ impl Scene {
         self.settings.cinema = false;
         let saved = self.desk.load();
         self.adopt_desk(saved);
-        if self
-            .monitors
-            .keys()
-            .any(|id| !self.placements.contains_key(id))
-        {
-            self.arrange_all();
-        }
+        self.place_missing();
     }
 
     /// Cinema mode with no view yet (started in cinema, or switched to a PC in it):
@@ -1777,6 +1839,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         profiles_path,
         active_profile: None,
         relayout_until: None,
+        pending_places: None,
         desk,
         placed_for: HashMap::new(),
         settings_path,
@@ -3013,6 +3076,8 @@ fn handle_net_event(
             scene.host = None;
             scene.pc = None;
             scene.feedback = None;
+            // The next session's order is news, not monitors removed.
+            scene.order.clear();
             if let Some(text) = disconnect_text(scene.lang(), why) {
                 scene.show_toast(text.into());
             }
@@ -3028,10 +3093,36 @@ fn handle_net_event(
         NetEvent::AudioWanted(enabled) => scene.audio_wanted = enabled,
         NetEvent::Focus(id) => scene.focus = id,
         NetEvent::Order(ids) => {
-            scene.order = ids;
-            if scene.relayout_pending() {
-                scene.arrange_all();
+            // Monitors gone from the order were removed: their places go, nothing
+            // else moves.
+            let gone: Vec<u8> = scene
+                .order
+                .iter()
+                .copied()
+                .filter(|id| !ids.contains(id))
+                .collect();
+            for id in &gone {
+                scene.placements.remove(id);
             }
+            scene.order = ids;
+            // A profile's places on the numbers its monitors have now (the last order
+            // of the right length while the PC makes them counts).
+            if scene.places_pending()
+                && let Some((places, _)) = &scene.pending_places
+                && places.len() == scene.order.len()
+                && !scene.settings.cinema
+            {
+                for (id, p) in scene.order.clone().into_iter().zip(places.clone()) {
+                    scene.placements.insert(id, p);
+                    scene.placed_for.remove(&id);
+                }
+                scene.save_layout();
+            } else if scene.relayout_pending() {
+                scene.arrange_all();
+            } else if !gone.is_empty() {
+                scene.save_layout();
+            }
+            scene.place_missing();
             scene.build_cinema_view_if_due();
         }
         NetEvent::HostError(text) => scene.show_error(text),
@@ -3076,14 +3167,10 @@ fn handle_net_event(
                         }
                     } else if scene.relayout_pending() {
                         scene.arrange_all();
-                    } else if !scene.placements.contains_key(&id) && !scene.settings.cinema {
-                        if id == MIRROR_ID {
-                            // Only the mirror is new: put it under the primary monitor.
-                            scene.place_mirror();
-                        } else {
-                            // A new monitor: re-arrange so it joins the row seamlessly.
-                            scene.arrange_all();
-                        }
+                    } else if !scene.placements.contains_key(&id) {
+                        // A monitor the arrangement has no place for: next to the
+                        // others, which stay. One it knows stays where it is.
+                        scene.place_missing();
                     }
                     scene.build_cinema_view_if_due();
                 }
@@ -3097,11 +3184,13 @@ fn handle_net_event(
                     *g = None;
                 }
             }
+            // A monitor the PC removed leaves its place once it is out of the order
+            // too; one whose stream only failed keeps it. The others never move.
             if removed && is_window_panel(id) {
                 scene.placements.remove(&id);
-            } else if removed && id != MIRROR_ID {
+            } else if removed && id != MIRROR_ID && !scene.order.contains(&id) {
                 scene.placements.remove(&id);
-                scene.arrange_all();
+                scene.save_layout();
             }
         }
     }
@@ -3305,13 +3394,25 @@ fn handle_action(
             controls.hands_enabled = mode == HandMode::Control;
         }
         Action::MakePrimary(id) => scene.send(ClientMsg::SetPrimary { id }),
+        // Swaps the places of a monitor and its neighbour in the order; the others
+        // stay.
         Action::Move { id, delta } => {
-            let mut ids: Vec<u8> = scene.quest_sizes().iter().map(|m| m.0).collect();
+            let ids: Vec<u8> = scene.quest_sizes().iter().map(|m| m.0).collect();
             if let Some(i) = ids.iter().position(|x| *x == id) {
                 let j = (i as i32 + delta).clamp(0, ids.len() as i32 - 1) as usize;
-                ids.swap(i, j);
-                scene.order = ids;
-                scene.arrange_all();
+                let other = ids[j];
+                if let (Some(a), Some(b)) = (
+                    scene.placements.get(&id).copied(),
+                    scene.placements.get(&other).copied(),
+                ) {
+                    // Each at the other's place, at the size of its own pixels.
+                    let size = |id: u8| scene.monitors.get(&id).map(|m| (m.width_px, m.height_px));
+                    if let (Some(sa), Some(sb)) = (size(id), size(other)) {
+                        scene.placements.insert(id, layout::refit(b, sb, sa));
+                        scene.placements.insert(other, layout::refit(a, sa, sb));
+                        scene.save_layout();
+                    }
+                }
             }
         }
         Action::SetMic(enabled) => {
@@ -3355,6 +3456,7 @@ fn handle_action(
                 profiles::save(&scene.profiles_path, &scene.profiles);
             }
             let p = scene.profiles[i].clone();
+            scene.pending_places = None;
             scene.send(ClientMsg::SetMonitors {
                 sizes: p.sizes.clone(),
                 primary: p.primary,
@@ -3372,8 +3474,16 @@ fn handle_action(
             scene.settings.save(settings_path);
             set_passthrough(scene, passthrough);
             scene.active_profile = Some(i);
-            scene.relayout_until = Some(Instant::now() + Duration::from_secs(8));
-            scene.arrange_all();
+            let until = Instant::now() + Duration::from_secs(8);
+            if p.places.is_empty() || p.settings.cinema {
+                // From before places were kept: laid out by its preset.
+                scene.relayout_until = Some(until);
+                scene.arrange_all();
+            } else {
+                // Its own places, once the PC says which numbers the monitors have.
+                scene.relayout_until = None;
+                scene.pending_places = Some((p.places.clone(), until));
+            }
             // The monitors changing is the answer: the menu gets out of the way.
             scene.panel_open = false;
         }

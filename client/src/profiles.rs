@@ -4,6 +4,9 @@
 
 use std::path::Path;
 
+use glam::{Quat, Vec3};
+
+use crate::layout::Placement;
 use crate::settings::{Background, Preset, Settings};
 
 pub const SLOTS: usize = 3;
@@ -18,6 +21,9 @@ pub struct Profile {
     /// Layout, curve, background and cinema are applied; hands and focus stay as
     /// they are (they are habits, not part of a setup).
     pub settings: Settings,
+    /// Where each monitor stood, by its place in `sizes`: all of them or none (a
+    /// profile from before 0.2.0, or a starting point: the preset lays them out).
+    pub places: Vec<Placement>,
 }
 
 impl Profile {
@@ -33,6 +39,7 @@ impl Profile {
                     primary: 0,
                     mirror: false,
                     settings,
+                    places: Vec::new(),
                 }
             }
             2 => {
@@ -42,6 +49,7 @@ impl Profile {
                     primary: 0,
                     mirror: false,
                     settings,
+                    places: Vec::new(),
                 }
             }
             _ => Self {
@@ -49,6 +57,7 @@ impl Profile {
                 primary: 1,
                 mirror: true,
                 settings,
+                places: Vec::new(),
             },
         }
     }
@@ -57,8 +66,14 @@ impl Profile {
         let mut sizes = Vec::new();
         let mut primary = 0;
         let mut mirror = false;
+        let mut places: Vec<(usize, Placement)> = Vec::new();
         for line in text.lines() {
             match line.split_once(' ') {
+                Some(("place", v)) => {
+                    if let Some(p) = parse_place(v) {
+                        places.push(p);
+                    }
+                }
                 Some(("monitors", list)) => {
                     for (i, m) in list.split_whitespace().enumerate() {
                         let m = m
@@ -78,11 +93,20 @@ impl Profile {
         if usize::from(primary) >= sizes.len() {
             primary = 0;
         }
+        // A place for every monitor, or none.
+        places.sort_by_key(|p| p.0);
+        places.dedup_by_key(|p| p.0);
+        let places: Vec<Placement> = if places.iter().map(|p| p.0).eq(0..sizes.len()) {
+            places.into_iter().map(|p| p.1).collect()
+        } else {
+            Vec::new()
+        };
         (!sizes.is_empty()).then(|| Self {
             sizes,
             primary,
             mirror,
             settings: Settings::parse(text),
+            places,
         })
     }
 
@@ -96,13 +120,42 @@ impl Profile {
                 format!("{star}{w}x{h}")
             })
             .collect();
+        let places: String = self
+            .places
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let (a, q) = (p.position, p.rotation);
+                format!(
+                    "place {i} {} {} {} {} {} {} {} {}\n",
+                    a.x, a.y, a.z, q.x, q.y, q.z, q.w, p.width
+                )
+            })
+            .collect();
         format!(
-            "monitors {}\nmirror {}\n{}",
+            "monitors {}\nmirror {}\n{places}{}",
             monitors.join(" "),
             if self.mirror { "on" } else { "off" },
             self.settings.to_text()
         )
     }
+}
+
+/// `INDEX x y z qx qy qz qw width`.
+fn parse_place(v: &str) -> Option<(usize, Placement)> {
+    let mut words = v.split_whitespace();
+    let i = words.next()?.parse().ok()?;
+    let n: Vec<f32> = words.map(|w| w.parse().ok()).collect::<Option<_>>()?;
+    let [x, y, z, qx, qy, qz, qw, width] = n[..] else {
+        return None;
+    };
+    let p = Placement {
+        position: Vec3::new(x, y, z),
+        rotation: Quat::from_xyzw(qx, qy, qz, qw).normalize(),
+        width,
+    };
+    (p.position.is_finite() && p.rotation.is_finite() && width.is_finite() && width > 0.0)
+        .then_some((i, p))
 }
 
 /// `[slot]` sections in one file.
@@ -149,8 +202,20 @@ mod tests {
         profiles[2].primary = 2;
         profiles[2].mirror = true;
         profiles[2].settings.curve = Curve::Strong;
+        profiles[2].places = (0..3)
+            .map(|i| Placement {
+                position: Vec3::new(i as f32, 0.5, -1.0),
+                rotation: Quat::from_rotation_y(0.25),
+                width: 1.2,
+            })
+            .collect();
         save(&path, &profiles);
-        assert_eq!(load(&path), profiles);
+        let back = load(&path);
+        assert_eq!(back[..2], profiles[..2]);
+        for (a, b) in back[2].places.iter().zip(&profiles[2].places) {
+            assert!(a.position.distance(b.position) < 1e-6 && (a.width - b.width).abs() < 1e-6);
+        }
+        assert_eq!(back[2].sizes, profiles[2].sizes);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -161,6 +226,18 @@ mod tests {
         let p = Profile::parse(&format!("monitors {list} *640x480\n")).unwrap();
         assert_eq!(p.sizes.len(), prostir_proto::MAX_MONITORS);
         assert_eq!(p.primary, 0, "the primary one was cut off");
+    }
+
+    /// Profiles saved by 0.1 (no places) still load, laid out by their preset; a
+    /// profile missing a place has none.
+    #[test]
+    fn old_profiles_load() {
+        let p = Profile::parse("monitors 2560x1440 *1440x2560\nmirror on\npreset wall\n").unwrap();
+        assert!(p.places.is_empty());
+        assert_eq!(p.settings.preset, Preset::Wall);
+        let p =
+            Profile::parse("monitors 2560x1440 2560x1440\nplace 0 0 0 -1 0 0 0 1 1.2\n").unwrap();
+        assert!(p.places.is_empty(), "one of two places");
     }
 
     #[test]
