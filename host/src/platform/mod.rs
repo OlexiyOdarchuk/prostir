@@ -231,12 +231,13 @@ pub trait DesktopBackend: Sized {
 
     /// Moves outputs to `positions` (logical, top-left); also makes `primary` the
     /// primary output where there is one. Only what differs from `current` is sent.
+    /// An error when the desktop did not take it.
     fn place(
         &self,
         positions: &[(String, i32, i32)],
         primary: Option<&str>,
         current: &HashMap<String, Geometry>,
-    );
+    ) -> Result<()>;
 
     /// Checks now and then that `primary` is still the primary output, and makes it
     /// so again if the desktop moved it elsewhere.

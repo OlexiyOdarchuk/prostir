@@ -105,10 +105,13 @@ impl DesktopBackend for Desktop {
         positions: &[(String, i32, i32)],
         primary: Option<&str>,
         current: &HashMap<String, Geometry>,
-    ) {
+    ) -> anyhow::Result<()> {
         match self {
             Self::Kde(k) => k.place(positions, primary, current),
-            Self::Hyprland => hyprland::place(positions),
+            Self::Hyprland => {
+                anyhow::ensure!(hyprland::place(positions), "Hyprland refused the layout");
+                Ok(())
+            }
         }
     }
 

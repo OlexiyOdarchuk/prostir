@@ -350,12 +350,16 @@ pub struct Displays {
     screens: BTreeMap<ScreenId, Screen>,
     /// When the window panels are next checked for a closed window.
     windows_checked: Instant,
-    /// A new panel output to place once the compositor lists it.
-    windows_unplaced: bool,
-    /// Left-to-right order of the monitors, in the headset and on the desktop.
-    order: Vec<ScreenId>,
-    /// How the headset arranges the monitors in rows (see `effective_rows`).
+    /// How the headset arranges the monitors in rows: every monitor, once, and the
+    /// laptop screen where the headset put it (see `effective_rows`). The one source of
+    /// their order.
     rows: Vec<Vec<desk::Entry<ScreenId>>>,
+    /// The desktop is to be laid out again (see [`Displays::place`]).
+    layout_due: bool,
+    /// Laid out without an output the desktop did not list yet: again once it does.
+    layout_waits: bool,
+    /// After the desktop refused a layout: when to try again, and how many times it did.
+    layout_retry: (Instant, u32),
     mirror_retry: Instant,
     /// The settings as last applied from the store (see [`Displays::apply`]).
     settings: Settings,
@@ -397,9 +401,10 @@ impl Displays {
         let mut displays = Self {
             screens: BTreeMap::new(),
             windows_checked: Instant::now(),
-            windows_unplaced: false,
-            order: Vec::new(),
             rows: set.rows.clone(),
+            layout_due: true,
+            layout_waits: false,
+            layout_retry: (Instant::now(), 0),
             settings: settings.clone(),
             audio: None,
             mic: None,
@@ -439,6 +444,7 @@ impl Displays {
             _ => displays.ensure_primary(),
         }
         displays.tick();
+        displays.place();
         displays.sync_wallpapers();
         Ok(displays)
     }
@@ -486,8 +492,14 @@ impl Displays {
             id,
             Screen::running(id, ScreenKind::Virtual { spec }, output, encoder),
         );
-        self.order.push(id);
-        self.apply_layout();
+        // A new one at the end of the bottom row.
+        if !self.rows.iter().flatten().any(|e| e.id == id) {
+            match self.rows.last_mut() {
+                Some(row) => row.push(desk::Entry::new(id)),
+                None => self.rows.push(vec![desk::Entry::new(id)]),
+            }
+        }
+        self.layout_changed();
         self.send_order();
         Ok(())
     }
@@ -563,7 +575,7 @@ impl Displays {
                 };
                 self.screens
                     .insert(id, Screen::running(id, kind, output, encoder));
-                self.apply_layout();
+                self.layout_changed();
             }
             Err(e) => warn!("cannot mirror {name}: {e:#}"),
         }
@@ -939,20 +951,33 @@ impl Displays {
     /// desktop's arrangement.
     fn forget(&mut self, id: ScreenId) {
         self.router.remove_stream(id);
-        self.order.retain(|o| *o != id);
+        for row in &mut self.rows {
+            row.retain(|e| e.id != id);
+        }
+        self.rows.retain(|r| !r.is_empty());
         self.send_order();
         if self.primary == Some(id) {
             self.primary = None;
         }
         self.ensure_primary();
         // Close the gap the monitor leaves.
-        self.apply_layout();
+        self.layout_changed();
+    }
+
+    /// The monitors left to right, row by row from the top: as the rows have them.
+    fn order(&self) -> Vec<ScreenId> {
+        self.effective_rows()
+            .iter()
+            .flatten()
+            .map(|e| e.id)
+            .filter(|id| self.is_monitor(*id))
+            .collect()
     }
 
     /// Tells the headset the order of the monitors.
     pub fn send_order(&self) {
         self.router.send(HostMsg::Order {
-            ids: wire_ids(&self.order),
+            ids: wire_ids(&self.order()),
         });
     }
 
@@ -967,7 +992,7 @@ impl Displays {
         }
         self.primary = Some(id);
         self.router.send(HostMsg::PrimaryChanged { id: id.wire() });
-        self.apply_layout();
+        self.layout_changed();
     }
 
     /// Lays the outputs out on the desktop like they stand in the headset (see
@@ -975,7 +1000,35 @@ impl Displays {
     /// under the primary monitor unless the headset placed it, other real displays
     /// next to it and window panels right of everything. The mouse then crosses
     /// screens where the eyes expect it to.
-    fn apply_layout(&self) {
+    /// Lays the desktop out again, once, at [`Displays::place`].
+    fn layout_changed(&mut self) {
+        self.layout_due = true;
+    }
+
+    /// Lays the outputs out on the desktop if anything changed since the last time,
+    /// once a pass of the main loop however much changed. Only outputs the desktop
+    /// lists already are placed; the others once it lists them. When the desktop
+    /// refuses (KScreen stuck, say), the layout stays due and is tried again after
+    /// 1, 2, 4... up to 30 s.
+    pub fn place(&mut self) {
+        if !self.layout_due || Instant::now() < self.layout_retry.0 {
+            return;
+        }
+        match self.place_now() {
+            Ok(()) => {
+                self.layout_due = self.layout_waits;
+                self.layout_retry = (Instant::now(), 0);
+            }
+            Err(e) => {
+                let failures = self.layout_retry.1 + 1;
+                let wait = Duration::from_secs((1u64 << failures.min(5)).min(30));
+                warn!("{e:#}; trying again in {} s", wait.as_secs());
+                self.layout_retry = (Instant::now() + wait, failures);
+            }
+        }
+    }
+
+    fn place_now(&mut self) -> Result<()> {
         /// An output on the desktop: a screen, or another real display.
         #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
         enum Out {
@@ -1004,25 +1057,15 @@ impl Displays {
         for (i, name) in others.into_iter().enumerate() {
             names.insert(Out::Other(i), name.clone());
         }
+        // Only outputs the desktop lists: the others once it does.
         let size = |out: Out| {
-            let spec = match out {
-                Out::Screen(id) => self.screens.get(&id).and_then(|s| s.kind.spec()),
-                Out::Other(_) => None,
-            };
-            let name = names.get(&out)?;
-            geometries
-                .get(name)
-                .map(|g| (g.w, g.h))
-                .or_else(|| {
-                    spec.map(|s| {
-                        (
-                            (f64::from(s.width) / s.scale).round() as i32,
-                            (f64::from(s.height) / s.scale).round() as i32,
-                        )
-                    })
-                })
-                .map(|(w, h)| desk::Size { w, h })
+            let g = geometries.get(names.get(&out)?)?;
+            Some(desk::Size { w: g.w, h: g.h })
         };
+        self.layout_waits = self
+            .screens
+            .values()
+            .any(|s| s.output_name().is_some_and(|n| !geometries.contains_key(n)));
         let plan = desk::plan(
             &desk::Desk {
                 rows: self
@@ -1040,7 +1083,7 @@ impl Displays {
                     .collect(),
                 main: self
                     .primary
-                    .or_else(|| self.order.first().copied())
+                    .or_else(|| self.order().first().copied())
                     .map(Out::Screen),
                 under_main: self.mirror().map(|_| Out::Screen(ScreenId::BUILTIN)),
                 bottom: names
@@ -1063,7 +1106,7 @@ impl Displays {
             .and_then(|p| self.screens.get(&p))
             .filter(|_| self.manage_primary)
             .and_then(Screen::output_name);
-        self.desktop.place(&positions, primary, &geometries);
+        self.desktop.place(&positions, primary, &geometries)
     }
 
     /// Makes the monitors match `sizes` left to right (a headset profile). Monitors of a
@@ -1083,7 +1126,7 @@ impl Displays {
         for s in &specs {
             s.validate()?;
         }
-        let mut unused: Vec<ScreenId> = self.order.clone();
+        let mut unused: Vec<ScreenId> = self.order();
         let mut plan: Vec<Option<ScreenId>> = specs
             .iter()
             .map(|s| {
@@ -1123,9 +1166,10 @@ impl Displays {
 
     /// The headset's rows, kept in step with the monitors (see [`rows_in_step`]).
     fn effective_rows(&self) -> Vec<Vec<desk::Entry<ScreenId>>> {
+        let monitors: Vec<ScreenId> = self.monitors().map(|s| s.id).collect();
         rows_in_step(
             &self.rows,
-            &self.order,
+            &monitors,
             |id| self.is_monitor(id),
             // The laptop screen too, where the headset put it (while it shows).
             |id| id == ScreenId::BUILTIN && self.mirror().is_some(),
@@ -1171,15 +1215,22 @@ impl Displays {
                 break;
             }
         }
-        self.rows = rows;
-        self.order = self
-            .effective_rows()
-            .iter()
-            .flatten()
-            .map(|e| e.id)
-            .filter(|id| *id != ScreenId::BUILTIN)
+        // Monitors the headset left out stay, at the end of the bottom row, in the order
+        // they had.
+        let missing: Vec<desk::Entry<ScreenId>> = self
+            .order()
+            .into_iter()
+            .filter(|id| !rows.iter().flatten().any(|e| e.id == *id))
+            .map(desk::Entry::new)
             .collect();
-        self.apply_layout();
+        if !missing.is_empty() {
+            match rows.last_mut() {
+                Some(row) => row.extend(missing),
+                None => rows.push(missing),
+            }
+        }
+        self.rows = rows;
+        self.layout_changed();
         self.send_order();
     }
 
@@ -1196,10 +1247,9 @@ impl Displays {
                 )
             );
         }
-        self.order = ids.to_vec();
         // One row, in this order.
         self.rows = vec![ids.iter().map(|&id| desk::Entry::new(id)).collect()];
-        self.apply_layout();
+        self.layout_changed();
         self.send_order();
         Ok(())
     }
@@ -1209,11 +1259,11 @@ impl Displays {
         if self.primary.is_some_and(|p| self.is_monitor(p)) {
             return;
         }
-        let ids = self.order.clone();
+        let ids = self.order();
         if let Some(&id) = ids.get(ids.len().saturating_sub(1) / 2) {
             self.set_primary(id);
         } else {
-            self.apply_layout();
+            self.layout_changed();
         }
     }
 
@@ -1264,7 +1314,7 @@ impl Displays {
         };
         self.screens
             .insert(id, Screen::running(id, kind, output, encoder));
-        self.apply_layout();
+        self.layout_changed();
         if let Err(e) = windows::move_to(&window, &name, true) {
             self.close_window_panel(id);
             return Err(e);
@@ -1275,8 +1325,6 @@ impl Displays {
             e.set_paused(true);
         }
         self.windows_checked = Instant::now() + Duration::from_secs(1);
-        // Hyprland lists a new output a moment later: placed again at the next check.
-        self.windows_unplaced = true;
         info!("window panel {id} on {name} ({width}x{height})");
         Ok(id)
     }
@@ -1306,7 +1354,7 @@ impl Displays {
         }
         self.router.remove_stream(id);
         drop(screen);
-        self.apply_layout();
+        self.layout_changed();
     }
 
     fn close_window_panels(&mut self) {
@@ -1322,9 +1370,6 @@ impl Displays {
             return;
         }
         self.windows_checked = Instant::now() + Duration::from_secs(1);
-        if std::mem::take(&mut self.windows_unplaced) {
-            self.apply_layout();
-        }
         let names: Vec<String> = self
             .windows()
             .filter_map(|s| s.output_name().map(str::to_owned))
@@ -1425,12 +1470,12 @@ impl Displays {
 }
 
 /// `rows` kept in step with the outputs: only monitors (`monitor`) and other outputs
-/// that show (`shown`) stay, each in the first place it is listed in, and monitors of
-/// `order` not placed yet go to the end of the bottom row. So every monitor is listed
+/// that show (`shown`) stay, each in the first place it is listed in, and any of
+/// `monitors` left out go to the end of the bottom row. So every monitor is listed
 /// exactly once.
 fn rows_in_step<K: Copy + PartialEq>(
     rows: &[Vec<desk::Entry<K>>],
-    order: &[K],
+    monitors: &[K],
     monitor: impl Fn(K) -> bool,
     shown: impl Fn(K) -> bool,
 ) -> Vec<Vec<desk::Entry<K>>> {
@@ -1452,7 +1497,7 @@ fn rows_in_step<K: Copy + PartialEq>(
         .filter(|r| !r.is_empty())
         .collect();
     let mut missing = Vec::new();
-    for &id in order {
+    for &id in monitors {
         if monitor(id) && !placed.contains(&id) {
             placed.push(id);
             missing.push(desk::Entry::new(id));

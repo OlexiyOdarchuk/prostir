@@ -122,31 +122,28 @@ fn strip_ansi(raw: &str) -> String {
 /// Applies several `output.<name>.<setting>` changes in one kscreen-doctor call, so
 /// KDE never sees an in-between (overlapping) layout. Retries while KScreen has not
 /// caught up with just-created outputs.
-pub fn apply(settings: &[String]) {
+pub fn apply(settings: &[String]) -> anyhow::Result<()> {
     if settings.is_empty() {
-        return;
+        return Ok(());
     }
     let mut last = String::new();
     for _ in 0..10 {
         match kscreen_doctor(settings, APPLY_TIMEOUT) {
             Ok(out) if out.status.success() => {
                 info!("KDE layout: {}", settings.join(" "));
-                return;
+                return Ok(());
             }
             Ok(out) => {
                 last = said(&out);
                 std::thread::sleep(Duration::from_millis(300));
             }
-            Err(e) => {
-                warn!("cannot run kscreen-doctor: {e}");
-                return;
-            }
+            Err(e) => anyhow::bail!("cannot run kscreen-doctor: {e}"),
         }
     }
-    warn!(
+    anyhow::bail!(
         "kscreen-doctor did not apply {} ({last})",
         settings.join(" ")
-    );
+    )
 }
 
 /// Applies `output.<name>.<setting>` through kscreen-doctor, retrying while KScreen

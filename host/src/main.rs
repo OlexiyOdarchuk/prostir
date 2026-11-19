@@ -383,7 +383,9 @@ fn serve_client(
     let mut focus = None;
     let mut next_focus = Instant::now();
     let (result, goodbye) = loop {
-        // What changed in the last pass goes to disk, off this thread.
+        // What changed in the last pass: the desktop laid out once, and the files
+        // written, off this thread.
+        displays.place();
         store.flush();
         if Instant::now() >= next_focus {
             next_focus = Instant::now() + Duration::from_millis(150);
@@ -855,6 +857,9 @@ fn main() -> Result<()> {
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
                 control.poll(&mut store, displays.as_mut());
                 control.show(None, displays.as_ref(), &store);
+                if let Some(d) = displays.as_mut() {
+                    d.place();
+                }
                 if displays.is_some() && idle_since.elapsed() >= Duration::from_secs(args.linger) {
                     displays = None;
                     control.show(None, None, &store);

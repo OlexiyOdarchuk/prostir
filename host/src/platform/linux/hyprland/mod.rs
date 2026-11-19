@@ -220,13 +220,13 @@ fn ok(reply: &str) -> bool {
 }
 
 /// Applies monitor rules in one request and remembers them.
-pub fn apply(rules: &[Rule]) {
+pub fn apply(rules: &[Rule]) -> bool {
     let mut applied = APPLIED.lock().unwrap();
     for r in rules {
         applied.insert(r.name.clone(), r.clone());
     }
     drop(applied);
-    send(rules);
+    send(rules)
 }
 
 /// Hyprland re-reads its config whenever the file is saved, which resets our outputs
@@ -276,13 +276,14 @@ fn reapply() {
             "Hyprland reloaded its config: restoring {} monitor rules",
             rules.len()
         );
-        send(&rules);
+        let _ = send(&rules);
     }
 }
 
-fn send(rules: &[Rule]) {
+/// Sends `rules` to Hyprland; whether it took them.
+fn send(rules: &[Rule]) -> bool {
     if rules.is_empty() {
-        return;
+        return true;
     }
     let lua = || {
         format!(
@@ -315,14 +316,13 @@ fn send(rules: &[Rule]) {
             for dialect in [1, 2] {
                 if attempt(dialect) {
                     DIALECT.store(dialect, Ordering::Relaxed);
-                    return;
+                    return true;
                 }
             }
             warn!("Hyprland accepted no monitor rule for {rules:?}");
+            false
         }
-        d => {
-            attempt(d);
-        }
+        d => attempt(d),
     }
 }
 
@@ -406,12 +406,13 @@ pub fn restore_real_outputs() {
         .collect();
     if !rules.is_empty() {
         info!("putting {} display(s) back where they were", rules.len());
-        send(&rules);
+        let _ = send(&rules);
     }
 }
 
-/// Moves outputs to new logical positions, keeping their modes and scales.
-pub fn place(positions: &[(String, i32, i32)]) {
+/// Moves outputs to new logical positions, keeping their modes and scales; whether
+/// Hyprland took them.
+pub fn place(positions: &[(String, i32, i32)]) -> bool {
     let current = monitors();
     {
         let mut original = ORIGINAL.lock().unwrap();
@@ -438,7 +439,7 @@ pub fn place(positions: &[(String, i32, i32)]) {
             })
         })
         .collect();
-    apply_without_overlaps(&current, rules);
+    apply_without_overlaps(&current, rules)
 }
 
 /// Logical rectangle `(x, y, w, h)` of a rule.
@@ -484,7 +485,7 @@ fn overlaps_on_the_way(current: &[Monitor], rules: &[Rule]) -> bool {
 
 /// Applies the rules; if doing so one by one would overlap outputs for a moment
 /// (Hyprland warns about that), first moves the outputs involved out of the way.
-fn apply_without_overlaps(current: &[Monitor], rules: Vec<Rule>) {
+fn apply_without_overlaps(current: &[Monitor], rules: Vec<Rule>) -> bool {
     if overlaps_on_the_way(current, &rules) {
         let aside: Vec<Rule> = rules
             .iter()
@@ -495,9 +496,9 @@ fn apply_without_overlaps(current: &[Monitor], rules: Vec<Rule>) {
                 ..r.clone()
             })
             .collect();
-        send(&aside);
+        let _ = send(&aside);
     }
-    apply(&rules);
+    apply(&rules)
 }
 
 #[cfg(test)]

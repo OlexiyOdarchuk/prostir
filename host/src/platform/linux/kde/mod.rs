@@ -40,7 +40,7 @@ impl Kde {
         positions: &[(String, i32, i32)],
         primary: Option<&str>,
         current: &HashMap<String, Geometry>,
-    ) {
+    ) -> anyhow::Result<()> {
         let mut settings: Vec<String> = positions
             .iter()
             .filter(|(name, x, y)| current.get(name).is_none_or(|g| (g.x, g.y) != (*x, *y)))
@@ -51,7 +51,7 @@ impl Kde {
         {
             settings.push(format!("output.{p}.priority.1"));
         }
-        kscreen::apply(&settings);
+        kscreen::apply(&settings)
     }
 
     /// Makes sure KDE's primary output (where the Plasma panel lives) is `ours`. Right
@@ -114,6 +114,8 @@ impl Kde {
         self.woke_display_at = Some(Instant::now());
         info!("lid is open but {off:?} is off: switching it on for the mirror");
         let settings: Vec<String> = off.iter().map(|n| format!("output.{n}.enable")).collect();
-        kscreen::apply(&settings);
+        if let Err(e) = kscreen::apply(&settings) {
+            log::warn!("{e:#}");
+        }
     }
 }

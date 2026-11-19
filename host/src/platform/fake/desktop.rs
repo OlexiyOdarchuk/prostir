@@ -97,13 +97,19 @@ impl DesktopBackend for FakeDesktop {
         positions: &[(String, i32, i32)],
         _primary: Option<&str>,
         _current: &HashMap<String, Geometry>,
-    ) {
+    ) -> Result<()> {
         let mut layout = self.layout.lock().unwrap();
         for (name, x, y) in positions {
             if let Some(g) = layout.get_mut(name) {
                 (g.x, g.y) = (*x, *y);
             }
         }
+        let placed: Vec<String> = positions
+            .iter()
+            .map(|(name, x, y)| format!("{name} {x},{y}"))
+            .collect();
+        info!("fake desktop: placed {}", placed.join(", "));
+        Ok(())
     }
 
     fn keep_primary(&mut self, _primary: &FakeOutput) {}

@@ -198,6 +198,32 @@ fn a_layout_with_a_repeated_monitor_is_refused() {
     assert_eq!(pc.count_log("panicked"), 0, "no thread of the PC app died");
 }
 
+/// A profile's monitors from the headset lay the desktop out once, not once for every
+/// monitor made or removed on the way.
+#[test]
+fn a_new_set_of_monitors_is_laid_out_once() {
+    let (_dir, mut pc, _keys, mut headset) = session("layout-once", &Options::default());
+    // Laid out once the session settles.
+    headset.take_for(Duration::from_secs(1)).unwrap();
+    let before = pc.count_log("fake desktop: placed");
+    headset
+        .send(&ClientMsg::SetMonitors {
+            sizes: vec![(800, 450), (640, 360), (480, 272), (320, 240)],
+            primary: 1,
+        })
+        .unwrap();
+    headset
+        .wait(SOON, "four monitors showing", |v| {
+            v.order.len() == 4 && v.all_monitors_show()
+        })
+        .unwrap();
+    headset.take_for(Duration::from_secs(1)).unwrap();
+    let line = pc.wait_log_after(SOON, "fake desktop: placed", before);
+    assert_eq!(pc.count_log("fake desktop: placed"), before + 1, "{line}");
+    // Side by side, from the left, in the order asked for.
+    assert!(line.contains("Fake-"), "{line}");
+}
+
 #[test]
 fn monitors_are_added_and_removed() {
     let (_dir, _pc, _keys, mut headset) = session("add-remove", &Options::default());
