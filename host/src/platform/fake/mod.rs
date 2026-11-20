@@ -16,8 +16,8 @@
 //!   made (see [`audio`]), so a fake headset can tell how late it arrives; the
 //!   microphone goes nowhere.
 //! - No windows, no mouse, no screenshots (its desktop has no [`crate::platform::Windows`]
-//!   and no [`crate::platform::Pointer`]), no notifications, and no outside programs
-//!   are run ([`run`] says none is installed). The tray is a file a test writes menu
+//!   and no [`crate::platform::Pointer`]), no notifications, no USB, and no outside
+//!   programs are run. The tray is a file a test writes menu
 //!   items to (see [`tray`]).
 //! - Another program can resize a monitor, as sharing it in Discord does on KDE: a
 //!   test writes `resize Fake-2 320x240` to `$XDG_RUNTIME_DIR/fake-desktop` (see
@@ -40,8 +40,6 @@ mod screen;
 
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
-use std::process::Command;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 
@@ -101,17 +99,6 @@ pub fn hostname() -> String {
 
 pub fn broadcast_addresses() -> Vec<Ipv4Addr> {
     Vec::new()
-}
-
-/// The fake PC has no programs installed.
-pub fn run(cmd: &mut Command, _timeout: Duration) -> std::io::Result<std::process::Output> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::NotFound,
-        format!(
-            "the fake desktop runs no programs ({})",
-            cmd.get_program().to_string_lossy()
-        ),
-    ))
 }
 
 /// Calls `on_text` with what a test writes to `$XDG_RUNTIME_DIR/NAME`, on a thread
@@ -197,10 +184,8 @@ fn watch_file(name: &'static str, on_text: impl Fn(String) -> bool + Send + 'sta
         .is_ok()
 }
 
-/// No USB devices are ever plugged in.
-pub fn on_usb_arrival(_on_arrival: impl Fn() + Send + 'static) -> std::io::Result<()> {
-    Ok(())
-}
+/// No headset is ever plugged in by USB.
+pub fn keep_adb_reverse(_port: u16) {}
 
 /// In the settings directory (the fake PC has no Pictures folder).
 pub fn screenshot_path() -> Result<PathBuf> {

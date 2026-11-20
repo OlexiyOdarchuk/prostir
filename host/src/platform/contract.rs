@@ -7,6 +7,18 @@
 //! answer fits all (the capabilities in [`DesktopCaps`], the kind of memory frames live
 //! in, the state of an output), not as more traits.
 //!
+//! # What is not in the contract
+//!
+//! Services of the operating system that do not depend on the desktop, and run from
+//! the start of the program to its end, are plain functions with one implementation
+//! per build (see `platform/mod.rs`), started once by the core: the tray, quitting on a
+//! signal, and `keep_adb_reverse`, which keeps `adb reverse` set up for a headset on
+//! USB. They have no trait because no build has two of them; another operating system
+//! (or the fake platform) gives the same function, doing nothing where there is
+//! nothing to do. Each sleeps in the kernel until something happens (a udev event, a
+//! signal, a click), so an idle PC is not woken by them. A desktop, in turn, exists
+//! only while a session needs it.
+//!
 //! # What Windows does differently, and where the contract says it
 //!
 //! From the Windows prototype (`plans/windows-prototype.md`, sections 6 and 10). The

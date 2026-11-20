@@ -173,7 +173,8 @@ struct Brain {
     /// For the sessions' readers.
     events: EventSink,
     displays: Option<Displays>,
-    /// The sessions, by the headset's key: one each (see `brain::admit`).
+    /// The sessions, by the headset's key: one each, and one in all for now (see
+    /// `brain::MAX_HEADSETS` for what still assumes a single headset).
     sessions: BTreeMap<[u8; 32], Session>,
     /// Sessions that said goodbye, until their headset closes or their moment ends.
     closing: Vec<Closing>,
@@ -286,6 +287,18 @@ impl Brain {
             "headset connected via {} from {from}",
             session::via_name(conn.link.peer.via)
         );
+        // Forgotten after its connection was set up (the tray's item came first).
+        if !self.security.trusted.lock().unwrap().contains(&key) {
+            info!("the headset from {from} was forgotten meanwhile: turning it away");
+            return turn_away(
+                conn,
+                i18n::t(
+                    "Цей ПК більше не довіряє шолому. Сполучіть їх знову.",
+                    "This PC no longer trusts this headset. Pair them again.",
+                )
+                .into(),
+            );
+        }
         match brain::admit(self.sessions.keys(), &key) {
             Admit::Open => {}
             Admit::Replace => {
@@ -605,117 +618,6 @@ fn spawn_discovery(port: u16) -> Result<()> {
     Ok(())
 }
 
-/// After a USB device is plugged in, `adb reverse` is tried again after each of these
-/// while a device is not ready (its owner has not allowed debugging yet, say): for
-/// about a minute.
-const ADB_RETRIES: [Duration; 4] = [
-    Duration::from_secs(5),
-    Duration::from_secs(10),
-    Duration::from_secs(20),
-    Duration::from_secs(25),
-];
-/// A device just plugged in needs a moment before adb sees it.
-const ADB_SETTLE: Duration = Duration::from_secs(1);
-
-/// What came of setting `adb reverse` up for every USB device.
-enum Reversed {
-    /// adb is not installed.
-    NoAdb,
-    /// Every device has it.
-    Done,
-    /// A device is not ready, or adb did not answer.
-    NotYet,
-}
-
-/// Sets `adb reverse` up for every device on USB (`active`: those that had it).
-fn adb_reverse_all(spec: &str, active: &mut Vec<String>) -> Reversed {
-    // The first call starts adb's server, which takes a few seconds.
-    let out = match platform::run(
-        std::process::Command::new("adb").arg("devices"),
-        Duration::from_secs(15),
-    ) {
-        Ok(out) => out,
-        Err(e) if e.kind() == ErrorKind::NotFound => return Reversed::NoAdb,
-        Err(_) => return Reversed::NotYet,
-    };
-    let mut ready = true;
-    let mut usb = Vec::new();
-    // "serial\tdevice" when ready, "\tunauthorized" or "\toffline" before; adb over
-    // Wi-Fi has serials "ip:port", left alone.
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
-        let Some((serial, state)) = line.split_once('\t') else {
-            continue;
-        };
-        if serial.contains(':') {
-            continue;
-        }
-        if state == "device" {
-            usb.push(serial.to_owned());
-        } else {
-            ready = false;
-        }
-    }
-    for serial in &usb {
-        let ok = platform::run(
-            std::process::Command::new("adb").args(["-s", serial, "reverse", spec, spec]),
-            Duration::from_secs(5),
-        )
-        .is_ok_and(|out| out.status.success());
-        if ok && !active.contains(serial) {
-            info!("USB headset {serial}: adb reverse {spec} active");
-        }
-        ready &= ok;
-    }
-    *active = usb;
-    if ready {
-        Reversed::Done
-    } else {
-        Reversed::NotYet
-    }
-}
-
-/// Keeps `adb reverse` set up so a headset on USB reaches the host via 127.0.0.1: at
-/// the start, and whenever a USB device is plugged in (the kernel says so), then a few
-/// times more while a device is not ready. In between nothing runs.
-fn spawn_adb_reverse(port: u16) {
-    let _ = std::thread::Builder::new()
-        .name("adb-reverse".into())
-        .spawn(move || {
-            let spec = format!("tcp:{port}");
-            let mut active: Vec<String> = Vec::new();
-            let (plugged_in, plugged) = std::sync::mpsc::channel();
-            let mut following = false;
-            // A device there already may not be ready either.
-            let mut retries = VecDeque::from(ADB_RETRIES);
-            loop {
-                match adb_reverse_all(&spec, &mut active) {
-                    Reversed::NoAdb => return,
-                    Reversed::Done => retries.clear(),
-                    Reversed::NotYet => {}
-                }
-                if !following {
-                    following = true;
-                    let plugged_in = plugged_in.clone();
-                    let followed = platform::on_usb_arrival(move || {
-                        let _ = plugged_in.send(());
-                    });
-                    if let Err(e) = followed {
-                        warn!("a headset plugged in later gets no adb reverse: {e}");
-                    }
-                }
-                let came = match retries.pop_front() {
-                    Some(wait) => plugged.recv_timeout(wait).is_ok(),
-                    None => plugged.recv().is_ok(),
-                };
-                if came {
-                    std::thread::sleep(ADB_SETTLE);
-                    while plugged.try_recv().is_ok() {}
-                    retries = VecDeque::from(ADB_RETRIES);
-                }
-            }
-        });
-}
-
 fn create_displays(set_primary: bool, store: &mut Store) -> Result<Displays> {
     let wanted = store.wanted();
     let (backend, codec) = encoder::pick(wanted.codec, wanted.software)?;
@@ -775,7 +677,7 @@ fn main() -> Result<()> {
         spawn_discovery(port)?;
     }
     if !args.no_adb {
-        spawn_adb_reverse(port);
+        platform::keep_adb_reverse(port);
     }
 
     let security = Arc::new(pairing::Security::load()?);

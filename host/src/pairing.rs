@@ -5,7 +5,7 @@ use std::io;
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -58,8 +58,19 @@ impl Limiter {
             .filter(|d| !d.is_zero())
     }
 
-    fn failed(&mut self) {
+    /// An attempt starts: it counts as a wrong code until it succeeds, so one that
+    /// never ends (a connection dropped half way) is not free.
+    fn begin(&mut self) {
         self.failures += 1;
+        self.pause();
+    }
+
+    /// The attempt did not succeed: the pause (if any) runs from now.
+    fn failed(&mut self) {
+        self.pause();
+    }
+
+    fn pause(&mut self) {
         if self.failures > FREE_FAILURES {
             let step = (self.failures - FREE_FAILURES - 1).min(5);
             let wait = Duration::from_secs((30u64 << step).min(900));
@@ -84,13 +95,56 @@ impl Limiter {
     }
 }
 
-struct ClearTrayCode<'a>(Option<&'a tray::Handle>);
+/// The connection whose code the tray shows now, if one does (by its number).
+static CODE_SHOWN_BY: Mutex<Option<u64>> = Mutex::new(None);
+/// The number of the next connection set up.
+static NEXT_CONNECTION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-impl Drop for ClearTrayCode<'_> {
-    fn drop(&mut self) {
-        tray::set_pairing(self.0, None);
+/// The tray's pairing code as one connection sees it: shown by it, and hidden when it
+/// ends, but only if it is still the one that showed it (another connection ending
+/// leaves the code of the one pairing).
+struct TrayCode<'a> {
+    tray: Option<&'a tray::Handle>,
+    connection: u64,
+}
+
+impl<'a> TrayCode<'a> {
+    fn new(tray: Option<&'a tray::Handle>) -> Self {
+        Self {
+            tray,
+            connection: NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed),
+        }
+    }
+
+    fn show(&self, code: String) {
+        *CODE_SHOWN_BY.lock().unwrap() = Some(self.connection);
+        tray::set_pairing(self.tray, Some(code));
+    }
+
+    fn hide(&self) {
+        let mut shown_by = CODE_SHOWN_BY.lock().unwrap();
+        if *shown_by == Some(self.connection) {
+            *shown_by = None;
+            tray::set_pairing(self.tray, None);
+        }
+    }
+
+    #[cfg(test)]
+    fn shows(&self) -> bool {
+        *CODE_SHOWN_BY.lock().unwrap() == Some(self.connection)
     }
 }
+
+impl Drop for TrayCode<'_> {
+    fn drop(&mut self) {
+        self.hide();
+    }
+}
+
+/// Held while a headset pairs: one pairing at a time, so the wrong codes counted
+/// before each attempt hold for every connection (several at once would each pass
+/// the check before any had failed).
+static PAIRING: Mutex<()> = Mutex::new(());
 
 /// The code shown on the PC: one per pairing window, not one per attempt.
 static PC_CODE: Mutex<Option<(String, Instant)>> = Mutex::new(None);
@@ -231,8 +285,8 @@ fn accept_within(
         &security.identity,
         Arc::new(crate::platform::TcpOptions),
     )?;
-    // However this connection ends, the tray stops showing a code for it.
-    let _clear_code = ClearTrayCode(tray);
+    // However this connection ends, the tray stops showing a code it showed.
+    let tray_code = TrayCode::new(tray);
     let peer = link.peer.clone();
     // Versions first, before pairing: this exchange is the same in every version, so
     // a headset of any version learns which side to update.
@@ -336,12 +390,32 @@ fn accept_within(
                         wait.as_secs()
                     );
                 }
+                let _pairing = match PAIRING.try_lock() {
+                    Ok(guard) => guard,
+                    Err(TryLockError::Poisoned(e)) => e.into_inner(),
+                    Err(TryLockError::WouldBlock) => {
+                        info!("another headset is pairing: this one is told to wait");
+                        refuse(
+                            &mut conn,
+                            t(
+                                "Інший шолом саме сполучається з цим ПК. Спробуйте за хвилину.",
+                                "Another headset is pairing with this PC right now. Try again in a minute.",
+                            ),
+                        )?;
+                        // Its half of the exchange came with the request.
+                        if headset_shows {
+                            let _ = conn.recv();
+                        }
+                        continue;
+                    }
+                };
+                LIMITER.lock().unwrap().begin();
                 // The user needs time to read and type the code.
                 conn.set_idle_limit(PAIRING_TIME);
                 deadline.extend(PAIRING_TIME);
                 // `None`: no attempt (the dialog was cancelled or there is none), which
                 // is not a wrong code.
-                let paired = match obtain_code(headset_shows, tray) {
+                let paired = match obtain_code(headset_shows, &tray_code) {
                     Ok(code) => pair(&mut conn, &security.identity, &peer, &code).map(Some),
                     Err(NoCode::Cancelled) => refuse(
                         &mut conn,
@@ -364,9 +438,9 @@ fn accept_within(
                 if headset_shows && matches!(paired, Ok(None)) {
                     let _ = conn.recv();
                 }
-                // Every attempt that did not succeed counts towards the slowdown: a
-                // cancelled dialog or a broken exchange too, so a peer cannot keep
-                // the PC showing dialogs and codes for free.
+                // Every attempt that did not succeed counted towards the slowdown (from
+                // its start): a cancelled dialog or a broken exchange too, so a peer
+                // cannot keep the PC showing dialogs and codes for free.
                 let paired = match paired {
                     Ok(p) => p,
                     Err(e) => {
@@ -382,7 +456,7 @@ fn accept_within(
                     Some(true) => {
                         LIMITER.lock().unwrap().succeeded();
                         *PC_CODE.lock().unwrap() = None;
-                        tray::set_pairing(tray, None);
+                        tray_code.hide();
                         let label = if name.is_empty() {
                             "headset".into()
                         } else {
@@ -411,7 +485,7 @@ fn accept_within(
 
 /// The code for this attempt: typed on the PC (the headset shows it), or generated
 /// here and shown in the tray and a notification (the headset asks for it).
-fn obtain_code(headset_shows: bool, tray: Option<&tray::Handle>) -> Result<String, NoCode> {
+fn obtain_code(headset_shows: bool, tray: &TrayCode) -> Result<String, NoCode> {
     if headset_shows {
         return ask_code();
     }
@@ -428,7 +502,7 @@ fn obtain_code(headset_shows: bool, tray: Option<&tray::Handle>) -> Result<Strin
     let shown = format!("{} {}", &code[..3], &code[3..]);
     // Never into the log: whoever can read the journal could pair with it.
     info!("pairing code shown in the tray");
-    tray::set_pairing(tray, Some(shown.clone()));
+    tray.show(shown.clone());
     // Once per code: a peer asking again and again must not flood the desktop.
     if new {
         notify(
@@ -910,6 +984,26 @@ mod tests {
         assert!(pc.security.trusted.lock().unwrap().is_empty());
     }
 
+    /// The tests that show a code in the tray, one at a time (the tray's code is one).
+    static TRAY_TESTS: Mutex<()> = Mutex::new(());
+
+    /// A connection that ends leaves the tray's code alone unless it showed it: one
+    /// trusted headset connecting does not hide the code another is pairing with.
+    #[test]
+    fn only_the_connection_that_showed_the_code_hides_it() {
+        let _tray = TRAY_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let pairing = TrayCode::new(None);
+        pairing.show("123 456".into());
+        drop(TrayCode::new(None));
+        assert!(pairing.shows(), "another connection's end hid the code");
+        let later = TrayCode::new(None);
+        later.show("654 321".into());
+        drop(pairing);
+        assert!(later.shows(), "an earlier connection hid the newer code");
+        drop(later);
+        assert_eq!(*CODE_SHOWN_BY.lock().unwrap(), None);
+    }
+
     #[test]
     fn a_peer_version_is_short_and_plain() {
         assert_eq!(peer_version("0.2.0-beta+1"), "0.2.0-beta+1");
@@ -929,16 +1023,21 @@ mod tests {
             warned: true, // no notification from tests
         };
         for _ in 0..FREE_FAILURES {
+            l.begin();
             l.failed();
             assert!(l.wait().is_none());
         }
-        l.failed();
+        // Counted from its start: the pause holds while it runs.
+        l.begin();
         let first = l.wait().expect("a pause after the free ones");
         assert!(first > Duration::from_secs(25) && first <= Duration::from_secs(30));
+        // Its end does not count it again.
         l.failed();
+        assert!(l.wait().unwrap() <= Duration::from_secs(30));
+        l.begin();
         assert!(l.wait().unwrap() > first);
         for _ in 0..20 {
-            l.failed();
+            l.begin();
         }
         assert!(l.wait().unwrap() <= Duration::from_secs(900));
         l.succeeded();
@@ -1015,6 +1114,7 @@ mod tests {
     /// user types it in the headset, and the headset is trusted afterwards.
     #[test]
     fn code_shown_on_the_pc_pairs() {
+        let _tray = TRAY_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let mut pc = TestPc::new("pcc");
         let (accepted, (ok, opened)) = connect(&mut pc, |h| {
             assert!(matches!(h.hello(PROTOCOL_VERSION), Answer::Welcome { .. }));

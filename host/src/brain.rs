@@ -70,8 +70,9 @@ pub enum Phase {
     Idle,
     /// At least one session.
     Live(Clocks),
-    /// No session; the monitors wait for the headset to come back until `until`.
-    Lingering { until: Instant },
+    /// No session; the monitors wait for the headset to come back until `until`
+    /// (`None`: a time too far to reckon, so for good).
+    Lingering { until: Option<Instant> },
 }
 
 /// How the last session ended, for what comes after it.
@@ -96,7 +97,7 @@ impl Phase {
     pub fn last_session_ended(&mut self, how: LastEnded, now: Instant, linger: Duration) {
         *self = match how {
             LastEnded::Keep if !linger.is_zero() => Phase::Lingering {
-                until: now + linger,
+                until: now.checked_add(linger),
             },
             _ => Phase::Idle,
         };
@@ -107,14 +108,14 @@ impl Phase {
         match self {
             Phase::Idle => None,
             Phase::Live(clocks) => Some(clocks.next()),
-            Phase::Lingering { until } => Some(*until),
+            Phase::Lingering { until } => *until,
         }
     }
 
     /// At `now`: whether the monitors' time ran out (the phase is then `Idle`).
     pub fn expire(&mut self, now: Instant) -> bool {
         match *self {
-            Phase::Lingering { until } if now >= until => {
+            Phase::Lingering { until: Some(until) } if now >= until => {
                 *self = Phase::Idle;
                 true
             }
@@ -123,7 +124,24 @@ impl Phase {
     }
 }
 
-/// How many headsets may have a session at once (step 11 of 0.2.0 lifts it).
+/// How many headsets may have a session at once.
+///
+/// Accepting, admitting and keeping sessions (by the headset's key, each with its own
+/// number, reader and writer) already work for more than one. Raising this is not
+/// enough, though: these still assume a single headset, and are the next sub-step
+/// (step 11 of 0.2.0 needs them):
+/// - `displays::Router` has one outbox: `attach` replaces the headset it sends to,
+///   `detach` stops sending to anyone, and `publish` takes one headset's list;
+/// - `Session::start` fits the codec of every stream to this headset
+///   (`Displays::fit_codec`), stops what is too big for it (`stop_too_big`), and
+///   starts every stream over (`headset_connected`, which also clears "taken off");
+/// - `Session::finish` pauses every encoder (`set_streaming(false)`) and detaches the
+///   router for all, whichever headset left;
+/// - worn or not, and so "taken off" (`Displays::set_worn`, `taken_off_for`), the PC's
+///   end of the microphone (`set_mic`) and its pause are one for the desktop;
+/// - the tray's `Control.via`, `no_limits`, `mic_denied` and battery show one headset,
+///   and a session's end clears them for all;
+/// - commands from the tray and the test hook go to one session (the main one).
 pub const MAX_HEADSETS: usize = 1;
 
 /// What becomes of a headset that asked to open a session.
@@ -181,6 +199,20 @@ mod tests {
         assert_eq!(phase, Phase::Idle);
         assert_eq!(phase.due(), None);
         assert!(!phase.expire(t0 + LINGER * 2), "only once");
+    }
+
+    /// `--linger` as long as a number holds keeps the monitors for good instead of
+    /// overflowing the clock.
+    #[test]
+    fn a_linger_too_long_to_reckon_never_ends() {
+        let t0 = Instant::now();
+        let mut phase = Phase::Live(Clocks::new(t0));
+        phase.last_session_ended(LastEnded::Keep, t0, Duration::from_secs(u64::MAX));
+        assert_eq!(phase, Phase::Lingering { until: None });
+        assert_eq!(phase.due(), None, "no deadline");
+        assert!(!phase.expire(t0 + Duration::from_secs(3600 * 24 * 365)));
+        phase.session_opened(t0);
+        assert!(matches!(phase, Phase::Live(_)));
     }
 
     #[test]
