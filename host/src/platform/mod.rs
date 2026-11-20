@@ -186,12 +186,6 @@ impl std::fmt::Display for MonitorSpec {
 }
 
 /// What the tray asks the control loop to do.
-// `allow`, not `expect`: whether rustc reports the items the fake tray never makes
-// changes with code elsewhere in the fake build.
-#[cfg_attr(
-    feature = "fake-desktop",
-    allow(dead_code, reason = "the fake tray has only some of the items")
-)]
 pub enum TrayCommand {
     SetBitrate(u32),
     /// Clearer text at about 2 ms more encoding per frame.

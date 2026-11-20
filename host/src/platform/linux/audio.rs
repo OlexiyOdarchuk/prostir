@@ -38,7 +38,10 @@ pub fn prepare() {
     pulse::prepare(&["pw-cli"]);
 }
 
-/// A PipeWire node created with `pw-cli`; destroyed on drop.
+/// A PipeWire node created with `pw-cli`; destroyed on drop. WirePlumber keeps
+/// nothing of it (`state.restore-props=false`): the headset owns the level of its
+/// sound device, which a remembered volume or mute would only fight, and a node of a
+/// test leaves nothing behind.
 struct VirtualNode {
     name: &'static str,
 }
@@ -46,11 +49,7 @@ struct VirtualNode {
 impl VirtualNode {
     fn create(name: &'static str, description: &str, class: &str) -> Result<Self> {
         destroy_node(name); // left over from a crash
-        let props = format!(
-            "{{ factory.name=support.null-audio-sink node.name={name} \
-             node.description=\"{description}\" media.class={class} \
-             audio.position=[ FL FR ] audio.rate={AUDIO_RATE} object.linger=true }}"
-        );
+        let props = node_props(name, description, class);
         let out = run(
             Command::new("pw-cli").args(["create-node", "adapter", &props]),
             TIMEOUT,
@@ -68,6 +67,16 @@ impl VirtualNode {
         }
         bail!("PipeWire did not create {name}")
     }
+}
+
+/// What `pw-cli create-node adapter` makes a node of.
+fn node_props(name: &str, description: &str, class: &str) -> String {
+    format!(
+        "{{ factory.name=support.null-audio-sink node.name={name} \
+         node.description=\"{description}\" media.class={class} \
+         audio.position=[ FL FR ] audio.rate={AUDIO_RATE} object.linger=true \
+         state.restore-props=false }}"
+    )
 }
 
 impl Drop for VirtualNode {
@@ -445,6 +454,15 @@ mod tests {
         assert!(pa.iter().any(|a| a == "--device=feed"));
     }
 
+    /// WirePlumber stores nothing of the headset's sound device (its level is the
+    /// headset's, a stored one would fight it), nor of a harness's.
+    #[test]
+    fn the_sound_device_is_not_remembered() {
+        let props = node_props(SINK, "Prostir", "Audio/Sink");
+        assert!(props.contains("state.restore-props=false"), "{props}");
+        assert!(props.contains("node.name=prostir_headset "), "{props}");
+    }
+
     /// Nobody takes the sound: the session loop does not wait, at most a pipe's worth
     /// waits, and the rest is dropped in whole slices.
     #[test]
@@ -479,7 +497,7 @@ mod tests {
 mod mic_harness {
     //! Measures the headset microphone path on this PC's PipeWire (with its PulseAudio
     //! server, and `parecord`): `cargo test -p prostir-host -- --ignored mic_harness
-    //! --nocapture`. It makes its own devices (`prostir_test_mic_<pid>`, gone when it
+    //! --nocapture`. It makes its own devices (`prostir_test_mic`, gone when it
     //! ends), leaves Prostir's and the default input alone, and can run while Prostir
     //! does. It prints, for each case, how much sound was lost, old or late, and the
     //! latency the PC adds (with the recording app's 10 ms).
@@ -680,10 +698,10 @@ mod mic_harness {
     #[ignore]
     fn mic_harness() {
         let _ = env_logger::try_init();
-        let tag = std::process::id();
+        // Fixed names, as in `sound_harness`.
         let (name, feed) = (
-            format!("prostir_test_mic_{tag}"),
-            format!("prostir_test_feed_{tag}"),
+            "prostir_test_mic".to_owned(),
+            "prostir_test_feed".to_owned(),
         );
         let mic = MicIn::start_as(&name, &feed, false).unwrap();
         let mut hs = Headset {
@@ -804,7 +822,7 @@ mod mic_harness {
 #[cfg(test)]
 mod sound_harness {
     //! Follows this PC's PipeWire (through its PulseAudio server) as Prostir does, with
-    //! throwaway devices of its own (`prostir_test_sink_<pid>`, `prostir_test_mic_<pid>`,
+    //! throwaway devices of its own (`prostir_test_sink`, `prostir_test_mic`,
     //! gone when it ends): `cargo test -p prostir-host -- --ignored sound_harness
     //! --nocapture`. It leaves Prostir's devices, the defaults and every other volume
     //! alone, and can run while Prostir does. It prints how often the watcher woke while
@@ -912,11 +930,13 @@ mod sound_harness {
     #[ignore]
     fn sound_harness() {
         let _ = env_logger::try_init();
-        let tag = std::process::id();
-        let sink: &'static str = Box::leak(format!("prostir_test_sink_{tag}").into_boxed_str());
+        // Fixed names: WirePlumber keeps the volume of the microphone programs record
+        // from (as it should for Prostir's own), so a name of each run would leave an
+        // entry each time. One harness at a time.
+        let sink = "prostir_test_sink";
         let (mic_name, feed) = (
-            format!("prostir_test_mic_{tag}"),
-            format!("prostir_test_feed_{tag}"),
+            "prostir_test_mic".to_owned(),
+            "prostir_test_feed".to_owned(),
         );
         let (events, received) = crate::events::channel();
         // The watcher first, then the devices, as Prostir starts them.
