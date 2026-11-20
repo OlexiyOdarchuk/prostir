@@ -277,17 +277,27 @@ impl MicIn {
     /// [`watch`]). A recording that begins gets a fresh way in; one that ends takes
     /// whatever still waits with it. Said again while it records, a way in that broke
     /// (`pacat` stopped) is made anew.
+    ///
+    /// The headset's sound keeps coming meanwhile ([`MicIn::push`], from another
+    /// thread): the way in is made without holding it up, and only put in place then.
     pub fn set_recording(&self, on: bool) {
-        let mut feed = self.feed.lock().unwrap();
         if !on {
-            *feed = None;
-        } else if feed.is_none() {
-            // Full volume, not muted: whatever someone set on the internal input.
-            let _ = pactl(&["set-sink-mute", &self.feed_sink, "0"]);
-            let _ = pactl(&["set-sink-volume", &self.feed_sink, "100%"]);
-            *feed = Feed::start(&self.feed_sink)
-                .inspect_err(|e| warn!("no headset microphone: {e:#}"))
-                .ok();
+            let old = self.feed.lock().unwrap().take();
+            drop(old);
+            return;
+        }
+        if self.feed.lock().unwrap().is_some() {
+            return;
+        }
+        // Full volume, not muted: whatever someone set on the internal input.
+        let _ = pactl(&["set-sink-mute", &self.feed_sink, "0"]);
+        let _ = pactl(&["set-sink-volume", &self.feed_sink, "100%"]);
+        let new = Feed::start(&self.feed_sink)
+            .inspect_err(|e| warn!("no headset microphone: {e:#}"))
+            .ok();
+        let mut feed = self.feed.lock().unwrap();
+        if feed.is_none() {
+            *feed = new;
         }
     }
 }

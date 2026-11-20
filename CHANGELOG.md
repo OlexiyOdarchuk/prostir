@@ -81,7 +81,8 @@
 - A desktop that thinks or hangs (KScreen, KWin, a graphics driver starting or
   stopping an encoder) no longer holds anything else up: the headset's requests are
   answered at once, sound, the microphone, the menu and the tray go on, and the
-  monitors follow as soon as the desktop is ready. Switching the codec no longer
+  monitors follow as soon as the desktop is ready. The same for a sound system that
+  is slow to make the headset's sound device or microphone. Switching the codec no longer
   freezes the PC for seconds; a monitor that cannot encode with the new codec goes on
   with the one it had. A desktop that does not respond for 15 s is said in the
   headset, in the tray and by `prostir ctl status`; after 2 min Prostir quits with an

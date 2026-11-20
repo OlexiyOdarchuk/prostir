@@ -23,6 +23,7 @@
 
 mod inbox;
 mod run;
+pub mod sound;
 mod timed;
 pub mod watch;
 

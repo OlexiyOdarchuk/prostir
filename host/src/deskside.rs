@@ -13,6 +13,7 @@ use crate::displays::{DeskNews, Displays};
 use crate::events::Accepted;
 use crate::session::{Session, desktop_not_responding};
 use crate::worker::Done;
+use crate::worker::sound::SoundDone;
 use crate::worker::watch::Change;
 use crate::{Brain, keep_screens, requests, turn_away};
 
@@ -63,6 +64,20 @@ impl Brain {
             }
         }
         self.look_at_desk(Instant::now());
+    }
+
+    /// What the sound thread of the desktop worker `generation` made or let go of.
+    pub(crate) fn sound_devices(&mut self, generation: u64, done: SoundDone) {
+        let Some(displays) = self
+            .displays
+            .as_mut()
+            .filter(|d| d.generation() == generation)
+        else {
+            return done.let_go();
+        };
+        displays.sound_done(done);
+        // The microphone may be free to go to the main headset now.
+        self.headsets_changed();
     }
 
     /// A connection waits for the desktop's worker to connect before its session

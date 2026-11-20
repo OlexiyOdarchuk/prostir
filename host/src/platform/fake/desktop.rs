@@ -15,9 +15,10 @@
 //! - `record on`, `record off`: a program records from the headset's microphone;
 //! - `sound-events stop`: the sound system's events end, as when `pactl subscribe`
 //!   dies;
-//! - `hang make 20`, `hang place 20`, `hang encoder-stop 20`: the next monitor made,
-//!   layout placed or encoder stopped takes that many seconds, as a desktop or a
-//!   driver that hangs.
+//! - `hang make 20`, `hang place 20`, `hang encoder-stop 20`, `hang sound-start 20`:
+//!   the next monitor made, layout placed, encoder stopped or sound to the headset
+//!   started takes that many seconds, as a desktop, a driver or a sound system that
+//!   hangs.
 //!
 //! The PC's own displays are `PROSTIR_FAKE_PHYSICAL`: `CONNECTOR=EDID@WxH` separated
 //! by `;` (an empty EDID: the display says nothing), all plugged in at the start.
@@ -509,7 +510,12 @@ fn command(line: &str) -> Result<()> {
         }
         _ => {}
     }
-    if let ["hang", point @ ("make" | "place" | "encoder-stop"), secs] = words[..] {
+    if let [
+        "hang",
+        point @ ("make" | "place" | "encoder-stop" | "sound-start"),
+        secs,
+    ] = words[..]
+    {
         super::hang_next(point, Duration::from_secs(secs.parse()?));
         info!("fake desktop: the next {point} hangs for {secs} s");
         return Ok(());

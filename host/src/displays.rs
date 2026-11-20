@@ -20,12 +20,13 @@ use prostir_proto::{Codec, HostMsg};
 use crate::encoder::{Backend, EncoderConfig};
 use crate::errors::{Counted, UserError};
 use crate::events::EventSink;
-use crate::platform::audio::{self, AudioOut, MicIn};
-use crate::platform::sound::{MicAvailability, SoundStatus};
+use crate::platform::audio::{self, MicIn};
+use crate::platform::sound::{MicAvailability, OutputDevice, Route, SoundStatus};
 use crate::platform::{DesktopCaps, MonitorSpec, OutputKey, PhysicalDisplay, Scales, WindowList};
 use crate::router::Router;
 use crate::screen::{Screen, ScreenId, ScreenKind, ScreenState};
 use crate::store::{LEGACY_LAPTOP, Physical, PhysicalKey, SavedScreens, Settings};
+use crate::worker::sound::{Sound, SoundDone, SoundWanted};
 use crate::worker::{self, Desk, Done, Job, JobId, Layout, Primary, Wanted, WantedScreen, What};
 
 /// Monitors of versions before the counter were numbered from 0 (and their outputs
@@ -69,29 +70,6 @@ pub struct OutputEncoding {
     pub copies: bool,
     /// Why it is not the best this PC has for it, when it is not.
     pub note: Option<String>,
-}
-
-/// Retry timing after failures: 2 s, then doubling up to 2 min.
-#[derive(Default)]
-struct Backoff {
-    failures: u32,
-    next: Option<Instant>,
-}
-
-impl Backoff {
-    fn due(&self) -> bool {
-        self.next.is_none_or(|t| Instant::now() >= t)
-    }
-
-    fn failed(&mut self) {
-        self.failures += 1;
-        let secs = (2u64 << self.failures.min(6)).min(120);
-        self.next = Some(Instant::now() + Duration::from_secs(secs));
-    }
-
-    fn succeeded(&mut self) {
-        *self = Self::default();
-    }
 }
 
 /// A headset that waited this long for a fresh picture of a stream that sent nothing
@@ -147,13 +125,16 @@ pub struct Displays {
     too_big: BTreeMap<ScreenId, ((u32, u32), Codec)>,
     /// The settings as last applied from the store (see [`Displays::apply`]).
     settings: Settings,
-    /// PC sound to the headset, while one is connected.
-    audio: Option<AudioOut>,
-    mic: Option<MicIn>,
-    /// After a failed start, sound and microphone wait longer and longer before the
-    /// next attempt (starting them blocks the session for up to 2 s).
-    audio_retry: Backoff,
-    mic_retry: Backoff,
+    /// Where the PC's sound goes to the headset, while it does (the sound thread
+    /// makes it, see `worker/sound.rs`).
+    audio: Option<(Route, OutputDevice)>,
+    /// The headset microphone on the PC, shared with the sound thread, which made it
+    /// and lets it go (this share goes first).
+    mic: Option<Arc<MicIn>>,
+    /// Raised when the person switches sound or the microphone on: tried at once.
+    by_hand: u32,
+    /// Raised to have a recording's way in looked at again.
+    recheck: u32,
     /// The headset's microphone switch is on: the PC's end of it is there.
     mic_wanted: bool,
     /// Why the headset microphone could not be made on the PC, while it cannot.
@@ -183,6 +164,8 @@ pub struct Displays {
     focus: Option<ScreenId>,
     /// What the desktop is, once the worker connected to it.
     facts: Option<Facts>,
+    /// The sound thread (after `mic`: its share of the microphone goes last).
+    sound: Sound,
     /// The desktop's worker: dropped, it puts everything back (window panels first).
     desk: Desk,
 }
@@ -208,6 +191,7 @@ impl Displays {
             router.clone(),
             events.clone(),
         );
+        let sound = Sound::start(router.clone(), events.clone(), desk.generation());
         let mut displays = Self {
             screens: BTreeMap::new(),
             detaching: BTreeMap::new(),
@@ -218,8 +202,8 @@ impl Displays {
             settings: settings.clone(),
             audio: None,
             mic: None,
-            audio_retry: Backoff::default(),
-            mic_retry: Backoff::default(),
+            by_hand: 0,
+            recheck: 0,
             mic_wanted: false,
             mic_failed: None,
             recording: false,
@@ -240,6 +224,7 @@ impl Displays {
             manage_primary,
             focus: None,
             facts: None,
+            sound,
             desk,
         };
         // In the order of the rows, then any the rows leave out.
@@ -740,11 +725,11 @@ impl Displays {
     pub fn tick(&mut self) {
         self.router.report();
         self.sync_audio();
-        // A way in for a recording that broke is made anew (nothing is asked).
-        if self.recording
-            && let Some(mic) = &self.mic
-        {
-            mic.set_recording(true);
+        // A way in for a recording that broke is made anew (nothing is asked), on the
+        // sound thread.
+        if self.recording && self.mic.is_some() {
+            self.recheck += 1;
+            self.sync_audio();
         }
         self.stop_too_big();
         // A fresh picture asked of a stream that then stood still never came.
@@ -1085,7 +1070,7 @@ impl Displays {
         self.cfg.sharp = wanted.sharp;
         // Switched on by hand: tried right away.
         if wanted.audio != was.audio {
-            self.audio_retry.succeeded();
+            self.by_hand += 1;
         }
         self.sync_audio();
     }
@@ -1096,7 +1081,7 @@ impl Displays {
         if on != self.mic_wanted {
             self.mic_wanted = on;
             // Switched on by hand: tried right away.
-            self.mic_retry.succeeded();
+            self.by_hand += 1;
             self.sync_audio();
         }
     }
@@ -1110,9 +1095,9 @@ impl Displays {
     /// The sound system said a program began (`on`) or stopped recording from the
     /// headset's microphone: a recording gets its own way in for the headset's sound.
     pub fn set_recording(&mut self, on: bool) {
-        let Some(mic) = &self.mic else {
+        if self.mic.is_none() {
             return;
-        };
+        }
         if on != self.recording {
             info!(
                 "{}",
@@ -1124,7 +1109,39 @@ impl Displays {
             );
         }
         self.recording = on;
-        mic.set_recording(on);
+        // The sound thread tells the microphone (that runs `pactl`).
+        self.sync_audio();
+    }
+
+    /// What the sound thread made or let go of.
+    pub fn sound_done(&mut self, done: SoundDone) {
+        match done {
+            SoundDone::Audio(route, device) => {
+                self.audio = (self.streaming && self.settings.audio).then_some((route, device));
+            }
+            SoundDone::AudioOff => self.audio = None,
+            // Taken only while it is still wanted; else this share goes at once, and
+            // the thread lets the microphone go once it hears it is not wanted.
+            SoundDone::Mic(mic) => {
+                if self.streaming && self.mic_wanted {
+                    self.mic = Some(mic);
+                    self.mic_failed = None;
+                } else {
+                    crate::worker::sound::let_go_of_mic(mic);
+                }
+            }
+            SoundDone::MicFailed(why) => {
+                self.mic = None;
+                self.mic_failed = Some(why);
+            }
+            SoundDone::MicOff => self.mic = None,
+        }
+        self.sync_audio();
+    }
+
+    /// The desktop worker's number, which the sound thread's news carry too.
+    pub fn generation(&self) -> u64 {
+        self.desk.generation()
     }
 
     /// Where the PC's sound goes, and the headset microphone on the PC.
@@ -1138,8 +1155,8 @@ impl Displays {
             )),
         };
         SoundStatus {
-            route: self.audio.as_ref().map(AudioOut::route),
-            output: self.audio.as_ref().map(AudioOut::device),
+            route: self.audio.as_ref().map(|(route, _)| *route),
+            output: self.audio.as_ref().map(|(_, device)| device.clone()),
             mic,
         }
     }
@@ -1540,40 +1557,25 @@ impl Displays {
         {
             self.sound_events = audio::watch(events.clone());
         }
-        if audio && self.audio.is_none() && self.audio_retry.due() {
-            let router = self.router.clone();
-            match AudioOut::start(move |pcm| router.send_audio(pcm)) {
-                Ok(a) => {
-                    self.audio = Some(a);
-                    self.audio_retry.succeeded();
-                }
-                Err(e) => {
-                    warn!("no sound in the headset: {e:#}");
-                    self.audio_retry.failed();
-                }
-            }
-        } else if !audio {
+        if !audio {
             self.audio = None;
         }
-        if mic && self.mic.is_none() && self.mic_retry.due() {
-            match MicIn::start() {
-                Ok(m) => {
-                    self.mic = Some(m);
-                    self.mic_failed = None;
-                    self.mic_retry.succeeded();
-                }
-                Err(e) => {
-                    warn!("no headset microphone: {e:#}");
-                    self.mic_failed = Some(MicAvailability::of_failure(&e));
-                    self.mic_retry.failed();
-                }
-            }
-        } else if !mic {
-            self.mic = None;
+        // This share of the microphone goes before the thread is told, so letting it go
+        // (`pactl`, `pw-loopback`) happens there; on a thread of its own all the same,
+        // should the sound thread have let its share go first.
+        if !mic && let Some(share) = self.mic.take() {
+            crate::worker::sound::let_go_of_mic(share);
         }
         if self.mic.is_none() {
             self.recording = false;
         }
+        self.sound.want(SoundWanted {
+            audio,
+            mic,
+            recording: self.recording,
+            recheck: self.recheck,
+            by_hand: self.by_hand,
+        });
         // Kept while sound or the microphone is wanted, even while neither could be
         // made (they are tried again): a watcher that came and went with every try
         // would start `pactl` again and again.

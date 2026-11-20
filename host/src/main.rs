@@ -349,6 +349,7 @@ impl Brain {
             // The next pass shows it.
             Event::Pairing => {}
             Event::Desk(generation, done) => self.desk(generation, done),
+            Event::SoundDevices(generation, done) => self.sound_devices(generation, done),
             Event::Quit => self.quit = true,
         }
     }
@@ -903,8 +904,14 @@ impl Brain {
         if self.desk_gave_up {
             return Some(1);
         }
-        // The desktop's worker puts the monitors and windows back.
-        if !worker::wait_gone(DESK_GONE) {
+        // The desktop's worker puts the monitors and windows back, the sound thread the
+        // sound.
+        let until = Instant::now() + DESK_GONE;
+        let sound_back = worker::sound::wait_gone(until.saturating_duration_since(Instant::now()));
+        if !sound_back {
+            warn!("the sound did not go back to the PC in time");
+        }
+        if !worker::wait_gone(until.saturating_duration_since(Instant::now())) {
             warn!("the desktop did not take the monitors back in time: quitting without them");
             return Some(0);
         }

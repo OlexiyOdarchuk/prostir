@@ -297,3 +297,31 @@ fn an_encoder_that_keeps_hanging_is_not_used_any_more() {
     assert_eq!(pc.count_log("does not respond:"), 0);
     assert!(!headset.view().closed);
 }
+
+/// Starting the PC's sound to the headset hangs (the sound system stuck for 6 s): the
+/// control loop does not wait for it; the sound comes once it is there.
+#[test]
+fn a_hung_sound_system_holds_nothing_up() {
+    let (_dir, mut pc, _keys, mut headset) = session("desk-sound", &Options::default());
+    headset.take_for(Duration::from_secs(1)).unwrap();
+    let off = ask_at_once(&mut headset, Request::SetSound { to_headset: false });
+    assert_eq!(off, Outcome::Done);
+    headset.take_for(Duration::from_secs(1)).unwrap();
+    pc.desktop("hang sound-start 6");
+    pc.wait_log(SOON, "the next sound-start hangs for 6 s");
+    let on = ask_at_once(&mut headset, Request::SetSound { to_headset: true });
+    assert_eq!(on, Outcome::Done);
+    pc.wait_log(SOON, "fake desktop: sound-start hangs for 6 s");
+    let before = headset.view().audio_bytes;
+    let pings = headset.view().pings;
+    for _ in 0..3 {
+        let done = ask_at_once(&mut headset, Request::SetSound { to_headset: true });
+        assert_eq!(done, Outcome::Done);
+        headset.take_for(Duration::from_millis(500)).unwrap();
+    }
+    assert!(headset.view().pings > pings, "no ping while the sound hung");
+    headset
+        .wait(SOON, "the sound comes", |v| v.audio_bytes > before + 10_000)
+        .unwrap();
+    assert!(!headset.view().closed);
+}

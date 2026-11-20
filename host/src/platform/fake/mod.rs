@@ -283,6 +283,7 @@ pub mod audio {
             if std::env::var_os("PROSTIR_FAKE_NO_SOUND").is_some_and(|v| v == "1") {
                 anyhow::bail!("the fake desktop makes no sound device (PROSTIR_FAKE_NO_SOUND)");
             }
+            super::hang("sound-start");
             let stop = Arc::new(AtomicBool::new(false));
             let stopped = stop.clone();
             std::thread::Builder::new()
