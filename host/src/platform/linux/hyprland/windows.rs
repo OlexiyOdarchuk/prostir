@@ -12,7 +12,20 @@ use crate::platform::linux::screenshot;
 use crate::platform::{ActiveWindow, AppWindow, OutputKey, Pointer, WindowList, Windows};
 
 /// Hyprland's windows and mouse, for the core.
-pub struct HyprWindows;
+pub struct HyprWindows {
+    list: Arc<HyprWindowList>,
+}
+
+impl HyprWindows {
+    pub fn new() -> Self {
+        Self {
+            list: Arc::new(HyprWindowList),
+        }
+    }
+}
+
+/// Every window, asked of Hyprland from any thread.
+struct HyprWindowList;
 
 impl Windows for HyprWindows {
     fn active(&mut self) -> Option<ActiveWindow> {
@@ -47,7 +60,7 @@ impl Windows for HyprWindows {
     }
 
     fn list(&self) -> Arc<dyn WindowList> {
-        Arc::new(HyprWindows)
+        self.list.clone()
     }
 }
 
@@ -61,7 +74,7 @@ impl Pointer for HyprWindows {
     }
 }
 
-impl WindowList for HyprWindows {
+impl WindowList for HyprWindowList {
     fn all(&self) -> Vec<AppWindow> {
         all_windows()
     }

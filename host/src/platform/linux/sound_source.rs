@@ -5,7 +5,7 @@
 
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -19,8 +19,8 @@ pub struct Watcher {
 }
 
 impl Watcher {
-    /// Looks with `windows`, the desktop's list of windows; without one (a desktop
-    /// with no windows), nothing is ever found.
+    /// Looks with `windows`, the desktop's list of windows, while the desktop keeps it;
+    /// without one (a desktop with no windows), nothing is ever found.
     pub fn start(windows: Option<Arc<dyn WindowList>>) -> Self {
         let on = Arc::new(AtomicBool::new(true));
         let found = Arc::new(Mutex::new(None));
@@ -28,11 +28,18 @@ impl Watcher {
         let Some(windows) = windows else {
             return Self { on, found };
         };
+        // Held weakly: what the list holds (KWin's reports on D-Bus) goes with the
+        // desktop, not with this thread.
+        let windows: Weak<dyn WindowList> = Arc::downgrade(&windows);
         let _ = std::thread::Builder::new()
             .name("sound-source".into())
             .spawn(move || {
                 while running.load(Ordering::Relaxed) {
-                    let now = output(windows.as_ref());
+                    let Some(list) = windows.upgrade() else {
+                        break;
+                    };
+                    let now = output(list.as_ref());
+                    drop(list);
                     *slot.lock().unwrap() = now;
                     std::thread::sleep(Duration::from_millis(1500));
                 }

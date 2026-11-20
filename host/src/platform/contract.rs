@@ -111,7 +111,8 @@ pub trait Windows {
     fn screenshot(&mut self, output: Option<&OutputKey>) -> Result<PathBuf>;
 
     /// Every window, for a thread of its own (the one that looks where sound comes
-    /// from). It may be asked after the desktop is gone: it holds what it needs.
+    /// from). The desktop keeps it: such a thread holds it weakly, and stops once the
+    /// desktop is gone.
     fn list(&self) -> Arc<dyn WindowList>;
 }
 

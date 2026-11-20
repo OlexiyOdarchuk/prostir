@@ -612,7 +612,7 @@ impl Hyprland {
                 // Hyprland keeps headless outputs after the program that made them.
                 cleans_up_after_crash: false,
             },
-            windows: HyprWindows,
+            windows: HyprWindows::new(),
             rules,
         }
     }
