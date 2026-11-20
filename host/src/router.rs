@@ -234,6 +234,9 @@ pub struct Router {
     pub failed: AtomicBool,
     /// Displays of the PC whose stream broke, to start again.
     broken: Mutex<Vec<ScreenId>>,
+    /// Streams whose encoder did not open, with why: each goes on with the next
+    /// encoder for it (see `Displays::tick`).
+    unopened: Mutex<Vec<(ScreenId, String)>>,
     /// Streams larger than every headset decodes, with their size and codec, for
     /// `Displays` to mark them failed.
     too_big: Mutex<Vec<TooBig>>,
@@ -249,6 +252,7 @@ impl Router {
             }),
             failed: AtomicBool::new(false),
             broken: Mutex::new(Vec::new()),
+            unopened: Mutex::new(Vec::new()),
             too_big: Mutex::new(Vec::new()),
             snapshot: Mutex::new(None),
         }
@@ -580,6 +584,8 @@ impl Router {
     /// starts over with a new encoder making `codec`: every headset gets it announced
     /// anew, and one that had it is told when it ends.
     pub fn add_stream(&self, id: ScreenId, codec: Codec, name: String, physical: bool) {
+        // What an encoder before this one said is no news of the new one.
+        self.unopened.lock().unwrap().retain(|(i, _)| *i != id);
         let mut inner = self.inner.lock().unwrap();
         let slot = StreamSlot {
             name,
@@ -608,6 +614,11 @@ impl Router {
     /// Displays of the PC whose stream broke since the last call.
     pub fn take_broken(&self) -> Vec<ScreenId> {
         std::mem::take(&mut *self.broken.lock().unwrap())
+    }
+
+    /// Streams whose encoder did not open since the last call, with why.
+    pub fn take_unopened(&self) -> Vec<(ScreenId, String)> {
+        std::mem::take(&mut *self.unopened.lock().unwrap())
     }
 
     /// Stream `id` stops: every headset that had it hears so.
@@ -731,6 +742,11 @@ impl Router {
                 } else {
                     self.failed.store(true, Ordering::Relaxed);
                 }
+                false
+            }
+            // Not the end of anything: `Displays` starts the next encoder for it.
+            EncoderEvent::Unopened(reason) => {
+                self.unopened.lock().unwrap().push((id, reason));
                 false
             }
             EncoderEvent::Frame {

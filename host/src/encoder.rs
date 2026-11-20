@@ -1,5 +1,12 @@
 //! Frames from the platform (a PipeWire node, a capture) → hardware encoder → encoded
 //! access units, via GStreamer.
+//!
+//! Each output gets its own encoder, picked for where its frames live
+//! ([`crate::platform::FrameSource::memory`]) so they stay on the graphics card
+//! (`choice.rs`), from the encoders this PC was found to have (`probe.rs`, kept in the
+//! cache directory), all sharing one graphics device per card (`gpu.rs`). An encoder
+//! that does not open goes on to the next one for that output only: `Displays` hears
+//! of it as [`EncoderEvent::Unopened`] and learns the encoder's session limit from it.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -15,101 +22,68 @@ use gstreamer_video as gst_video;
 use log::{debug, error, info, warn};
 use prostir_proto::Codec;
 
+mod choice;
 mod gpu;
+mod probe;
 
+pub use choice::{Backend, Kind, Wanted, note};
 pub use gpu::GpuDevices;
+pub use probe::catalog;
+#[cfg(not(feature = "fake-desktop"))]
+pub use probe::file_identity;
 
-/// Which hardware (or the CPU) encodes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Backend {
-    /// VA-API: Intel and AMD graphics.
-    Va,
-    /// NVENC through GStreamer's nvcodec plugin: NVIDIA graphics with its own driver.
-    Nvenc,
-    /// x264 on the CPU (gst-plugins-ugly): works anywhere, costs CPU time.
-    X264,
-}
+use crate::platform::AdapterId;
 
 impl Backend {
     /// The GStreamer elements it encodes `codec` with; none for a codec it cannot
-    /// encode (AV1: no encoder of Prostir makes it yet).
+    /// encode (AV1: no encoder of Prostir makes it yet). The encoder is the last.
     fn elements(self, codec: Codec) -> Option<&'static [&'static str]> {
         Some(match (self, codec) {
             (Self::Va, Codec::H265) => &["vapostproc", "vah265enc"],
             (Self::Va, Codec::H264) => &["vapostproc", "vah264enc"],
-            (Self::Nvenc, Codec::H265) => &["nvh265enc"],
-            (Self::Nvenc, Codec::H264) => &["nvh264enc"],
-            (Self::X264, Codec::H264) => &["x264enc"],
+            (Self::Nvenc, Codec::H265) => &["videoconvert", "nvh265enc"],
+            (Self::Nvenc, Codec::H264) => &["videoconvert", "nvh264enc"],
+            (Self::X264, Codec::H264) => &["videoconvert", "x264enc"],
+            // Windows (step 11c), as the prototype ran them: the card's own encoders
+            // take the capture's textures as they are, Media Foundation in NV12.
+            (Self::NvencD3d11, Codec::H265) => &["nvd3d11h265enc"],
+            (Self::NvencD3d11, Codec::H264) => &["nvd3d11h264enc"],
+            (Self::Amf, Codec::H265) => &["amfh265enc"],
+            (Self::Amf, Codec::H264) => &["amfh264enc"],
+            (Self::Qsv, Codec::H265) => &["qsvh265enc"],
+            (Self::Qsv, Codec::H264) => &["qsvh264enc"],
+            (Self::MediaFoundation, Codec::H265) => &["d3d11convert", "mfh265enc"],
+            (Self::MediaFoundation, Codec::H264) => &["d3d11convert", "mfh264enc"],
+            #[cfg(feature = "fake-desktop")]
+            (Self::Fake, Codec::H264) => &["videoconvert", "x264enc"],
+            #[cfg(feature = "fake-desktop")]
+            (Self::Fake, Codec::H265) => return None,
             (_, Codec::Av1) | (Self::X264, Codec::H265) => return None,
         })
     }
-
-    /// Whether this PC has what it takes to encode `codec` with it.
-    fn can(self, codec: Codec) -> bool {
-        self.elements(codec)
-            .is_some_and(|e| e.iter().all(|e| gst::ElementFactory::find(e).is_some()))
-    }
-
-    /// Whether the encoder takes frames straight from GPU buffers (dmabuf).
-    pub fn takes_dmabuf(self) -> bool {
-        self == Self::Va
-    }
 }
 
-/// What this PC can encode with: each codec, and whether on the graphics card.
-pub fn available() -> Vec<(Codec, bool)> {
-    let mut choices = Vec::new();
-    for codec in [Codec::H265, Codec::H264, Codec::Av1] {
-        if Backend::Va.can(codec) || Backend::Nvenc.can(codec) {
-            choices.push((codec, true));
-        }
-        if Backend::X264.can(codec) {
-            choices.push((codec, false));
-        }
-    }
-    choices
-}
-
-/// Picks the first encoder this PC has: VA-API, then NVENC, then x264 on the CPU, in
-/// the preferred codec first. `software` forces x264. The error names what to install.
-pub fn pick(prefer: Codec, software: bool) -> Result<(Backend, Codec)> {
-    // The preferred codec first, then the others from the sharpest.
-    let mut codecs = vec![prefer];
-    codecs.extend(
-        [Codec::H265, Codec::H264]
-            .into_iter()
-            .filter(|c| *c != prefer),
-    );
-    let mut order = Vec::new();
-    if !software {
-        for backend in [Backend::Va, Backend::Nvenc] {
-            order.extend(codecs.iter().map(|c| (backend, *c)));
-        }
-    }
-    order.push((Backend::X264, Codec::H264));
-    let parser = |codec| match codec {
+/// The parser after the encoder of `codec`.
+fn parser(codec: Codec) -> &'static str {
+    match codec {
         Codec::H265 => "h265parse",
         Codec::H264 => "h264parse",
         Codec::Av1 => "av1parse",
-    };
-    let found = order.into_iter().find(|(backend, codec)| {
-        backend.can(*codec) && gst::ElementFactory::find(parser(*codec)).is_some()
-    });
-    found.ok_or_else(|| {
-        anyhow!(
-            "{}",
-            crate::i18n::t(
-                "На ПК немає відеокодувальника. Intel чи AMD: встановіть VA-плагін GStreamer \
-                 (gst-plugin-va або gst-plugins-bad) і VA-драйвер. NVIDIA: драйвер NVIDIA і \
-                 nvcodec з gst-plugins-bad. Будь-яка відеокарта: gst-plugins-ugly (x264, \
-                 кодування процесором).",
-                "No video encoder on the PC. Intel or AMD: install the GStreamer VA plugin \
-                 (gst-plugin-va or gst-plugins-bad) and a VA driver. NVIDIA: the NVIDIA driver \
-                 and nvcodec from gst-plugins-bad. Any graphics: gst-plugins-ugly (x264, \
-                 encoding on the CPU).",
-            )
-        )
-    })
+    }
+}
+
+/// What this PC can encode with: each codec, and whether on the graphics card, as the
+/// encoders' probes found (see `probe.rs`).
+pub fn available() -> Vec<(Codec, bool)> {
+    catalog().available()
+}
+
+/// The encoder this PC encodes with when nothing is known of the frames: VA-API, then
+/// NVENC, then x264 on the CPU, in the preferred codec first, as their probes found
+/// them. `software` forces x264. The error names what to install. Each output then
+/// gets its own encoder for where its frames are (`Catalog::rank`).
+pub fn pick(prefer: Codec, software: bool) -> Result<(Backend, Codec)> {
+    catalog().pick(prefer, software)
 }
 
 #[derive(Debug, Clone)]
@@ -141,6 +115,9 @@ pub enum EncoderEvent {
         data: Vec<u8>,
     },
     Failed(String),
+    /// The encoder itself failed before its first frame: it did not open (no more
+    /// sessions, a size or format its driver does not take). Another encoder may.
+    Unopened(String),
 }
 
 pub struct Encoder {
@@ -155,6 +132,15 @@ pub struct Encoder {
     /// It takes frames straight from GPU buffers (dmabuf), so a capture hands it those.
     takes_dmabuf: bool,
     bus_thread: Option<JoinHandle<()>>,
+    kind: Kind,
+    codec: Codec,
+    /// It has encoded a frame since it last started.
+    encoded: Arc<AtomicBool>,
+    /// What to say of the encoder this output got, when it is not the best for it.
+    note: Option<String>,
+    /// A fake hardware encoder that opened, counted until dropped.
+    #[cfg(feature = "fake-desktop")]
+    fake_open: bool,
 }
 
 /// Where the frames come from: the start of the pipeline, made by the platform (a
@@ -169,11 +155,37 @@ pub struct Input {
 }
 
 fn pipeline_description(input: &Input, cfg: &EncoderConfig) -> Result<String> {
+    Ok(format!(
+        "{} ! appsink name=sink sync=false max-buffers=8",
+        encoding(input, cfg)?
+    ))
+}
+
+/// The pipeline from the source to the encoded frames, without the sink.
+fn encoding(input: &Input, cfg: &EncoderConfig) -> Result<String> {
     let source = &input.source;
     let (encoder, parser, caps) = match (cfg.codec, cfg.backend) {
         (Codec::Av1, _) | (Codec::H265, Backend::X264) => {
             bail!("no encoder for {:?} on {:?}", cfg.codec, cfg.backend)
         }
+        (_, Backend::NvencD3d11 | Backend::Amf | Backend::Qsv | Backend::MediaFoundation) => {
+            bail!("{} is for Windows (step 11c)", cfg.backend.label())
+        }
+        // x264 underneath; one more than its sessions lets no frame through, and its
+        // encoder says it did not open (see `Encoder::start`).
+        #[cfg(feature = "fake-desktop")]
+        (Codec::H265, Backend::Fake) => bail!("the fake encoder makes H.264 only"),
+        #[cfg(feature = "fake-desktop")]
+        (Codec::H264, Backend::Fake) => (
+            format!(
+                "videoconvert name=enc_in ! video/x-raw,format=I420 ! valve drop={} ! x264enc name=enc tune=zerolatency speed-preset=superfast \
+                 bitrate={} key-int-max=600 bframes=0",
+                !probe::fake::opens(),
+                cfg.bitrate_kbps
+            ),
+            "h264parse config-interval=-1",
+            "video/x-h264,stream-format=byte-stream,alignment=au,profile=high",
+        ),
         (Codec::H264, Backend::X264) => (
             format!(
                 "videoconvert name=enc_in ! video/x-raw,format=I420 ! x264enc name=enc tune=zerolatency speed-preset=superfast \
@@ -223,16 +235,18 @@ fn pipeline_description(input: &Input, cfg: &EncoderConfig) -> Result<String> {
         ),
     };
     Ok(format!(
-        "{source} ! queue max-size-buffers=2 leaky=downstream ! {encoder} ! {parser} ! {caps} ! appsink name=sink sync=false max-buffers=8"
+        "{source} ! queue max-size-buffers=2 leaky=downstream ! {encoder} ! {parser} ! {caps}"
     ))
 }
 
 impl Encoder {
-    /// An encoder with `cfg`, taking its graphics device from `gpu`. `on_event` returns
-    /// `true` when the receiver needs a keyframe (e.g. it had to drop frames).
+    /// An encoder with `cfg` on card `adapter` (none: the one its driver picks), taking
+    /// its graphics device from `gpu`. `on_event` returns `true` when the receiver needs
+    /// a keyframe (e.g. it had to drop frames).
     pub fn start(
         input: &Input,
         cfg: &EncoderConfig,
+        adapter: Option<AdapterId>,
         gpu: &GpuDevices,
         on_event: impl Fn(EncoderEvent) -> bool + Send + Sync + 'static,
     ) -> Result<Self> {
@@ -250,6 +264,8 @@ impl Encoder {
         gpu.share_with(&pipeline);
 
         let on_event = Arc::new(on_event);
+        // Nothing encoded yet: an error of the encoder now means it did not open.
+        let encoded = Arc::new(AtomicBool::new(false));
         let last_size = std::sync::Mutex::new((0u32, 0u32));
         let probe = Arc::new(Mutex::new(Probe::default()));
         // Frames enter the encoder in order and (no B-frames) leave in order, so a FIFO
@@ -267,10 +283,12 @@ impl Encoder {
         {
             let on_event = on_event.clone();
             let node = node.clone();
+            let encoded = encoded.clone();
             sink.set_callbacks(
                 gst_app::AppSinkCallbacks::builder()
                     .new_sample(move |sink| {
                         let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                        encoded.store(true, Ordering::Relaxed);
                         if let Some(info) =
                             sample.caps().and_then(|c| c.structure(0)).and_then(|s| {
                                 Some((
@@ -315,6 +333,7 @@ impl Encoder {
         let bus_thread = {
             let stop = stop.clone();
             let on_event = on_event.clone();
+            let encoded = encoded.clone();
             std::thread::Builder::new()
                 .name(format!("gst-bus-{node}"))
                 .spawn(move || {
@@ -329,8 +348,18 @@ impl Encoder {
                         match msg.view() {
                             gst::MessageView::Error(e) => {
                                 let text = format!("{} ({:?})", e.error(), e.debug());
-                                error!("encoder for {node}: {text}");
-                                on_event(EncoderEvent::Failed(text));
+                                // The encoder (or its converter) before its first frame:
+                                // it did not open, and another encoder may.
+                                let by_encoder = msg
+                                    .src()
+                                    .is_some_and(|s| matches!(s.name().as_str(), "enc" | "enc_in"));
+                                if by_encoder && !encoded.load(Ordering::Relaxed) {
+                                    warn!("encoder for {node} did not open: {text}");
+                                    on_event(EncoderEvent::Unopened(e.error().to_string()));
+                                } else {
+                                    error!("encoder for {node}: {text}");
+                                    on_event(EncoderEvent::Failed(text));
+                                }
                                 break;
                             }
                             gst::MessageView::Warning(w) => {
@@ -349,6 +378,8 @@ impl Encoder {
         let restart_on_resume = pipeline.by_name("src").is_none();
         // Built first, so a failed start below stops the bus thread and the pipeline
         // through Drop instead of leaking them.
+        #[cfg(feature = "fake-desktop")]
+        let fake_open = cfg.backend == Backend::Fake && probe::fake::opens();
         let encoder = Self {
             pipeline,
             sink,
@@ -357,12 +388,64 @@ impl Encoder {
             restart_on_resume,
             takes_dmabuf: cfg.backend.takes_dmabuf(),
             bus_thread: Some(bus_thread),
+            kind: (cfg.backend, adapter),
+            codec: cfg.codec,
+            encoded,
+            note: None,
+            #[cfg(feature = "fake-desktop")]
+            fake_open,
         };
+        #[cfg(feature = "fake-desktop")]
+        if fake_open {
+            probe::fake::OPEN.fetch_add(1, Ordering::Relaxed);
+        }
         encoder
             .pipeline
             .set_state(gst::State::Playing)
             .context("cannot start encoder pipeline")?;
+        // One more fake hardware encoder than it opens says so, as a real one does once
+        // it has the first frame's format.
+        #[cfg(feature = "fake-desktop")]
+        if cfg.backend == Backend::Fake
+            && !fake_open
+            && let Some(enc) = encoder.pipeline.by_name("enc")
+        {
+            gst::element_error!(
+                enc,
+                gst::ResourceError::NoSpaceLeft,
+                ("no more encoder sessions")
+            );
+        }
         Ok(encoder)
+    }
+
+    /// The encoder it runs, to count sessions by.
+    pub fn kind(&self) -> Kind {
+        self.kind
+    }
+
+    /// The codec it makes.
+    pub fn codec(&self) -> Codec {
+        self.codec
+    }
+
+    /// Whether it has encoded a frame (so it opened).
+    pub fn opened(&self) -> bool {
+        self.encoded.load(Ordering::Relaxed)
+    }
+
+    /// Whether it is paused now (the headset is off).
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
+
+    /// What to say of the encoder this output got (see [`note`]).
+    pub fn note(&self) -> Option<&str> {
+        self.note.as_deref()
+    }
+
+    pub fn set_note(&mut self, note: Option<String>) {
+        self.note = note;
     }
 
     /// The `appsrc` to push frames into, when the input has one.
@@ -424,6 +507,8 @@ impl Encoder {
             // in the headset stays frozen, or a headset that just connected gets no
             // monitors): connected again, the source sends the current picture at once.
             let _ = self.pipeline.set_state(gst::State::Null);
+            // It opens again with the first frame.
+            self.encoded.store(false, Ordering::Relaxed);
         }
         let _ = self.pipeline.set_state(state);
         if !paused {
@@ -458,6 +543,10 @@ impl Drop for Encoder {
         let _ = self.pipeline.set_state(gst::State::Null);
         if let Some(t) = self.bus_thread.take() {
             let _ = t.join();
+        }
+        #[cfg(feature = "fake-desktop")]
+        if self.fake_open {
+            probe::fake::OPEN.fetch_sub(1, Ordering::Relaxed);
         }
     }
 }

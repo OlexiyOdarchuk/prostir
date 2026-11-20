@@ -13,7 +13,7 @@ use prostir_layout::desk;
 use prostir_proto::state;
 use prostir_proto::{Codec, HostMsg};
 
-use crate::encoder::{Encoder, EncoderConfig, GpuDevices};
+use crate::encoder::{Backend, Encoder, EncoderConfig, GpuDevices, Kind, Wanted};
 use crate::errors::{Counted, UserError, code_of};
 use crate::layout::panel_size;
 use crate::platform::audio::{AudioOut, MicIn};
@@ -372,10 +372,6 @@ impl Displays {
         };
         let result = match started {
             Ok((output, encoder)) => {
-                // Made while the headset is off: paused like the others.
-                if !self.streaming {
-                    encoder.set_paused(true);
-                }
                 screen.output = Some(output);
                 screen.stream = Some(encoder);
                 screen.state = ScreenState::Running;
@@ -458,8 +454,11 @@ impl Displays {
             .inspect_err(|_| self.router.remove_stream(id))
     }
 
-    /// A new encoder with `cfg` for stream `id`, fed by `output`. The stream's slot
-    /// starts over with it, and stays when this fails.
+    /// A new encoder for stream `id`, fed by `output`: the best this PC has for where
+    /// the output's frames are, in `cfg`'s codec (only x264 when `cfg` encodes on the
+    /// CPU), else the next one, in H.264 if need be (see `encoder/choice.rs`). The
+    /// stream's slot starts over with it, and stays when this fails. Made while the
+    /// headset is off, it starts paused like the others.
     fn start_encoder(
         &self,
         id: ScreenId,
@@ -470,13 +469,127 @@ impl Displays {
             .screens
             .get(&id)
             .map_or((id.to_string(), false), |s| (s.name(), s.is_physical()));
-        self.router.add_stream(id, cfg.codec, name, physical);
-        let router = self.router.clone();
-        let encoder = Encoder::start(&output.source().input, cfg, &self.gpu, move |ev| {
-            router.on_event(id, ev)
-        })?;
-        output.attach(&encoder)?;
-        Ok(encoder)
+        let source = output.source();
+        let wanted = Wanted {
+            codec: cfg.codec,
+            software: cfg.backend == Backend::X264,
+        };
+        let running = self.running_encoders(&[id]);
+        let ranked = crate::encoder::catalog().rank(source.memory, wanted, &|kind| {
+            running.get(&kind).copied().unwrap_or(0)
+        });
+        let mut tried = Vec::new();
+        for choice in &ranked.choices {
+            let cfg = EncoderConfig {
+                backend: choice.backend,
+                codec: choice.codec,
+                ..cfg.clone()
+            };
+            self.router
+                .add_stream(id, choice.codec, name.clone(), physical);
+            let router = self.router.clone();
+            let started =
+                Encoder::start(&source.input, &cfg, choice.adapter, &self.gpu, move |ev| {
+                    router.on_event(id, ev)
+                });
+            let mut encoder = match started {
+                Ok(encoder) => encoder,
+                Err(e) => {
+                    warn!("{name}: {choice} did not start: {e:#}");
+                    tried.push((*choice, format!("{e:#}")));
+                    continue;
+                }
+            };
+            output.attach(&encoder)?;
+            let note = crate::encoder::note(choice, wanted, &ranked.skipped, &tried);
+            match &note {
+                Some(note) => warn!("{name}: encoding with {note}"),
+                None => info!("{name}: encoding with {choice}"),
+            }
+            encoder.set_note(note);
+            if !self.streaming {
+                encoder.set_paused(true);
+            }
+            return Ok(encoder);
+        }
+        let mut why: Vec<String> = ranked
+            .skipped
+            .iter()
+            .map(|((b, _), skip)| format!("{}: {}", b.label(), skip.text()))
+            .chain(tried.iter().map(|(c, e)| format!("{c}: {e}")))
+            .collect();
+        if why.is_empty() {
+            why.push(
+                crate::encoder::pick(cfg.codec, wanted.software)
+                    .err()
+                    .map_or_else(
+                        || {
+                            t(
+                                "немає кодувальника для цього виходу",
+                                "no encoder for this output",
+                            )
+                            .to_owned()
+                        },
+                        |e| e.to_string(),
+                    ),
+            );
+        }
+        bail!("{}", why.join("; "))
+    }
+
+    /// Sessions each encoder holds now, those of the screens `except` left out: every
+    /// stream that opened, or is opening (it runs, and has not said it did not open).
+    fn running_encoders(&self, except: &[ScreenId]) -> BTreeMap<Kind, u32> {
+        let mut running = BTreeMap::new();
+        for s in self.screens.values().filter(|s| !except.contains(&s.id)) {
+            if let Some(e) = s.stream.as_ref().filter(|e| e.opened() || !e.is_paused()) {
+                *running.entry(e.kind()).or_insert(0) += 1;
+            }
+        }
+        running
+    }
+
+    /// Streams whose encoder did not open go on with the next encoder for them: one
+    /// that did not open while others of it held sessions opens as many as those (kept
+    /// for the next runs; the least such count wins, so several not opening at once
+    /// settle on it), one that did not open alone is not tried again this run.
+    fn retry_unopened(&mut self) {
+        let unopened = self.router.take_unopened();
+        let ids: Vec<ScreenId> = unopened.iter().map(|(id, _)| *id).collect();
+        for (id, why) in unopened {
+            let Some(encoder) = self.screens.get(&id).and_then(|s| s.stream.as_ref()) else {
+                continue;
+            };
+            let (kind, codec) = (encoder.kind(), encoder.codec());
+            let open = self.running_encoders(&ids).get(&kind).copied().unwrap_or(0);
+            {
+                let mut catalog = crate::encoder::catalog();
+                if open > 0 {
+                    catalog.learn_limit(kind, open);
+                } else {
+                    catalog.failed(kind, codec, why);
+                }
+            }
+            if self.is_physical(id) {
+                self.stop_physical(id);
+                self.physical_due = Instant::now();
+            } else if let Err(e) = self.restart_monitor(id, None) {
+                error!("{id}: {e:#}");
+            }
+        }
+    }
+
+    /// How each screen that streams encodes, and what to say of it when it is not the
+    /// best this PC has for it (see `encoder::note`): for the local API.
+    pub fn encoding_report(&self) -> Vec<(ScreenId, String, Option<String>)> {
+        self.screens
+            .values()
+            .filter_map(|s| {
+                let e = s.stream.as_ref()?;
+                let what = format!("{} {:?}", e.kind().0.label(), e.codec());
+                Some((s.id, what, e.note().map(str::to_owned)))
+            })
+            .collect()
     }
 
     /// Housekeeping, about twice a second: logs what the streams sent now and then,
@@ -491,6 +604,7 @@ impl Displays {
         self.check_primary();
         self.check_window_panels();
         self.stop_too_big();
+        self.retry_unopened();
         // A fresh picture asked of a stream that then stood still never came.
         for id in self.router.starved(STARVED) {
             if self.streaming
@@ -873,9 +987,6 @@ impl Displays {
         };
         match started {
             Ok((output, encoder)) => {
-                if !self.streaming {
-                    encoder.set_paused(true);
-                }
                 encoder.force_keyframe();
                 s.output = Some(output);
                 s.stream = Some(encoder);
@@ -1034,10 +1145,7 @@ impl Displays {
 
     /// What the encoders make now: the codec, and whether on the CPU.
     fn encoding_now(&self) -> (Codec, bool) {
-        (
-            self.cfg.codec,
-            self.cfg.backend == crate::encoder::Backend::X264,
-        )
+        (self.cfg.codec, self.cfg.backend == Backend::X264)
     }
 
     /// The streams go in a codec every headset with a session (`headsets`) decodes:
@@ -1342,6 +1450,11 @@ impl Displays {
             return Ok(());
         }
         let (backend, codec) = crate::encoder::pick(codec, software).context(UserError::Encoder)?;
+        // The same encoder in the same codec (VA-API without H.265 asked for H.265
+        // while it makes H.264): nothing starts over.
+        if (backend, codec) == (self.cfg.backend, self.cfg.codec) {
+            return Ok(());
+        }
         info!("encoding with {backend:?} {codec:?} (from the headset menu)");
         self.switch_encoding(backend, codec)
             .context(UserError::Encoder)
@@ -1349,7 +1462,7 @@ impl Displays {
 
     /// Encodes with `backend` and `codec` from now on: every monitor's stream starts
     /// over with them. When one cannot, all go back to how they encoded before.
-    fn switch_encoding(&mut self, backend: crate::encoder::Backend, codec: Codec) -> Result<()> {
+    fn switch_encoding(&mut self, backend: Backend, codec: Codec) -> Result<()> {
         let before = self.cfg.clone();
         self.cfg.backend = backend;
         self.cfg.codec = codec;

@@ -133,6 +133,9 @@ pub struct Options {
     /// How many headsets may have a session at once (`PROSTIR_TEST_MAX_HEADSETS`, a
     /// build for these tests only); 0: as a release allows.
     pub headsets: usize,
+    /// A fake hardware encoder (`PROSTIR_FAKE_ENCODER`: `works`, `sessions=N`,
+    /// `broken`, `hangs`), tried before every other; none: the PC's own encoders only.
+    pub encoder: Option<&'static str>,
 }
 
 impl Default for Options {
@@ -149,6 +152,7 @@ impl Default for Options {
             physical: String::new(),
             software: true,
             headsets: 0,
+            encoder: None,
         }
     }
 }
@@ -165,7 +169,7 @@ pub struct Pc {
 impl Pc {
     pub fn start(dir: &TestDir, options: &Options) -> Self {
         let root = dir.path();
-        for sub in ["config", "run", "home"] {
+        for sub in ["config", "run", "home", "cache"] {
             std::fs::create_dir_all(root.join(sub)).unwrap();
         }
         // Commands for the headset come through this pipe (see `Pc::command`).
@@ -181,6 +185,8 @@ impl Pc {
             .args(["--linger", &options.linger.to_string()])
             .env("XDG_CONFIG_HOME", root.join("config"))
             .env("XDG_RUNTIME_DIR", root.join("run"))
+            // What the encoders' probes found, kept for the next start of this test.
+            .env("XDG_CACHE_HOME", root.join("cache"))
             .env("HOME", root.join("home"))
             .env("PROSTIR_FAKE_DESKTOP", "1")
             .env("PROSTIR_NO_COUNT", "1")
@@ -218,6 +224,10 @@ impl Pc {
         match options.headsets {
             0 => cmd.env_remove("PROSTIR_TEST_MAX_HEADSETS"),
             n => cmd.env("PROSTIR_TEST_MAX_HEADSETS", n.to_string()),
+        };
+        match options.encoder {
+            Some(mode) => cmd.env("PROSTIR_FAKE_ENCODER", mode),
+            None => cmd.env_remove("PROSTIR_FAKE_ENCODER"),
         };
         match &options.typed_code {
             Some(code) => cmd.env("PROSTIR_FAKE_TYPED_CODE", code),

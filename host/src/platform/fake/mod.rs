@@ -93,6 +93,26 @@ pub fn clean_up_after_crash() {}
 
 pub fn give_memory_back() {}
 
+/// Where caches go: `$XDG_CACHE_HOME` and nowhere else, and only when the fake desktop
+/// was asked for (as [`config_home`]).
+pub fn cache_home() -> Option<PathBuf> {
+    if !asked_for() {
+        return None;
+    }
+    std::env::var_os("XDG_CACHE_HOME")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+}
+
+/// What the fake hardware encoder is told to do (`PROSTIR_FAKE_ENCODER`): another
+/// setting is another PC, probed anew.
+pub fn encoder_drivers() -> Vec<String> {
+    vec![format!(
+        "fake encoder {}",
+        std::env::var("PROSTIR_FAKE_ENCODER").unwrap_or_default()
+    )]
+}
+
 pub fn hostname() -> String {
     "fake-pc".into()
 }

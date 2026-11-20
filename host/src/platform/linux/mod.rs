@@ -19,6 +19,7 @@ pub use system::{
     broadcast_addresses, clean_up_after_crash, config_home, give_memory_back, hostname, run,
     single_instance,
 };
+pub use system::{cache_home, encoder_drivers};
 pub use usb::keep_adb_reverse;
 
 /// Whether a connector is a laptop's own panel.

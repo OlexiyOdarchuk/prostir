@@ -63,11 +63,13 @@
 //!    neither started over nor laid out again.
 //! 8. The graphics card is part of an output: [`FrameSource::memory`]
 //!    ([`Memory::D3D11`], whose adapter [`FrameSource::adapter`] reads), for an encoder
-//!    picked per output on the same card (step 6.5). One device per card is shared by
-//!    every capture and encoder ([`GpuDevices`], given to the desktop when it
-//!    connects, see `encoder/gpu.rs`): neither an output nor an encoder makes its own.
-//! 9. A limit on encoder sessions: found when an encoder does not start (step 6.5), not
-//!    a field here.
+//!    picked per output on the same card (`encoder/choice.rs`: the card's own
+//!    encoder, then Media Foundation on it, then one that needs a copy, x264 last). One
+//!    device per card is shared by every capture and encoder ([`GpuDevices`], given to
+//!    the desktop when it connects): neither an output nor an encoder makes its own.
+//! 9. A limit on encoder sessions: learned when an encoder does not open while others
+//!    of it run, and kept with the probes in the cache (`encoder/probe.rs`); not a
+//!    field here. The output goes on with the next encoder.
 //! 10. The cursor in the frames or apart: [`FrameSource::cursor`].
 //! 11. Sound also in the speakers, and no microphone without VB-CABLE: the sound module
 //!     of step 6.6 (`Route`, `MicAvailability`, an explicit output device to capture
@@ -306,19 +308,15 @@ pub struct FrameSource {
     /// Who makes the frames.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "the encoder is picked per output later")
+        expect(dead_code, reason = "no encoder depends on who makes the frames")
     )]
     pub origin: Origin,
     /// Where the frames can be handed over without a copy: an encoder that takes this
     /// keeps them on the graphics card.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the encoder is picked per output later")
-    )]
     pub memory: Memory,
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "the encoder is picked per output later")
+        expect(dead_code, reason = "every Linux source draws the pointer in")
     )]
     pub cursor: Cursor,
 }
@@ -328,7 +326,10 @@ impl FrameSource {
     /// [`FrameSource::memory`]).
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "the encoder is picked per output later")
+        expect(
+            dead_code,
+            reason = "the encoders read the card from the memory itself"
+        )
     )]
     pub fn adapter(&self) -> Option<AdapterId> {
         match self.memory {
@@ -353,22 +354,10 @@ pub enum Origin {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Memory {
     /// Plain memory.
-    #[cfg_attr(
-        all(not(test), not(feature = "fake-desktop")),
-        expect(
-            dead_code,
-            reason = "only the fake desktop's frames are in plain memory alone"
-        )
-    )]
     System,
     /// Linux GPU buffers; also plain memory for an encoder that takes no others.
-    #[cfg_attr(
-        all(not(test), feature = "fake-desktop"),
-        expect(dead_code, reason = "the fake desktop's frames are in plain memory")
-    )]
     DmaBuf,
     /// Direct3D 11 textures on one graphics card.
-    #[cfg_attr(not(test), expect(dead_code, reason = "Windows only"))]
     D3D11 { adapter: AdapterId },
 }
 
