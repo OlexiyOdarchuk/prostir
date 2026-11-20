@@ -136,7 +136,7 @@ pub struct Options {
     /// build for these tests only); 0: as a release allows.
     pub headsets: usize,
     /// A fake hardware encoder (`PROSTIR_FAKE_ENCODER`: `works`, `sessions=N`,
-    /// `refuses=N`, `broken`, `hangs`), tried before every other; none: the PC's own
+    /// `refuses=N`, `broken`, `hangs`, `slow`), tried before every other; none: the PC's own
     /// encoders only.
     pub encoder: Option<&'static str>,
     /// More of the PC app's environment (`PROSTIR_FAKE_NO_SOUND`, `PATH`).
@@ -447,13 +447,23 @@ impl Pc {
 
     /// Clicks `item` in the PC app's tray (see the fake tray for the items).
     pub fn tray(&self, item: &str) {
-        std::fs::write(self.run_dir.join("fake-tray"), format!("{item}\n")).unwrap();
+        self.order("fake-tray", item);
+    }
+
+    /// Writes `text` to the file `name` the fake desktop watches, whole at once: made
+    /// under another name and moved there, so the PC app never reads it half written
+    /// (it would take an empty file and remove it, and the command would be lost).
+    fn order(&self, name: &str, text: &str) {
+        let path = self.run_dir.join(name);
+        let new = self.run_dir.join(format!("{name}.new"));
+        std::fs::write(&new, format!("{text}\n")).unwrap();
+        std::fs::rename(&new, &path).unwrap();
     }
 
     /// Has another program do `command` on the fake desktop (see the fake desktop
     /// for the commands, e.g. `resize Fake-2 320x240`).
     pub fn desktop(&self, command: &str) {
-        std::fs::write(self.run_dir.join("fake-desktop"), format!("{command}\n")).unwrap();
+        self.order("fake-desktop", command);
     }
 
     /// How many times each thread of the PC app went to sleep and woke since it

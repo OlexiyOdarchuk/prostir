@@ -739,9 +739,11 @@ fn probe(asked: &[Asked]) -> Vec<(Asked, Probed)> {
     for (index, &(backend, _, codec)) in asked.iter().enumerate() {
         deadlines.push(Instant::now() + PROBE_TIMEOUT);
         let sender = tx.clone();
+        let alive = Alive::new();
         let spawned = std::thread::Builder::new()
             .name(format!("probe-{}", backend.name()))
             .spawn(move || {
+                let _alive = alive;
                 let _ = sender.send((index, probe_one(backend, codec)));
             });
         if let Err(e) = spawned {
@@ -784,6 +786,71 @@ fn probe(asked: &[Asked]) -> Vec<(Asked, Probed)> {
         .collect()
 }
 
+/// The threads of the probes, and the one finding what the encoders can do, that did
+/// not end yet (one that hangs is left behind and stays counted), and a wake-up for
+/// each that ends.
+struct Running {
+    count: Mutex<usize>,
+    ended: Condvar,
+}
+
+fn running() -> &'static Running {
+    static RUNNING: OnceLock<Running> = OnceLock::new();
+    RUNNING.get_or_init(|| Running {
+        count: Mutex::new(0),
+        ended: Condvar::new(),
+    })
+}
+
+/// Counts a thread of the probes from before it is made until it ends, or until it
+/// turns out it could not be made.
+struct Alive;
+
+impl Alive {
+    fn new() -> Self {
+        *running()
+            .count
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+        Self
+    }
+}
+
+impl Drop for Alive {
+    fn drop(&mut self) {
+        let running = running();
+        *running
+            .count
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) -= 1;
+        running.ended.notify_all();
+    }
+}
+
+/// Waits up to `wait` for the probes under way to end: whether none is left. One
+/// still running is inside a driver (VA-API, NVIDIA) whose library is torn down when
+/// the process exits, which must not happen under that thread.
+pub fn settle(wait: Duration) -> bool {
+    let running = running();
+    let until = Instant::now() + wait;
+    let mut count = running
+        .count
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    while *count > 0 {
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        count = running
+            .ended
+            .wait_timeout(count, left)
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .0;
+    }
+    true
+}
+
 /// The catalog of this run, once found.
 struct Shared {
     catalog: Mutex<Option<Catalog>>,
@@ -805,9 +872,13 @@ fn shared() -> &'static Shared {
 pub fn start_probing() {
     static STARTED: Once = Once::new();
     STARTED.call_once(|| {
+        let alive = Alive::new();
         let spawned = std::thread::Builder::new()
             .name("encoders".into())
-            .spawn(find);
+            .spawn(move || {
+                let _alive = alive;
+                find();
+            });
         if let Err(e) = spawned {
             warn!("no thread to probe the encoders on: {e}; probing here");
             find();
@@ -914,7 +985,7 @@ pub fn catalog() -> CatalogGuard {
 /// The fake hardware encoder of the end-to-end tests, as `PROSTIR_FAKE_ENCODER` says:
 /// `works` (any number of sessions), `sessions=N` (one more does not open once it
 /// started), `refuses=N` (one more does not start at all), `broken` (its probe fails),
-/// `hangs` (its probe never ends).
+/// `hangs` (its probe never ends), `slow` (works, its probe takes a second).
 #[cfg(feature = "fake-desktop")]
 pub mod fake {
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -949,6 +1020,10 @@ pub mod fake {
     pub(super) fn probe() -> Option<Probed> {
         match mode()?.as_str() {
             "broken" => Some(Probed::Failed("broken on purpose".into())),
+            "slow" => {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                None
+            }
             "hangs" => {
                 std::thread::sleep(std::time::Duration::from_secs(600));
                 Some(Probed::Failed("hung".into()))

@@ -1069,5 +1069,13 @@ fn serve(args: Args) -> Result<()> {
     if let Some(api) = api {
         api.finish();
     }
+    // A probe of the encoders still under way (quitting right after the start) is
+    // inside a driver whose library the exit tears down: the process crashed so on
+    // the way out. Each probe ends within its time limit; one that hangs is left
+    // behind, and then the process ends without the libraries' exit handlers.
+    if !encoder::settle(encoder::PROBE_TIMEOUT) {
+        warn!("a probe of the encoders did not end: quitting without waiting for it");
+        platform::end_now(0);
+    }
     Ok(())
 }

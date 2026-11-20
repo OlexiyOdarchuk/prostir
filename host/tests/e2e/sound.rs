@@ -33,13 +33,32 @@ fn wait_written(pc: &Pc, headset: &mut FakeHeadset, level: u8) {
     }
 }
 
+/// Takes what the PC sends until the session took the headset's new sound device in:
+/// its first level is the headset's whatever it says, so a slider moved before would
+/// be put back, not asked about. The device is set at start too, before the session
+/// follows it, so the level alone does not tell. Read before the PC set it, the device
+/// needs nothing more; else the PC puts the headset's level on it, and that is waited
+/// for too.
+fn wait_first_volume(pc: &mut Pc, headset: &mut FakeHeadset) {
+    const NEW_DEVICE: &str = "volume: a new device for the headset";
+    const SET: &str = "fake desktop: volume set to";
+    let line = pc.wait_log(SOON, NEW_DEVICE);
+    if line.contains("it takes the headset's") {
+        let log = pc.lines("");
+        let new_device = log.iter().position(|l| l.contains(NEW_DEVICE)).unwrap();
+        let before = log[..new_device].iter().filter(|l| l.contains(SET)).count();
+        pc.wait_log_after(SOON, SET, before);
+    }
+    wait_written(pc, headset, FIRST_VOLUME);
+}
+
 /// The headset's level comes in `Open` and goes to the device, its buttons too, and
 /// nothing comes back for them; the slider asks the headset once and ends on its step;
 /// dragged, the device is not set until it rests, and then once; quiet after.
 #[test]
 fn one_volume_for_the_slider_and_the_buttons() {
     let (_dir, mut pc, _keys, mut headset) = session("volume", &Options::default());
-    wait_written(&pc, &mut headset, FIRST_VOLUME);
+    wait_first_volume(&mut pc, &mut headset);
     headset.press_volume(73).unwrap();
     wait_written(&pc, &mut headset, 73);
     headset.take_for(Duration::from_millis(500)).unwrap();
@@ -97,7 +116,7 @@ fn one_volume_for_the_slider_and_the_buttons() {
 #[test]
 fn at_the_same_moment_the_headset_wins() {
     let (_dir, mut pc, _keys, mut headset) = session("volume-race", &Options::default());
-    wait_written(&pc, &mut headset, FIRST_VOLUME);
+    wait_first_volume(&mut pc, &mut headset);
     // The headset reads nothing for a moment: the PC's request waits on the way.
     headset.stall(Duration::from_secs(1));
     pc.desktop("volume 90");
@@ -223,20 +242,34 @@ fn mic_wanted(view: &View) -> bool {
     view.pc.up_wanted.get(&UpKind::Mic).is_some_and(|u| u.on)
 }
 
+/// Everything the sound system said so far has been looked at: the slider moved to
+/// `level`, the PC asked the headset to take it. The PC reads the sound system's lines
+/// in order, so its looks at the lines before are in the log by then.
+fn sound_looked_at(pc: &mut Pc, level: u8) {
+    const ASKING: &str = "volume: asking the headset for";
+    let before = pc.count_log(&format!("{ASKING} {level}"));
+    pc.desktop(&format!("volume {level}"));
+    pc.wait_log_after(SOON, &format!("{ASKING} {level}"), before);
+}
+
 /// The PC learns that a program records from the sound system's event at once, not
 /// on a clock: nothing asks the sound system while nothing changes, and a recording
-/// that begins or ends is answered within a moment, with one look each.
+/// that begins or ends is answered within a moment, with one look each (the lines of
+/// one change come together).
 #[test]
 fn a_recording_is_seen_from_the_sound_systems_event() {
     let (_dir, mut pc, _keys, mut headset) = session("recording-event", &Options::default());
     const ASKED: &str = "fake desktop: asked whether a program records";
     pc.wait_log(SOON, "sound: following the sound system");
-    headset.take_for(Duration::from_millis(500)).unwrap();
+    pc.wait_log(SOON, "headset microphone ready");
+    wait_first_volume(&mut pc, &mut headset);
+    sound_looked_at(&mut pc, 55);
     let asked = pc.count_log(ASKED);
     headset.take_for(Duration::from_secs(2)).unwrap();
     assert_eq!(pc.count_log(ASKED), asked, "asked while nothing changed");
 
-    for (on, what) in [(true, "record on"), (false, "record off")] {
+    for (on, what, level) in [(true, "record on", 65), (false, "record off", 75)] {
+        let asked = pc.count_log(ASKED);
         let started = Instant::now();
         pc.desktop(what);
         headset
@@ -248,12 +281,8 @@ fn a_recording_is_seen_from_the_sound_systems_event() {
         // Through a file the fake desktop watches, the sound system and the network:
         // within the second a request is answered in.
         assert!(took < Duration::from_secs(1), "{what} seen after {took:?}");
-        headset.take_for(Duration::from_millis(300)).unwrap();
-        assert!(
-            pc.count_log(ASKED) <= asked + 2,
-            "{what}: asked {} times",
-            pc.count_log(ASKED) - asked
-        );
+        sound_looked_at(&mut pc, level);
+        assert_eq!(pc.count_log(ASKED), asked + 1, "{what}: one look");
     }
     let after = pc.count_log(ASKED);
     headset.take_for(Duration::from_secs(1)).unwrap();
@@ -313,7 +342,7 @@ fn the_sound_watcher_sleeps_while_the_sound_is_idle() {
 fn the_sound_watcher_starts_again_and_catches_up() {
     let (_dir, mut pc, _keys, mut headset) = session("sound-again", &Options::default());
     pc.wait_log(SOON, "sound: following the sound system");
-    wait_written(&pc, &mut headset, FIRST_VOLUME);
+    wait_first_volume(&mut pc, &mut headset);
     let asks = headset.view().volume_asks.len();
     pc.desktop("sound-events stop");
     pc.wait_log(SOON, "sound: the sound system's events stopped");
@@ -386,7 +415,7 @@ fn the_sound_watcher_stays_while_the_device_cannot_be_made() {
 #[test]
 fn a_new_sound_device_takes_the_headsets_level() {
     let (_dir, mut pc, _keys, mut headset) = session("sound-anew", &Options::default());
-    wait_written(&pc, &mut headset, FIRST_VOLUME);
+    wait_first_volume(&mut pc, &mut headset);
     headset.take_for(Duration::from_millis(500)).unwrap();
     let asks = headset.view().volume_asks.len();
     let before = written(&pc).len();
