@@ -421,8 +421,9 @@ screen fainter. Press a monitor to pick it: under the map are its number, size a
 where it stands (left, middle, right, above, below), "Make primary" and × to remove
 it. Detached windows are listed too, with a button to close them. Then the laptop
 screen (shown or hidden), "Line up: close the seams (A button)" and "Save as profile".
-Next to them: add a monitor (1920×1080, 2560×1440, 3840×2160, 3440×1440 or
-1440×2560), the layout (around me, wall, lying down), the curve, follow my head, stick
+Next to them: add a monitor in one of the sizes the PC offers (1920×1080, 2560×1440,
+3840×2160, 3440×1440, 1440×2560, and 5120×1440 when the headset decodes HEVC), up to
+six monitors and three windows, the layout (around me, wall, lying down), the curve, follow my head, stick
 together, drag (one monitor or all together) and the cinema screen. Cinema itself is
 a tile in Quick and a sector of the palm menu.
 
@@ -459,10 +460,13 @@ down or cinema, and not while dragging all together.
 ### Tray on the PC
 
 The tray shows whether the headset is connected, how many monitors there are and the
-headset's battery; when it drops to 15 % the PC shows a notification. From the tray
-you can bring the monitors in front of you, set the video quality and sharper text
-(the same settings as in the headset menu), start Prostir with the session (KDE), turn
-the usage counter on or off, forget paired headsets, and quit.
+headset's battery; when it drops to 15 % the PC shows a notification. It also says when
+the headset's microphone has no permission to record (allow it in the headset's
+settings, under the app's permissions). From the tray you can bring the monitors in
+front of you, turn on No limits (up to ten monitors and four of the PC's own displays,
+for when the headset copes with more), set the video quality and sharper text (the
+same settings as in the headset menu), start Prostir with the session (KDE), turn the
+usage counter on or off, forget paired headsets, and quit.
 
 ### Command line
 
@@ -474,12 +478,46 @@ prostir [--monitor WxH[@scale]]... [--codec h265|h264] [--bitrate MBPS] [--softw
 Without `--monitor`, Prostir brings back the monitors from the last session, each with
 its number, so the headset finds it where it was. They are stored in
 `~/.config/prostir/screens.txt` with the rows the headset shows them in, and the
-settings (quality, clearer text, codec, sound, microphone, laptop screen, the counter)
-in `~/.config/prostir/settings.txt`; both are plain text. The first start of 0.2.0
-moves them over from `monitors.txt` of 0.1, which stays as it was. Options on the
-command line (`--monitor`, `--bitrate`, `--codec`, `--software`) hold for that run only
-and are never saved; what you change while it runs is, and a set of monitors you
-change in the headset replaces the one from `--monitor`.
+settings (quality, clearer text, codec, sound, whether a newly found display of the PC
+is shown, the counter) in `~/.config/prostir/settings.txt`; both are plain text. The
+first start of 0.2.0 moves them over from `monitors.txt` of 0.1, which stays as it was.
+Options on the command line (`--monitor`, `--bitrate`, `--codec`, `--software`) hold
+for that run only and are never saved; what you change while it runs is, and a set of
+monitors you change in the headset replaces the one from `--monitor`.
+
+A display gets a number once and keeps it: numbers come from a counter that never goes
+back (`next` in `screens.txt`), so after a restart, or after a display was removed and
+another added, the headset never mistakes one for another. The PC's own displays (the
+laptop's panel, a monitor on a cable) are listed in `screens.txt` too, each with its
+number, recognised by its EDID (make and model) or else by its connector:
+
+```
+next 117
+physical 101 edid "BOE 0x0a1c" connector eDP-1 builtin shown
+physical 102 edid "DELL U2720Q" connector DP-2
+row
+screen 103 2560x1440 at 1280 720 primary
+screen 104 2560x1440 at 3840 720
+place 101 at 2560 2160
+```
+
+A display of the PC that is not connected now (the lid closed, the cable out) keeps its
+number and its place in the headset, and comes back there. Another monitor in the same
+connector is a new display with a place of its own.
+
+One headset is the main one and may do everything. A headset can be given less with a
+line of its own in `settings.txt`, by its key (the first word of its line in
+`~/.config/prostir/paired_headsets`):
+
+```
+access 3f9a…(64 hex digits) guest input
+```
+
+`main` or `guest`, then its rights: `input` (the mouse following the gaze, moving a
+window to a monitor), `mic`, `changes` (monitors and the PC's settings), `private`
+(notifications, window titles, screenshots), `camera` and `clipboard` (for later). A
+guest's arrangement does not move the desktop, and its volume does not change the
+PC's.
 
 ## Update and uninstall
 

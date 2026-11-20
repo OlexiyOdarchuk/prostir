@@ -49,6 +49,25 @@
   into a staircase. The map in the menu shows exactly the desktop the PC makes.
 - A monitor whose picture cannot start on the PC keeps its place and is tried again at
   the next connection; the headset says why. Before, it was dropped from the saved set.
+- Each display of the PC itself (the laptop's panel, a monitor on a cable) is now one
+  of its own: it is recognised by its make and model, keeps its own place in the
+  headset, and comes back there after the lid was closed or the cable pulled out.
+  Another monitor plugged into the same connector gets a place of its own instead of
+  taking the old one's. A profile can show or hide each of them, and make one of them
+  the primary display.
+- A display keeps its number for good: a removed monitor's number is never given to
+  another one, so after a restart or a change of monitors nothing lands in another
+  monitor's place.
+- The sizes to add a monitor come from the PC, with 5120×1440 when the headset decodes
+  HEVC.
+- "No limits" in the PC tray allows up to ten monitors and four of the PC's own
+  displays, for when the headset copes with more than the safe six.
+- Switching to a profile puts its monitors in their places as soon as the PC has made
+  them, instead of watching for up to 8 s.
+- When something the headset asked for does not happen, the menu says why next to the
+  control that asked, in the headset's language (for example "The limit is reached" or
+  "No active window on the PC"), with the PC's own detail under it. A request the PC
+  does not answer within 30 s says so instead of waiting for ever.
 
 ### Settings
 
@@ -63,6 +82,13 @@
 - The codec you choose in the headset stays chosen when the graphics card has to use
   another one.
 
+### Sound
+
+- The PC tray says when the headset's microphone has no permission to record, so a
+  silent microphone is no longer a mystery.
+- The PC no longer keeps a microphone setting of its own: its microphone follows the
+  switch in the headset.
+
 ### Connection
 
 - A dropped connection, a PC gone to sleep or a headset switched off is noticed within
@@ -75,6 +101,11 @@
 - Leaving a PC in the headset (another PC, forgetting it, closing the app) tells the
   PC why, and the PC writes it in its log. Both sides log the round trip of the
   connection every 10 s.
+- What the tray asks of the headset (bring the monitors in front, No limits) waits for
+  the headset's answer; a headset that does not answer within 30 s is written in the
+  log instead of being waited for.
+- A second headset can be given fewer rights with a line in `settings.txt`, for
+  example only moving the mouse; the main headset can do everything, as before.
 
 ## 0.1.3 (not released yet)
 

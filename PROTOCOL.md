@@ -5,6 +5,9 @@ talk to each other. It is meant for anyone who wants to understand the connectio
 write their own client or host.
 
 The source of truth is the code: [`proto/src/lib.rs`](proto/src/lib.rs) (messages),
+[`proto/src/state.rs`](proto/src/state.rs) (the state each side keeps),
+[`proto/src/request.rs`](proto/src/request.rs) (requests, commands and replies),
+[`proto/src/volume.rs`](proto/src/volume.rs) (the shared volume),
 [`proto/src/wire.rs`](proto/src/wire.rs) (how values are encoded),
 [`proto/src/packet.rs`](proto/src/packet.rs) (packets),
 [`proto/src/handshake.rs`](proto/src/handshake.rs) (the version handshake on records),
@@ -21,8 +24,11 @@ Words used below:
 
 - **host**: the PC program. It listens for connections.
 - **client** or **headset**: the Quest app. It connects to the host.
-- **stream**: one encoded video picture (a virtual monitor, a window panel or the
-  mirrored laptop screen), identified by a one-byte stream id.
+- **display**: a virtual monitor, a window panel or a display of the PC itself (the
+  laptop's panel, a monitor on a cable), identified by a `DisplayId`.
+- **stream**: the encoded video of one display, from one `StreamStart` on (one
+  generation).
+- **part**: a piece of one side's state, sent whole whenever it changes.
 - **frozen**: kept byte for byte in every protocol version, past and future.
 
 Contents:
@@ -30,7 +36,8 @@ Contents:
 1. [Overview](#1-overview)
 2. [Security](#2-security)
 3. [Framing](#3-framing)
-4. [Session flow](#4-session-flow)
+4. [Session flow](#4-session-flow): opening, state, requests and commands,
+   capabilities, rights, volume, end of session
 5. [Message reference](#5-message-reference)
 6. [Streams, sound and microphone](#6-streams-sound-and-microphone)
 7. [Layout](#7-layout)
@@ -295,9 +302,9 @@ packet.
 - Order: the messages of one lane arrive in order; messages of different lanes in the
   order of their last packets.
 - The sender chooses the lanes and how big each packet is (the current apps: 16 KiB of
-  body, lane `0` for control messages, `1` for PC sound and the microphone, and `2 +
-  id` for video stream `id`). A receiver accepts any body size from 1 byte to the size
-  of a record and any lane.
+  body, lane `0` for control messages, `1` for PC sound and the headset's up streams,
+  and a free lane from `2` to `31` for each video stream). A receiver accepts any body
+  size from 1 byte to the size of a record and any lane.
 - A message with a tag the receiver does not know is put together and skipped.
 
 The transport is reliable and ordered, so a packet out of place is a bug or an attack,
@@ -320,18 +327,19 @@ never a loss. Each of these ends the connection:
 
 Limits:
 
-| What | Before `Opened` | In the session |
+| What | Before the session | In the session |
 |---|---|---|
 | Payload of a message from the host | 64 KiB | 64 MiB |
 | Payload of a message from the headset | 64 KiB | 64 KiB |
 | Lanes holding a message being put together at once | 1 | 32 |
 | Bytes those messages say they hold, together | 64 KiB | 128 MiB from the host, 2 MiB from the headset |
 
-Before `Opened` the host may not be trusted yet, and the headset is not trusted until
-it pairs, so what either can make the other allocate stays small. The biggest headset
-message in use, a slice of microphone sound, is under 1 KiB. A message complete in one
-packet takes no lane. The host applies the session column once it has sent `Opened`,
-the headset once it has read it.
+Before the session the host may not be trusted yet, and the headset is not trusted
+until it pairs, so what either can make the other allocate stays small. The biggest
+headset messages in use, `Open` and a piece of microphone sound, are around 1 KiB. A
+message complete in one packet takes no lane. The headset applies the session column
+once it has sent `Open` (it sends it only to a host it trusts, so `Snapshot` need not
+fit in 64 KiB), the host once it has sent `Snapshot`.
 
 ### Protocol messages
 
@@ -342,7 +350,7 @@ the headset once it has read it.
 ```
 
 - `tag`: which message (see [Message reference](#5-message-reference)). Host→client tags
-  are 1 to 27, client→host tags 101 to 130.
+  are 1 to 40, client→host tags 101 to 141 (some of them retired).
 - `length`: payload length in bytes, **little-endian**, at most the limit above.
 
 ### Encoding
@@ -362,18 +370,19 @@ lists them, with nothing in between (`proto/src/wire.rs`):
 | `(A, B)` | An `A`, then a `B` |
 | struct | Its fields in order |
 | enum | A `u8` tag, then the fields of the variant with that tag |
-| `str*`, `bytes*` | The rest of the payload, no count (only in the frozen messages and the media messages `Frame`, `Audio`, `Mic`) |
+| `str*`, `bytes*` | The rest of the payload, no count (only in the frozen messages and the media messages `Frame`, `Audio`, `Up`) |
 
 Enum tags are fixed numbers written next to each variant in the code, so reordering
-variants never changes the bytes. The only enum inside messages so far is the codec:
-`0` H.264, `1` H.265 (HEVC).
+variants never changes the bytes. A request or command adds an envelope that a reader
+can skip whole (see [Requests, commands and replies](#requests-commands-and-replies)).
 
 Reading is strict, and any of these ends the connection:
 
 - a payload shorter than its fields;
 - bytes left over after the last field;
 - a `bool` or `opt` byte other than `0` or `1`;
-- an enum tag no variant has (an unknown codec, say);
+- an enum tag no variant has (an unknown codec, say), except the soft values listed
+  under [Capabilities](#capabilities);
 - a string that is not valid UTF-8 (also in the frozen messages);
 - a string or list over its limit.
 
@@ -395,13 +404,16 @@ client                                         host
                                                compatible:
                                        <-        Welcome{version, language}
   [pairing, if the client does not trust the host and the user agreed]
-  Open                                 ->
+  Open{parts}                          ->
                                                client not trusted:
                                        <-        PairingRequired
   [pairing, then Open again]
+                                               cannot set up its displays:
+                                       <-        Error{text}, close
                                                trusted:
-                                       <-        Opened
-  steady state
+                                       <-        Snapshot{parts}
+                                       <-        StreamStart, Frame... in the stream lanes
+  Arrange, parts, Request/Reply, Command/Reply, both ways
 ```
 
 ### The version handshake (frozen)
@@ -461,6 +473,14 @@ pairing, so an unpaired client also learns this. The client compares `protocol` 
 its own `PROTOCOL_VERSION` to tell which side needs an update. The current client waits
 10 s before trying again.
 
+**Development builds.** Between releases the messages of version 2 change on the
+development branch while the version stays 2. A development build says so in its app
+version: `0.2.0-dev+p4` reads messages of revision 4 (`PROTO_REVISION`). A development
+host turns away a `Hello` whose app version carries another revision (or none) the same
+way as an incompatible one: `Error`, then `Incompatible`; the side with the lower
+revision is the one to update. Released builds carry no revision and do not look at
+it.
+
 A first message other than `Hello` can only come from a version 1 client (Prostir
 0.1.x), which may ask to pair before saying hello. The host answers it the same way
 (`Error` saying to update the headset, then `Incompatible`) and closes the connection,
@@ -472,14 +492,17 @@ Nothing else starts yet.
 
 **Trust.** If the client does not trust the host's key, it pairs now (only after the
 user agreed in its menu; otherwise it closes the connection and asks the user). Then it
-sends `Open`. The host answers `PairingRequired` if it does not trust the client: the
-client may pair and send `Open` again. Once the host trusts the client, it makes its
-monitors and encoders (which can take a few seconds) and answers `Opened`, and the
-session starts: from then on both sides ping and count silence. Until then the host accepts only `Open` and
-`PairBegin` (and skips unknown tags), and closes the connection on anything else.
+sends `Open` with every part of its state (see [State](#state)). The host answers
+`PairingRequired` if it does not trust the client: the client may pair and send `Open`
+again. Once the host trusts the client, it sets up its displays and encoders (which can
+take a few seconds) and answers `Snapshot` with every part of its own state, and the
+session starts: from then on both sides ping and count silence. Until then the host
+accepts only `Open` and `PairBegin` (and skips unknown tags), and closes the connection
+on anything else.
 
-If the host cannot set up its monitors or encoders, it answers `Error{text}` instead
-of `Opened` and closes the connection.
+If the host cannot set up its displays at all, it answers `Error{text}` instead of
+`Snapshot` and closes the connection. A display that does not start is not that: it
+stands in `Displays` as `Failed`.
 
 ### What a version 1 peer sees
 
@@ -490,30 +513,183 @@ of `Opened` and closes the connection.
 | 0.1.x client, pairing first, code shown on the PC | Sends `PairBegin`, then waits for the user to type the code the PC would show, up to 300 s; the host shows none, only its "update the headset" notification, and closes. Once a code is typed the client reads the `Error` text, shows it and reconnects as above; after 300 s without one it gives up the attempt and reconnects. |
 | 0.1.x host | Gets `Hello{2, 2}` and answers `Error` ("Update Prostir on the PC…") and `Incompatible{1, …}`; the client shows "update the PC". The host also shows a desktop notification. |
 
+### State
+
+Each side keeps a state the other one is told about, cut into **parts**: a part is a
+message of its own (`Displays`, `Prefs`, …), sent whole whenever it changes, never as
+a difference. At the start of a session the whole state goes as the parts inside one
+message: `Open` from the headset, `Snapshot` from the host. A part inside them is
+
+```
+part: tag:u8, body:list<u8>(max 65535)
+```
+
+where `tag` and `body` are the tag and the payload the part has as a message of its
+own, so a reader parses a part in `Snapshot` with the same code as the same part
+arriving later. A part with a tag the reader does not know is skipped; a part twice in
+one `Open` or `Snapshot` (of the same kind, for the parts kept per kind) is an error.
+
+| Side | Parts | Kept |
+|---|---|---|
+| Host | `Displays`, `PcInfo`, `HostCaps`, `Access`, `Limits`, `Encoding`, `Sound`, `UpWanted`, `Focus`, `SoundFrom` | one of each; `UpWanted` one per kind |
+| Headset | `HeadsetCaps`, `Prefs`, `Presence`, `Battery`, `Volume`, `UpState` | one of each; `UpState` one per kind |
+
+`HeadsetCaps` is always in `Open`, and `HostCaps` in `Snapshot`; neither changes in a
+session. The host sends `Displays` first and `Focus` and `SoundFrom` last, in one pass,
+so a part that names a display comes after the `Displays` that lists it.
+
+**Checked on arrival**, on both sides: the ids in `Displays` differ, `primary`, `Focus`
+and `SoundFrom` are among them or none, every scale is above 0, a `Volume` is at most
+100 %, an up stream is 48 kHz with 1 or 2 channels, a decoder is bigger than 0×0, and
+an `Arrange` lists each display once. A state that breaks these is the other side's
+bug: the session ends, as for a message that does not parse. Bad arguments of a
+request are not: they get a failed reply.
+
+The host cuts its texts (window titles, names, details) to their limits on a character
+boundary when it builds its state, so a long text never makes a part impossible to
+send.
+
+### Requests, commands and replies
+
+The headset changes the host's state with a `Request`, the host asks the headset to do
+something with a `Command`. Both are an envelope:
+
+```
+Request / Command: req:u32, kind:u8, the kind's fields
+Reply:             req:u32, outcome:Outcome
+```
+
+Each side counts its own `req` from 1 in every session, and each request or command
+gets **exactly one** `Reply` with its number. A `kind` the reader does not know is
+read with its fields skipped (the envelope runs to the end of the message) and answered
+`Failed{UNSUPPORTED}`, so this holds between any two versions. A reply with a `req`
+nobody asked is skipped and logged. A new field for a kind makes a new kind, never a
+longer old one; a new `Outcome` comes only with a new kind.
+
+**The state before the reply.** The side that answers first sends the parts the
+request changed, then the `Reply`, in the same lane: when the headset reads
+`Added{id}`, it has the `Displays` with `id` already. The same the other way: the
+headset answers `Command FocusMode` after its `Prefs`, `Command SetMic` after its
+`UpState`, and `Command Profile` once the profile is in place (after the host's reply
+to the `SetDisplays` it sent for it).
+
+**Partial success.** A request that makes displays answers with all it made, also
+those that did not start: they stand in `Displays` as `Failed` and keep their place.
+It fails only when nothing was made (`LIMIT`, `BAD_SIZE`).
+
+A command the headset has not answered within 30 s is closed on the host as "the
+headset does not answer" (implementation-defined); a late reply is skipped.
+
+### Capabilities
+
+`HostCaps.features` and `HeadsetCaps.features` name what each side can do (numbers a
+reader does not know are ignored). The rule: **a value of an enum goes on the wire only
+when the other side named the capability it needs**; otherwise the sender falls back as
+the table says. A new value later comes with a capability and a fallback of its own.
+
+| Host features | | Headset features | |
+|---:|---|---:|---|
+| 1 | moves the mouse | 1 | takes commands |
+| 2 | a screenshot of one display | 2 | one volume with the PC |
+| 3 | window panels | 3 | the microphone as an up stream |
+| 4 | displays of the PC itself | 4 | the camera |
+| 5 | one volume with the headset | 5 | poses |
+| 6 | notifications | 6 | says where the user looks |
+| 7 | which display the sound comes from | 7 | shows displays of the PC itself |
+| 8 | commands | 8 | shows window panels |
+| 9 | "No limits" | | |
+| 10 | monitors with a scale | | |
+| 11 | the microphone as an up stream | | |
+| 12 | the camera | | |
+| 13 | poses | | |
+| 14 | uses the gaze for which display gets the most bits | | |
+
+| Enum | Value | Needs | Without it |
+|---|---|---|---|
+| `Codec` | `H264` | nothing | |
+| | `H265`, `Av1` | the codec in the headset's `decoders` | not in `Encoding.choices`, no stream with it; `Encoding.wanted.codec` is none when the saved choice is a codec this headset does not decode |
+| `DisplayKind` | `Virtual` | nothing | |
+| | `Window` | headset 8 | panels are not in `Displays` and do not stream; `DetachWindow` fails `UNSUPPORTED` |
+| | `Physical` | headset 7 | displays of the PC are not in `Displays` and do not stream; `primary` is none when one of them is primary |
+| `UpKind`, `UpFormat` | `Mic` / `Pcm16` | host 11 and headset 3 | no `UpWanted`, no microphone |
+| | `Camera` / `Video`, `Poses` | host 12 / 13 and headset 4 / 5 | the same (not used yet) |
+| `Primary` | `Display` | headset 7 (it names a display of the PC) | |
+| `Outcome` | all | the request's kind | |
+| `VolumeAsk` | | host 5 and headset 2 | the PC's volume and the headset's are separate |
+| `Command` | | headset 1 | no commands |
+
+Soft values need no capability: `role`, `permission` and `os` read an unknown value as
+a guest, not known and another OS; unknown bits of `perms` and unknown `features` are
+ignored; an unknown `ErrorCode` reads as `OTHER` and an unknown goodbye reason as `0`;
+a `Request` or `Command` of an unknown kind gets `UNSUPPORTED`, an unknown preset
+`BAD_ARGUMENT`.
+
+### Rights
+
+The host checks the rights of the headset (`Access`, told to it as a part). Without a
+line of its own in the host's `settings.txt` a headset is the main one with every
+right, so a single headset can do everything. A request without its right fails
+`NOT_ALLOWED`; anything else without its right is dropped and logged.
+
+| What | Needs |
+|---|---|
+| `AddDisplay`, `RemoveDisplay`, `SetDisplays`, `SetPrimary`, `ShowPhysical`, `SetEncoding`, `SetSound` | changes |
+| `DetachWindow` | changes and private |
+| `WindowHere`, `MouseTo`, `Prefs.gaze_mouse_ms` | input |
+| `Screenshot`, `Prefs.notifications` | private |
+| `FindMouse`, `RequestKeyframe`, `Gaze` | nothing (keyframes at most every 300 ms for a display, from all sessions together) |
+| `UpStart` | the microphone (or the camera, by kind) |
+| `Arrange`, `Volume` | the main headset: a guest's arrangement does not move the desktop, its volume does not move the PC's |
+| `Presence` | anyone, but only the main headset pauses the desktop and ends the session when taken off |
+| `Prefs.no_limits` | changes the host's `Limits` only from the main headset |
+| sent by the host | `Notice` and window titles only with private (else the title is empty) |
+
+### Volume
+
+One volume for the PC's slider and the headset's buttons, where both sides name the
+capability. The headset owns the level (its system volume is the sound); `level` is a
+percent, `0..=100`. Two counters keep the two from fighting: the headset's `seq` counts
+only its own changes (its buttons, its system menu), the host's `ask` counts its
+requests.
+
+- **The headset changes it**: `seq + 1`, and `Volume{level, muted, seq, ask: 0}`. The
+  host sets its sound device to it and remembers what it set.
+- **The PC's device moves**: if it is where the host set it itself (within 1 %), that
+  is an echo, and nothing happens. Otherwise `ask + 1`, and
+  `VolumeAsk{level, muted, seen: the last seq from the headset, ask}`; while a slider
+  is dragged, at most every 50 ms, with the newest level.
+- **The headset gets `VolumeAsk`**: if `seen` is at least its own last `seq` (the host
+  saw every change of the headset's), it takes the level (to the nearest step it has),
+  keeps `seq`, and answers `Volume{the level it took, seq, ask}`. Otherwise its own
+  change wins, and it answers `Volume{its level, seq, ask}`.
+- **The host gets `Volume`**: if `ask` is older than its newest request not answered
+  yet, it leaves the device alone (the slider is still moving, it does not jump back).
+  Otherwise it sets the device to `level`, so the slider rests on the headset's step.
+- `Volume` is in `Open`, so the PC takes the headset's level at the start.
+
+`proto/src/volume.rs` has both sides of this as plain functions.
+
 ### Steady state
 
-Right after `Opened` the host sends, in this order: `PrimaryChanged` (if a primary
-monitor is set), `Order`, `MirrorWanted`, `AudioWanted`, `MicWanted`, `PcSettings`,
-`Abilities`. Then it forces a keyframe on every encoder, and each stream starts with
-`StreamStart` followed by `Frame`s (see [Streams](#6-streams-sound-and-microphone)).
-`Focus` follows whenever the monitor under the mouse changes (checked every 150 ms).
+Right after `Snapshot` every stream starts with `StreamStart` and a keyframe (see
+[Streams](#6-streams-sound-and-microphone)). The host sends a part again whenever it
+changes: `Focus` whenever the display under the mouse changes (checked every 150 ms),
+`Displays` when a display comes, goes, moves on the desktop or changes its state.
 
-The current client sends after `Opened`: `SetMic` (its microphone switch), and
-`SetNotifications{1}` and `SetSoundFromScreen{1}` if those are on, and `Presence{0}`
-if the headset is not worn. `SetLayout` follows once the monitors are placed and the
-arrangement has held still for 800 ms. Everything else is sent when the user does
-something.
+The current client sends `Arrange` once the displays are placed and the arrangement
+has held still for 800 ms, and a part of its state whenever it changes. Everything
+else is sent when the user does something.
 
 Both sides send `Ping{seq}` every second once the session is open (the host from
-`Opened` on, the client from reading it), with `seq` counting up from 0, and answer a
-`Ping` at once with a `Pong` carrying its `seq`. A peer must answer pings; it may send
-its own at another rate or not at all, but then the other side sees silence (below)
-when nothing else flows. The current apps answer from their reading thread, so the
-round trip measures the network and not a busy main loop, and log it every 10 s.
+`Snapshot` on, the client from reading it), with `seq` counting up from 0, and answer
+a `Ping` at once with a `Pong` carrying its `seq`. A peer must answer pings; it may
+send its own at another rate or not at all, but then the other side sees silence
+(below) when nothing else flows. The current apps answer from their reading thread, so
+the round trip measures the network and not a busy main loop, and log it every 10 s.
 
 The host ignores (and logs) known client messages that have no meaning in the session,
-such as `Open` or `PairBegin`. The client ignores host pairing messages, `Welcome`,
-`Opened` and `Incompatible` in the session.
+such as `Open` or `PairBegin`. The client ignores host pairing messages, `Welcome` and
+`Incompatible` in the session.
 
 ### End of session
 
@@ -533,7 +709,7 @@ does). A reason a reader does not know reads as `0`.
 | `2` | The headset was not worn for a while; it may connect again once it is worn | The user chose another PC |
 | `3` | The PC forgot this headset (the tray's "Forget paired headsets"): pair again | The user forgot this PC in the headset |
 | `4` | A new connection of this headset replaced this one | |
-| `5` | The monitors or encoders stopped; an `Error` with a text came first | |
+| `5` | The displays or encoders stopped; an `Error` with a text came first | |
 
 What the current client shows: "The PC app was closed" for `1`, the pairing offer
 for `3` ("The PC no longer knows this headset"), "The PC ended the connection" for
@@ -549,138 +725,237 @@ Without a goodbye, implementation-defined details of the current apps:
 - Both: a write blocked for 5 s ends the session.
 - Host: TCP keepalive (idle 4 s, interval 2 s, 3 probes) and `TCP_USER_TIMEOUT` 10 s
   also notice a headset that vanished, already while pairing.
-- Host: a headset reported as not worn (`Presence{0}`) for 10 s ends the session (with
-  goodbye `2`); the host then removes its virtual monitors until the headset connects
-  again.
+- Host: the main headset reported as not worn (`Presence{worn: false}`) for 10 s ends
+  the session (with goodbye `2`); the host then removes its virtual monitors until the
+  headset connects again.
 - Host: after a session it keeps the virtual monitors for 30 s (`--linger`).
 
 ### Forward compatibility
 
 - **Unknown tags must be skipped.** A reader that gets a tag it does not know reads
   and discards `length` bytes and goes on. Both sides do this, also before the session.
-- Unknown values inside a known message (a codec, an enum tag, an `opt` byte) are
-  errors, not skipped. A new value of an existing field therefore needs a new message
-  or a new protocol version.
-- So a new **optional** message needs no new protocol version: older peers skip it.
+  The same holds for a part with an unknown tag inside `Open` or `Snapshot`.
+- Unknown values inside a known message (an enum tag, an `opt` byte) are errors, not
+  skipped, except the soft values of [Capabilities](#capabilities). A new value of an
+  enum therefore comes with a capability, and is sent only to a peer that names it.
+- A new field of a part makes a new part next to it (say `DisplayHdr{id, …}` next to
+  `Displays`), never a longer old one; a new field of a request or command makes a
+  new kind.
+- So new optional things need no new protocol version: older peers skip them.
 - Raise `MIN_PROTOCOL` (and `PROTOCOL_VERSION` with it) only for a change an older peer
   cannot just skip: a different layout or meaning of an existing message, a message the
   other side must understand for the session to work, or a change to framing, the
   handshake or pairing. Peers whose ranges no longer overlap then get `Incompatible`
   instead of misreading each other.
 - Never reuse a tag number for a different message, and never change the
-  [frozen messages](#the-version-handshake-frozen).
+  [frozen messages](#the-version-handshake-frozen). Tags of messages of development
+  builds of version 2 that are gone (`RETIRED_HOST_TAGS`, `RETIRED_CLIENT_TAGS`) are
+  never used again.
 
 ## 5. Message reference
 
 Payload notation: fields in order, `name:type`, with the types of
-[Encoding](#encoding). Frozen messages are marked as such (their bytes never change).
+[Encoding](#encoding); the types below are defined in [Types](#types). Frozen messages
+are marked as such (their bytes never change). "Part" marks a part of the state (see
+[State](#state)). Lanes are those of the current apps.
 
 ### Host → headset
 
 | Tag | Name | Payload | Meaning |
 |---:|---|---|---|
-| 1 | `Welcome` (frozen) | `version:u32, language:str*` | The versions fit. `version`: host `PROTOCOL_VERSION`. `language`: `uk` or `en`. |
-| 2 | `StreamStart` | `id:u8, width:u32, height:u32, codec:u8, name:str(max 64)` | A stream begins, or restarts with a new size or codec. `codec`: `0` H.264, `1` H.265 (HEVC); any other value is an error. `width`, `height`: encoded size in pixels. `name`: `Prostir-<id+1>` or `mirror`, informational. |
-| 3 | `Frame` | `id:u8, keyframe:bool, pts_us:u64, data:bytes*` | One encoded access unit of stream `id`. See [Frames](#frames). |
-| 4 | `StreamEnd` | `id:u8` | The stream is gone (monitor removed, panel closed, mirror stopped). |
-| 5 | `PrimaryChanged` | `id:u8` | Monitor `id` is the desktop's primary monitor (KDE: where the Plasma panel is). |
-| 6 | `Error` (frozen) | `text:str*` | Something failed; text for the user, in the PC's language. |
-| 7 | `MirrorWanted` | `enabled:bool` | Whether the laptop screen should be mirrored into the headset (the host's setting, also the echo of `SetMirror`). |
-| 8 | `Order` | `ids:list<u8>(max 16)` | Monitor ids, left to right (rows flattened top to bottom); without the mirror and window panels. |
-| 9 | `PairingRequired` | (empty) | The answer to `Open` when the host does not trust this headset: pair first. |
+| 1 | `Welcome` | `version:u32, language:str*` | Frozen. The versions fit. |
+| 6 | `Error` | `text:str*` | Frozen. Something failed before or instead of the session (pairing, opening it, an incompatible version); shown in the headset menu. |
+| 17 | `Incompatible` | `protocol:u32, app:str*` | Frozen. The versions do not fit; the host closes after it. |
+| 9 | `PairingRequired` | (empty) | The host does not know this headset: pair first (the answer to `Open`). |
 | 10 | `PairMsg` | `msg:bytes[33]` | The host's SPAKE2 message. |
-| 11 | `PairResult` | `tag:opt<bytes[32]>` | Whether the codes matched: the host's confirmation tag if they did, none if not. |
-| 12 | `Audio` | `pcm:bytes*` | A slice of PC sound: 48 kHz, 2 channels, interleaved signed 16-bit little-endian. |
-| 13 | `AudioWanted` | `enabled:bool` | Whether PC sound goes to the headset. |
-| 14 | `MicWanted` | `enabled:bool` | Whether the headset microphone should act as the PC's microphone (the host's setting). |
-| 15 | `MicActive` | `active:bool` | A PC app is recording from the headset microphone right now (`1`), or stopped (`0`). |
-| 16 | `Focus` | `id:opt<u8>` | The stream the mouse is on; none if it is on none of the streamed ones. |
-| 17 | `Incompatible` (frozen) | `protocol:u32, app:str*` | The versions do not fit. `protocol`: host `PROTOCOL_VERSION`; `app`: host app version. The host closes the connection after it. |
-| 18 | `PcSettings` | `quality:u32, codec:u8, software:bool, sharp:bool, encoders:u8` | How the host encodes. `quality`: bitrate per stream in Mbit/s. `codec`: as in `StreamStart`. `software`: CPU encoder (x264). `sharp`: slower preset for clearer small text. `encoders`: what the PC can use, bits `1` GPU H.264, `2` GPU H.265, `4` CPU H.264. |
-| 19 | `Recenter` | (empty) | Turn the monitors to face the user (asked for from the PC tray). |
-| 20 | `Notice` | `text:str(max 8192)` | Something done, to show briefly (a saved screenshot, a PC desktop notification). Not an error. |
-| 21 | `MouseAt` | `id:u8, x:u16, y:u16` | Answer to `FindMouse`: the mouse is on stream `id` at `x`, `y` across its picture, `0` to `65535` from the top left. |
-| 22 | `Abilities` | `bits:u8` | What the PC can do beyond the basics. Bit `1` (`MOVE_MOUSE`): it can move the mouse, so `MouseTo` works. |
-| 23 | `SoundFrom` | `id:opt<u8>` | The window playing sound is on stream `id`; none if not known. Sent only while `SetSoundFromScreen` is on, when it changes. |
-| 24 | `Opened` | (empty) | The answer to `Open` from a trusted headset: the session started. |
-| 25 | `Ping` | `seq:u32` | Sent every second in the session; answer with `Pong{seq}` at once. |
-| 26 | `Pong` | `seq:u32` | The answer to the headset's `Ping{seq}`. |
-| 27 | `Goodbye` | `reason:u8` | The host ends the session on purpose, for `reason` (see [End of session](#end-of-session)); nothing follows. |
+| 11 | `PairResult` | `tag:opt<bytes[32]>` | Whether the codes matched: the host's confirmation tag if they did. |
+| 28 | `Snapshot` | `parts:list<part>(max 65535)` | The session started: every part of the host's state. |
+| 31 | `Displays` | `displays:list<Display>(max 32), primary:opt<DisplayId>` | Part. Every display there is (see [Displays](#displays)). |
+| 32 | `Encoding` | `wanted:Wanted, using:opt<(Codec, bool)>, choices:list<(Codec, bool)>(max 64)` | Part. How the host encodes: what is wanted, what it encodes with now (`bool`: on the graphics card), what it could encode with. |
+| 33 | `Sound` | `to_headset:bool, mic:MicDevice` | Part. Whether the PC's sound plays in the headset, and the PC's end of the headset microphone. |
+| 34 | `Limits` | `virtual_max:u8, windows_max:u8, physical_max:u8, streams_max:u8, min:(u32, u32), max:(u32, u32), sizes:list<Mode>(max 64), scales:list<u16>(max 32)` | Part. What the host allows this headset: how many displays of each kind, how many streams, the smallest and largest monitor, the sizes and scales it offers. |
+| 35 | `Access` | `role:u8, perms:u32` | Part. This headset's role (`0` main, `1` guest, anything else a guest) and rights (see [Rights](#rights)). |
+| 36 | `PcInfo` | `name:str(64), app:str(32), language:str(8), os:u8, desktop:str(32)` | Part. The PC's name, app version, interface language, OS (`1` Linux, `2` Windows) and desktop (`KDE Plasma`, `Hyprland`). |
+| 37 | `HostCaps` | `features:list<u16>(max 65535)` | Part, in `Snapshot` only. What the host can do (see [Capabilities](#capabilities)). |
+| 16 | `Focus` | `display:opt<DisplayId>` | Part. The display the mouse is on; none: none of them. |
+| 23 | `SoundFrom` | `display:opt<DisplayId>` | Part, while `Prefs.sound_from_screen` is on. The display whose window plays the sound; none: not known. |
+| 40 | `UpWanted` | `kind:UpKind, on:bool` | Part, one per kind. A program on the PC records from the headset's microphone now: the headset streams it while its own switch is on. |
+| 39 | `VolumeAsk` | `level:u8, muted:bool, seen:u32, ask:u32` | The PC's slider moved: take this level (see [Volume](#volume)). |
+| 29 | `Reply` | `req:u32, outcome:Outcome` | The answer to the headset's `Request` `req`, after the parts it changed. |
+| 30 | `Command` | `req:u32, kind:u8, fields` | Something the PC asks the headset to do (see [Commands](#commands)). Only to a headset with feature 1. |
+| 38 | `Problem` | `error:ErrorCode, detail:str(512), display:opt<DisplayId>` | Something went wrong that nobody asked for and that does not last (what lasts is in the state: a display or the microphone `Failed`). |
+| 2 | `StreamStart` | `id:DisplayId, generation:u32, w:u32, h:u32, codec:Codec` | The stream of display `id` starts, or starts over: a new generation. In the stream's lane. |
+| 3 | `Frame` | `id:DisplayId, generation:u32, seq:u32, keyframe:bool, pts_us:u64, data:bytes*` | One encoded access unit, number `seq` of its generation from 0. In the stream's lane. |
+| 4 | `StreamEnd` | `id:DisplayId, generation:u32` | The stream of this generation stopped. Never "the display is gone": only `Displays` says that. |
+| 12 | `Audio` | `pcm:bytes*` | A slice of PC sound. Lane 1. |
+| 20 | `Notice` | `text:str(8192)` | A desktop notification of the PC, while `Prefs.notifications` is on and the headset has the private right. |
+| 25 | `Ping` | `seq:u32` | Every second in the session; answer with `Pong` at once. |
+| 26 | `Pong` | `seq:u32` | The answer to the headset's `Ping`. |
+| 27 | `Goodbye` | `reason:u8` | The host ends the session on purpose (see [End of session](#end-of-session)). |
 
 ### Headset → host
 
 | Tag | Name | Payload | Meaning |
 |---:|---|---|---|
-| 101 | `Hello` (frozen) | `version:u32, min:u32, app:str*` | First message of every connection (see [Opening](#opening)). |
-| 102 | `RequestKeyframe` | `id:u8` | The decoder of stream `id` lost frames: send a keyframe. |
-| 103 | `FrameShown` | `id:u8, pts_us:u64` | The frame with this `pts_us` was handed to the compositor. |
-| 104 | `AddMonitor` | `width:u32, height:u32` | Create another virtual monitor of this size in pixels. |
-| 105 | `RemoveMonitor` | `id:u8` | Remove monitor `id`. For a window panel id (10 to 12), close the panel and put its window back. |
-| 106 | `SetPrimary` | `id:u8` | Make monitor `id` the primary one. Answered with `PrimaryChanged`; an unknown id is ignored. |
-| 107 | `SetMirror` | `enabled:bool` | Show or hide the mirror of the laptop screen. Answered with `MirrorWanted`. |
-| 108 | `SetOrder` | `ids:list<u8>(max 16)` | New left-to-right order: must contain exactly the ids of the current monitors, otherwise `Error`. Resets the layout to one row. Answered with `Order`. |
-| 109 | `PairBegin` | `headset_shows:bool, name:str(max 64)` | Start a pairing attempt. `headset_shows`: `1` the headset shows the code, `0` the host shows it. `name`: label for the host's trust store (the current client sends `Meta Quest`). |
+| 101 | `Hello` | `version:u32, min:u32, app:str*` | Frozen. The first message of every connection. |
+| 109 | `PairBegin` | `headset_shows:bool, name:str(64)` | Start pairing; `headset_shows`: the headset displays the code and the PC asks for it, otherwise the other way round. |
 | 110 | `PairMsg` | `msg:bytes[33]` | The headset's SPAKE2 message. |
-| 111 | `PairConfirm` | `tag:bytes[32]` | The headset's confirmation tag. |
-| 112 | `SetAudio` | `enabled:bool` | Send PC sound to the headset, or keep it on the PC. Answered with `AudioWanted`. |
-| 113 | `SetMic` | `enabled:bool` | Use the headset microphone as the PC's microphone. Answered with `MicWanted`. |
-| 114 | `Mic` | `pcm:bytes*` | A slice of microphone sound: 48 kHz, 1 channel, signed 16-bit little-endian. |
-| 115 | `Presence` | `worn:bool` | Whether the headset is worn. While it is not, the host pauses encoding and sound. |
-| 116 | `SetMonitors` | `sizes:list<(width:u32, height:u32)>(max 16), primary:u8` | Switch to this set of monitors, left to right (a profile). `primary` is an index into `sizes`. Monitors whose size already matches are kept. |
-| 117 | `SetLayout` | `rows:list<row>(max 16)`, see [Layout](#7-layout) | How the monitors stand around the user. |
-| 118 | `SetPcSettings` | `quality:u32, codec:u8, software:bool, sharp:bool` | Change how the PC encodes (same fields as `PcSettings`, without `encoders`). Answered with `PcSettings`, or `Error`. |
-| 119 | `Battery` | `percent:u8, charging:bool` | The headset's battery, for the PC tray. |
-| 120 | `DetachWindow` | (empty) | Put the PC's active window on a panel of its own. A new stream with an id from 10 to 12 starts, or `Error`. |
-| 121 | `WindowHere` | `id:u8` | Move the PC's active window to monitor `id` (a monitor or `100`, the mirror). |
-| 122 | `Screenshot` | `id:u8` | Save a picture of monitor or window panel `id` on the PC (of the whole desktop where one output cannot be captured). Answered with `Notice` (where it was saved) or `Error`. |
-| 123 | `FindMouse` | (empty) | Where is the mouse? Answered with `MouseAt`, or not at all if the mouse is on none of the streams. |
-| 124 | `MouseTo` | `id:u8, x:u16, y:u16` | Put the mouse on stream `id` at `x`, `y` across its picture (`0` to `65535`). Only if `Abilities` has `MOVE_MOUSE`. No answer. |
-| 125 | `SetNotifications` | `enabled:bool` | Pass the PC's desktop notifications to the headset as `Notice`. |
-| 126 | `SetSoundFromScreen` | `enabled:bool` | Report which stream the sound comes from (`SoundFrom`). |
-| 127 | `Open` | (empty) | Start the session, once the headset trusts the host. Answered with `Opened`, `PairingRequired`, or `Error` when the host cannot serve a session. |
-| 128 | `Ping` | `seq:u32` | Sent every second in the session; answer with `Pong{seq}` at once. |
-| 129 | `Pong` | `seq:u32` | The answer to the host's `Ping{seq}`. |
-| 130 | `Goodbye` | `reason:u8` | The headset ends the session on purpose, for `reason`; nothing follows. |
+| 111 | `PairConfirm` | `tag:bytes[32]` | Proof that the headset derived the same pairing key. |
+| 127 | `Open` | `parts:list<part>(max 65535)` | Start the session, with every part of the headset's state (`HeadsetCaps` always). |
+| 138 | `HeadsetCaps` | `features:list<u16>(max 65535), decoders:list<Decoder>(max 64), streams_max:u8, layers_max:u8, model:str(32)` | Part, in `Open` only. What the headset can do: features, a decoder for each codec with the largest picture, streams it decodes at once, compositor layers it shows at once, its model. |
+| 134 | `Prefs` | `notifications:bool, sound_from_screen:bool, focus_mode:bool, gaze_mouse_ms:opt<u16>, no_limits:bool` | Part. The headset's settings the PC acts on: pass notifications, say where the sound comes from, fewer frames for displays out of focus, the mouse follows the gaze after resting this long, "No limits". |
+| 115 | `Presence` | `worn:bool` | Part. Whether the headset is worn; streaming pauses while it is not. |
+| 119 | `Battery` | `percent:u8, charging:bool` | Part. For the PC's tray. |
+| 135 | `Volume` | `level:u8, muted:bool, seq:u32, ask:u32` | Part. The headset's volume (see [Volume](#volume)). |
+| 136 | `UpState` | `kind:UpKind, switch:bool, permission:u8` | Part, one per kind. The headset's switch for its microphone, and whether the system lets it record: `0` not known, `1` yes, `2` no, `3` the system is asking the user now. |
+| 139 | `UpStart` | `up:u8, kind:UpKind, format:UpFormat` | Up stream `up` starts. Lane 1. |
+| 140 | `Up` | `up:u8, data:bytes*` | A piece of up stream `up`. Lane 1. |
+| 141 | `UpEnd` | `up:u8` | Up stream `up` ended. Lane 1. |
+| 133 | `Arrange` | `rows:list<Row>(max 32)` | How the displays stand around the user (see [Layout](#7-layout)). |
+| 137 | `Gaze` | `display:opt<DisplayId>, u:u16, v:u16` | The display the user looks at, and where on it (0 to 65535 from the top left). |
+| 131 | `Request` | `req:u32, kind:u8, fields` | A change of the host's state (see [Requests](#requests)). |
+| 132 | `Reply` | `req:u32, outcome:Outcome` | The answer to the host's `Command` `req`, after the parts it changed. |
+| 124 | `MouseTo` | `id:DisplayId, u:u16, v:u16` | Put the mouse on display `id`, at `u`, `v` across its picture (0 to 65535). |
+| 102 | `RequestKeyframe` | `id:DisplayId, generation:u32` | The decoder lost frames of this generation: a keyframe, please. |
+| 103 | `FrameShown` | `id:DisplayId, generation:u32, seq:u32` | The decoder handed frame `seq` of this generation to the compositor. |
+| 128 | `Ping` | `seq:u32` | As the host's. |
+| 129 | `Pong` | `seq:u32` | The answer to the host's `Ping`. |
+| 130 | `Goodbye` | `reason:u8` | The headset ends the session on purpose. |
 
-Tags 0, 28 to 100 and 131 to 255 are unused.
+### Types
 
-Host behaviour for monitor requests (implementation-defined): at most 6 monitors; sizes
-from 320×240 to 7680×4320; the last monitor cannot be removed; at most 3 window panels.
-A request that fails is answered with `Error`.
+| Type | Bytes | Notes |
+|---|---|---|
+| `DisplayId` | `u32` | A display of the PC. The host gives numbers out from a counter that never goes back (kept in its `screens.txt`), so a number is never another display's, in this run or a later one. |
+| `Gen` (`generation`) | `u32` | One counter for every stream of a run of the host app, from 1, a new one at every `StreamStart`. |
+| `ErrorCode` | `u16` | See [Error codes](#error-codes). |
+| `Mode` | `w:u32, h:u32, scale:u16` | Pixels, and the scale in percent (100: one pixel of the picture is one of the desktop; 150: "larger text"). |
+| `DeskRect` | `x:i32, y:i32, w:u32, h:u32` | Where a display is on the PC's desktop, in logical pixels. |
+| `Display` | `id:DisplayId, kind:DisplayKind, name:str(64), mode:Mode, desk:opt<DeskRect>, state:DisplayState` | `desk` none: nowhere on the desktop now. |
+| `DisplayKind` | `0 Virtual`, `1 Window{title:str(128)}`, `2 Physical{builtin:bool, connector:str(32), shown:bool}` | A virtual monitor; a small output for one window, shown as a panel (the title empty without the private right); a display of the PC itself (`builtin`: the laptop's own panel), streamed while `shown`. |
+| `DisplayState` | `0 Starting`, `1 Running`, `2 Failed{error:ErrorCode, detail:str(512)}`, `3 Absent` | `Failed`: it could not start, keeps its place and is tried again. `Absent`: a display of the PC known but not connected now (the lid closed, the cable out); it keeps its number and place. |
+| `Wanted` | `bitrate:u16, codec:opt<Codec>, software:bool, sharp:bool` | Mbit/s for each monitor; the codec chosen (none: one this headset does not decode); on the CPU; the slower preset for clearer small text. |
+| `Codec` | `0 H264`, `1 H265`, `2 Av1` | |
+| `MicDevice` | `0 Off`, `1 Ready`, `2 Failed{error:ErrorCode, detail:str(512)}` | The virtual microphone programs on the PC record from. |
+| `UpKind` | `0 Mic`, `1 Camera`, `2 Poses` | |
+| `UpFormat` | `0 Pcm16{rate:u32, channels:u8}`, `1 Video{codec:Codec, w:u32, h:u32}`, `2 Poses{hz:u8}` | The microphone: 48000 Hz, 1 or 2 channels. |
+| `Decoder` | `codec:u8, max_w:u32, max_h:u32` | The codec as `Codec`'s number, kept raw so a codec the host does not know simply does not match. |
+| `Row` | `entries:list<Placed>(max 32)` | |
+| `Placed` | `id:DisplayId, center:opt<i32>, middle:opt<i32>` | See [Layout](#7-layout). |
+| `Primary` | `0 Index{index:u8}`, `1 Display{id:DisplayId}` | The monitor made for `modes[index]`, or a display of the PC itself. |
+| `Outcome` | `0 Done`, `1 Added{id:DisplayId}`, `2 Ids{ids:list<DisplayId>(max 32)}`, `3 Saved{path:str(1024)}`, `4 Pointer{id:DisplayId, u:u16, v:u16}`, `5 Failed{error:ErrorCode, detail:str(512)}` | |
+| `part` | `tag:u8, body:list<u8>(max 65535)` | See [State](#state). |
+
+### Displays
+
+`Displays` lists every display there is: first in the order of the rows the headset
+arranged (top to bottom, left to right), then those the rows leave out (window panels,
+displays of the PC that are hidden or absent). It is the one source of which displays
+exist. Within a session, a display leaves the headset only when it leaves this list;
+a reconnect or a `Snapshot` never removes a place (numbers are not reused, so an old
+place is in nobody's way), and a display of the PC is never removed at all (it becomes
+`Absent`).
+
+A display of the PC keeps its number by its EDID (make and model as the desktop says
+them), else by its connector: another screen in the same connector gets a new number
+and a new place.
+
+### Requests
+
+| `kind` | Request | Fields | Success | Right | Typical failures |
+|---:|---|---|---|---|---|
+| 1 | `AddDisplay` | `mode:Mode` | `Added` | changes | `LIMIT`, `BAD_SIZE` |
+| 2 | `RemoveDisplay` | `id:DisplayId` | `Done` | changes | `UNKNOWN_DISPLAY`, `LAST_DISPLAY` |
+| 3 | `SetDisplays` | `modes:list<Mode>(max 32), primary:opt<Primary>, shown_physical:list<DisplayId>(max 32)` | `Ids`, in the order of `modes` | changes | `LIMIT`, `BAD_SIZE`, `UNKNOWN_DISPLAY` |
+| 4 | `SetPrimary` | `id:DisplayId` | `Done` | changes | `UNKNOWN_DISPLAY` |
+| 5 | `ShowPhysical` | `id:DisplayId, shown:bool` | `Done` | changes | `UNKNOWN_DISPLAY`, `LIMIT`, `CAPTURE` |
+| 6 | `SetEncoding` | `bitrate:opt<u16>, codec:opt<Codec>, software:opt<bool>, sharp:opt<bool>` (none: as it is) | `Done` (what came of it is in `Encoding`) | changes | `ENCODER`, `BAD_ARGUMENT` |
+| 7 | `SetSound` | `to_headset:bool` | `Done` | changes | `SOUND` |
+| 9 | `DetachWindow` | | `Added` | changes, private | `NO_WINDOW`, `LIMIT` |
+| 10 | `WindowHere` | `id:DisplayId` | `Done` | input | `NO_WINDOW`, `UNKNOWN_DISPLAY` |
+| 11 | `Screenshot` | `id:DisplayId` | `Saved` | private | `CAPTURE` |
+| 12 | `FindMouse` | | `Pointer` | none | `NOT_ON_DISPLAYS` |
+
+`SetDisplays` sets the monitors of a profile, left to right: monitors of a size that
+is there already are kept with their windows; `shown_physical` are the displays of the
+PC to show, the others are hidden. Kind 8 is not used.
+
+### Commands
+
+| `kind` | Command | Fields | What the headset does |
+|---:|---|---|---|
+| 1 | `Recenter` | | Brings everything in front of the user. |
+| 2 | `Profile` | `name:str(64)` | Switches to the profile of this name (`NO_SUCH_PROFILE`); answers once it is in place. |
+| 3 | `Cinema` | `on:bool` | Cinema mode. |
+| 4 | `FocusMode` | `on:bool` | "Focus" (changes `Prefs`). |
+| 5 | `Distance` | `steps:i8` | Closer (below 0) or further. |
+| 6 | `Preset` | `preset:u8` | A preset arrangement (`BAD_ARGUMENT` for one it does not know). |
+| 7 | `LineUp` | | "Line up". |
+| 8 | `ShowMouse` | | Shows where the mouse is. |
+| 9 | `SetMic` | `on:bool` | The headset's microphone switch (changes `UpState`). |
+| 10 | `Follow` | `on:bool` | Follow the head. |
+| 11 | `ResetArrangement` | | Reset the arrangement (`UNSUPPORTED` in the current client). |
+| 12 | `NoLimits` | `on:bool` | "No limits" (changes `Prefs`). |
+
+### Error codes
+
+A code a reader does not know reads as `OTHER`, so a new code needs no new protocol
+version. The headset shows its own text for a code it knows, in its language, with the
+`detail` (technical, in the PC's language) under it; for `OTHER`, only the detail.
+
+| Code | Name | Meaning |
+|---:|---|---|
+| 0 | `OTHER` | Something else: only the detail says what. |
+| 1 | `UNSUPPORTED` | A request or command this side does not know or cannot do. |
+| 2 | `NOT_ALLOWED` | This headset has no right to it. |
+| 3 | `UNKNOWN_DISPLAY` | No such display (any more). |
+| 4 | `LIMIT` | As many as the host allows. |
+| 5 | `BAD_SIZE` | A size or scale the host does not make. |
+| 6 | `LAST_DISPLAY` | The last monitor cannot be removed. |
+| 7 | `NO_WINDOW` | No active window on the PC. |
+| 8 | `DESKTOP` | The desktop did not do it (an output not made, KScreen stuck). |
+| 9 | `ENCODER` | The encoder could not start. |
+| 10 | `CAPTURE` | The picture of a display could not be taken. |
+| 11 | `SOUND` | Sound could not be routed. |
+| 12 | `NOT_ON_DISPLAYS` | The mouse is on none of the displays. |
+| 13 | `NO_SUCH_PROFILE` | The headset has no profile of that name. |
+| 14 | `BAD_ARGUMENT` | An argument out of range. |
 
 ## 6. Streams, sound and microphone
 
-### Stream ids
+### Streams and generations
 
-| Ids | What | Notes |
-|---|---|---|
-| `0`, `1`, … | Virtual monitors | The host gives a new monitor the lowest free id. With at most 6 monitors these are `0` to `5`. A monitor keeps its id between sessions and runs of the host, so the headset may keep where it showed a monitor by its id. |
-| `10`, `11`, `12` | Window panels (`WINDOW_IDS` = `10..13`) | A small output made for one window, shown as a floating panel. At most three, because the headset has only so many video decoders. |
-| `100` | Mirror of the physical display (`MIRROR_ID`) | The laptop panel, streamed as it is. |
+Every display in `Displays` that is `Running` streams its picture: a virtual monitor,
+a window panel, or a display of the PC itself while it is shown. A stream is named by
+its display's id and a **generation**: the host counts generations from 1 over a run
+of its app, a new one at every `StreamStart`. A frame, its acknowledgement and a
+request for a keyframe carry the generation, so nothing of an earlier start of a
+stream is taken for the new one. The host ignores `RequestKeyframe` and `FrameShown`
+of a generation that is not the current one; the headset ignores `Frame` and
+`StreamEnd` of a generation it did not see start.
 
-A monitor whose stream cannot start (its output or encoder fails) stays in `Order`
-without a `StreamStart`, and the host says why in an `Error`; it is tried again at the
-next session. A client keeps its place. A monitor removed leaves `Order`; its
-`StreamEnd` and the `Order` without it may come in either order.
+The host sends `StreamStart` before the first `Frame` of a stream on this connection,
+and again (a new generation) when the encoded size or the codec changes, and for every
+stream at the start of each session. A client that gets `StreamStart` for a display it
+streams already replaces that stream (new decoder, new size). `StreamStart`,
+`StreamEnd` and the frames of a stream go in a lane of their own, which the host picks
+from the free lanes `2` to `31`, so they never overtake a frame of the old
+configuration on its way. Video frames still waiting on the host are discarded when
+`StreamStart` or `StreamEnd` is queued, so no frame of the old configuration follows.
 
-### StreamStart
+The first `Frame` of a generation is a keyframe, and `seq` counts its frames from 0.
 
-The host sends `StreamStart` before the first `Frame` of a stream on this connection.
-It sends it again for the same id when the encoded size changes, when the codec changes
-(after `SetPcSettings`), and for every stream at the start of each session. A client
-that gets `StreamStart` for an id it already has replaces that stream (new decoder,
-new size). `StreamStart` and `StreamEnd` go in the lane of their stream, so they never
-overtake a frame of the old configuration that is on its way already. Video frames of
-that stream still waiting on the host are discarded when `StreamStart` or `StreamEnd`
-is queued, so no other frame of the old configuration follows.
+**Lanes are not ordered with each other.** `Displays` goes in the control lane, a
+stream in its own, so the host holds a `StreamStart` back (and drops the frames before
+it) until the `Displays` it sent this session lists the display. A client still
+tolerates a `StreamStart` for a display it does not know: it may set up the decoder
+and show nothing until `Displays` lists it.
 
-The first `Frame` after a `StreamStart` is a keyframe.
-
-Messages about a stream that go in the control lane (`Order`, `Focus`,
-`PrimaryChanged`, `SoundFrom`, `MouseAt`) are not ordered with the stream's own lane:
-they can arrive before the `StreamStart` they refer to (control goes first) or after
-its `StreamEnd`. A client keeps what they say for an id it does not stream yet, or
-ignores it, but must not treat it as an error.
+At most `Limits.streams_max` streams go at once (30 at most: a lane each). A display
+whose stream cannot start (its output or encoder fails) stands in `Displays` as
+`Failed`, without a `StreamStart`, keeps its place and is tried again; a display
+removed leaves `Displays`, and its `StreamEnd` and the `Displays` without it may come
+in either order.
 
 ### Frames
 
@@ -692,22 +967,23 @@ ignores it, but must not treat it as an error.
 - No B-frames: decode order is display order.
 - `pts_us` is the presentation timestamp in microseconds from the host's capture clock
   (0 if the encoder gave none). Its starting point is implementation-defined; use it to
-  order frames and to refer to them in `FrameShown`, not as wall-clock time.
+  order frames and for latency figures, not as wall-clock time.
 - Keyframes come mostly on request (at session start, after loss, after
   `RequestKeyframe`); otherwise the encoders put at most 600 frames between two
   keyframes (implementation-defined).
 
 ### Feedback from the headset
 
-- **`FrameShown{id, pts_us}`**: the current client sends it for a decoded frame at
-  most every 100 ms per stream. The host treats every earlier frame of that stream as
-  done too, and uses the acknowledgements only for its latency figures in the log.
-  They are not flow control: a host must not wait for them.
-- **`RequestKeyframe{id}`**: the client sends it when it has had to drop frames (its
-  queue for that decoder, 32 frames in the current client, was full) or its decoder is
-  waiting for a keyframe; it then drops non-key frames of that stream until a keyframe
-  arrives. The current client asks at most every 300 ms per stream. The host asks its
-  encoder for a keyframe.
+- **`FrameShown{id, generation, seq}`**: the current client sends it for a decoded
+  frame at most every 100 ms per stream. The host treats every earlier frame of that
+  generation as done too, and uses the acknowledgements only for its latency figures
+  in the log. They are not flow control: a host must not wait for them.
+- **`RequestKeyframe{id, generation}`**: the client sends it when it has had to drop
+  frames (its queue for that decoder, 32 frames in the current client, was full) or
+  its decoder is waiting for a keyframe; it then drops non-key frames of that stream
+  until a keyframe arrives. The current client asks at most every 300 ms per stream,
+  and the host takes at most one request every 300 ms per display, from all sessions
+  together. The host asks its encoder for a keyframe.
 
 ### When frames are late
 
@@ -719,8 +995,7 @@ in strict priority:
    means the headset reads nothing, and the session ends;
 2. sound (`Audio`), in lane `1`, at most 8 slices waiting; the oldest is dropped when a
    newer one arrives;
-3. video, each stream in a lane of its own (`2 + id`), the streams taking turns a
-   packet each.
+3. video, each stream in a lane of its own, the streams taking turns a packet each.
 
 A message it started is always finished; one of a higher class goes between its
 packets. So sound waits behind at most one packet (16 KiB) of a big keyframe, and one
@@ -751,70 +1026,80 @@ kernel (`TCP_NOTSENT_LOWAT` 32 KiB) for the same reason.
 These values are implementation-defined; the rule a client can rely on is that
 **after a gap in a stream, the next frame it gets for that stream is a keyframe**.
 
-### Sound and microphone
+### Sound
 
-| | Direction | Format | Message |
-|---|---|---|---|
-| PC sound | host → headset | 48 kHz (`AUDIO_RATE`), 2 channels (`AUDIO_CHANNELS`), interleaved signed 16-bit little-endian | `Audio` |
-| Microphone | headset → host | 48 kHz, 1 channel (`MIC_CHANNELS`), signed 16-bit little-endian | `Mic` |
+PC sound (`Audio`, lane 1) is 48 kHz (`AUDIO_RATE`), 2 channels (`AUDIO_CHANNELS`),
+interleaved signed 16-bit little-endian, with no header or timestamp: each message is a
+whole number of sample frames, to be played in arrival order. Slices are 10 ms in the
+current host (1920 bytes), but the size is implementation-defined and a receiver must
+accept any length. It flows while the headset is worn and `Sound.to_headset` is on.
 
-There is no header or timestamp: each message is a whole number of sample frames, to
-be played in arrival order. Slices are 10 ms in the current apps (1920 bytes of PC
-sound, 960 bytes of microphone), but the size is implementation-defined and a receiver
-must accept any length.
+### Up streams: the microphone
 
-The current client sends control messages first, then microphone sound and
-`FrameShown` in a lane of their own; while the network is stuck it drops those beyond
-about 2.5 s waiting, and never a control message.
+What goes from the headset to the PC as a stream (the microphone now; the camera and
+poses later) is an **up stream**: `UpStart{up, kind, format}`, then `Up{up, data}`
+pieces, then `UpEnd{up}`, all in lane 1 so that none overtakes another. `up` is the
+headset's number for the stream (the current client uses `0` for the microphone). The
+microphone is `Pcm16` at 48000 Hz with 1 channel (`MIC_CHANNELS`) or 2, interleaved
+signed 16-bit little-endian, 10 ms in a piece in the current client.
 
-PC sound flows while the headset is worn and `AudioWanted` is on. The microphone:
-`SetMic{1}` tells the host to offer the headset microphone as a PC input; the host sends
-`MicActive{1}` while a PC app records from it, and the headset then sends `Mic` slices
-until `MicActive{0}`, but only if its own microphone switch is on. The host cannot turn
-that switch on. The current client ignores `MicWanted`.
+- The headset tells its switch and whether the system lets it record in `UpState`
+  (a part, in `Open` and on every change). The host makes its end of the microphone
+  (a virtual input programs record from; its state in `Sound.mic`) while the switch of
+  a headset with the microphone right is on, and shows in its tray when the system does
+  not let the headset record.
+- While a program on the PC records from it, the host says `UpWanted{Mic, on: true}`;
+  the headset then streams its microphone while its own switch is on, and ends the
+  stream with `UpEnd` once `UpWanted` is off or the switch goes off. The switch is the
+  headset's: the host changes it only with the command `SetMic` (from its tray), which
+  the headset carries out as if the user pressed it.
+- `UpStart` needs the microphone right; the host drops a stream without it.
+
+The current client sends control messages first, then up streams and `FrameShown` in
+lane 1; while the network is stuck it drops `Up` pieces and `FrameShown` beyond about
+2.5 s waiting, never `UpStart` or `UpEnd`, and never a control message.
 
 ## 7. Layout
 
-`SetLayout` tells the host how the monitors stand around the user, so the PC desktop
-can be arranged the same way and the mouse crosses from monitor to monitor where the
-eyes expect it.
+`Arrange` tells the host how the displays stand around the user, so the PC desktop can
+be arranged the same way and the mouse crosses from display to display where the eyes
+expect it. Only the main headset's `Arrange` moves the desktop.
 
 ### Encoding
 
 ```
-SetLayout: rows:list<row>(max 16)
-row:       entries:list<entry>(max 16)
-entry:     id:u8, center:opt<i32>, middle:opt<i32>
+Arrange: rows:list<Row>(max 32)
+Row:     entries:list<Placed>(max 32)
+Placed:  id:DisplayId, center:opt<i32>, middle:opt<i32>
 ```
 
 Rows go from top to bottom, entries in a row from left to right. An empty list means no
-rows. A `SetLayout` may hold at most 16 rows and at most 16 monitors in all its rows
-together, and lists each monitor once; a reader rejects any other as invalid, and the
-connection ends.
+rows. An `Arrange` holds at most 32 displays in all its rows together and lists each
+once; a reader rejects any other as invalid, and the connection ends.
 
-- `id`: a monitor id, or `100` for the mirror if the headset placed it. Window panels
-  are not part of the layout.
-- `center`: across, where the centre of the monitor's place on the PC desktop is in
+- `id`: a virtual monitor, or a display of the PC itself if the headset placed it.
+  Window panels are not part of the layout.
+- `center`: across, where the centre of the display's place on the PC desktop is in
   the client's plan of it (see Units); none: not known.
 - `middle`: the same **downwards**; none: not known.
 
 ### Units
 
-`center` and `middle` are in pixels of the monitors' own streams. Only differences
+`center` and `middle` are in pixels of the displays' own streams. Only differences
 between values matter; the origin is arbitrary.
 
-The current client plans the PC desktop itself, from how it shows the monitors (the
-same code the host runs, `layout/src/desk.rs`), and sends that plan: each monitor's
+The current client plans the PC desktop itself, from how it shows the displays (the
+same code the host runs, `layout/src/desk.rs`), and sends that plan: each display's
 place on it, a rectangle of its stream's size, as its top-left corner plus half its
 size, rounded down (`x + w / 2`, `y + h / 2` in whole pixels). So a host that plans
 from these rectangles gets the client's plan back to the pixel, and the client's map
 shows what the PC desktop will be. The rows and the plan follow what the eyes see:
 
-- A row is a chain of monitors side by side as seen; a monitor joins its neighbour
+- A row is a chain of displays side by side as seen; a display joins its neighbour
   when their facing edges share at least half of the shorter one, and stays while they
-  share a quarter, so a hand's tremor never moves a monitor from one row to another.
-- Monitors stand on the desktop as they are seen along the edges they share: offset
-  as seen, so the mouse and a dragged window cross where the monitors meet, sideways
+  share a quarter, so a hand's tremor never moves a display from one row to another.
+- Displays stand on the desktop as they are seen along the edges they share: offset
+  as seen, so the mouse and a dragged window cross where the displays meet, sideways
   and up or down. A difference within 3 % of the shorter edge is a hand's and is lined
   up; a larger one is kept, cut back only so that neighbours share at least 200 px.
 - A changed arrangement is sent only when it has held for 0.8 s and nothing is being
@@ -822,8 +1107,8 @@ shows what the PC desktop will be. The rows and the plan follow what the eyes se
   tremor, is kept.
 
 This method is implementation-defined; what the host relies on is that the values are
-rectangles' centres in one pixel space, comparable between monitors and to the
-monitors' own pixel sizes.
+rectangles' centres in one pixel space, comparable between displays and to the
+displays' own pixel sizes.
 
 ### What the host does with it
 
@@ -831,29 +1116,29 @@ monitors' own pixel sizes.
 the client uses too to plan the desktop it sends and shows on its map.)
 
 1. Clamps every known `center` and `middle` to ±100000.
-2. Keeps the rows, drops ids that are neither a current monitor nor the active mirror,
-   and appends monitors missing from the rows to the end of the last row, with no
-   positions. The rows are the one source of the order: it sends the monitor ids of
-   all rows, top to bottom and left to right, without the mirror, back as `Order`, and
-   keeps the rows for the next run.
+2. Keeps the rows, drops ids that are neither a current monitor nor a display of the
+   PC, keeps the spot of a display of the PC that is not connected now (it is not in
+   the headset's rows while absent), and appends monitors missing from the rows to the
+   end of the last row, with no positions. The rows are the one source of the order:
+   `Displays` lists the displays in it, and the host keeps the rows for the next run.
 3. Lays the desktop out, in logical pixels (pixel size divided by the output's scale),
    once however many changes came in at once, and only with outputs the desktop lists
-   already. Each monitor with both values is a rectangle of its stream's size centred
+   already. Each display with both values is a rectangle of its stream's size centred
    there; the plan is made of the rows and those rectangles:
-   - When the rectangles already are a plan (the client's: every monitor of the rows
+   - When the rectangles already are a plan (the client's: every display of the rows
      placed, in whole pixels, each the size of its output on the desktop, nothing
-     overlapping, rows in order and side by side, every monitor in reach of the mouse),
+     overlapping, rows in order and side by side, every display in reach of the mouse),
      it is taken as it is.
-   - Otherwise the row with the primary monitor goes side by side from `0,0`, each
-     monitor offset from its left neighbour as its rectangle is (within 3 % lined up,
+   - Otherwise the row with the primary display goes side by side from `0,0`, each
+     display offset from its left neighbour as its rectangle is (within 3 % lined up,
      sharing at least 200 px); every other row, outwards from it, is cut where another
-     row's monitor stands between two of its monitors, and each piece rests on what is
+     row's display stands between two of its displays, and each piece rests on what is
      placed where its rectangles meet it. A plan worked out this way replaces the one
      the desktop has only when it is better by more than a hand's tremor.
-   - The mirror goes under the primary monitor unless the headset placed it, other
-     real displays next to it; window panels go in a column right of everything.
+   - A display of the PC goes under the primary monitor unless the headset placed it;
+     window panels go in a column right of everything.
    Nothing overlaps, every output can be reached by the mouse, and the top-left corner
-   of everything is at `0,0`.
+   of everything is at `0,0`. Where each display ended up is in `Displays` (`desk`).
 
-`SetOrder` and `SetMonitors` replace the layout with one row in the given order, with
-no positions.
+`SetDisplays` replaces the layout with one row in the order of its `modes`, with no
+positions, until the next `Arrange`.
