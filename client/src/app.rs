@@ -1042,8 +1042,7 @@ impl Scene {
         };
         let curve = self.curve_radius();
         let looked = self
-            .monitors
-            .keys()
+            .visible_monitors()
             .filter_map(|id| {
                 let p = self.placements.get(id)?;
                 let c = curve.filter(|_| !self.is_window(*id));
@@ -1155,7 +1154,11 @@ impl Scene {
         let (head, forward) = self.head;
         self.placements
             .iter()
-            .filter(|(id, _)| !self.is_window(**id) && self.monitors.contains_key(*id))
+            .filter(|(id, _)| {
+                !self.is_window(**id)
+                    && self.monitors.contains_key(*id)
+                    && !self.being_removed(**id)
+            })
             .max_by(|a, b| {
                 let score = |p: &Placement| (p.position - head).normalize_or_zero().dot(forward);
                 score(a.1).total_cmp(&score(b.1))
@@ -1464,7 +1467,7 @@ impl Scene {
             );
         }
         let curve = self.curve_radius();
-        for id in self.monitors.keys() {
+        for id in self.visible_monitors() {
             if let Some(p) = self.placements.get(id) {
                 consider(
                     Target::Monitor(*id),
@@ -1602,8 +1605,13 @@ impl Scene {
         Some(ui::display_label(&d.name))
     }
 
+    /// The monitors with a stream that are shown: not those asked to go.
+    fn visible_monitors(&self) -> impl Iterator<Item = &ScreenId> {
+        self.monitors.keys().filter(|id| !self.being_removed(**id))
+    }
+
     /// Monitor `id` was asked to go and the PC has not answered yet: it is not shown
-    /// meanwhile.
+    /// meanwhile, nor pointed at, looked at or taken as the one in front.
     fn being_removed(&self, id: ScreenId) -> bool {
         self.asks.waits(ui::Asked::Remove(id))
     }
