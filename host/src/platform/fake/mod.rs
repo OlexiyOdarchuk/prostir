@@ -104,7 +104,9 @@ pub fn broadcast_addresses() -> Vec<Ipv4Addr> {
 
 /// Calls `on_text` with what a test writes to `$XDG_RUNTIME_DIR/NAME`, on a thread
 /// that sleeps in the kernel until a file there is written (inotify), and removes the
-/// file once read. `on_text` returns `false` to stop. Whether the thread started.
+/// file once read. A test makes the file under another name and moves it there, so it
+/// is never read half written. `on_text` returns `false` to stop. Whether the thread
+/// started.
 fn watch_file(name: &'static str, on_text: impl Fn(String) -> bool + Send + 'static) -> bool {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::ffi::OsStrExt;
@@ -136,10 +138,14 @@ fn watch_file(name: &'static str, on_text: impl Fn(String) -> bool + Send + 'sta
         log::warn!("fake desktop: cannot watch {}", dir.display());
         return false;
     }
+    // Moved aside before it is read, so a command written meanwhile is a file of its
+    // own, not removed unread with this one.
+    let taken = dir.join(format!("{name}.taken"));
     let take = move |path: &std::path::Path| {
-        let text = std::fs::read_to_string(path).ok()?;
-        let _ = std::fs::remove_file(path);
-        Some(text)
+        std::fs::rename(path, &taken).ok()?;
+        let text = std::fs::read_to_string(&taken).ok();
+        let _ = std::fs::remove_file(&taken);
+        text
     };
     std::thread::Builder::new()
         .name(name.into())
