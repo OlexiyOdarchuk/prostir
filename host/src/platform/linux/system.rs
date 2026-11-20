@@ -1,11 +1,10 @@
 //! Linux system bits that do not depend on the desktop: files, the single instance,
-//! signals, memory.
+//! memory, programs run with a time limit.
 
 use std::io::{ErrorKind, Read};
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
@@ -84,44 +83,6 @@ pub fn clean_up_after_crash() {
 pub fn give_memory_back() {
     // SAFETY: plain glibc call; only releases memory that is already free.
     unsafe { libc::malloc_trim(0) };
-}
-
-/// Set by SIGTERM, SIGINT and SIGHUP; the main loop then quits normally, so monitors,
-/// the sound output and the microphone are put back by the usual clean-up.
-static QUIT: AtomicBool = AtomicBool::new(false);
-
-/// Whether a signal asked Prostir to quit.
-pub fn quit_requested() -> bool {
-    QUIT.load(Ordering::Relaxed)
-}
-
-/// Lets signals end the program cleanly on every desktop. If the normal path does not
-/// finish within a few seconds (stuck in a dialog, say), removes Hyprland's monitors
-/// directly: KWin drops its outputs when the program ends, Hyprland keeps them.
-pub fn quit_on_signals() {
-    extern "C" fn on_signal(_: libc::c_int) {
-        // Only an atomic store: safe inside a signal handler.
-        QUIT.store(true, Ordering::Relaxed);
-    }
-    for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
-        // SAFETY: installs a handler that only stores an atomic. A handler (unlike a
-        // blocked signal mask) is not inherited by child processes such as pw-loopback.
-        unsafe { libc::signal(sig, on_signal as *const () as libc::sighandler_t) };
-    }
-    let spawned = std::thread::Builder::new()
-        .name("signals".into())
-        .spawn(|| {
-            while !QUIT.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            std::thread::sleep(Duration::from_secs(5));
-            warn!("did not quit within 5 s: removing monitors and leaving");
-            clean_up_after_crash();
-            std::process::exit(1);
-        });
-    if let Err(e) = spawned {
-        warn!("cannot watch for signals: {e}");
-    }
 }
 
 /// The PC's name, for the headset's list of PCs.

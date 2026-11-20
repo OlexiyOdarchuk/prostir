@@ -39,7 +39,6 @@ mod screen;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -87,24 +86,6 @@ pub fn single_instance() -> Result<std::fs::File> {
     }
     log::warn!("fake desktop (a test build): settings in {}", dir.display());
     Ok(file)
-}
-
-/// Set by SIGTERM and SIGINT: a test stops the PC app the way a user would.
-static QUIT: AtomicBool = AtomicBool::new(false);
-
-pub fn quit_requested() -> bool {
-    QUIT.load(Ordering::Relaxed)
-}
-
-pub fn quit_on_signals() {
-    extern "C" fn on_signal(_: libc::c_int) {
-        // Only an atomic store: safe inside a signal handler.
-        QUIT.store(true, Ordering::Relaxed);
-    }
-    for sig in [libc::SIGTERM, libc::SIGINT] {
-        // SAFETY: installs a handler that only stores an atomic.
-        unsafe { libc::signal(sig, on_signal as *const () as libc::sighandler_t) };
-    }
 }
 
 /// Nothing outlives a fake run.

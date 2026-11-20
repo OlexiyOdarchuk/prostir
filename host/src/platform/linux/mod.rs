@@ -15,6 +15,6 @@ pub mod windows;
 
 pub use desktop::{Desktop, Output};
 pub use system::{
-    broadcast_addresses, clean_up_after_crash, config_home, give_memory_back, hostname,
-    quit_on_signals, quit_requested, run, single_instance,
+    broadcast_addresses, clean_up_after_crash, config_home, give_memory_back, hostname, run,
+    single_instance,
 };

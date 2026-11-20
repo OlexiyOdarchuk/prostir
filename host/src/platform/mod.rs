@@ -29,8 +29,7 @@
 //!   `set_pairing`; the tray menu also turns autostart on and off.
 //! - `dialogs`: `ask_code` (the pairing code typed on the PC), `notify` and
 //!   `notify_and_wait` (desktop notifications).
-//! - System: `config_home`, `single_instance`, `quit_on_signals`, `quit_requested`,
-//!   `clean_up_after_crash`, `give_memory_back`, `hostname`, `broadcast_addresses`,
+//! - System: `config_home`, `single_instance`, `clean_up_after_crash`, `give_memory_back`, `hostname`, `broadcast_addresses`,
 //!   `run` (a program run to the end, stopped if it hangs). The private runtime dir
 //!   stays inside the platform.
 //!
@@ -72,6 +71,10 @@ pub use fake::*;
 // The connection to the headset, the same with the fake desktop as with a real one.
 mod net;
 pub use net::*;
+
+// Signals that ask the program to quit, the same on every Linux desktop and the fake one.
+mod signals;
+pub use signals::quit_on_signals;
 
 #[cfg(not(any(target_os = "linux", feature = "fake-desktop")))]
 compile_error!("Prostir has no platform layer for this operating system yet (see platform/mod.rs)");

@@ -20,6 +20,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::io::ErrorKind;
 use std::net::{Ipv4Addr, TcpListener, UdpSocket};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
@@ -89,6 +90,9 @@ fn parse_monitor(s: &str) -> Result<MonitorSpec, String> {
     s.parse()
 }
 
+/// A signal asked the program to quit.
+static QUIT_ASKED: AtomicBool = AtomicBool::new(false);
+
 /// Tray icon and the commands it sends.
 struct Control {
     tray: Option<tray::Handle>,
@@ -113,7 +117,7 @@ impl Control {
     /// Applies tray commands (through the store, then to the screens); returns why a
     /// session must end, if it must (quitting, or the paired headsets forgotten).
     fn poll(&mut self, store: &mut Store, displays: Option<&mut Displays>) -> Option<PcGoodbye> {
-        if platform::quit_requested() {
+        if QUIT_ASKED.load(Ordering::Relaxed) {
             self.quit = true;
         }
         let mut forgot = false;
@@ -1041,6 +1045,8 @@ fn notify_battery(percent: u8) {
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse();
+    // A signal from here on quits the usual way, putting everything back.
+    platform::quit_on_signals(|_| QUIT_ASKED.store(true, Ordering::Relaxed));
     let _instance = platform::single_instance()?;
     // The command line holds for this run only.
     let run = store::Run {
@@ -1057,7 +1063,6 @@ fn main() -> Result<()> {
     // The first start says that this build counts its users and how to turn it off,
     // a day before the first count.
     usage::announce_once(store.wanted().count);
-    platform::quit_on_signals();
     // Monitors from a run that crashed: without the headset nobody sees their windows.
     platform::clean_up_after_crash();
     gstreamer::init().context("GStreamer init")?;
