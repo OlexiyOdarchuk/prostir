@@ -6,6 +6,11 @@
 //!
 //! One Wayland connection ([`Screencast`]) serves all monitors, which come and
 //! go one by one ([`VirtualOutput`]).
+//!
+//! KWin gives a virtual output the size that any stream of it negotiates, also a
+//! stream another program opened (sharing the screen in Discord through the portal).
+//! The output's `wl_output` mode shows that at once ([`VirtualOutput::resized`]);
+//! our own stream, connected again, makes KWin put the created size back.
 
 use std::collections::HashMap;
 use std::os::fd::AsRawFd;
@@ -22,7 +27,7 @@ use crate::platform::MonitorSpec;
 use log::{info, warn};
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
 use wayland_client::protocol::{wl_output, wl_registry};
-use wayland_client::{Connection, Dispatch, Proxy, QueueHandle};
+use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, WEnum};
 use wayland_protocols_plasma::screencast::v1::client::{
     zkde_screencast_stream_unstable_v1::{self, ZkdeScreencastStreamUnstableV1},
     zkde_screencast_unstable_v1::ZkdeScreencastUnstableV1,
@@ -38,13 +43,51 @@ struct StreamState {
     closed: bool,
 }
 
+/// A compositor output as its `wl_output` events describe it.
+#[derive(Debug, Default, PartialEq)]
+struct OutputInfo {
+    /// Connector name: eDP-1, HDMI-A-1, Virtual-Prostir-1…
+    name: Option<String>,
+    /// Current mode in pixels, as of the last `done`.
+    mode: Option<(u32, u32)>,
+    /// Current mode announced since that `done`.
+    next_mode: Option<(u32, u32)>,
+}
+
+impl OutputInfo {
+    fn on_event(&mut self, event: wl_output::Event) {
+        match event {
+            wl_output::Event::Name { name } => self.name = Some(name),
+            wl_output::Event::Mode {
+                flags: WEnum::Value(flags),
+                width,
+                height,
+                ..
+            } if flags.contains(wl_output::Mode::Current) => {
+                self.next_mode = u32::try_from(width).ok().zip(u32::try_from(height).ok());
+            }
+            wl_output::Event::Done => {
+                if let Some(mode) = self.next_mode.take() {
+                    self.mode = Some(mode);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The current size `now` when it is not the size `made` the output was created with.
+fn resized(made: (u32, u32), now: Option<(u32, u32)>) -> Option<(u32, u32)> {
+    now.filter(|&size| size != made)
+}
+
 /// Stream states keyed by monitor number, shared with the event thread.
 #[derive(Default)]
 struct Shared {
     streams: Mutex<HashMap<u32, StreamState>>,
     changed: Condvar,
-    /// Compositor outputs by registry name: proxy and connector name (eDP-1, HDMI-A-1…).
-    outputs: Mutex<HashMap<u32, (wl_output::WlOutput, Option<String>)>>,
+    /// Compositor outputs by registry name.
+    outputs: Mutex<HashMap<u32, (wl_output::WlOutput, OutputInfo)>>,
 }
 
 impl Shared {
@@ -60,7 +103,10 @@ impl Shared {
             return;
         }
         let output = registry.bind::<wl_output::WlOutput, _, _>(name, 4, qh, name);
-        self.outputs.lock().unwrap().insert(name, (output, None));
+        self.outputs
+            .lock()
+            .unwrap()
+            .insert(name, (output, OutputInfo::default()));
     }
 }
 
@@ -104,10 +150,8 @@ impl Dispatch<wl_output::WlOutput, u32> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let wl_output::Event::Name { name } = event
-            && let Some(entry) = state.shared.outputs.lock().unwrap().get_mut(global)
-        {
-            entry.1 = Some(name);
+        if let Some((_, info)) = state.shared.outputs.lock().unwrap().get_mut(global) {
+            info.on_event(event);
         }
     }
 }
@@ -233,7 +277,7 @@ impl Screencast {
         let outputs = self.shared.outputs.lock().unwrap();
         let mut names: Vec<&String> = outputs
             .values()
-            .filter_map(|(_, name)| name.as_ref())
+            .filter_map(|(_, info)| info.name.as_ref())
             .filter(|n| !n.starts_with("Virtual-"))
             .collect();
         names.sort();
@@ -250,7 +294,7 @@ impl Screencast {
             .lock()
             .unwrap()
             .values()
-            .find(|(_, n)| n.as_deref() == Some(output_name))
+            .find(|(_, info)| info.name.as_deref() == Some(output_name))
             .map(|(o, _)| o.clone())
             .with_context(|| format!("display {output_name} is gone"))?;
         self.shared
@@ -266,6 +310,7 @@ impl Screencast {
             number,
             stream,
             output_name.to_owned(),
+            None,
             Duration::from_secs(2),
         )?;
         info!("mirroring {output_name}, PipeWire node {}", mirror.node);
@@ -277,6 +322,7 @@ impl Screencast {
         number: u32,
         stream: ZkdeScreencastStreamUnstableV1,
         name: String,
+        made: Option<(u32, u32)>,
         timeout: Duration,
     ) -> Result<VirtualOutput> {
         self.conn.flush()?;
@@ -314,6 +360,7 @@ impl Screencast {
             number,
             node,
             name,
+            made,
             stream,
             conn: self.conn.clone(),
             shared: self.shared.clone(),
@@ -359,6 +406,7 @@ impl Screencast {
             number,
             stream,
             format!("Virtual-Prostir-{number}"),
+            Some((spec.width, spec.height)),
             Duration::from_secs(10),
         )?;
         info!("Prostir-{number}: {spec}, PipeWire node {}", output.node);
@@ -386,6 +434,9 @@ pub struct VirtualOutput {
     pub node: u32,
     /// KScreen/connector name: `Virtual-Prostir-N`, or e.g. `eDP-1` for a mirror.
     name: String,
+    /// Pixel size KWin made it with; `None` for a mirrored real display, whose size
+    /// streams do not change.
+    made: Option<(u32, u32)>,
     stream: ZkdeScreencastStreamUnstableV1,
     conn: Connection,
     shared: Arc<Shared>,
@@ -404,6 +455,20 @@ impl VirtualOutput {
             .unwrap()
             .get(&self.number)
             .is_none_or(|s| s.closed)
+    }
+
+    /// The pixel size another program's stream gave this output, when it is no longer
+    /// the size it was made with. Connecting our stream again puts that size back.
+    pub fn resized(&self) -> Option<(u32, u32)> {
+        let made = self.made?;
+        let outputs = self.shared.outputs.lock().unwrap();
+        // Made anew, the output can briefly be listed twice: the newest one is ours.
+        let now = outputs
+            .iter()
+            .filter(|(_, (_, info))| info.name.as_deref() == Some(self.name.as_str()))
+            .max_by_key(|(global, _)| **global)
+            .and_then(|(_, (_, info))| info.mode);
+        resized(made, now)
     }
 
     /// The encoder reads the stream from KWin's PipeWire node.
@@ -429,5 +494,70 @@ impl Drop for VirtualOutput {
         let _ = self.conn.flush();
         self.shared.streams.lock().unwrap().remove(&self.number);
         info!("{} stream closed", self.name);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mode(width: i32, height: i32, flags: wl_output::Mode) -> wl_output::Event {
+        wl_output::Event::Mode {
+            flags: WEnum::Value(flags),
+            width,
+            height,
+            refresh: 60000,
+        }
+    }
+
+    fn info(events: Vec<wl_output::Event>) -> OutputInfo {
+        let mut info = OutputInfo::default();
+        for event in events {
+            info.on_event(event);
+        }
+        info
+    }
+
+    #[test]
+    fn the_current_mode_counts_once_done() {
+        let mut out = info(vec![
+            wl_output::Event::Name {
+                name: "Virtual-Prostir-2".into(),
+            },
+            mode(
+                1440,
+                2560,
+                wl_output::Mode::Current | wl_output::Mode::Preferred,
+            ),
+        ]);
+        assert_eq!(out.mode, None);
+        out.on_event(wl_output::Event::Done);
+        assert_eq!(out.name.as_deref(), Some("Virtual-Prostir-2"));
+        assert_eq!(out.mode, Some((1440, 2560)));
+
+        // A mode that is not current changes nothing.
+        out.on_event(mode(320, 240, wl_output::Mode::Preferred));
+        out.on_event(wl_output::Event::Done);
+        assert_eq!(out.mode, Some((1440, 2560)));
+
+        // Another program's stream resized it.
+        out.on_event(mode(320, 240, wl_output::Mode::Current));
+        out.on_event(wl_output::Event::Done);
+        assert_eq!(out.mode, Some((320, 240)));
+
+        // A `done` for something else (scale, description) keeps the mode.
+        out.on_event(wl_output::Event::Scale { factor: 2 });
+        out.on_event(wl_output::Event::Done);
+        assert_eq!(out.mode, Some((320, 240)));
+    }
+
+    #[test]
+    fn only_a_size_other_than_the_created_one_counts() {
+        let made = (1440, 2560);
+        // Not described yet, or the first mode event: the size it was made with.
+        assert_eq!(resized(made, None), None);
+        assert_eq!(resized(made, Some((1440, 2560))), None);
+        assert_eq!(resized(made, Some((320, 240))), Some((320, 240)));
+        assert_eq!(resized(made, Some((2560, 1440))), Some((2560, 1440)));
     }
 }

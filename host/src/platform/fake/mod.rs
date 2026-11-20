@@ -18,6 +18,9 @@
 //! - No windows, no mouse, no screenshots, no notifications, and no outside programs
 //!   are run ([`run`] says none is installed). The tray is a file a test writes menu
 //!   items to (see [`tray`]).
+//! - Another program can resize a monitor, as sharing it in Discord does on KDE: a
+//!   test writes `resize Fake-2 320x240` to `$XDG_RUNTIME_DIR/fake-desktop` (see
+//!   `desktop.rs`).
 //! - The network is the real one: the connection to the headset is set up as on any
 //!   Linux PC (`platform/net.rs`), so the tests measure what a user gets.
 //! - It runs only when asked to with `PROSTIR_FAKE_DESKTOP=1`, and its settings live
@@ -262,7 +265,7 @@ pub mod audio {
         pub fn push(&self, _pcm: Vec<u8>) {}
 
         /// No app on the fake PC records.
-        pub fn in_use(&self) -> bool {
+        pub fn recording(&self) -> bool {
             false
         }
     }

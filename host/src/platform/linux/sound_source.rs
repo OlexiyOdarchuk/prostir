@@ -92,17 +92,28 @@ fn playing() -> Vec<(u32, String)> {
                     own
                 }
             };
-            let mut name = either("application.process.binary");
-            if name.is_empty() {
-                name = either("application.name");
-            }
-            // Prostir's own streams (the headset microphone and the like) do not count.
-            if name.is_empty() || name.eq_ignore_ascii_case("prostir") || name.starts_with("pw-") {
+            let binary = either("application.process.binary");
+            let app = either("application.name");
+            if ignored(&binary, &app) {
                 return None;
             }
-            Some((either("application.process.id").parse().unwrap_or(0), name))
+            Some((
+                either("application.process.id").parse().unwrap_or(0),
+                if binary.is_empty() { app } else { binary },
+            ))
         })
         .collect()
+}
+
+/// Prostir's own streams (the headset microphone and the like, some played by a
+/// helper such as `pacat`) and PipeWire's tools do not count, nor nameless streams.
+fn ignored(binary: &str, app: &str) -> bool {
+    let name = if binary.is_empty() { app } else { binary };
+    name.is_empty()
+        || name.starts_with("pw-")
+        || [binary, app]
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case("prostir"))
 }
 
 /// The parent of process `pid`.
@@ -146,6 +157,16 @@ pub fn output() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prostirs_own_streams_do_not_count() {
+        assert!(ignored("pacat", "prostir"));
+        assert!(ignored("prostir", ""));
+        assert!(ignored("pw-cat", "pw-cat"));
+        assert!(ignored("", ""));
+        assert!(!ignored("firefox", "Firefox"));
+        assert!(!ignored("", "Spotify"));
+    }
 
     #[test]
     fn parents_are_read_from_proc() {

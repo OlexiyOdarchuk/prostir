@@ -1,6 +1,8 @@
 //! A screen of the PC shown in the headset: a virtual monitor, a window panel or a real
 //! display, and the one key the PC knows it by.
 
+use std::time::{Duration, Instant};
+
 use prostir_proto::{MIRROR_ID, WINDOW_IDS};
 
 use crate::encoder::Encoder;
@@ -119,6 +121,8 @@ pub struct Screen {
     pub stream: Option<Encoder>,
     pub output: Option<Output>,
     pub state: ScreenState,
+    /// Puts the output's size back when another program changes it.
+    pub size_guard: SizeGuard,
 }
 
 impl Screen {
@@ -130,6 +134,7 @@ impl Screen {
             stream: Some(stream),
             output: Some(output),
             state: ScreenState::Running,
+            size_guard: SizeGuard::default(),
         }
     }
 
@@ -141,6 +146,7 @@ impl Screen {
             stream: None,
             output: None,
             state: ScreenState::Starting,
+            size_guard: SizeGuard::default(),
         }
     }
 
@@ -166,6 +172,79 @@ impl Screen {
     }
 }
 
+/// Restores of one monitor's size allowed in [`RESTORE_WINDOW`].
+const RESTORES_ALLOWED: usize = 3;
+const RESTORE_WINDOW: Duration = Duration::from_secs(60);
+/// How long a restart has to put the size back before the output is made anew.
+const RESTORE_WAIT: Duration = Duration::from_secs(2);
+
+/// What to do about a monitor's size (see [`SizeGuard::check`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SizeAction {
+    /// The size is right, or the last step still has time to work.
+    Wait,
+    /// The size is right again: lay the desktop out again for it.
+    Restored,
+    /// Start its encoder over: the desktop gives the output back its size.
+    Restart,
+    /// The restart did not help: make the output anew with the same number and spec.
+    Recreate,
+    /// Restored too often lately: say so once and leave the size as it is.
+    GiveUp,
+}
+
+/// Puts a monitor's size back after another program changed it, without fighting
+/// that program forever.
+#[derive(Default)]
+pub struct SizeGuard {
+    /// When the size was restored (restarts and recreations), within the window.
+    restores: Vec<Instant>,
+    /// The last step taken and when, while the size is still wrong.
+    last: Option<(SizeAction, Instant)>,
+    /// Gave up (and said so): no more restores until the size is right again with
+    /// room in the window.
+    gave_up: bool,
+    /// The size was wrong at the last check.
+    wrong: bool,
+}
+
+impl SizeGuard {
+    /// What to do at `now`, given the size another program gave the monitor
+    /// (`None` while it has its own size). Records the step it returns.
+    pub fn check(&mut self, resized: Option<(u32, u32)>, now: Instant) -> SizeAction {
+        self.restores
+            .retain(|&at| now.duration_since(at) < RESTORE_WINDOW);
+        let full = self.restores.len() >= RESTORES_ALLOWED;
+        if resized.is_none() {
+            self.last = None;
+            // A give-up ends once the window has room again, so it is said once.
+            self.gave_up &= full;
+            return if std::mem::take(&mut self.wrong) {
+                SizeAction::Restored
+            } else {
+                SizeAction::Wait
+            };
+        }
+        self.wrong = true;
+        if self.gave_up {
+            return SizeAction::Wait;
+        }
+        let step = match self.last {
+            Some((_, at)) if now.duration_since(at) < RESTORE_WAIT => return SizeAction::Wait,
+            Some((SizeAction::Restart, _)) => SizeAction::Recreate,
+            _ => SizeAction::Restart,
+        };
+        if full {
+            self.last = None;
+            self.gave_up = true;
+            return SizeAction::GiveUp;
+        }
+        self.restores.push(now);
+        self.last = Some((step, now));
+        step
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,5 +267,59 @@ mod tests {
             "past the window panels"
         );
         assert_eq!(ScreenId::from_wire(0).name(), "Prostir-1");
+    }
+
+    const SHRUNK: Option<(u32, u32)> = Some((320, 240));
+
+    fn secs(start: Instant, s: f64) -> Instant {
+        start + Duration::from_secs_f64(s)
+    }
+
+    #[test]
+    fn a_resized_monitor_is_restarted_once_and_then_left_to_settle() {
+        let start = Instant::now();
+        let mut guard = SizeGuard::default();
+        assert_eq!(guard.check(None, start), SizeAction::Wait);
+        assert_eq!(guard.check(SHRUNK, secs(start, 1.0)), SizeAction::Restart);
+        // The size comes back a moment after the restart.
+        assert_eq!(guard.check(SHRUNK, secs(start, 1.5)), SizeAction::Wait);
+        assert_eq!(guard.check(None, secs(start, 2.0)), SizeAction::Restored);
+        assert_eq!(guard.check(None, secs(start, 2.5)), SizeAction::Wait);
+        assert_eq!(guard.restores.len(), 1);
+    }
+
+    #[test]
+    fn a_size_that_does_not_come_back_makes_the_output_anew() {
+        let start = Instant::now();
+        let mut guard = SizeGuard::default();
+        assert_eq!(guard.check(SHRUNK, start), SizeAction::Restart);
+        assert_eq!(guard.check(SHRUNK, secs(start, 1.9)), SizeAction::Wait);
+        assert_eq!(guard.check(SHRUNK, secs(start, 2.0)), SizeAction::Recreate);
+        // The new output gets its time too; still wrong after that, a restart again.
+        assert_eq!(guard.check(SHRUNK, secs(start, 3.0)), SizeAction::Wait);
+        assert_eq!(guard.check(SHRUNK, secs(start, 4.0)), SizeAction::Restart);
+        assert_eq!(guard.check(None, secs(start, 4.5)), SizeAction::Restored);
+    }
+
+    #[test]
+    fn a_program_that_keeps_resizing_is_not_fought_forever() {
+        let start = Instant::now();
+        let mut guard = SizeGuard::default();
+        let mut actions = Vec::new();
+        // Resized again every 3 s, each time after the size came back.
+        for i in 0..5 {
+            let at = f64::from(i) * 3.0;
+            actions.push(guard.check(SHRUNK, secs(start, at)));
+            guard.check(None, secs(start, at + 0.5));
+        }
+        use SizeAction::*;
+        assert_eq!(actions, [Restart, Restart, Restart, GiveUp, Wait]);
+        // Still shrunk: no more restores.
+        assert_eq!(guard.check(SHRUNK, secs(start, 20.0)), Wait);
+        assert_eq!(guard.check(SHRUNK, secs(start, 90.0)), Wait);
+        // Back by other means (the headset taken off and put on): laid out again.
+        assert_eq!(guard.check(None, secs(start, 91.0)), Restored);
+        // After a quiet minute the guard starts over.
+        assert_eq!(guard.check(SHRUNK, secs(start, 92.0)), Restart);
     }
 }

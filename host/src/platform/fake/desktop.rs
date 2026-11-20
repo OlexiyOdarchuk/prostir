@@ -1,14 +1,22 @@
 //! The fake desktop and its monitors: outputs with a size and a place, whose picture
 //! (see `screen.rs`) the encoder reads like a KWin output.
+//!
+//! Other programs act on the desktop through `$XDG_RUNTIME_DIR/fake-desktop`, read and
+//! removed a few times a second, one command a line:
+//! - `resize Fake-2 320x240`: another program's stream of the output makes it that
+//!   size, as sharing a monitor in Discord does on KDE; starting Prostir's own stream
+//!   over puts its size back;
+//! - `resize-sticky Fake-2 320x240`: the same, but only making the output anew does.
 
 use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use log::info;
+use log::{info, warn};
 
 use super::screen::{self, Picture, Screen};
 use crate::encoder::{Encoder, Input};
@@ -54,6 +62,8 @@ impl DesktopBackend for FakeDesktop {
             .filter_map(|n| n.trim().parse().ok())
             .collect();
         info!("desktop: fake, the picture ({picture:?}) changes {fps} times a second");
+        static WATCHED: Once = Once::new();
+        WATCHED.call_once(watch_commands);
         Ok(Self {
             layout: Layout::default(),
             fps,
@@ -100,7 +110,21 @@ impl DesktopBackend for FakeDesktop {
             .lock()
             .unwrap()
             .iter()
-            .map(|(name, g)| (name.clone(), *g))
+            .map(|(name, g)| {
+                let mut g = *g;
+                // Resized by another program: at the same scale, the size it has now.
+                if let Some(screen) = Screen::find(name)
+                    && let Some((w, h)) = screen.resized()
+                {
+                    let (made_w, made_h) = screen.size();
+                    let scaled = |now: u32, made: u32, logical: i32| {
+                        (f64::from(now) * f64::from(logical) / f64::from(made.max(1))).round()
+                            as i32
+                    };
+                    (g.w, g.h) = (scaled(w, made_w, g.w), scaled(h, made_h, g.h));
+                }
+                (name.clone(), g)
+            })
             .collect()
     }
 
@@ -218,6 +242,10 @@ impl OutputBackend for FakeOutput {
         false
     }
 
+    fn resized(&self) -> Option<(u32, u32)> {
+        self.screen.resized()
+    }
+
     fn make_primary(&self) {}
 
     fn input(&self) -> Input {
@@ -233,4 +261,46 @@ impl OutputBackend for FakeOutput {
     fn attach(&mut self, _encoder: &Encoder, _dmabuf: bool) -> Result<()> {
         Ok(())
     }
+}
+
+/// Carries out what other programs do on the desktop, as the test writes it to
+/// `$XDG_RUNTIME_DIR/fake-desktop` (see the top of this file).
+fn watch_commands() {
+    let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") else {
+        return;
+    };
+    let path = PathBuf::from(dir).join("fake-desktop");
+    let watched = std::thread::Builder::new()
+        .name("fake-desktop".into())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_millis(100));
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                let _ = std::fs::remove_file(&path);
+                for line in text.lines() {
+                    if let Err(e) = command(line.trim()) {
+                        warn!("fake desktop: {line:?}: {e:#}");
+                    }
+                }
+            }
+        });
+    if let Err(e) = watched {
+        warn!("fake desktop: no commands: {e}");
+    }
+}
+
+/// One command from the file.
+fn command(line: &str) -> Result<()> {
+    let words: Vec<&str> = line.split_whitespace().collect();
+    let [verb @ ("resize" | "resize-sticky"), name, size] = words[..] else {
+        anyhow::bail!("not a command");
+    };
+    let (w, h) = size.split_once('x').context("a size is WxH")?;
+    let size = (w.parse()?, h.parse()?);
+    let screen = Screen::find(name).with_context(|| format!("no output {name}"))?;
+    screen.resize(size, verb == "resize-sticky");
+    info!("fake desktop: another program resized {name} to {w}x{h}");
+    Ok(())
 }

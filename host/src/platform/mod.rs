@@ -21,8 +21,8 @@
 //!   `move_to`, `put_back`, `forget_panel`, `vacated`, `screenshot`, `screenshot_path`.
 //! - `focus::ActiveOutput` (`new`, `get`): the output the user works on.
 //! - `audio`: `AudioOut` (PC sound to the headset, as a default output device while it
-//!   exists), `MicIn` (the headset microphone as the default input: `push`, `in_use`),
-//!   `restore_after_crash`.
+//!   exists), `MicIn` (the headset microphone as the default input: `push`,
+//!   `recording`), `restore_after_crash`.
 //! - `sound_source::Watcher` (`start`, `output`): the output whose window plays sound.
 //! - `notifications::watch`: the PC's desktop notifications, as text.
 //! - `tray`: `spawn`, `Handle`, `set_status`, `set_battery`, `set_settings`,
@@ -262,6 +262,11 @@ pub trait OutputBackend {
 
     /// Whether the desktop closed it.
     fn closed(&self) -> bool;
+
+    /// The pixel size another program gave it, when that is no longer the size it was
+    /// made with (on KDE, sharing it in Discord or OBS can do that). Starting its
+    /// encoder over puts the size back. `None` where the desktop never does that.
+    fn resized(&self) -> Option<(u32, u32)>;
 
     /// Makes it the primary output (where the desktop has one).
     fn make_primary(&self);

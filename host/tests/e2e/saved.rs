@@ -10,7 +10,7 @@ use crate::pc::{Options, Pc, TestDir};
 use crate::{SOON, START, TWO_MONITORS, connect, session};
 
 /// Where the fake desktop put each output the last time (`name -> (x, y)`).
-fn placed(pc: &Pc) -> Vec<(String, i32, i32)> {
+pub fn placed(pc: &Pc) -> Vec<(String, i32, i32)> {
     let lines = pc.lines("fake desktop: placed ");
     let Some(line) = lines.last() else {
         return Vec::new();

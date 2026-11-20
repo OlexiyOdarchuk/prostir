@@ -262,6 +262,12 @@ impl Pc {
         std::fs::write(self.run_dir.join("fake-tray"), format!("{item}\n")).unwrap();
     }
 
+    /// Has another program do `command` on the fake desktop (see the fake desktop
+    /// for the commands, e.g. `resize Fake-2 320x240`).
+    pub fn desktop(&self, command: &str) {
+        std::fs::write(self.run_dir.join("fake-desktop"), format!("{command}\n")).unwrap();
+    }
+
     /// Kills the PC app (`SIGKILL`), as a crash or a power cut would.
     pub fn kill(mut self) {
         self.signal(libc::SIGKILL);

@@ -16,9 +16,9 @@ use crate::encoder::{Encoder, EncoderConfig, EncoderEvent};
 use crate::layout::panel_size;
 use crate::outbox::Outbox;
 use crate::platform::audio::{AudioOut, MicIn};
-use crate::platform::windows;
 use crate::platform::{Desktop, DesktopBackend, Geometry, MonitorSpec, Output, OutputBackend};
-use crate::screen::{Screen, ScreenId, ScreenKind, ScreenState, wire_ids};
+use crate::platform::{dialogs, windows};
+use crate::screen::{Screen, ScreenId, ScreenKind, ScreenState, SizeAction, wire_ids};
 use crate::store::{SavedScreens, Settings};
 
 /// Retry timing after failures: 2 s, then doubling up to 2 min.
@@ -622,9 +622,106 @@ impl Displays {
     pub fn tick(&mut self) {
         self.router.report();
         self.sync_audio();
+        self.check_sizes();
         self.check_primary();
         self.check_window_panels();
         self.sync_mirror();
+    }
+
+    /// Puts back the size of monitors another program changed (on KDE, sharing one in
+    /// Discord or OBS can shrink it to what that program asks for). Each monitor's
+    /// [`crate::screen::SizeGuard`] decides; the desktop is laid out again once the
+    /// size is back, at the next [`Displays::place`]. Window panels are left alone: made
+    /// anew, one would lose its window.
+    fn check_sizes(&mut self) {
+        // Paused encoders connect again on resuming, which puts the size back too.
+        if !self.streaming {
+            return;
+        }
+        let now = Instant::now();
+        let ids: Vec<ScreenId> = self
+            .monitors()
+            .filter(|s| s.running())
+            .map(|s| s.id)
+            .collect();
+        for id in ids {
+            let Some(screen) = self.screens.get_mut(&id) else {
+                continue;
+            };
+            let Some(output) = &screen.output else {
+                continue;
+            };
+            let resized = output.resized();
+            let action = screen.size_guard.check(resized, now);
+            if action == SizeAction::Wait {
+                continue;
+            }
+            let name = output.output_name().to_owned();
+            let Some(spec) = screen.kind.spec().cloned() else {
+                continue;
+            };
+            let (w, h) = resized.unwrap_or_default();
+            match action {
+                SizeAction::Wait => {}
+                SizeAction::Restored => {
+                    info!("{name} is {spec} again");
+                    self.layout_changed();
+                }
+                // Laid out once the size is back: the desktop still lists the wrong one.
+                SizeAction::Restart => {
+                    warn!(
+                        "{name} was resized to {w}x{h} by another program (screen sharing?): restoring {spec}"
+                    );
+                    if let Err(e) = self.restart_monitor(id, None) {
+                        error!("{id}: {e:#}");
+                    }
+                    show_sharing_tip(id);
+                }
+                SizeAction::Recreate => {
+                    warn!("{name} is still {w}x{h}: making it again at {spec}");
+                    self.recreate(id);
+                }
+                SizeAction::GiveUp => {
+                    warn!("{name} keeps being resized by another program: leaving it at {w}x{h}");
+                    let body = format!(
+                        "{} {}. {}",
+                        t(
+                            "Інша програма раз у раз змінює розмір монітора",
+                            "Another program keeps changing the size of monitor"
+                        ),
+                        id.number() + 1,
+                        t(
+                            "Покажіть у ній вікно програми замість монітора, а тоді зніміть і знову вдягніть шолом.",
+                            "Share an app window in it instead of the monitor, then take the headset off and put it on again."
+                        )
+                    );
+                    dialogs::notify(t("Розмір монітора", "Monitor size"), &body);
+                }
+            }
+        }
+    }
+
+    /// Makes monitor `id`'s output anew with the same number and spec, when nothing
+    /// else gives it back its size. It keeps its place in the set and the rows; its
+    /// windows move to the other screens. One that cannot start again stays, Failed.
+    fn recreate(&mut self, id: ScreenId) {
+        let Some(screen) = self.screens.get_mut(&id) else {
+            return;
+        };
+        // The encoder stops before the output goes away.
+        drop(screen.stream.take());
+        drop(screen.output.take());
+        screen.state = ScreenState::Starting;
+        if self.start(id).is_err() {
+            return;
+        }
+        if self.manage_primary
+            && self.primary == Some(id)
+            && let Some(output) = self.screens.get(&id).and_then(|s| s.output.as_ref())
+        {
+            output.make_primary();
+        }
+        self.sync_wallpapers();
     }
 
     /// Streams the laptop screen while it is wanted and there, and starts it again
@@ -1003,7 +1100,7 @@ impl Displays {
             self.mic = None;
         }
         // The headset records only while some PC app listens.
-        let recording = self.mic.as_ref().is_some_and(MicIn::in_use);
+        let recording = self.mic.as_ref().is_some_and(MicIn::recording);
         if recording != self.mic_recording {
             self.mic_recording = recording;
             self.router.send(HostMsg::MicActive { active: recording });
@@ -1590,6 +1687,28 @@ impl Displays {
             primary: self.primary,
         })
     }
+}
+
+/// The first time in a run that a screen sharing program resizes a monitor: says the
+/// size is back, and how to share without the jumps.
+fn show_sharing_tip(id: ScreenId) {
+    static SHOWN: AtomicBool = AtomicBool::new(false);
+    if SHOWN.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let body = format!(
+        "{} {}. {}",
+        t(
+            "Програма, що показує екран, змінила розмір монітора",
+            "A screen sharing program changed the size of monitor"
+        ),
+        id.number() + 1,
+        t(
+            "Розмір повернено, але показ може стрибати. Щоб цього не було, показуйте вікно програми, а не монітор.",
+            "Its size is back, but the share may jump. To avoid that, share an app window instead of the monitor."
+        )
+    );
+    dialogs::notify(t("Показ екрана", "Screen sharing"), &body);
 }
 
 /// An output on the desktop: a screen, or another real display.

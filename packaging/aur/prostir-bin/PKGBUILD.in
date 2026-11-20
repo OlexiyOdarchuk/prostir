@@ -7,8 +7,8 @@ arch=('x86_64')
 url="https://prostir.ishawyha.dev"
 license=('GPL-3.0-or-later')
 # gst-plugin-va: the VA-API encoders (vah264enc, vah265enc, vapostproc).
-# gst-plugins-bad-libs: h264parse and h265parse. gst-plugins-good: pulsesrc, pulsesink.
-# libpulse: pactl. pipewire-audio: pw-loopback. mesa: libgbm and the AMD VA driver.
+# gst-plugins-bad-libs: h264parse and h265parse. gst-plugins-good: pulsesrc.
+# libpulse: pactl, pacat. pipewire-audio: pw-loopback. mesa: libgbm and the AMD VA driver.
 depends=('glibc' 'gcc-libs' 'gstreamer' 'gst-plugins-base-libs' 'gst-plugins-good'
          'gst-plugins-bad-libs' 'gst-plugin-va' 'gst-plugin-pipewire' 'pipewire'
          'pipewire-audio' 'pulse-native-provider' 'libpulse' 'mesa' 'curl')

@@ -58,9 +58,9 @@ prostir-testkit = { path = "../testkit" }
 # Same files as scripts/install.sh puts in ~/.local.
 #
 # Runtime needs: GStreamer with the VA plugin (hardware encoding), x264enc for the CPU
-# fallback (NVIDIA, or no VA encoder), pipewiresrc, pulsesrc/pulsesink, h264parse and
-# h265parse; pw-cli and pw-loopback; pactl; kscreen-doctor and qdbus6 on KDE Plasma;
-# grim for screenshots on Hyprland (optional).
+# fallback (NVIDIA, or no VA encoder), pipewiresrc, pulsesrc, h264parse and
+# h265parse; pw-cli and pw-loopback; pactl and pacat; kscreen-doctor and qdbus6 on KDE
+# Plasma; grim for screenshots on Hyprland (optional).
 [package.metadata.deb]
 name = "prostir"
 maintainer = "Prostir contributors <https://github.com/OlexiyOdarchuk/prostir>"

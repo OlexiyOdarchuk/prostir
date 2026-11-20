@@ -76,6 +76,22 @@
   PC why, and the PC writes it in its log. Both sides log the round trip of the
   connection every 10 s.
 
+## 0.1.3 (not released yet)
+
+### Monitors and windows
+
+- On KDE, sharing one of Prostir's monitors in another app (Discord, OBS) no longer
+  leaves it shrunk: Prostir puts its size back within a second.
+
+### Sound
+
+- The headset microphone could record only silence on the PC: the sound system kept
+  a mute or a near-zero volume on Prostir's internal sound device from an earlier
+  run. It now always stays at full volume.
+- A recording no longer starts with old sound or loses its first moments, and sound
+  held up by a Wi-Fi hiccup is dropped instead of coming out late: what you say comes
+  out about 20 ms later.
+
 ## 0.1.2 (2026-11-19)
 
 A fix for the headset app. The PC part is the same as in 0.1.1.

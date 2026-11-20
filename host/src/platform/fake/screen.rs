@@ -11,6 +11,10 @@
 //!
 //! Every start is logged (`fake screen NAME: started`), so a test sees how often the
 //! core started a stream over.
+//!
+//! Like a KWin virtual output, a screen can be resized by another program's stream of
+//! it ([`Screen::resize`]); the core's own stream keeps the size it was made with, and
+//! starting that stream over puts the size back, unless the resize is sticky.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, LazyLock, Mutex};
@@ -50,6 +54,9 @@ pub struct Screen {
     /// How many times the picture changed.
     changes: Mutex<u64>,
     changed: Condvar,
+    /// The size another program gave the output, and whether it stays when the stream
+    /// starts over.
+    resized: Mutex<Option<((u32, u32), bool)>>,
 }
 
 impl Screen {
@@ -68,6 +75,7 @@ impl Screen {
             picture,
             changes: Mutex::new(0),
             changed: Condvar::new(),
+            resized: Mutex::new(None),
         });
         SCREENS
             .lock()
@@ -85,6 +93,27 @@ impl Screen {
         {
             screens.remove(&self.name);
         }
+    }
+
+    /// The screen of output `name`, while it has one.
+    pub fn find(name: &str) -> Option<Arc<Self>> {
+        SCREENS.lock().unwrap().get(name).cloned()
+    }
+
+    /// The pixel size it was made with.
+    pub fn size(&self) -> (u32, u32) {
+        (self.info.width(), self.info.height())
+    }
+
+    /// Another program's stream makes the output `size`. Starting the stream over puts
+    /// the made size back, unless `sticky`.
+    pub fn resize(&self, size: (u32, u32), sticky: bool) {
+        *self.resized.lock().unwrap() = (size != self.size()).then_some((size, sticky));
+    }
+
+    /// The size another program gave the output, while it has it.
+    pub fn resized(&self) -> Option<(u32, u32)> {
+        self.resized.lock().unwrap().map(|(size, _)| size)
     }
 
     /// Something on the screen moved.
@@ -255,12 +284,20 @@ mod imp {
             let screen = SCREENS.lock().unwrap().get(&name).cloned().ok_or_else(|| {
                 gst::error_msg!(gst::ResourceError::NotFound, ["no fake screen {name}"])
             })?;
+            log::info!("fake screen {name}: started");
+            // As KWin does when the stream that made the output connects again.
+            let mut resized = screen.resized.lock().unwrap();
+            if resized.is_some_and(|(_, sticky)| !sticky) {
+                *resized = None;
+                let (w, h) = screen.size();
+                log::info!("fake screen {name}: back to {w}x{h}");
+            }
+            drop(resized);
             *self.state.lock().unwrap() = State {
                 screen: Some(screen),
                 sent: None,
                 flushing: false,
             };
-            log::info!("fake screen {name}: started");
             Ok(())
         }
 
