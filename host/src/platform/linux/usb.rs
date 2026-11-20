@@ -22,6 +22,7 @@ use std::io::Read;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
@@ -31,6 +32,15 @@ use super::system::run;
 
 /// Meta's USB vendor id (the Quest's), as the kernel writes it.
 const META: &str = "2833";
+
+/// A Quest is plugged in and has no `adb reverse` yet (USB debugging not allowed yet,
+/// say): the program it started waits for it rather than leave.
+static WAITING: AtomicBool = AtomicBool::new(false);
+
+/// Whether a Quest on USB waits for its `adb reverse` now.
+pub fn usb_waiting() -> bool {
+    WAITING.load(Ordering::Relaxed)
+}
 
 /// The kernel's own uevents (udev passes them on in group 2, which needs udev).
 const KERNEL_EVENTS: u32 = 1;
@@ -369,6 +379,7 @@ impl Follow {
                     Ok(t) => tracker = Some(t),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                         info!("a headset is on USB, but adb is not installed: no adb reverse");
+                        WAITING.store(false, Ordering::Relaxed);
                         return;
                     }
                     Err(e) => {
@@ -400,6 +411,7 @@ impl Follow {
                     (Instant::now() + wait, wait)
                 });
             }
+            WAITING.store(plugged && reversed.is_empty(), Ordering::Relaxed);
             let deadline = [
                 retry.map(|(at, _)| at),
                 restart.filter(|_| plugged).map(|(at, _)| at),
@@ -698,9 +710,16 @@ exit 1
         std::thread::scope(|s| {
             s.spawn(move || follow.run(&notes, &sender));
             let _stop = Stop(stopper.clone());
+            // Plugged in, not allowed yet: it waits (the program it started stays).
+            wait_for(
+                "waiting for the reverse",
+                Duration::from_secs(5),
+                usb_waiting,
+            );
             wait_for("the reverse once ready", Duration::from_secs(5), || {
                 reversed() == 1
             });
+            wait_for("done waiting", Duration::from_secs(5), || !usb_waiting());
             assert_eq!(starts(), 1);
             wait_for(
                 "the reverse on the new server",

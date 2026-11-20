@@ -97,6 +97,12 @@ pub fn import_session_environment() {
     }
 }
 
+/// Where the time of the last notice of a new headset is kept, for every program of
+/// this user (see `door::notice_due`).
+pub fn notice_mark() -> PathBuf {
+    runtime_dir().join("prostir-notice")
+}
+
 /// The sockets' watcher of this user, if one runs: its process id.
 pub fn watcher() -> Option<u32> {
     crate::platform::lock::holder(&runtime_dir().join("prostir.lock"), "watcher")

@@ -341,7 +341,9 @@ impl Brain {
                 Err(f) => CtlReply::Failed(f),
             },
             Request::Quit => {
+                // As the tray's "Quit": nothing waits for the headset afterwards either.
                 self.quit = true;
+                self.quit_asked = true;
                 done()
             }
             Request::SetMic { .. } => unsupported(t(

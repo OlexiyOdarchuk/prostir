@@ -344,7 +344,21 @@ fn the_watcher_sleeps_until_a_headset_comes() {
     // Its own headset asks: answered, and the full program starts ahead.
     assert!(asks(to, &keys, "").is_some());
     pc.wait_log(SOON, "starting Prostir: Headset");
+    // `prostir open` while it starts (not on the bus yet): the watcher passes the wish
+    // for the window on, and the program takes it once it can.
+    // SAFETY: a signal to the PC app's own process.
+    unsafe { libc::kill(pc.pid() as libc::pid_t, libc::SIGUSR1) };
+    pc.wait_log(START, "SIGUSR1 received: the settings window");
     wait_program(&pc, true);
+    // The full program shows no second notice within the minute: the watcher's counts.
+    pc.wait_log_after(START, "discovery on UDP port", 1);
+    assert!(silent(to, &stranger, ""));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        pc.count_log("notification: New headset nearby"),
+        1,
+        "once a minute, whichever program asks"
+    );
     let mut headset = connect(&pc, &mut keys);
     headset
         .wait(START, "every monitor showing", View::all_monitors_show)
@@ -376,10 +390,14 @@ fn the_watcher_sleeps_until_a_headset_comes() {
         .wait(START, "every monitor showing", View::all_monitors_show)
         .unwrap();
 
-    // "Quit" (the tray's): the full program and the watcher end.
-    pc.tray("quit");
+    // "Quit" (the local API's, else the tray's): the full program and the watcher end.
+    match pc.ctl(&["quit"]) {
+        Some(ctl) => assert_eq!(ctl.code, 0, "{ctl:?}"),
+        None => pc.tray("quit"),
+    }
     let status = pc.wait_end(SOON);
     assert!(status.success(), "{status}");
+    pc.wait_log(SOON, "Prostir was asked to quit: the watcher quits too");
 }
 
 /// Under systemd: a stranger's query starts nothing heavy (the program answers and
@@ -398,13 +416,23 @@ fn socket_activation_starts_the_pc_for_its_headset_only() {
         activate: Activate::new(by_connection),
         ..Options::default()
     };
-    // Unpaired, a stranger's query: answered, and it leaves at once, light.
+    // Unpaired, strangers' queries, more than systemd starts a service for in 10 s
+    // (5 by default): every one answered by the one light program, which stays while
+    // they come and leaves once they stopped, starting nothing heavy.
     let options = unpaired(false);
     if options.activate.is_none() {
         return;
     }
     let mut pc = Pc::start(&dir, &options);
-    assert!(asks(pc.discovery.unwrap(), &stranger, "").is_some());
+    let pid = pc.pid();
+    for i in 0..8 {
+        assert!(
+            asks(pc.discovery.unwrap(), &stranger, "").is_some(),
+            "query {i}"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    assert_eq!(pc.program(), Some(pid), "the same program all along");
     let status = pc.wait_end(SOON);
     assert_eq!(status.code(), Some(0));
     assert_eq!(pc.count_log("nothing for Prostir to do: back to sleep"), 1);
@@ -443,11 +471,65 @@ fn socket_activation_starts_the_pc_for_its_headset_only() {
         "nothing needs Prostir now: leaving until a headset comes",
     );
 
+    // A connection that says nothing (a port scan) is let go: nothing heavy starts.
+    let mut pc = Pc::start(&dir, &unpaired(true));
+    let silent_peer = std::net::TcpStream::connect(pc.addr).unwrap();
+    let status = pc.wait_end(SOON);
+    assert_eq!(status.code(), Some(0));
+    assert_eq!(pc.count_log("waiting for the headset on port"), 0);
+    drop(silent_peer);
+
     // A connection starts it.
+
     let pc = Pc::start(&dir, &unpaired(true));
     let mut headset = connect(&pc, &mut keys);
     headset
         .wait(START, "every monitor showing", View::all_monitors_show)
         .unwrap();
+    pc.quit();
+}
+
+/// While the full program runs (with `--stay`, all along), its beacon wakes it once a
+/// second, and nothing else does: the price of being found by headsets that do not
+/// ask yet, until the headset asks (step 7 of 0.2.0) and the beacon goes.
+#[test]
+fn the_beacon_is_the_only_thing_that_wakes_a_running_pc() {
+    let dir = TestDir::new("beacon");
+    let heard = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    heard
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let options = Options {
+        discovery: true,
+        beacon_to: Some(heard.local_addr().unwrap()),
+        ..Options::default()
+    };
+    let pc = Pc::start(&dir, &options);
+    let mut buf = [0u8; 512];
+    let n = heard.recv(&mut buf).expect("a beacon");
+    let (port, name) = prostir_proto::decode_beacon(&buf[..n]).expect("a beacon");
+    assert_eq!((port, name.as_str()), (pc.addr.port(), "fake-pc"));
+    // Settled, every wakeup is the beacon's, about one a second.
+    std::thread::sleep(Duration::from_secs(2));
+    let before = wakeups_of(pc.pid());
+    std::thread::sleep(WATCH);
+    let after = wakeups_of(pc.pid());
+    let mut beacon = 0;
+    for (tid, (name, n)) in &after {
+        let was = before.get(tid).map_or(0, |(_, n)| *n);
+        if *n > was {
+            assert_eq!(
+                name,
+                "beacon",
+                "only the beacon wakes: {name} woke {}",
+                n - was
+            );
+            beacon += n - was;
+        }
+    }
+    assert!(
+        (2..=5).contains(&beacon),
+        "the beacon woke {beacon} times in {WATCH:?}"
+    );
     pc.quit();
 }

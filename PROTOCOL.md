@@ -154,12 +154,22 @@ most once a minute. The headsets that asked recently (by name, or by address wit
 a name) are the local API's `nearby`. A query from one of its own headsets lets a
 sleeping PC start ahead of the connection that follows.
 
+**Implementation-defined**, a sleeping host: nothing of it wakes while nobody on the
+network talks to it. Queries that get no answer wake only a light part of it (the
+sockets' watcher, or under systemd a short-lived process that stays a minute after
+the last query, so a stream of them does not hit systemd's limit on starts). Any TCP
+connection to port 47830, though, wakes the whole program: under systemd it first
+waits 3 s for the peer to say something and lets a silent one go (a port scan); the
+sockets' watcher starts the program for any connection.
+
 #### The beacon (until step 7)
 
 Every second while the PC program runs (not while it sleeps waiting for a headset), the
 host sends a UDP datagram (the *beacon*) from an ephemeral port to port `47831` at
 `255.255.255.255` and at the broadcast address of every IPv4 interface that is up and
-not loopback. The `--no-discovery` option turns the beacon and the answers off.
+not loopback. The `--no-discovery` option turns the beacon and the answers off. So
+the running program wakes once a second for it (with `--stay`, all along); it goes
+when the headset asks instead.
 
 Beacon layout:
 

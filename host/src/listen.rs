@@ -3,7 +3,8 @@
 //! its bytes holds only its own thread, never the PC. A connection set up and trusted
 //! goes to the control loop as [`Event::Accepted`].
 
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpListener, TcpStream};
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -86,11 +87,26 @@ impl Listening {
 /// Accepts connections on `listener` until stopped (see [`Listening`]).
 pub fn spawn(
     listener: TcpListener,
+    first: Option<TcpStream>,
     security: Arc<pairing::Security>,
     tray: Option<tray::Handle>,
     events: EventSink,
 ) -> Result<Listening> {
     let setups = Arc::new(AtomicUsize::new(0));
+    // A connection the light phase accepted already: set up first.
+    if let Some(stream) = first
+        && let Some(setup) = Setup::take(&setups)
+    {
+        let from = stream.peer_addr()?;
+        set_up(
+            stream,
+            from,
+            setup,
+            security.clone(),
+            tray.clone(),
+            events.clone(),
+        );
+    }
     let stop = start(
         listener.try_clone()?,
         setups.clone(),
@@ -167,28 +183,47 @@ fn start(
                     }
                     continue;
                 };
-                let (security, tray, events) = (security.clone(), tray.clone(), events.clone());
-                let spawned = std::thread::Builder::new()
-                    .name("setup".into())
-                    .spawn(move || {
-                        let _setup = setup;
-                        match pairing::accept(stream, &security, tray.as_ref()) {
-                            Ok((conn, open)) => {
-                                let accepted = Accepted { conn, open, from };
-                                events.send(Event::Accepted(Box::new(accepted)));
-                            }
-                            Err(e) if e.is::<pairing::TurnedAwayAgain>() => {
-                                debug!("rejected connection from {from}: {e:#}");
-                            }
-                            Err(e) => warn!("rejected connection from {from}: {e:#}"),
-                        }
-                    });
-                if let Err(e) = spawned {
-                    warn!("connection from {from} dropped: {e}");
-                }
+                set_up(
+                    stream,
+                    from,
+                    setup,
+                    security.clone(),
+                    tray.clone(),
+                    events.clone(),
+                );
             }
         })?;
     Ok((stop, thread))
+}
+
+/// Sets the connection `stream` from `from` up on a thread of its own, which holds
+/// `setup` until it is done.
+fn set_up(
+    stream: TcpStream,
+    from: SocketAddr,
+    setup: Setup,
+    security: Arc<pairing::Security>,
+    tray: Option<tray::Handle>,
+    events: EventSink,
+) {
+    let spawned = std::thread::Builder::new()
+        .name("setup".into())
+        .spawn(move || {
+            let _setup = setup;
+            match pairing::accept(stream, &security, tray.as_ref()) {
+                Ok((conn, open)) => {
+                    let accepted = Accepted { conn, open, from };
+                    events.send(Event::Accepted(Box::new(accepted)));
+                }
+                Err(e) if e.is::<pairing::TurnedAwayAgain>() => {
+                    debug!("rejected connection from {from}: {e:#}");
+                }
+                Err(e) => warn!("rejected connection from {from}: {e:#}"),
+            }
+        });
+    if let Err(e) = spawned {
+        warn!("connection from {from} dropped: {e}");
+    }
 }
 
 #[cfg(test)]

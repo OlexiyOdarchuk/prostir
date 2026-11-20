@@ -1,4 +1,6 @@
-# A Meta Quest plugged in by USB starts Prostir for the user's session, where
-# Prostir waits for the headset (prostir.socket is on; otherwise prostir.service does
-# not start): it sets up `adb reverse`, so the headset reaches it through USB.
-ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="2833", TAG+="systemd", ENV{SYSTEMD_USER_WANTS}+="prostir.service"
+# A Meta Quest plugged in by USB (or plugged in already at login) starts Prostir for the
+# user's session, where Prostir waits for the headset (prostir.socket is on; otherwise
+# prostir.service does not start): it sets up `adb reverse`, so the headset reaches it
+# through USB. Not on `add` only: a later `bind` or `change` event would drop what
+# `add` set, and a user's systemd that starts after it (at login) would see none.
+ACTION!="remove", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="2833", TAG+="systemd", ENV{SYSTEMD_USER_WANTS}+="prostir.service"

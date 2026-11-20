@@ -740,6 +740,15 @@ impl CtlClient for Client {
         crate::platform::watcher().is_some() || crate::platform::autostart::socket_waits()
     }
 
+    fn port_taken(&self) -> bool {
+        // The tests' fake PC never uses the real port, whatever runs on this machine.
+        if cfg!(feature = "fake-desktop") {
+            return false;
+        }
+        let port = (std::net::Ipv4Addr::UNSPECIFIED, prostir_proto::TCP_PORT);
+        std::net::TcpListener::bind(port).is_err_and(|e| e.kind() == std::io::ErrorKind::AddrInUse)
+    }
+
     fn watch(&self, each: &mut dyn FnMut(Watched) -> bool) -> Result<(), ClientError> {
         use zbus::message::Type;
         let dbus = zbus::blocking::fdo::DBusProxy::new(&self.bus).map_err(broken)?;

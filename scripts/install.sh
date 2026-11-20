@@ -49,6 +49,33 @@ refresh_menu() {
     fi
 }
 
+# The text $1 as the replacement of a sed `s|...|...|`: its `\`, `&` and `|` escaped.
+sed_text() { printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'; }
+
+# A program's path as one argument of a desktop entry's Exec line: quoted where it has
+# a character the line would read otherwise, escaped for the quoting and then for the
+# string value; `%` doubled.
+desktop_arg() {
+    local s=${1//%/%%}
+    if [[ $s =~ ^[A-Za-z0-9/._+-]+$ ]]; then printf '%s' "$s"; return; fi
+    s=${s//\\/\\\\\\\\}
+    s=${s//\"/\\\\\"}
+    s=${s//\`/\\\\\`}
+    s=${s//\$/\\\\\$}
+    printf '"%s"' "$s"
+}
+
+# A program's path as one argument of a systemd unit's ExecStart (quoted where needed,
+# `%` and `$` doubled).
+unit_arg() {
+    local s=${1//%/%%}
+    s=${s//\$/\$\$}
+    if [[ $s =~ ^[A-Za-z0-9/._+-]+$ ]]; then printf '%s' "$s"; return; fi
+    s=${s//\\/\\\\}
+    s=${s//\"/\\\"}
+    printf '"%s"' "$s"
+}
+
 # The user's systemd runs (its private socket is there).
 user_systemd() {
     [[ -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/systemd/private" ]] && command -v systemctl >/dev/null
@@ -102,18 +129,18 @@ assets="$ROOT/packaging"
 install -Dm755 "$built/prostir" "$BIN/prostir"
 install -Dm644 "$assets/prostir.svg" "$ICON"
 install -Dm644 "$assets/prostir.desktop" "$DESKTOP"
-sed -i "s|^Exec=.*|Exec=$BIN/prostir open|" "$DESKTOP"
+sed -i "s|^Exec=.*|Exec=$(sed_text "$(desktop_arg "$BIN/prostir") open")|" "$DESKTOP"
 # Archives made before the settings window existed have no prostir-settings.
 if [[ -x "$built/prostir-settings" ]]; then
     install -Dm755 "$built/prostir-settings" "$BIN/prostir-settings"
     install -Dm644 "$assets/$SETTINGS_ID.desktop" "$SETTINGS_DESKTOP"
-    sed -i "s|^Exec=.*|Exec=$BIN/prostir-settings|" "$SETTINGS_DESKTOP"
+    sed -i "s|^Exec=.*|Exec=$(sed_text "$(desktop_arg "$BIN/prostir-settings")")|" "$SETTINGS_DESKTOP"
 fi
 # Archives made before Prostir could sleep until the headset comes have no units.
 if [[ -f "$assets/systemd/prostir.socket" ]]; then
     install -Dm644 "$assets/systemd/prostir.socket" "$UNITS/prostir.socket"
     install -Dm644 "$assets/systemd/prostir.service" "$UNITS/prostir.service"
-    sed -i "s|^ExecStart=.*|ExecStart=$BIN/prostir serve|" "$UNITS/prostir.service"
+    sed -i "s|^ExecStart=.*|ExecStart=$(sed_text "$(unit_arg "$BIN/prostir") serve")|" "$UNITS/prostir.service"
     if user_systemd; then systemctl --user daemon-reload || true; fi
 fi
 for f in LICENSE LICENSE-EXCEPTION.md THIRD-PARTY-LICENSES.txt; do
@@ -140,7 +167,7 @@ elif (( autostart )) && user_systemd && [[ -f "$UNITS/prostir.socket" ]]; then
     echo "   From the next login it starts when the headset comes. Turn that off in the tray: \"Start with the system\"."
 elif (( autostart )); then
     install -Dm644 "$DESKTOP" "$AUTOSTART"
-    sed -i "s|^Exec=.*|Exec=$BIN/prostir serve|" "$AUTOSTART"
+    sed -i "s|^Exec=.*|Exec=$(sed_text "$(desktop_arg "$BIN/prostir") serve")|" "$AUTOSTART"
     echo "X-KDE-autostart-phase=2" >> "$AUTOSTART"
     echo "   It starts when you log in. Turn that off in the tray: \"Start with the system\"."
 elif [[ -f "$AUTOSTART" ]] || { user_systemd && systemctl --user -q is-enabled prostir.socket 2>/dev/null; }; then

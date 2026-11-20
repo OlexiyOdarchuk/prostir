@@ -193,8 +193,9 @@ fn write_entry() {
         .unwrap_or_else(|| "prostir".into());
     let text = format!(
         "[Desktop Entry]\nType=Application\nName=Prostir\n\
-         Comment=Virtual monitors for Meta Quest\nExec={exe} serve\nIcon=prostir\n\
-         Terminal=false\nX-KDE-autostart-phase=2\n"
+         Comment=Virtual monitors for Meta Quest\nExec={} serve\nIcon=prostir\n\
+         Terminal=false\nX-KDE-autostart-phase=2\n",
+        desktop_arg(&exe)
     );
     let written = path
         .parent()
@@ -203,6 +204,36 @@ fn write_entry() {
     if let Err(e) = written {
         warn!("cannot change autostart ({}): {e}", path.display());
     }
+}
+
+/// `arg` as one argument of an `Exec` line of a desktop entry: quoted where it has a
+/// character the line would read otherwise (a space, a quote, `$`...), with the
+/// escapes the quoting and then the string value need; `%` doubled.
+fn desktop_arg(arg: &str) -> String {
+    const RESERVED: &str = " \t\n\"'\\><~|&;$*?#()`";
+    let arg: String = arg
+        .chars()
+        .filter(|c| *c != '\n')
+        .collect::<String>()
+        .replace('%', "%%");
+    if !arg.chars().any(|c| RESERVED.contains(c)) {
+        return arg;
+    }
+    let mut out = String::from("\"");
+    for c in arg.chars() {
+        match c {
+            // Escaped for the quoting (a backslash), that backslash escaped again for
+            // the string value.
+            '"' | '`' | '$' => {
+                out.push_str("\\\\");
+                out.push(c);
+            }
+            '\\' => out.push_str("\\\\\\\\"),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn remove_entry() {
@@ -227,5 +258,19 @@ mod tests {
         assert_eq!(pick(false, true, false), Way::Entry, "no systemd");
         assert_eq!(pick(true, true, true), Way::None);
         assert_eq!(pick(false, false, true), Way::None);
+    }
+
+    /// A program's path goes into the entry as one argument, whatever it holds.
+    #[test]
+    fn paths_are_quoted_for_the_entry() {
+        assert_eq!(desktop_arg("/usr/bin/prostir"), "/usr/bin/prostir");
+        assert_eq!(
+            desktop_arg("/home/a b/.local/bin/prostir"),
+            "\"/home/a b/.local/bin/prostir\""
+        );
+        assert_eq!(desktop_arg("/x/$HOME/p"), "\"/x/\\\\$HOME/p\"");
+        assert_eq!(desktop_arg("/x/a\"b"), "\"/x/a\\\\\"b\"");
+        assert_eq!(desktop_arg("/x/a\\b"), "\"/x/a\\\\\\\\b\"");
+        assert_eq!(desktop_arg("/x/100%/p"), "/x/100%%/p");
     }
 }

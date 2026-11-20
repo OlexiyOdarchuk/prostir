@@ -217,6 +217,10 @@ pub fn keep_screens(store: &mut Store, displays: &Displays, chosen: bool) {
     }
 }
 
+/// While a Quest on USB waits for its `adb reverse`, how often the program looks
+/// whether it may leave.
+const USB_LOOK: Duration = Duration::from_secs(5);
+
 /// Taken off for this long, the headset counts as gone.
 const TAKEN_OFF_GRACE: Duration = Duration::from_secs(10);
 
@@ -291,6 +295,9 @@ impl Brain {
                     .filter(|_| self.sessions.is_empty())
                     .and_then(Displays::place_due),
                 self.door.due(),
+                // Looked at again now and then while a Quest on USB waits for its
+                // `adb reverse` (only then).
+                platform::usb_waiting().then(|| Instant::now() + USB_LOOK),
             ]);
             let first = match next {
                 // Nothing to do until something happens: no wakeups at all.
@@ -319,8 +326,12 @@ impl Brain {
                 // Nothing may slip in as it leaves: a connection accepted meanwhile,
                 // or an event already sent, keeps it.
                 self.listening.stop();
+                // In this order: a connection set up meanwhile sends its event before
+                // it stops counting as busy, so a look at the events after it misses
+                // nothing.
+                let busy = self.listening.busy();
                 let event = events.try_recv();
-                if event.is_err() && !self.listening.busy() {
+                if event.is_err() && !busy {
                     info!("nothing needs Prostir now: leaving until a headset comes");
                     break;
                 }
@@ -351,7 +362,10 @@ impl Brain {
             || !self.closing.is_empty()
             || self.listening.busy()
             || self.code_reply.is_some()
-            || pairing::code_shown().is_some();
+            || pairing::code_shown().is_some()
+            // A Quest on USB waits for its `adb reverse` (USB debugging not allowed yet,
+            // say): the program it starts must not leave before it connects.
+            || platform::usb_waiting();
         self.door.leave_at(now, busy).is_some_and(|at| now >= at)
     }
 
@@ -423,7 +437,10 @@ impl Brain {
                 self.code_tried();
             }
             Event::Asked(asker) => {
-                if self.door.asked(&asker, Instant::now()) {
+                if self.door.asked(&asker, Instant::now())
+                    && !self.door.notice_waits()
+                    && door::notice_due(&platform::notice_mark(), std::time::SystemTime::now())
+                {
                     self.notice_new_headset();
                 }
             }
@@ -1091,9 +1108,10 @@ fn serve(args: Args) -> Result<i32> {
             }
             // systemd started it for what came: sorted first, light.
             match wake::sort(&sockets)? {
-                Some(why) => {
+                Some(sorted) => {
                     platform::import_session_environment();
-                    full(args, sockets, Origin::Systemd, Some(why))
+                    sockets.first = sorted.first;
+                    full(args, sockets, Origin::Systemd, Some(sorted.why))
                 }
                 None => {
                     info!("nothing for Prostir to do: back to sleep");
@@ -1126,6 +1144,23 @@ fn open_sockets(args: &Args, discovery: Option<u16>) -> Result<platform::sockets
                  `prostir open` opens it, `systemctl --user stop prostir.socket` stops it",
             )
         } else {
+            // Another program (another user's Prostir, say): there is no tray to say
+            // so, a notification does.
+            let taken = e.chain().any(|c| {
+                c.downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == ErrorKind::AddrInUse)
+            });
+            if taken {
+                platform::dialogs::notify_and_wait(
+                    i18n::t("Prostir не працює", "Prostir is not running"),
+                    &format!(
+                        "{} {} {}",
+                        i18n::t("Порт", "Port"),
+                        args.port,
+                        i18n::t("зайнятий іншою програмою.", "is taken by another program.")
+                    ),
+                );
+            }
             e
         }
     })
@@ -1158,10 +1193,15 @@ fn full_with(
     let (events, received) = events::channel();
     // A signal from here on quits the usual way, putting everything back.
     {
-        let events = events.clone();
-        platform::quit_on_signals(move |_| {
-            events.send(Event::Quit);
-        });
+        let (quit, window) = (events.clone(), events.clone());
+        platform::quit_on_signals(
+            move |_| {
+                quit.send(Event::Quit);
+            },
+            move || {
+                window.tray(TrayCommand::ShowSettings);
+            },
+        );
     }
     if let Some(why) = why {
         info!("started: {why:?}");
@@ -1215,7 +1255,13 @@ fn full_with(
     // The local API: requests come in as events, what the control loop says goes out.
     let (outlet, notes) = api::channel();
     pairing::tell_about_codes(events.clone());
-    let listening = listen::spawn(sockets.tcp, security.clone(), tray.clone(), events.clone())?;
+    let listening = listen::spawn(
+        sockets.tcp,
+        sockets.first,
+        security.clone(),
+        tray.clone(),
+        events.clone(),
+    )?;
     let mut control = Control {
         tray,
         shown: None,

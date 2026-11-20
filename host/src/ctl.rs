@@ -69,6 +69,11 @@ pub trait CtlClient {
     fn asleep(&self) -> bool {
         false
     }
+    /// While Prostir is neither running nor asleep: whether its port is taken by
+    /// another program (another user's Prostir, say), which keeps it from starting.
+    fn port_taken(&self) -> bool {
+        false
+    }
 }
 
 /// What `ctl` was asked.
@@ -362,11 +367,15 @@ pub fn run(args: &[String], client: Result<&dyn CtlClient, ClientError>, io: &mu
                 Ok((revision, text)) => show_state(&ctl, revision, &text, json, io),
                 Err(e @ ClientError::NotRunning) if ctl == Ctl::Status => {
                     let asleep = client.asleep();
+                    let taken = !asleep && client.port_taken();
                     if json {
                         let (_, name, text) = what_failed(&e, false);
                         let mut value = error_json(name, &text, Some(false));
                         if asleep {
                             value["asleep"] = true.into();
+                        }
+                        if taken {
+                            value["port_taken"] = true.into();
                         }
                         let _ = writeln!(io.out, "{value}");
                     } else if asleep {
@@ -374,6 +383,14 @@ pub fn run(args: &[String], client: Result<&dyn CtlClient, ClientError>, io: &mu
                             io.out,
                             "{}",
                             t("Чекає на шолом (спить)", "Waiting for the headset (asleep)")
+                        );
+                    } else if taken {
+                        let _ = writeln!(
+                            io.out,
+                            "{} {} {}",
+                            t("Не працює: порт", "Not running: port"),
+                            prostir_proto::TCP_PORT,
+                            t("зайнятий іншою програмою", "is taken by another program")
                         );
                     } else {
                         let _ = writeln!(io.out, "{}", t("Не працює", "Not running"));
@@ -913,6 +930,71 @@ mod tests {
         fn watch(&self, _each: &mut dyn FnMut(Watched) -> bool) -> Result<(), ClientError> {
             Ok(())
         }
+    }
+
+    /// A Prostir that does not run, asleep or kept from starting by its port.
+    struct NotRunning {
+        asleep: bool,
+        taken: bool,
+    }
+
+    impl CtlClient for NotRunning {
+        fn call(&self, _request: &Request) -> Result<Answer, ClientError> {
+            Err(ClientError::NotRunning)
+        }
+
+        fn state(&self) -> Result<(u32, String), ClientError> {
+            Err(ClientError::NotRunning)
+        }
+
+        fn running(&self) -> bool {
+            false
+        }
+
+        fn watch(&self, _each: &mut dyn FnMut(Watched) -> bool) -> Result<(), ClientError> {
+            Err(ClientError::NotRunning)
+        }
+
+        fn asleep(&self) -> bool {
+            self.asleep
+        }
+
+        fn port_taken(&self) -> bool {
+            self.taken
+        }
+    }
+
+    /// `status` without Prostir says whether it sleeps, or whether its port keeps it
+    /// from starting.
+    #[test]
+    fn status_says_asleep_or_port_taken() {
+        let status = |asleep, taken, json: bool| {
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            let line = if json { "status --json" } else { "status" };
+            let code = run(
+                &args(line),
+                Ok(&NotRunning { asleep, taken }),
+                &mut Output {
+                    out: &mut out,
+                    err: &mut err,
+                },
+            );
+            (code, String::from_utf8(out).unwrap())
+        };
+        let not_running = format!("{}\n", t("Не працює", "Not running"));
+        assert_eq!(
+            status(false, false, false),
+            (NOT_RUNNING, not_running.clone())
+        );
+        let asleep = status(true, true, false).1;
+        assert_ne!(asleep, not_running);
+        let taken = status(false, true, false).1;
+        assert!(taken.contains("47830"), "{taken}");
+        assert_ne!(taken, asleep);
+        let json: serde_json::Value = serde_json::from_str(&status(false, true, true).1).unwrap();
+        assert_eq!(json["port_taken"], true);
+        let json: serde_json::Value = serde_json::from_str(&status(true, false, true).1).unwrap();
+        assert_eq!(json["asleep"], true);
     }
 
     fn ctl(line: &str, client: &Fake) -> (i32, String, String) {

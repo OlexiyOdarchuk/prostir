@@ -64,6 +64,66 @@ fn leave_times() -> (Duration, Duration) {
     (QUIET, FIRST_WAIT)
 }
 
+/// At most so many headsets nearby are kept (made-up addresses must not grow it).
+pub const MAX_NEARBY: usize = 16;
+/// A headset's name as the PC shows it, at most so many characters.
+pub const MAX_NAME_CHARS: usize = 32;
+
+/// Whether a headset that asked wants the notice of a new headset nearby: not one of
+/// this PC's, no answer (the PC is paired), the pairing window closed.
+pub fn wants_notice(asker: &Asker, pairing: bool) -> bool {
+    !asker.answered && !asker.ours && !pairing
+}
+
+/// Whether the notice of a new headset may be shown at `now`, [`NOTICE_EVERY`] at
+/// most, however many programs ask (the watcher, its child, the light phase under
+/// systemd and the full program after it): the time of the last one is kept in the
+/// file `mark` (in the user's runtime directory), written when one is shown.
+pub fn notice_due(mark: &std::path::Path, now: std::time::SystemTime) -> bool {
+    let last = std::fs::read_to_string(mark)
+        .ok()
+        .and_then(|t| t.trim().parse::<u64>().ok())
+        .map(|s| std::time::UNIX_EPOCH + Duration::from_secs(s));
+    // A clock set back counts as long ago.
+    let quiet = last.is_none_or(|last| {
+        now.duration_since(last)
+            .map_or(true, |since| since >= NOTICE_EVERY)
+    });
+    if quiet {
+        let secs = now
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        if let Err(e) = std::fs::write(mark, format!("{secs}\n")) {
+            log::warn!(
+                "cannot keep the time of the notice ({}): {e}",
+                mark.display()
+            );
+        }
+    }
+    quiet
+}
+
+/// A name a headset gave (it comes from the network): without control and
+/// direction-changing characters (which could make it read as something else), trimmed,
+/// [`MAX_NAME_CHARS`] at most.
+pub fn clean_name(name: &str) -> String {
+    let bidi = |c: char| {
+        matches!(
+            c,
+            '\u{200e}' | '\u{200f}' | '\u{061c}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+        )
+    };
+    name.chars()
+        .filter(|c| !c.is_control() && !bidi(*c))
+        .collect::<String>()
+        .trim()
+        .chars()
+        .take(MAX_NAME_CHARS)
+        .collect::<String>()
+        .trim_end()
+        .to_owned()
+}
+
 /// A headset that asked for this PC lately.
 struct Near {
     /// Its name, or its address when it gave none.
@@ -97,8 +157,7 @@ pub struct Door {
     /// How the last pairing attempt ended.
     last: Option<api::PairResult>,
     nearby: Vec<Near>,
-    /// When a notice of a new headset was last shown.
-    noticed: Option<Instant>,
+
     /// A notice waits for its button, until then.
     notice: Option<Instant>,
     /// The settings window is on the bus.
@@ -155,34 +214,37 @@ impl Door {
         self.last = Some(api::PairResult::Wrong);
     }
 
-    /// A headset that is not one of this PC's asked at `now`: whether to show the
-    /// notice of a new headset nearby (it got no answer, the pairing window is closed,
-    /// and none was shown lately).
+    /// A headset that is not one of this PC's asked at `now`: it is nearby (by its
+    /// name, cleaned, else its address; [`MAX_NEARBY`] at most, the latest kept).
+    /// Whether it wants the notice of a new headset (see [`wants_notice`]; whether one
+    /// is shown now is [`notice_due`]'s).
     pub fn asked(&mut self, asker: &Asker, now: Instant) -> bool {
-        let label = if asker.name.is_empty() {
+        let name = clean_name(&asker.name);
+        let label = if name.is_empty() {
             asker.from.ip().to_string()
         } else {
-            asker.name.clone()
+            name
         };
         self.nearby.retain(|n| n.from.ip() != asker.from.ip());
+        if self.nearby.len() >= MAX_NEARBY {
+            self.nearby.remove(0);
+        }
         self.nearby.push(Near {
             label,
             from: asker.from,
             at: now,
         });
-        let quiet = self
-            .noticed
-            .is_none_or(|at| now.saturating_duration_since(at) >= NOTICE_EVERY);
-        let notice = !asker.answered && !asker.ours && self.pairing.is_none() && quiet;
-        if notice {
-            self.noticed = Some(now);
-        }
-        notice
+        wants_notice(asker, self.pairing.is_some())
     }
 
     /// A notice now waits for its button (`true`), or is gone.
     pub fn notice_up(&mut self, up: bool, now: Instant) {
         self.notice = up.then_some(now + NOTICE_TIME);
+    }
+
+    /// A notice waits for its button now.
+    pub fn notice_waits(&self) -> bool {
+        self.notice.is_some()
     }
 
     /// The settings window came onto the bus or left it.
@@ -339,27 +401,55 @@ mod tests {
         assert!(!door.pairing_open());
     }
 
-    /// A stranger the PC does not answer brings a notice, once a minute at most, and
-    /// none while the window is open or for the PC's own headsets.
+    /// A stranger the PC does not answer wants the notice; not while the window is
+    /// open, nor the PC's own headsets, nor one that got an answer.
     #[test]
-    fn a_stranger_outside_the_window_brings_a_notice_now_and_then() {
+    fn a_stranger_outside_the_window_wants_the_notice() {
         let now = Instant::now();
         let mut door = Door::new(PairingOpen::default(), false, now);
         assert!(!door.asked(&asker(true, true, ""), now), "one of its own");
         assert!(door.asked(&asker(false, false, ""), now));
-        assert!(!door.asked(&asker(false, false, ""), now + Duration::from_secs(30)));
-        assert!(door.asked(&asker(false, false, ""), now + NOTICE_EVERY));
-        let later = now + NOTICE_EVERY * 3;
-        door.open_pairing(later, PAIRING_TIME);
+        door.open_pairing(now, PAIRING_TIME);
         assert!(
-            !door.asked(&asker(false, true, ""), later),
+            !door.asked(&asker(false, false, ""), now),
             "the window is open"
         );
         door.stop_pairing();
-        assert!(
-            !door.asked(&asker(false, true, ""), later),
-            "it was answered"
-        );
+        assert!(!door.asked(&asker(false, true, ""), now), "it was answered");
+    }
+
+    /// The notice once a minute at most, kept in a file every program reads: a second
+    /// program (another start, the watcher's child) sees the first one's.
+    #[test]
+    fn the_notice_is_shown_once_a_minute_across_programs() {
+        let mark = std::env::temp_dir().join(format!("prostir-notice-{}", std::process::id()));
+        let _ = std::fs::remove_file(&mark);
+        let now = std::time::SystemTime::now();
+        assert!(notice_due(&mark, now));
+        assert!(!notice_due(&mark, now + Duration::from_secs(30)));
+        assert!(notice_due(&mark, now + NOTICE_EVERY));
+        // A clock set back: long ago.
+        assert!(notice_due(&mark, now - Duration::from_secs(3600)));
+        std::fs::write(&mark, "nonsense").unwrap();
+        assert!(notice_due(&mark, now));
+        std::fs::remove_file(&mark).unwrap();
+    }
+
+    /// Made-up addresses keep at most sixteen entries; names are cleaned.
+    #[test]
+    fn nearby_is_capped_and_names_cleaned() {
+        let now = Instant::now();
+        let mut door = Door::new(PairingOpen::default(), false, now);
+        for i in 0..100u8 {
+            let mut a = asker(false, false, "");
+            a.from = SocketAddr::from(([10, 0, 0, i], 5000));
+            door.asked(&a, now);
+        }
+        assert_eq!(door.nearby().len(), MAX_NEARBY);
+        assert_eq!(door.nearby().last().unwrap(), "10.0.0.99");
+        assert_eq!(clean_name("  Quest\u{202e}3S\n\t "), "Quest3S");
+        assert_eq!(clean_name(&"я".repeat(50)).chars().count(), MAX_NAME_CHARS);
+        assert_eq!(clean_name("\u{2066}\u{0007}"), "");
     }
 
     /// Nearby: by name, else by address, one entry for each address, forgotten a

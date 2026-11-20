@@ -7,6 +7,12 @@ Description=Prostir: virtual monitors for the headset
 Documentation=https://prostir.ishawyha.dev
 Requisite=prostir.socket
 After=prostir.socket
+# Each start stays a minute at least (it answers what else comes meanwhile), so starts
+# are rare; a program that crashes at once still stops after 20 tries in 5 minutes
+# instead of restarting for good (systemd's default, 5 in 10 s, would also stop the
+# socket for a burst of headsets asking).
+StartLimitIntervalSec=300
+StartLimitBurst=20
 
 [Service]
 Type=exec

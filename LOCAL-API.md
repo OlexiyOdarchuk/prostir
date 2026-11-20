@@ -210,7 +210,7 @@ exist, monitor requests change the set kept for the next headset (its monitors s
 | `forget_headset` | `headset`: its `key`, its whole key (64 hex digits) or its name | its session ends |
 | `forget_all` | | every paired headset |
 | `show_settings` | | starts `prostir-settings` (it keeps one window per user itself); `Unsupported` when it is not installed |
-| `quit` | | Prostir quits after answering |
+| `quit` | | Prostir quits after answering, as the tray's "Quit": nothing waits for the headset afterwards (the sockets' watcher quits too; under systemd the socket stops until the next login) |
 
 ### Not yet
 
@@ -387,7 +387,8 @@ time Prostir comes back on the bus.
 `ctl status` when Prostir is not running does not start it: it says `Not running`
 (`{"error": "NotRunning", "text": …, "running": false}`), or `Waiting for the
 headset (asleep)` (`"asleep": true` too) when the sockets' watcher or systemd's socket
-waits for a headset, and exits with 2.
+waits for a headset, or that port 47830 is taken by another program (`"port_taken":
+true`), and exits with 2.
 
 ## `prostir open` and the settings window
 

@@ -534,6 +534,8 @@ fn accept_within(
                 name,
             } => {
                 attempts += 1;
+                // From the network: shown in the window, the tray and the list of headsets.
+                let name = crate::door::clean_name(&name);
                 if attempts > MAX_ATTEMPTS {
                     bail!("too many wrong pairing codes");
                 }
@@ -670,7 +672,7 @@ fn obtain_code(headset_shows: bool, name: &str, tray: &TrayCode) -> Result<Strin
         let name = if name.is_empty() {
             t("Шолом", "Headset").to_owned()
         } else {
-            name.chars().take(64).collect()
+            name.to_owned()
         };
         *CODE_FOR.lock().unwrap() = Some((tray.connection, name, to));
         code_changed();

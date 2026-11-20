@@ -23,6 +23,8 @@ pub struct Sockets {
     pub tcp: TcpListener,
     /// Where discovery queries come; none with `--no-discovery`.
     pub udp: Option<UdpSocket>,
+    /// A connection accepted already (by the light phase): set up before the rest.
+    pub first: Option<std::net::TcpStream>,
 }
 
 impl Sockets {
@@ -82,6 +84,12 @@ pub fn take() -> Result<Option<Sockets>> {
                 // SAFETY: a socket passed to this process, owned from here on.
                 udp = Some(unsafe { UdpSocket::from_raw_fd(fd) });
             }
+            // A second one of a kind: which is the one meant is anyone's guess, and
+            // answering on one while the other waits would start this again and again.
+            Some(libc::SOCK_STREAM | libc::SOCK_DGRAM) => bail!(
+                "{count} sockets passed, more than one TCP or UDP socket among them: \
+                 prostir.socket listens on one of each (ListenStream, ListenDatagram)"
+            ),
             _ => log::warn!("passed descriptor {fd} is not a socket Prostir uses: left alone"),
         }
     }
@@ -96,7 +104,11 @@ pub fn take() -> Result<Option<Sockets>> {
         // what is no query never wakes it again.
         filter_queries(udp)?;
     }
-    Ok(Some(Sockets { tcp, udp }))
+    Ok(Some(Sockets {
+        tcp,
+        udp,
+        first: None,
+    }))
 }
 
 /// Opens the sockets here: TCP on `port`, and UDP on `discovery` (none: no discovery).
@@ -113,7 +125,11 @@ pub fn open(port: u16, discovery: Option<u16>) -> Result<Sockets> {
             Some(udp)
         }
     };
-    Ok(Sockets { tcp, udp })
+    Ok(Sockets {
+        tcp,
+        udp,
+        first: None,
+    })
 }
 
 /// Lets only discovery queries into `socket`: datagrams of [`MIN_QUERY`] to
@@ -243,8 +259,8 @@ pub fn start_with(
     env_ptrs.push(pid_slot.cast_const().cast());
     env_ptrs.push(std::ptr::null());
     // SAFETY: after the fork the child only calls async-signal-safe functions (getpid,
-    // fcntl, dup2, execve, _exit) and writes into memory prepared above; it allocates
-    // nothing. The parent goes on as before.
+    // fcntl, dup2, sigprocmask, execve, _exit) and writes into memory prepared above;
+    // it allocates nothing. The parent goes on as before.
     unsafe {
         let pid = libc::fork();
         if pid < 0 {
@@ -282,6 +298,12 @@ pub fn start_with(
                 libc::_exit(126);
             }
         }
+        // SIGUSR1 (the settings window, passed on by the watcher) waits blocked until
+        // the program has its handler: before that it would end it.
+        let mut held: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut held);
+        libc::sigaddset(&mut held, libc::SIGUSR1);
+        libc::sigprocmask(libc::SIG_BLOCK, &held, std::ptr::null_mut());
         libc::execve(path.as_ptr(), argv_ptrs.as_ptr(), env_ptrs.as_ptr());
         libc::_exit(127);
     }

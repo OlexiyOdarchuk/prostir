@@ -212,6 +212,21 @@ fn watch_file(name: &'static str, on_text: impl Fn(String) -> bool + Send + 'sta
 /// No headset is ever plugged in by USB.
 pub fn keep_adb_reverse(_port: u16) {}
 
+/// No headset waits on USB.
+pub fn usb_waiting() -> bool {
+    false
+}
+
+/// In the test's runtime directory, shared by the watcher and its child as on a real
+/// PC.
+pub fn notice_mark() -> PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .or_else(config_home)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("prostir-notice")
+}
+
 /// In the settings directory (the fake PC has no Pictures folder).
 pub fn screenshot_path() -> Result<PathBuf> {
     let dir = config_home()

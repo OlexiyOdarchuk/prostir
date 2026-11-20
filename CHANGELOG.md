@@ -103,7 +103,8 @@
 - Without systemd, and on Hyprland (`exec-once = prostir`), `prostir` sleeps in a
   small watcher that wakes for nothing (about 1 MB of its own memory) and starts the
   rest when a headset comes. A Quest plugged in by USB is noticed without waking for
-  other devices. A crash of the rest no longer loses the port: the next headset
+  other devices. When another program holds Prostir's port, a notification and
+  `prostir ctl status` say so. A crash of the rest no longer loses the port: the next headset
   starts it again.
 - Once no headset needs it (none connected, no monitors waiting, no settings window,
   no pairing), Prostir leaves after 10 s, and the headset's next visit starts it

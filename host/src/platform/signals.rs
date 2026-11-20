@@ -86,6 +86,17 @@ pub fn install(signals: &[libc::c_int]) -> std::io::Result<OwnedFd> {
             return Err(std::io::Error::last_os_error());
         }
     }
+    // A signal that came while the program started (the watcher passes them on) was
+    // held: let it in now that the handler is there.
+    if signals.contains(&libc::SIGUSR1) {
+        // SAFETY: an empty set with one signal added, read by the call.
+        unsafe {
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            libc::sigaddset(&mut set, libc::SIGUSR1);
+            libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+        }
+    }
     Ok(read)
 }
 
@@ -107,8 +118,13 @@ pub fn wait_for_signal(pipe: &OwnedFd) -> Option<libc::c_int> {
 /// Lets the quit signals end the program cleanly: `on_quit` is called with the
 /// signal's name on a thread of its own, once. If the normal way out does not finish
 /// within a few seconds, the program removes its monitors (what KWin would do itself,
-/// Hyprland not) and leaves.
-pub fn quit_on_signals(on_quit: impl FnOnce(&'static str) + Send + 'static) {
+/// Hyprland not) and leaves. SIGUSR1 calls `on_window`: the sockets' watcher passes on
+/// `prostir open`'s wish for the settings window while the program is starting (it is
+/// held blocked until now, see `sockets::start_with`).
+pub fn quit_on_signals(
+    on_quit: impl FnOnce(&'static str) + Send + 'static,
+    on_window: impl Fn() + Send + 'static,
+) {
     let pipe = match install(&[QUIT_SIGNALS.as_slice(), &[libc::SIGUSR1]].concat()) {
         Ok(pipe) => pipe,
         Err(e) => {
@@ -121,8 +137,11 @@ pub fn quit_on_signals(on_quit: impl FnOnce(&'static str) + Send + 'static) {
         .spawn(move || {
             let signal = loop {
                 match wait_for_signal(&pipe) {
-                    // For the sockets' watcher; nothing to do here.
-                    Some(libc::SIGUSR1) => continue,
+                    Some(libc::SIGUSR1) => {
+                        info!("SIGUSR1 received: the settings window");
+                        on_window();
+                        continue;
+                    }
                     Some(signal) => break name(signal),
                     None => {
                         warn!("reading signals failed: quit signals are ignored");

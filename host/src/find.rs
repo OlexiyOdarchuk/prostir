@@ -221,16 +221,31 @@ pub fn spawn_beacon(port: u16) -> Result<()> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
     socket.set_broadcast(true)?;
     let beacon = prostir_proto::encode_beacon(port, &platform::hostname());
+    // A build for the end-to-end tests sends it to the test only, never to the network.
+    #[cfg(feature = "fake-desktop")]
+    let to_test: Option<SocketAddr> = std::env::var("PROSTIR_TEST_BEACON_TO")
+        .ok()
+        .and_then(|a| a.parse().ok());
+    #[cfg(not(feature = "fake-desktop"))]
+    let to_test: Option<SocketAddr> = None;
+    // It wakes the program once a second while it runs (not while it sleeps): until
+    // the headset asks instead (step 7 of 0.2.0), the price of being found.
     std::thread::Builder::new()
         .name("beacon".into())
         .spawn(move || {
             loop {
                 // 255.255.255.255 only leaves through the default route, so also send to
                 // the broadcast address of every interface (Wi-Fi, Ethernet, hotspot).
-                let mut targets = platform::broadcast_addresses();
-                targets.push(Ipv4Addr::BROADCAST);
-                for ip in targets {
-                    let _ = socket.send_to(&beacon, (ip, prostir_proto::DISCOVERY_PORT));
+                let targets: Vec<SocketAddr> = match to_test {
+                    Some(to) => vec![to],
+                    None => platform::broadcast_addresses()
+                        .into_iter()
+                        .chain([Ipv4Addr::BROADCAST])
+                        .map(|ip| SocketAddr::from((ip, prostir_proto::DISCOVERY_PORT)))
+                        .collect(),
+                };
+                for to in targets {
+                    let _ = socket.send_to(&beacon, to);
                 }
                 std::thread::sleep(Duration::from_secs(1));
             }
