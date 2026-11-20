@@ -370,7 +370,10 @@ impl Displays {
                         spec: spec.clone(),
                         number: s.number,
                     },
-                    ScreenKind::Window { .. } => What::Panel,
+                    ScreenKind::Window { .. } => What::Panel {
+                        number: s.number,
+                        detach: None,
+                    },
                     ScreenKind::Physical { key, .. } if s.streaming => What::Physical {
                         key: OutputKey::new(key.connector.as_str()),
                         number: s.number,
@@ -386,11 +389,14 @@ impl Displays {
                 Some((id, wanted))
             })
             .collect();
-        for (id, (number, _)) in &self.detaching {
+        for (id, (number, job)) in &self.detaching {
             screens.push((
                 *id,
                 WantedScreen {
-                    what: What::Panel,
+                    what: What::Panel {
+                        number: *number,
+                        detach: Some(*job),
+                    },
                     stream: true,
                     attempt: 0,
                     name: format!("Prostir-{number}"),
@@ -531,9 +537,9 @@ impl Displays {
                 encoding,
             }) => {
                 if !self.detaching.contains_key(&id) {
-                    // Made too late: the headset was told it failed.
+                    // Made too late (the headset was told it failed): the worker closes
+                    // it, no longer wanted, and puts the window back.
                     info!("window panel {id} came too late: closing it");
-                    self.desk.ask(Job::ClosePanel { id, put_back: true });
                     return DeskNews::None;
                 }
                 self.panel_made(id, spec, key, encoding);
@@ -737,7 +743,7 @@ impl Displays {
             let why = too_big_why(&s.name(), (w, h), codec);
             warn!("{why}");
             if s.is_window() {
-                self.close_panel(id, true);
+                self.close_window_panel(id);
                 self.router.send_all(HostMsg::Problem {
                     error: state::ErrorCode::BAD_SIZE,
                     detail: state::clip(&why, state::MAX_DETAIL),
@@ -1372,7 +1378,8 @@ impl Displays {
     /// Asks where the mouse is (the answer comes as the job's).
     pub fn find_mouse(&mut self) -> JobId {
         let job = self.desk.job_id();
-        self.desk.ask(Job::FindMouse { job });
+        let until = Instant::now() + worker::answer_within();
+        self.desk.ask(Job::FindMouse { job, until });
         job
     }
 
@@ -1802,10 +1809,10 @@ impl Displays {
         if !self.facts.as_ref().is_some_and(|f| f.has_windows) {
             bail!(UserError::NoWindow);
         }
+        // Made by the worker as part of the wanted state, after any output it removes.
         let number = self.free_number();
         let job = self.desk.job_id();
         self.detaching.insert(id, (number, job));
-        self.desk.ask(Job::Detach { job, id, number });
         Ok(job)
     }
 
@@ -1828,17 +1835,11 @@ impl Displays {
     }
 
     /// Removes a window panel; its window goes back where it was detached from (or,
-    /// when that monitor is gone, to the others).
+    /// when that monitor is gone, to the others), as the worker closes it.
     pub fn close_window_panel(&mut self, id: ScreenId) {
-        self.close_panel(id, true);
-    }
-
-    fn close_panel(&mut self, id: ScreenId, put_back: bool) {
-        if !self.screens.get(&id).is_some_and(Screen::is_window) {
-            return;
+        if self.screens.get(&id).is_some_and(Screen::is_window) {
+            self.screens.remove(&id);
         }
-        self.screens.remove(&id);
-        self.desk.ask(Job::ClosePanel { id, put_back });
     }
 
     /// Moves the PC's active window to monitor `id` (the one the user looks at); the
@@ -1855,7 +1856,8 @@ impl Displays {
             bail!(UserError::NoWindow);
         }
         let job = self.desk.job_id();
-        self.desk.ask(Job::WindowHere { job, id });
+        let until = Instant::now() + worker::answer_within();
+        self.desk.ask(Job::WindowHere { job, id, until });
         Ok(job)
     }
 
@@ -1870,7 +1872,8 @@ impl Displays {
             bail!(UserError::UnknownDisplay);
         }
         let job = self.desk.job_id();
-        self.desk.ask(Job::Screenshot { job, id });
+        let until = Instant::now() + worker::answer_within();
+        self.desk.ask(Job::Screenshot { job, id, until });
         Ok(job)
     }
 

@@ -72,15 +72,16 @@ impl Default for Watchdog {
 }
 
 /// [`STUCK`] and [`GIVE_UP`]; in a build for the end-to-end tests, what
-/// `PROSTIR_TEST_DESK_LIMITS` says (`3,6`: seconds), so giving up is tested without
-/// waiting 2 min (never a setting of a release).
+/// `PROSTIR_TEST_DESK_LIMITS` says (`3,6`: seconds; a third number is for
+/// `answer_within`), so giving up is tested without waiting 2 min (never a setting
+/// of a release).
 fn limits() -> (Duration, Duration) {
     #[cfg(feature = "fake-desktop")]
     if let Some((stuck, give_up)) = std::env::var("PROSTIR_TEST_DESK_LIMITS")
         .ok()
         .and_then(|v| {
-            let (a, b) = v.split_once(',')?;
-            Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+            let mut n = v.split(',').map(|n| n.trim().parse().ok());
+            Some((n.next()??, n.next()??))
         })
     {
         return (Duration::from_secs(stuck), Duration::from_secs(give_up));

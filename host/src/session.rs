@@ -1064,7 +1064,8 @@ impl Session {
                             req.0,
                             (started - came).as_millis(),
                         );
-                        self.waiting.push((req, job, Instant::now() + DESK_ANSWER));
+                        let until = Instant::now() + crate::worker::answer_within();
+                        self.waiting.push((req, job, until));
                         return false;
                     }
                 };
@@ -1106,9 +1107,6 @@ impl Session {
         false
     }
 }
-
-/// How long a request waits for the desktop's worker to answer it.
-pub const DESK_ANSWER: Duration = Duration::from_secs(20);
 
 /// What the headset and the person at the PC are told while the desktop does not
 /// respond.

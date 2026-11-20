@@ -14,7 +14,9 @@ use prostir_proto::{Codec, HostMsg};
 
 use super::inbox::Inbox;
 use super::watch::Steps;
-use super::{Connected, Done, Encoding, Gone, Job, JobOk, Primary, Start, Wanted, What, timed};
+use super::{
+    Connected, Done, Encoding, Gone, Job, JobId, JobOk, Primary, Start, Wanted, What, timed,
+};
 use crate::encoder::{
     Backend, Choice, Encoder, EncoderConfig, GpuDevices, Kind, Next, NotOpened, Wanted as Asked,
 };
@@ -107,6 +109,7 @@ enum Made {
     Panel {
         origin: ActiveWindow,
         spec: MonitorSpec,
+        number: u32,
     },
 }
 
@@ -120,7 +123,7 @@ impl Made {
             (Made::Physical { key, number }, What::Physical { key: k, number: n }) => {
                 key == k && number == n
             }
-            (Made::Panel { .. }, What::Panel) => true,
+            (Made::Panel { number, .. }, What::Panel { number: n, .. }) => number == n,
             _ => false,
         }
     }
@@ -206,6 +209,8 @@ enum Step {
     /// Another encoder or codec is wanted.
     Restart(ScreenId),
     Pause(ScreenId, bool),
+    /// The active window onto a new panel, for job `JobId`.
+    Detach(ScreenId, JobId),
 }
 
 /// An output on the desktop: a screen, or another real display.
@@ -232,6 +237,8 @@ pub struct Worker {
     wallpapers_due: bool,
     /// How many things handed over the worker took so far.
     taken: u64,
+    /// Panels it made (or tried to) for these jobs: each is made once.
+    detached: std::collections::BTreeSet<JobId>,
     /// The desktop is to be laid out again.
     layout_due: bool,
     /// The rows and the layout the desktop took last.
@@ -305,6 +312,7 @@ impl Worker {
             primary_made: None,
             wallpapers_due: false,
             taken: 0,
+            detached: std::collections::BTreeSet::new(),
             layout_due: false,
             applied: (Vec::new(), Vec::new()),
             layout_waits: false,
@@ -436,7 +444,15 @@ impl Worker {
             let has_output = slot.is_some_and(|s| s.output.is_some());
             let encoder = slot.and_then(|s| s.encoder.as_ref());
             match &w.what {
-                What::Panel if slot.is_none() => continue,
+                What::Panel {
+                    detach: Some(job), ..
+                } if slot.is_none() => {
+                    if !self.detached.contains(job) {
+                        return Some(Step::Detach(*id, *job));
+                    }
+                    continue;
+                }
+                What::Panel { .. } if slot.is_none() => continue,
                 What::Physical { .. } if !w.stream => continue,
                 _ => {}
             }
@@ -475,7 +491,24 @@ impl Worker {
         match step {
             Step::Remove(id) => {
                 self.begin(format!("removing {id}"));
-                self.remove(id, false);
+                // A window panel no longer wanted closes, its window back where it was.
+                let panel = self.slots.get(&id).is_some_and(Slot::is_panel);
+                self.remove(id, panel);
+            }
+            Step::Detach(id, job) => {
+                self.begin(format!("putting the active window on panel {id}"));
+                self.detached.insert(job);
+                let number = self.wanted.as_ref().and_then(|w| {
+                    w.screens.iter().find_map(|(i, s)| match s.what {
+                        What::Panel { number, .. } if *i == id => Some(number),
+                        _ => None,
+                    })
+                });
+                let result = match number {
+                    Some(number) => self.detach(id, number),
+                    None => Err(anyhow!("no panel {id} wanted")),
+                };
+                self.done(Done::Job { job, result });
             }
             Step::StopStream(id) => {
                 self.begin(format!("stopping the stream of {}", name(&id)));
@@ -568,7 +601,7 @@ impl Worker {
                 },
                 self.desktop.show(key).context(UserError::Capture),
             ),
-            What::Panel => return,
+            What::Panel { .. } => return,
         };
         let slot = self
             .slots
@@ -910,13 +943,21 @@ impl Worker {
                     }
                 }
             }
-            Job::Screenshot { job, id } => {
+            Job::Screenshot { until, .. }
+            | Job::FindMouse { until, .. }
+            | Job::WindowHere { until, .. }
+                if Instant::now() > until =>
+            {
+                info!("a job of the desktop came too late for whoever asked: dropped");
+            }
+            Job::Screenshot { job, id, .. } => {
                 self.begin(format!("a picture of {id}"));
                 let result = self.screenshot(id).map(JobOk::Saved);
                 self.end();
                 self.done(Done::Job { job, result });
             }
-            Job::FindMouse { job } => {
+            Job::FindMouse { job, .. } => {
+                info!("looking where the mouse is");
                 self.begin("finding the mouse");
                 let result = self.find_mouse();
                 self.end();
@@ -927,22 +968,11 @@ impl Worker {
                 self.mouse_to(id, x, y);
                 self.end();
             }
-            Job::WindowHere { job, id } => {
+            Job::WindowHere { job, id, .. } => {
                 self.begin(format!("moving the active window to {id}"));
                 let result = self.window_here(id).map(|()| JobOk::Done);
                 self.end();
                 self.done(Done::Job { job, result });
-            }
-            Job::Detach { job, id, number } => {
-                self.begin(format!("putting the active window on panel {id}"));
-                let result = self.detach(id, number);
-                self.end();
-                self.done(Done::Job { job, result });
-            }
-            Job::ClosePanel { id, put_back } => {
-                self.begin(format!("closing panel {id}"));
-                self.remove(id, put_back);
-                self.end();
             }
         }
     }
@@ -1392,6 +1422,7 @@ impl Worker {
             Made::Panel {
                 origin: window.clone(),
                 spec: spec.clone(),
+                number,
             },
             name,
         );
@@ -1981,5 +2012,108 @@ mod tests {
         let moved = [spot(0, 0, 360), spot(1, 640, 0)];
         assert!(!is_the_headsets(&moved, &boxes));
         assert!(!is_the_headsets(&moved, &desk::Boxes::new(Vec::new())));
+    }
+    /// A worker of a stub desktop that never waits, on a thread of its own.
+    struct Harness {
+        calls: Calls,
+        inbox: Arc<Inbox<Wanted, Job>>,
+        received: std::sync::mpsc::Receiver<Event>,
+        thread: std::thread::JoinHandle<()>,
+    }
+
+    impl Harness {
+        fn start() -> Self {
+            let calls = Calls::default();
+            let stub = Stub {
+                caps: DesktopCaps {
+                    name: "stub",
+                    virtual_monitors: Ok(AddModel::OneByOne),
+                    has_primary: false,
+                    origin_is_primary: false,
+                    scales: Scales::Any { min: 50, max: 400 },
+                    refresh: vec![60],
+                    screenshot_one_output: true,
+                    moves_pointer: false,
+                    cleans_up_after_crash: true,
+                },
+                calls: calls.clone(),
+                gate: Arc::new((Mutex::new(false), Condvar::new())),
+                outputs: Arc::default(),
+            };
+            let (events, received) = crate::events::channel();
+            let inbox: Arc<Inbox<Wanted, Job>> = Arc::default();
+            let shared = Shared {
+                inbox: inbox.clone(),
+                steps: Arc::default(),
+                router: Arc::new(Router::new()),
+                events,
+                generation: 1,
+            };
+            let worker = Worker::with(shared, Box::new(stub), GpuDevices::default());
+            let thread = std::thread::spawn(move || worker.run());
+            Self {
+                calls,
+                inbox,
+                received,
+                thread,
+            }
+        }
+
+        /// Hands `wanted` over and waits until the worker did all of it: the jobs it
+        /// answered meanwhile.
+        fn settle(&self, wanted: Wanted) -> Vec<(JobId, bool)> {
+            let upto = self.inbox.want(wanted);
+            let mut jobs = Vec::new();
+            loop {
+                match self.received.recv_timeout(Duration::from_secs(5)).unwrap() {
+                    Event::Desk(_, Done::Job { job, result }) => jobs.push((job, result.is_ok())),
+                    Event::Desk(_, Done::Settled(n)) if n >= upto => return jobs,
+                    _ => {}
+                }
+            }
+        }
+
+        fn end(self) -> Vec<String> {
+            self.inbox.quit();
+            self.thread.join().unwrap();
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    /// A number given again (a monitor removed, another added at once) is made only
+    /// after the output that had it is gone: the difference removes first.
+    #[test]
+    fn a_number_is_made_again_only_after_its_output_is_gone() {
+        let harness = Harness::start();
+        harness.settle(wanted(&[(1, 1, 640), (2, 2, 800)]));
+        harness.settle(wanted(&[(1, 1, 640), (3, 2, 320)]));
+        let calls = harness.end();
+        let remove = calls.iter().position(|c| c == "remove Prostir-2").unwrap();
+        let again = calls.iter().rposition(|c| c == "make Prostir-2").unwrap();
+        assert!(remove < again, "{calls:?}");
+    }
+
+    /// A window panel asked for is tried once, however long the state asks for it, and
+    /// its answer comes once (here: the stub desktop has no windows).
+    #[test]
+    fn a_panel_is_tried_once() {
+        let harness = Harness::start();
+        let mut with_panel = wanted(&[(1, 1, 640)]);
+        with_panel.screens.push((
+            ScreenId::saved(9),
+            WantedScreen {
+                what: What::Panel {
+                    number: 2,
+                    detach: Some(JobId(7)),
+                },
+                stream: true,
+                attempt: 0,
+                name: "Prostir-2".into(),
+            },
+        ));
+        assert_eq!(harness.settle(with_panel.clone()), [(JobId(7), false)]);
+        with_panel.streaming = false;
+        assert_eq!(harness.settle(with_panel), [], "not tried again");
+        harness.end();
     }
 }

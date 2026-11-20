@@ -52,8 +52,10 @@ pub enum What {
     Monitor { spec: MonitorSpec, number: u32 },
     /// A display of the PC, streamed as it is, numbered `number` while it streams.
     Physical { key: OutputKey, number: u32 },
-    /// A window panel the worker made for a [`Job::Detach`]: kept as it is.
-    Panel,
+    /// A window panel, as output `number`. With `detach`, it is still to be made: the
+    /// active window goes onto it, and what came of that is the answer to job
+    /// `detach` (made once, however long the state asks for it).
+    Panel { number: u32, detach: Option<JobId> },
 }
 
 /// One screen of the wanted state.
@@ -121,12 +123,16 @@ pub enum Job {
     LookPhysical,
     /// These streams start over, for a fresh picture.
     Fresh(BTreeSet<ScreenId>),
+    /// A job with an answer someone waits for until `until`: past it, nobody does,
+    /// and it is dropped instead of done late.
     Screenshot {
         job: JobId,
         id: ScreenId,
+        until: Instant,
     },
     FindMouse {
         job: JobId,
+        until: Instant,
     },
     MouseTo {
         id: ScreenId,
@@ -136,17 +142,7 @@ pub enum Job {
     WindowHere {
         job: JobId,
         id: ScreenId,
-    },
-    /// The active window onto a panel of its own, screen `id`, output `number`.
-    Detach {
-        job: JobId,
-        id: ScreenId,
-        number: u32,
-    },
-    /// A window panel closes (its window back where it was with `put_back`).
-    ClosePanel {
-        id: ScreenId,
-        put_back: bool,
+        until: Instant,
     },
 }
 
@@ -155,9 +151,8 @@ impl Job {
     fn id(&self) -> Option<JobId> {
         match self {
             Job::Screenshot { job, .. }
-            | Job::FindMouse { job }
-            | Job::WindowHere { job, .. }
-            | Job::Detach { job, .. } => Some(*job),
+            | Job::FindMouse { job, .. }
+            | Job::WindowHere { job, .. } => Some(*job),
             _ => None,
         }
     }
@@ -286,6 +281,19 @@ pub struct Start {
     pub software: bool,
     /// The sizes offered to headsets, to find their scales.
     pub sizes: Vec<(u32, u32)>,
+}
+
+/// How long a request waits for the worker's answer: 20 s; in a build for the
+/// end-to-end tests, the third number of `PROSTIR_TEST_DESK_LIMITS` if it has one.
+pub fn answer_within() -> Duration {
+    #[cfg(feature = "fake-desktop")]
+    if let Some(secs) = std::env::var("PROSTIR_TEST_DESK_LIMITS")
+        .ok()
+        .and_then(|v| v.split(',').nth(2)?.trim().parse().ok())
+    {
+        return Duration::from_secs(secs);
+    }
+    Duration::from_secs(20)
 }
 
 /// A worker that ended (or will): set once it put everything back.

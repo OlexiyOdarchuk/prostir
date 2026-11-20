@@ -206,3 +206,36 @@ fn a_hung_worker_let_go_still_ends_the_program() {
     assert_eq!(status.code(), Some(1), "{status}");
     pc.wait_log(SOON, "quitting, to be started again");
 }
+
+/// A request that waited too long for the desktop (2 s here) fails, and the desktop's
+/// job for it is taken back: once the desktop answers again, it is not done late.
+#[test]
+fn a_request_given_up_is_not_done_later() {
+    let options = Options {
+        desk_answer: Some(2),
+        ..Options::default()
+    };
+    let (_dir, mut pc, _keys, mut headset) = session("desk-given-up", &options);
+    headset.take_for(Duration::from_secs(1)).unwrap();
+    pc.desktop("hang place 6");
+    pc.wait_log(SOON, "the next place hangs for 6 s");
+    ask_at_once(
+        &mut headset,
+        Request::AddDisplay {
+            mode: Mode::new(320, 240),
+        },
+    );
+    pc.wait_log(SOON, "fake desktop: place hangs for 6 s");
+    let started = Instant::now();
+    let mouse = headset.ask(Request::FindMouse).unwrap();
+    let took = started.elapsed();
+    assert!(
+        matches!(&mouse, Outcome::Failed { error, .. } if *error == ErrorCode::DESKTOP),
+        "{mouse:?}"
+    );
+    assert!(took < Duration::from_secs(4), "answered after {took:?}");
+    pc.wait_log(SOON, "fake desktop: place is back");
+    headset.take_for(Duration::from_secs(1)).unwrap();
+    assert_eq!(pc.count_log("looking where the mouse is"), 0, "done late");
+    assert!(!headset.view().closed);
+}
