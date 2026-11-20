@@ -182,7 +182,7 @@ fn main() -> Result<()> {
             HostMsg::Problem { error, detail, .. } => {
                 println!("problem {}: {detail}", error.code())
             }
-            HostMsg::MicActive { active } => println!("PC is recording: {active}"),
+            HostMsg::VolumeAsk { asked } => println!("PC asks for volume (answered): {asked:?}"),
             HostMsg::Command { req, asked } => {
                 println!("command {} (answered done): {asked:?}", req.0)
             }

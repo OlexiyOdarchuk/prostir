@@ -7,4 +7,6 @@
 mod headset;
 pub mod nal;
 
-pub use headset::{Arrival, ConnectError, FakeHeadset, Keys, Stream, View};
+pub use headset::{
+    Arrival, ConnectError, FIRST_VOLUME, FakeHeadset, Keys, Stream, View, quest_step,
+};

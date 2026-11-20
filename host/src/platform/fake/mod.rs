@@ -255,18 +255,69 @@ pub mod audio {
         }
     }
 
-    pub struct MicIn;
+    /// The headset's microphone as the fake PC's: what comes is counted and said in
+    /// the log now and then; a program records while a test says so (`record on`).
+    pub struct MicIn {
+        got: std::sync::atomic::AtomicUsize,
+    }
+
+    /// A program of the fake PC records from the headset's microphone.
+    pub static RECORDING: AtomicBool = AtomicBool::new(false);
 
     impl MicIn {
         pub fn start() -> Result<Self> {
-            Ok(Self)
+            Ok(Self {
+                got: std::sync::atomic::AtomicUsize::new(0),
+            })
         }
 
-        pub fn push(&self, _pcm: Vec<u8>) {}
+        pub fn push(&self, pcm: Vec<u8>) {
+            let before = self.got.fetch_add(pcm.len(), Ordering::Relaxed);
+            // About once a second of mono sound.
+            if before / 96_000 != (before + pcm.len()) / 96_000 {
+                log::info!(
+                    "fake desktop: the microphone got {} bytes",
+                    before + pcm.len()
+                );
+            }
+        }
 
-        /// No app on the fake PC records.
         pub fn recording(&self) -> bool {
-            false
+            RECORDING.load(Ordering::Relaxed)
+        }
+    }
+
+    /// The fake sound device for the headset: its level is what a test sets (`volume
+    /// 40`, `volume 40 muted`, `drag 0 100 1000`: the slider from 0 to 100 in a
+    /// second), and what the PC sets goes into the log.
+    pub struct SinkVolume {
+        changes: std::sync::mpsc::Receiver<(u8, bool)>,
+    }
+
+    /// Where the fake desktop's commands send the device's changes.
+    pub static VOLUME: std::sync::Mutex<Option<std::sync::mpsc::Sender<(u8, bool)>>> =
+        std::sync::Mutex::new(None);
+
+    impl SinkVolume {
+        pub fn open() -> Option<Self> {
+            let (tx, changes) = std::sync::mpsc::channel();
+            *VOLUME.lock().unwrap() = Some(tx);
+            Some(Self { changes })
+        }
+
+        pub fn set(&self, level: u8, muted: bool) {
+            log::info!(
+                "fake desktop: volume set to {level}{}",
+                if muted { " muted" } else { "" }
+            );
+            // The device says it changed, as a real one does.
+            if let Some(tx) = VOLUME.lock().unwrap().as_ref() {
+                let _ = tx.send((level, muted));
+            }
+        }
+
+        pub fn changed(&self) -> Option<(u8, bool)> {
+            self.changes.try_recv().ok()
         }
     }
 }

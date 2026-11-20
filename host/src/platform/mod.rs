@@ -205,6 +205,8 @@ pub struct TrayStatus {
     pub paused: bool,
     /// The headset's "No limits", while one is connected that takes commands.
     pub no_limits: Option<bool>,
+    /// The headset's microphone is on, but its system does not let it record.
+    pub mic_denied: bool,
 }
 
 /// Why there is no pairing code typed on the PC (see `dialogs::ask_code`).

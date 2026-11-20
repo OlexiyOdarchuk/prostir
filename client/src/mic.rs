@@ -1,13 +1,14 @@
 //! Headset microphone to the PC: captured with AAudio only while a PC app is
-//! recording, in 10 ms slices.
+//! recording, in 10 ms slices, as an up stream (`UpStart`, `Up`, `UpEnd`).
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 use jni::objects::{JObject, JValue};
 use log::{info, warn};
 use ndk_sys as ffi;
+use prostir_proto::state::{UpFormat, UpKind, permission};
 use prostir_proto::{AUDIO_RATE, ClientMsg, MIC_CHANNELS};
 
 use crate::net::Feedback;
@@ -15,6 +16,28 @@ use crate::net::Feedback;
 const PERMISSION: &str = "android.permission.RECORD_AUDIO";
 /// 10 ms per slice.
 const FRAMES: usize = AUDIO_RATE as usize / 100;
+/// The number of the microphone's up stream.
+const UP: u8 = 0;
+
+/// Whether the system lets the app record, as last found (see
+/// `prostir_proto::state::permission`): the PC shows when it does not.
+static ALLOWED_BY_SYSTEM: AtomicU8 = AtomicU8::new(permission::UNKNOWN);
+
+pub fn permission() -> u8 {
+    ALLOWED_BY_SYSTEM.load(Ordering::Relaxed)
+}
+
+/// Looks whether the system lets the app record now (one call into Android).
+pub fn refresh_permission() {
+    let now = if has_permission() {
+        permission::GRANTED
+    } else if DENIED.load(Ordering::Relaxed) {
+        permission::DENIED
+    } else {
+        permission::UNKNOWN
+    };
+    ALLOWED_BY_SYSTEM.store(now, Ordering::Relaxed);
+}
 
 /// Records until dropped.
 /// The user's microphone switch, from the headset's own settings. Recording happens
@@ -63,13 +86,24 @@ impl Recorder {
                 if !ensure_permission(&flag) {
                     return;
                 }
+                let start = ClientMsg::UpStart {
+                    up: UP,
+                    kind: UpKind::Mic,
+                    format: UpFormat::Pcm16 {
+                        rate: AUDIO_RATE,
+                        channels: MIC_CHANNELS as u8,
+                    },
+                };
+                if feedback.send(start).is_err() {
+                    return;
+                }
                 // A broken input stream (an audio route change) is opened again.
                 let mut failures = 0;
                 while failures < 5 && !flag.load(Ordering::Relaxed) {
                     match Input::open() {
                         Ok(input) => {
                             if record(&input, &feedback, &flag) {
-                                return;
+                                break;
                             }
                             failures = 0;
                         }
@@ -80,6 +114,7 @@ impl Recorder {
                     }
                     std::thread::sleep(Duration::from_millis(300));
                 }
+                let _ = feedback.send(ClientMsg::UpEnd { up: UP });
             })
             .inspect_err(|e| warn!("no microphone: {e}"));
         Self { stop }
@@ -104,7 +139,7 @@ fn record(input: &Input, feedback: &Feedback, stop: &AtomicBool) -> bool {
                     .iter()
                     .flat_map(|s| s.to_le_bytes())
                     .collect();
-                if feedback.send(ClientMsg::Mic { pcm }).is_err() {
+                if feedback.send(ClientMsg::Up { up: UP, data: pcm }).is_err() {
                     break;
                 }
             }
@@ -123,20 +158,25 @@ fn record(input: &Input, feedback: &Feedback, stop: &AtomicBool) -> bool {
 fn ensure_permission(stop: &AtomicBool) -> bool {
     if has_permission() {
         DENIED.store(false, Ordering::Relaxed);
+        ALLOWED_BY_SYSTEM.store(permission::GRANTED, Ordering::Relaxed);
         return true;
     }
     if DENIED.load(Ordering::Relaxed) {
+        ALLOWED_BY_SYSTEM.store(permission::DENIED, Ordering::Relaxed);
         return false;
     }
+    ALLOWED_BY_SYSTEM.store(permission::ASKING, Ordering::Relaxed);
     request_permission();
     let until = Instant::now() + Duration::from_secs(60);
     while Instant::now() < until && !stop.load(Ordering::Relaxed) {
         std::thread::sleep(Duration::from_millis(500));
         if has_permission() {
+            ALLOWED_BY_SYSTEM.store(permission::GRANTED, Ordering::Relaxed);
             return true;
         }
     }
     warn!("no microphone permission");
+    ALLOWED_BY_SYSTEM.store(permission::DENIED, Ordering::Relaxed);
     DENIED.store(true, Ordering::Relaxed);
     false
 }

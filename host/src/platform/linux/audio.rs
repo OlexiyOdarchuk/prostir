@@ -182,6 +182,25 @@ const FEED_PIPE: usize = 4096;
 /// muted: WirePlumber does not remember its settings (it used to, keyed by its name,
 /// so a mute once set silenced the microphone on every later run), and they are set
 /// again at the start of each recording.
+/// The volume of the sound device for the headset ("Prostir: headset"), as the PC's
+/// slider and keys show it. Followed with `pactl subscribe` from 0.2.0 step 6; until
+/// then there is none, and the PC says it cannot share the volume.
+pub struct SinkVolume;
+
+impl SinkVolume {
+    pub fn open() -> Option<Self> {
+        None
+    }
+
+    /// Puts the device at `level` percent, `muted` or not.
+    pub fn set(&self, _level: u8, _muted: bool) {}
+
+    /// A change of the device since the last call, if there was one.
+    pub fn changed(&self) -> Option<(u8, bool)> {
+        None
+    }
+}
+
 pub struct MicIn {
     loopback: Child,
     mic: String,

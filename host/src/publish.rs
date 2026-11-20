@@ -3,9 +3,11 @@
 //! a part goes out whole and only when it changed. Values of enums go out only when the
 //! headset named the capability they need (see `PROTOCOL.md`, "Capabilities").
 
+use std::collections::BTreeMap;
+
 use prostir_proto::state::{
     self, Access, DisplayId, Focus, HeadsetCaps, HeadsetState, HostCaps, Limits, Mode, PcInfo,
-    PcState, Prefs, SoundFrom, caps, clip,
+    PcState, Prefs, SoundFrom, UpKind, UpWanted, caps, clip,
 };
 use prostir_proto::wire::WireError;
 use prostir_proto::{Codec, HostMsg, MAX_MONITORS};
@@ -48,6 +50,8 @@ pub struct Sources<'a> {
     pub focus: Option<ScreenId>,
     /// The screen the sound comes from, while the headset asks for it.
     pub sound_from: Option<ScreenId>,
+    /// The PC can share the volume with the headset (its sound device follows).
+    pub volume: bool,
 }
 
 /// One session's view of the PC's state: the headset's own state, and what it was
@@ -106,13 +110,26 @@ impl Publisher {
         let sound_from = prefs.sound_from_screen.then(|| SoundFrom {
             display: listed(src.sound_from),
         });
+        // The microphone as an up stream, where both sides do it.
+        let mut up_wanted = BTreeMap::new();
+        if headset.has(caps::headset::MIC) {
+            let on = src.displays.recording();
+            up_wanted.insert(
+                UpKind::Mic,
+                UpWanted {
+                    kind: UpKind::Mic,
+                    on,
+                },
+            );
+        }
         PcState {
             info: Some(pc_info(src.displays)),
-            caps: Some(host_caps(src.displays)),
+            caps: Some(host_caps(src.displays, src.volume)),
             access: Some(self.access),
             limits: Some(self.limits(src.displays)),
             encoding: Some(src.displays.encoding_part(src.wanted, headset)),
             sound: Some(src.displays.sound_part()),
+            up_wanted,
             focus: Some(focus),
             sound_from,
             displays: Some(displays),
@@ -178,8 +195,9 @@ pub fn limits(prefs: &Prefs, headset: &HeadsetCaps, codec: Codec) -> Limits {
 }
 
 /// What this PC can do.
-fn host_caps(displays: &Displays) -> HostCaps {
+fn host_caps(displays: &Displays, volume: bool) -> HostCaps {
     let mut features = vec![
+        caps::pc::MIC,
         caps::pc::WINDOWS,
         caps::pc::PHYSICAL,
         caps::pc::NOTIFICATIONS,
@@ -193,6 +211,9 @@ fn host_caps(displays: &Displays) -> HostCaps {
     }
     if displays.screenshots_one_output() {
         features.push(caps::pc::SCREENSHOT_ONE);
+    }
+    if volume {
+        features.push(caps::pc::VOLUME);
     }
     features.sort();
     HostCaps { features }

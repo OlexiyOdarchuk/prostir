@@ -158,6 +158,13 @@ pub(crate) fn pc_state() -> PcState {
                 detail: "pw-loopback".into(),
             },
         }),
+        up_wanted: [state::UpWanted {
+            kind: state::UpKind::Mic,
+            on: true,
+        }]
+        .into_iter()
+        .map(|u| (u.kind, u))
+        .collect(),
         focus: Some(Focus {
             display: Some(DisplayId(100)),
         }),
@@ -191,6 +198,27 @@ pub(crate) fn headset_state() -> HeadsetState {
             percent: 72,
             charging: true,
         }),
+        volume: Some(state::Volume {
+            level: 40,
+            muted: false,
+            seq: 3,
+            ask: 0,
+        }),
+        up: [
+            state::UpState {
+                kind: state::UpKind::Mic,
+                switch: true,
+                permission: state::permission::DENIED,
+            },
+            state::UpState {
+                kind: state::UpKind::Camera,
+                switch: false,
+                permission: state::permission::UNKNOWN,
+            },
+        ]
+        .into_iter()
+        .map(|u| (u.kind, u))
+        .collect(),
     }
 }
 
@@ -242,7 +270,14 @@ pub(crate) fn host_samples() -> Vec<HostMsg> {
         HostMsg::Audio {
             pcm: vec![0, 1, 2, 3],
         },
-        HostMsg::MicActive { active: true },
+        HostMsg::VolumeAsk {
+            asked: state::VolumeAsk {
+                level: 55,
+                muted: true,
+                seen: 3,
+                ask: 9,
+            },
+        },
         HostMsg::Incompatible {
             protocol: 10,
             app: "0.3.0".into(),
@@ -305,10 +340,19 @@ pub(crate) fn client_samples() -> Vec<ClientMsg> {
             req: ReqId(3),
             asked: Asked::Unknown { kind: 200 },
         },
-        ClientMsg::SetMic { enabled: false },
-        ClientMsg::Mic {
-            pcm: vec![1, 0, 2, 0],
+        ClientMsg::UpStart {
+            up: 0,
+            kind: state::UpKind::Mic,
+            format: state::UpFormat::Pcm16 {
+                rate: 48_000,
+                channels: 1,
+            },
         },
+        ClientMsg::Up {
+            up: 0,
+            data: vec![1, 0, 2, 0],
+        },
+        ClientMsg::UpEnd { up: 0 },
         ClientMsg::Arrange {
             rows: vec![
                 Row {
@@ -418,11 +462,15 @@ fn media_by_hand_matches_the_declared_fields() {
     }
     assert_eq!(frame.wire_tag(), tag::FRAME);
     assert_eq!(audio.wire_tag(), tag::AUDIO);
-    let mic = ClientMsg::Mic { pcm: vec![3; 960] };
-    assert_eq!(mic.wire_tag(), tag::MIC);
+    let mic = ClientMsg::Up {
+        up: 2,
+        data: vec![3; 960],
+    };
+    assert_eq!(mic.wire_tag(), tag::UP);
     let mut payload = Vec::new();
     mic.put_fields(&mut payload).unwrap();
-    assert_eq!(client_bytes(&mic), framed(tag::MIC, &payload));
+    assert_eq!(client_bytes(&mic), framed(tag::UP, &payload));
+    assert_eq!(read_client(&client_bytes(&mic)).unwrap(), mic);
     // A frame whose keyframe byte is not a boolean: after the header, the id, the
     // generation and the number.
     let mut bad = host_bytes(&frame);
@@ -706,12 +754,10 @@ fn skips_unknown_messages() {
     assert!(r.is_empty());
 
     let mut buf = framed(251, &[7; 10]);
-    ClientMsg::SetMic { enabled: true }.write(&mut buf).unwrap();
+    let end = ClientMsg::UpEnd { up: 1 };
+    end.write(&mut buf).unwrap();
     let mut r = buf.as_slice();
-    assert_eq!(
-        client_read(&mut r).unwrap(),
-        ClientMsg::SetMic { enabled: true }
-    );
+    assert_eq!(client_read(&mut r).unwrap(), end);
     // An unknown message cut off is an error, not a skip past the end.
     let err = host_read(&mut framed(250, &[1, 2, 3])[..6].as_ref()).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
@@ -904,6 +950,25 @@ fn values_breaking_the_rules_are_refused() {
         panic!("not a snapshot")
     };
     assert!(PcState::from_snapshot(&parts).is_err());
+    // A volume over 100 %, a microphone the PC does not take.
+    let loud = ClientMsg::Volume {
+        part: state::Volume {
+            level: 101,
+            muted: false,
+            seq: 0,
+            ask: 0,
+        },
+    };
+    assert!(read_client(&client_bytes(&loud)).is_err());
+    let odd = ClientMsg::UpStart {
+        up: 0,
+        kind: state::UpKind::Mic,
+        format: state::UpFormat::Pcm16 {
+            rate: 44_100,
+            channels: 1,
+        },
+    };
+    assert!(read_client(&client_bytes(&odd)).is_err());
     // A decoder of no size.
     let mut caps = headset_state().caps.unwrap();
     caps.decoders[0].max_h = 0;

@@ -1083,7 +1083,6 @@ fn run_session(
     // Runs only while a PC app records from the headset microphone and the user's
     // microphone switch on the headset is on.
     let mut recorder: Option<crate::mic::Recorder> = None;
-    let mut mic_asked = false;
     // Pauses between messages: with sound on, anything over ~10 ms is something
     // (a frame being written, Wi-Fi) holding the rest up.
     let mut gaps = Gaps::default();
@@ -1123,10 +1122,20 @@ fn run_session(
                 {
                     player = None;
                 }
-                continue;
+                None
             }
-            Ok(Some(msg)) => msg,
+            Ok(Some(msg)) => Some(msg),
             Err(e) => break Err(e.into()),
+        };
+        // The microphone streams while a PC program records from it (`UpWanted`) and
+        // the user's switch on the headset is on.
+        let record =
+            pc.up_wanted.get(&state::UpKind::Mic).is_some_and(|u| u.on) && crate::mic::allowed();
+        if record != recorder.is_some() {
+            recorder = record.then(|| crate::mic::Recorder::start(feedback.clone()));
+        }
+        let Some(msg) = msg else {
+            continue;
         };
         match msg {
             HostMsg::StreamStart {
@@ -1236,8 +1245,6 @@ fn run_session(
             HostMsg::Notice { text } => {
                 let _ = events.send(NetEvent::Notice(text));
             }
-            // The PC asks; the headset's own switch decides (checked below too).
-            HostMsg::MicActive { active } => mic_asked = active,
             // Answered at once, from here: the round trip is the network's.
             HostMsg::Ping { seq } => feedback.send(ClientMsg::Pong { seq })?,
             HostMsg::Pong { seq } => feedback.outbox.pong(seq),
@@ -1257,10 +1264,6 @@ fn run_session(
             }
             // Only before the session: ignored in it, as parts already taken are.
             _ => {}
-        }
-        let record = mic_asked && crate::mic::allowed();
-        if record != recorder.is_some() {
-            recorder = record.then(|| crate::mic::Recorder::start(feedback.clone()));
         }
     };
     for id in streams.into_keys() {

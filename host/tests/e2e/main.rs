@@ -10,6 +10,7 @@ mod pc;
 mod requests;
 mod resize;
 mod saved;
+mod sound;
 
 use std::collections::BTreeMap;
 use std::time::Duration;

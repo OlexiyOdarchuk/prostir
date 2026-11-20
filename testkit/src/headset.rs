@@ -15,9 +15,10 @@ use prostir_proto::request::{Asked, Command, Outcome, Request};
 use prostir_proto::secure::{Identity, Pairing, TrustStore, confirmation, tags_match};
 use prostir_proto::state::{
     Decoder, Display, DisplayId, Encoding, Gen, HeadsetCaps, HeadsetState, PcState, Prefs,
-    Presence, ReqId, caps,
+    Presence, ReqId, UpFormat, UpKind, UpState, VolumeAsk, caps, permission,
 };
 use prostir_proto::stats::{Gaps, Pings};
+use prostir_proto::volume::HeadsetVolume;
 use prostir_proto::{ClientMsg, Codec, HostMsg};
 
 use crate::nal;
@@ -34,6 +35,14 @@ const PAIRING: Duration = Duration::from_secs(300);
 const PING_EVERY: Duration = Duration::from_secs(1);
 /// After a goodbye, how long the PC has to close the connection.
 const GOODBYE_WAIT: Duration = Duration::from_secs(1);
+/// The fake headset's volume when it connects, percent.
+pub const FIRST_VOLUME: u8 = 40;
+
+/// The Quest's volume has 16 steps: a level becomes the nearest one.
+pub fn quest_step(level: u8) -> u8 {
+    let step = (f32::from(level) * 15.0 / 100.0).round();
+    (step * 100.0 / 15.0).round() as u8
+}
 
 /// A headset's long-term key and the PCs it trusts, kept in a directory.
 pub struct Keys {
@@ -162,8 +171,6 @@ pub struct View {
     pub notices: Vec<String>,
     /// How many times `Encoding` came, to tell an answer from what it said before.
     pub encoding_count: u32,
-    /// The PC asks for the microphone.
-    pub mic_active: Option<bool>,
     /// Bytes of PC sound received.
     pub audio_bytes: u64,
     /// How late each slice of sound arrived, in order: from when the fake desktop made
@@ -195,6 +202,8 @@ pub struct View {
     /// Commands from the PC, in order (the reader answers them, see
     /// [`FakeHeadset::stop_answering`]).
     pub commands: Vec<Asked<Command>>,
+    /// The PC's requests to take its volume, in order (the reader answers them).
+    pub volume_asks: Vec<VolumeAsk>,
     /// The displays of the last `Displays`.
     listed: Vec<DisplayId>,
 }
@@ -312,7 +321,7 @@ impl View {
             }
             HostMsg::Problem { detail, .. } => self.errors.push(detail),
             HostMsg::Command { asked, .. } => self.commands.push(asked),
-            HostMsg::MicActive { active } => self.mic_active = Some(active),
+            HostMsg::VolumeAsk { asked } => self.volume_asks.push(asked),
             HostMsg::Audio { pcm } => {
                 self.audio_bytes += pcm.len() as u64;
                 self.sound_between_fragments += u32::from(arrived.between_fragments);
@@ -428,6 +437,8 @@ struct Shared {
     cut_mid_message: AtomicBool,
     /// Leave the PC's commands unanswered.
     silent: AtomicBool,
+    /// The headset's volume, which the PC asks to change.
+    volume: Mutex<Option<HeadsetVolume>>,
     /// Why reading stopped.
     end: Mutex<Option<std::io::ErrorKind>>,
     pings: Mutex<Pings>,
@@ -505,6 +516,8 @@ impl FakeHeadset {
                     caps::headset::PHYSICAL,
                     caps::headset::WINDOWS,
                     caps::headset::COMMANDS,
+                    caps::headset::MIC,
+                    caps::headset::VOLUME,
                 ],
                 decoders: vec![
                     Decoder {
@@ -525,6 +538,17 @@ impl FakeHeadset {
             prefs: Some(Prefs::default()),
             presence: Some(Presence { worn: true }),
             battery: None,
+            volume: Some(HeadsetVolume::new(FIRST_VOLUME, false).now()),
+            up: [(
+                UpKind::Mic,
+                UpState {
+                    kind: UpKind::Mic,
+                    switch: true,
+                    permission: permission::GRANTED,
+                },
+            )]
+            .into_iter()
+            .collect(),
         }
     }
 
@@ -599,6 +623,9 @@ impl FakeHeadset {
         receiver.set_idle_limit(Some(SILENCE));
         let writer = Arc::new(Mutex::new(sender));
         let shared = Arc::new(Shared::default());
+        if let Some(v) = state.volume {
+            *shared.volume.lock().unwrap() = Some(HeadsetVolume::new(v.level, v.muted));
+        }
         let incoming = spawn_reader(
             receiver,
             packets,
@@ -750,6 +777,47 @@ impl FakeHeadset {
         *self.shared.stalled_until.lock().unwrap() = Some(Instant::now() + time);
     }
 
+    /// The volume buttons of the headset: its own change, told to the PC.
+    pub fn press_volume(&mut self, level: u8) -> Result<()> {
+        let changed = self
+            .shared
+            .volume
+            .lock()
+            .unwrap()
+            .as_mut()
+            .and_then(|v| v.changed_here(level, false));
+        if let Some(part) = changed {
+            self.send(&ClientMsg::Volume { part })?;
+        }
+        Ok(())
+    }
+
+    /// The headset's volume now.
+    pub fn volume(&self) -> Option<u8> {
+        self.shared
+            .volume
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|v| v.now().level)
+    }
+
+    /// Streams `slices` of 10 ms of silence as the microphone: its start, the slices,
+    /// its end.
+    pub fn send_mic(&mut self, slices: usize) -> Result<()> {
+        let rate = prostir_proto::AUDIO_RATE;
+        self.send(&ClientMsg::UpStart {
+            up: 0,
+            kind: UpKind::Mic,
+            format: UpFormat::Pcm16 { rate, channels: 1 },
+        })?;
+        for _ in 0..slices {
+            let data = vec![0; (rate / 100 * 2) as usize];
+            self.send(&ClientMsg::Up { up: 0, data })?;
+        }
+        self.send(&ClientMsg::UpEnd { up: 0 })
+    }
+
     /// Leaves the PC's commands unanswered from now on, as a headset that hangs would.
     pub fn stop_answering(&self) {
         self.shared.silent.store(true, Ordering::Relaxed);
@@ -794,10 +862,11 @@ impl Drop for FakeHeadset {
     }
 }
 
-/// Sends `msg` whole: microphone sound in its lane, everything else in the control one.
+/// Sends `msg` whole: up streams in the sound lane, everything else in the control
+/// one.
 fn send(tx: &mut dyn RecordSender, msg: ClientMsg) -> std::io::Result<()> {
     let lane = match msg {
-        ClientMsg::Mic { .. } => lane::SOUND,
+        ClientMsg::UpStart { .. } | ClientMsg::Up { .. } | ClientMsg::UpEnd { .. } => lane::SOUND,
         _ => lane::CONTROL,
     };
     packet::send_whole(tx, lane, msg.encode()?, FRAGMENT)
@@ -960,6 +1029,19 @@ fn spawn_reader(
                     }
                     HostMsg::Pong { seq } => {
                         round_trip = shared.pings.lock().unwrap().pong(*seq, at);
+                    }
+                    // Takes the PC's level, as the Quest does (to its nearest step), unless
+                    // its own change crossed it.
+                    HostMsg::VolumeAsk { asked } => {
+                        let answer = shared
+                            .volume
+                            .lock()
+                            .unwrap()
+                            .as_mut()
+                            .map(|v| v.asked(asked, |level, muted| (quest_step(level), muted)));
+                        if let Some(part) = answer {
+                            let _ = send(&mut **writer.lock().unwrap(), ClientMsg::Volume { part });
+                        }
                     }
                     // Done, as far as a fake headset does anything; a kind it does not
                     // know is unsupported, as the Quest app answers it.

@@ -861,13 +861,15 @@ pub struct PcState {
     pub limits: Option<Limits>,
     pub encoding: Option<Encoding>,
     pub sound: Option<Sound>,
+    /// A part for each kind of up stream.
+    pub up_wanted: std::collections::BTreeMap<UpKind, UpWanted>,
     pub focus: Option<Focus>,
     pub sound_from: Option<SoundFrom>,
 }
 
 /// Tags of the PC's parts, in the order they go: `Displays` first (other parts name its
 /// displays), `Focus` and `SoundFrom` last.
-const PC_PARTS: &[u8] = &[31, 36, 37, 35, 34, 32, 33, 16, 23];
+const PC_PARTS: &[u8] = &[31, 36, 37, 35, 34, 32, 33, 40, 16, 23];
 
 impl PcState {
     /// Whether messages with `tag` are parts of the PC's state.
@@ -884,18 +886,13 @@ impl PcState {
     pub fn changed(&self, sent: &Self) -> Vec<crate::HostMsg> {
         use crate::HostMsg as M;
         let mut out = Vec::new();
-        let mut part = |now: &Option<_>, then: &Option<_>, msg: &dyn Fn() -> M| {
-            if now.is_some() && now != then {
-                out.push(msg());
-            }
-        };
         macro_rules! each {
             ($($field:ident => $variant:ident),*) => {$(
-                part(
-                    &self.$field.clone().map(|p| M::$variant { part: p }),
-                    &sent.$field.clone().map(|p| M::$variant { part: p }),
-                    &|| M::$variant { part: self.$field.clone().expect("checked above") },
-                );
+                if let Some(part) = &self.$field
+                    && sent.$field.as_ref() != Some(part)
+                {
+                    out.push(M::$variant { part: part.clone() });
+                }
             )*};
         }
         each!(
@@ -905,10 +902,14 @@ impl PcState {
             access => Access,
             limits => Limits,
             encoding => Encoding,
-            sound => Sound,
-            focus => Focus,
-            sound_from => SoundFrom
+            sound => Sound
         );
+        for (kind, now) in &self.up_wanted {
+            if sent.up_wanted.get(kind) != Some(now) {
+                out.push(M::UpWanted { part: *now });
+            }
+        }
+        each!(focus => Focus, sound_from => SoundFrom);
         out
     }
 
@@ -937,6 +938,9 @@ impl PcState {
             M::Limits { part } => self.limits = Some(part),
             M::Encoding { part } => self.encoding = Some(part),
             M::Sound { part } => self.sound = Some(part),
+            M::UpWanted { part } => {
+                self.up_wanted.insert(part.kind, part);
+            }
             M::Focus { part } if known(part.display, &self.displays) => self.focus = Some(part),
             M::SoundFrom { part } if known(part.display, &self.displays) => {
                 self.sound_from = Some(part)
@@ -950,16 +954,20 @@ impl PcState {
     }
 
     /// The state a `Snapshot`'s parts hold. A part this build does not know is skipped;
-    /// one twice is an error.
+    /// one twice (of the same kind, for the parts of each kind) is an error.
     pub fn from_snapshot(parts: &[Part]) -> Result<Self, WireError> {
         let mut state = Self::default();
         let mut seen = Vec::new();
         for part in parts.iter().filter(|p| Self::is_part(p.tag)) {
-            if seen.contains(&part.tag) {
+            let msg = crate::HostMsg::decode(part.tag, &part.body)?;
+            let kind = match &msg {
+                crate::HostMsg::UpWanted { part } => Some(part.kind),
+                _ => None,
+            };
+            if seen.contains(&(part.tag, kind)) {
                 return Err(WireError::Invalid("a part twice in one snapshot"));
             }
-            seen.push(part.tag);
-            let msg = crate::HostMsg::decode(part.tag, &part.body)?;
+            seen.push((part.tag, kind));
             state.apply(msg)?;
         }
         Ok(state)
@@ -974,10 +982,13 @@ pub struct HeadsetState {
     pub prefs: Option<Prefs>,
     pub presence: Option<Presence>,
     pub battery: Option<Battery>,
+    pub volume: Option<Volume>,
+    /// A part for each kind of up stream.
+    pub up: std::collections::BTreeMap<UpKind, UpState>,
 }
 
 /// Tags of the headset's parts, in the order they go.
-const HEADSET_PARTS: &[u8] = &[138, 134, 115, 119];
+const HEADSET_PARTS: &[u8] = &[138, 134, 115, 119, 135, 136];
 
 impl HeadsetState {
     /// Whether messages with `tag` are parts of the headset's state.
@@ -993,6 +1004,8 @@ impl HeadsetState {
         out.extend(self.prefs.map(|part| M::Prefs { part }));
         out.extend(self.presence.map(|part| M::Presence { part }));
         out.extend(self.battery.map(|part| M::Battery { part }));
+        out.extend(self.volume.map(|part| M::Volume { part }));
+        out.extend(self.up.values().map(|part| M::UpState { part: *part }));
         out
     }
 
@@ -1014,6 +1027,10 @@ impl HeadsetState {
             M::Prefs { part } => self.prefs = Some(part),
             M::Presence { part } => self.presence = Some(part),
             M::Battery { part } => self.battery = Some(part),
+            M::Volume { part } => self.volume = Some(part),
+            M::UpState { part } => {
+                self.up.insert(part.kind, part);
+            }
             other => return Some(other),
         }
         None
@@ -1025,11 +1042,16 @@ impl HeadsetState {
         let mut state = Self::default();
         let mut seen = Vec::new();
         for part in parts.iter().filter(|p| Self::is_part(p.tag)) {
-            if seen.contains(&part.tag) {
+            let msg = crate::ClientMsg::decode(part.tag, &part.body)?;
+            let kind = match &msg {
+                crate::ClientMsg::UpState { part } => Some(part.kind),
+                _ => None,
+            };
+            if seen.contains(&(part.tag, kind)) {
                 return Err(WireError::Invalid("a part twice in Open"));
             }
-            seen.push(part.tag);
-            state.apply(crate::ClientMsg::decode(part.tag, &part.body)?);
+            seen.push((part.tag, kind));
+            state.apply(msg);
         }
         if state.caps.is_none() {
             return Err(WireError::Invalid(

@@ -496,8 +496,8 @@ pub struct Displays {
     /// next attempt (starting them blocks the session for up to 2 s).
     audio_retry: Backoff,
     mic_retry: Backoff,
-    /// Last state told to the headset: a PC app is recording.
-    mic_recording: bool,
+    /// The headset's microphone switch is on: the PC's end of it is there.
+    mic_wanted: bool,
     /// Why the headset microphone could not be made on the PC, while it cannot.
     mic_failed: Option<String>,
     /// What the PC can encode with (see `encoder::available`), found once.
@@ -546,7 +546,7 @@ impl Displays {
             mic: None,
             audio_retry: Backoff::default(),
             mic_retry: Backoff::default(),
-            mic_recording: false,
+            mic_wanted: false,
             mic_failed: None,
             choices: crate::encoder::available(),
             streaming: true,
@@ -1166,10 +1166,23 @@ impl Displays {
         if wanted.audio != was.audio {
             self.audio_retry.succeeded();
         }
-        if wanted.mic != was.mic {
-            self.mic_retry.succeeded();
-        }
         self.sync_audio();
+    }
+
+    /// The headset's microphone switch (its `UpState`): the PC's end of the microphone
+    /// is there while it is on.
+    pub fn set_mic(&mut self, on: bool) {
+        if on != self.mic_wanted {
+            self.mic_wanted = on;
+            // Switched on by hand: tried right away.
+            self.mic_retry.succeeded();
+            self.sync_audio();
+        }
+    }
+
+    /// A program on the PC records from the headset's microphone now.
+    pub fn recording(&self) -> bool {
+        self.mic.as_ref().is_some_and(MicIn::recording)
     }
 
     /// The codec the streams are in now.
@@ -1319,7 +1332,7 @@ impl Displays {
     pub fn sound_part(&self) -> state::Sound {
         let mic = match (&self.mic, &self.mic_failed) {
             (Some(_), _) => state::MicDevice::Ready,
-            (None, Some(why)) if self.settings.mic => state::MicDevice::Failed {
+            (None, Some(why)) if self.mic_wanted => state::MicDevice::Failed {
                 error: UserError::Sound.code(),
                 detail: state::clip(why, state::MAX_DETAIL),
             },
@@ -1559,7 +1572,7 @@ impl Displays {
         } else if !audio {
             self.audio = None;
         }
-        let mic = self.streaming && self.settings.mic;
+        let mic = self.streaming && self.mic_wanted;
         if mic && self.mic.is_none() && self.mic_retry.due() {
             match MicIn::start() {
                 Ok(m) => {
@@ -1575,12 +1588,6 @@ impl Displays {
             }
         } else if !mic {
             self.mic = None;
-        }
-        // The headset records only while some PC app listens.
-        let recording = self.mic.as_ref().is_some_and(MicIn::recording);
-        if recording != self.mic_recording {
-            self.mic_recording = recording;
-            self.router.send(HostMsg::MicActive { active: recording });
         }
     }
 

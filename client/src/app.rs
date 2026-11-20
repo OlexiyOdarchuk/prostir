@@ -381,6 +381,8 @@ struct Scene {
     /// Commands of the PC answered once the PC answered a request of their own (a
     /// profile is in place when the PC made its monitors): request → command.
     command_after: std::collections::BTreeMap<ReqId, ReqId>,
+    /// The microphone permission the PC was last told.
+    mic_permission: u8,
     /// An unknown PC waiting for "Pair" or "Not now" (survives the disconnect that
     /// follows the question).
     pair_offer: Option<(String, crate::ui::OfferWhy)>,
@@ -1520,6 +1522,18 @@ impl Scene {
         headset_state(&self.settings, self.worn, self.headset_battery)
     }
 
+    /// The microphone's switch or permission changed: the PC hears at once (it makes
+    /// its end of the microphone, or says there is no permission), and the next session
+    /// starts with it.
+    fn mic_changed(&mut self) {
+        self.steering.set_headset(self.headset_state());
+        self.mic_permission = crate::mic::permission();
+        let part = mic_state(&self.settings);
+        if self.feedback.is_some() {
+            self.send(ClientMsg::UpState { part });
+        }
+    }
+
     /// The settings the PC acts on changed: it hears at once, and the next session
     /// starts with them.
     fn prefs_changed(&mut self) {
@@ -2022,6 +2036,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         asks: std::collections::BTreeMap::new(),
         failed_asks: Vec::new(),
         command_after: std::collections::BTreeMap::new(),
+        mic_permission: crate::mic::permission(),
         steering,
         offline_since: Some(Instant::now()),
         feedback: None,
@@ -2341,6 +2356,10 @@ fn run(app: &AndroidApp) -> Result<()> {
         }
         scene.place_button();
         scene.expire_asks();
+        // The system may let the app record now, or not any more.
+        if crate::mic::permission() != scene.mic_permission {
+            scene.mic_changed();
+        }
         // The headset's battery: on the palm menu (fresh when it appears, then every 15 s)
         // and for the PC's tray (once a minute).
         let palm_opened = scene.wrist.is_some() && !palm_was_shown;
@@ -3273,12 +3292,13 @@ fn handle_net_event(
             scene.last_req = 0;
             scene.sent_layout = None;
             scene.update_needed = None;
-            // The PC follows the headset's microphone switch.
-            scene.send(ClientMsg::SetMic {
-                enabled: scene.settings.mic,
-            });
+            // Whether the system lets the app record (the PC shows when it does not).
+            crate::mic::refresh_permission();
             // What changed since `Open` went (it carried the state of that moment).
             let now = scene.headset_state();
+            if now.up != opened_with.up {
+                scene.mic_changed();
+            }
             if now.prefs != opened_with.prefs {
                 scene.prefs_changed();
             }
@@ -3522,11 +3542,24 @@ fn prefs_of(s: &Settings) -> Prefs {
 /// What the headset says about itself when it opens a session: what it can do, its
 /// settings, whether it is worn, its battery.
 fn headset_state(settings: &Settings, worn: bool, battery: Option<(u8, bool)>) -> HeadsetState {
+    let mic = mic_state(settings);
     HeadsetState {
         caps: Some(headset_caps()),
         prefs: Some(prefs_of(settings)),
         presence: Some(Presence { worn }),
         battery: battery.map(|(percent, charging)| Battery { percent, charging }),
+        // The Quest's own volume follows the PC's slider from 0.2.0 step 7.
+        volume: None,
+        up: [(mic.kind, mic)].into_iter().collect(),
+    }
+}
+
+/// The microphone's switch, and whether the system lets the app record.
+fn mic_state(settings: &Settings) -> state::UpState {
+    state::UpState {
+        kind: state::UpKind::Mic,
+        switch: settings.mic,
+        permission: crate::mic::permission(),
     }
 }
 
@@ -3544,6 +3577,7 @@ fn headset_caps() -> HeadsetCaps {
             caps::headset::PHYSICAL,
             caps::headset::WINDOWS,
             caps::headset::COMMANDS,
+            caps::headset::MIC,
         ],
         decoders: vec![
             decoder(Codec::H264, 4096, 4096),
@@ -3897,7 +3931,7 @@ fn handle_action(
             scene.settings.mic = enabled;
             scene.settings.save(&scene.settings_path);
             crate::mic::set_allowed(enabled);
-            scene.send(ClientMsg::SetMic { enabled });
+            scene.mic_changed();
         }
         Action::SetAudio(enabled) => {
             scene.audio_wanted = enabled;

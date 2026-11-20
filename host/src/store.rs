@@ -56,8 +56,6 @@ pub struct Settings {
     pub software: bool,
     /// PC sound to the headset.
     pub audio: bool,
-    /// The headset microphone as the PC's microphone.
-    pub mic: bool,
     /// The laptop screen in the headset.
     pub mirror: bool,
     /// Count this PC among users (see `usage`).
@@ -128,7 +126,6 @@ impl Default for Settings {
             codec: Codec::H265,
             software: false,
             audio: true,
-            mic: true,
             mirror: true,
             count: true,
             access: BTreeMap::new(),
@@ -302,10 +299,6 @@ fn parse_settings(text: &str) -> (Settings, Kept) {
                 s.audio = v;
                 true
             }
-            ("mic", Some(v)) => {
-                s.mic = v;
-                true
-            }
             ("mirror", Some(v)) => {
                 s.mirror = v;
                 true
@@ -328,14 +321,13 @@ fn parse_settings(text: &str) -> (Settings, Kept) {
 
 fn settings_text(s: &Settings, kept: &Kept) -> String {
     let mut text = format!(
-        "{}bitrate {}\nsharp {}\ncodec {}\nsoftware {}\naudio {}\nmic {}\nmirror {}\ncount {}\n",
+        "{}bitrate {}\nsharp {}\ncodec {}\nsoftware {}\naudio {}\nmirror {}\ncount {}\n",
         kept.head(),
         s.bitrate,
         on_off(s.sharp),
         codec_name(s.codec),
         on_off(s.software),
         on_off(s.audio),
-        on_off(s.mic),
         on_off(s.mirror),
         on_off(s.count),
     );
@@ -949,7 +941,6 @@ mod tests {
                 codec: Codec::H264,
                 software: true,
                 audio: false,
-                mic: false,
                 mirror: true,
                 count: true,
                 access: BTreeMap::new(),
@@ -1175,11 +1166,11 @@ mod tests {
         let mut store = Store::open(Some(dir.clone()), Run::default());
         store.start_with(&[]);
         assert_eq!(store.screens(), &SavedScreens::first());
-        store.change(|s| s.mic = false);
+        store.change(|s| s.audio = false);
         store.close();
         assert!(!dir.join("screens.txt").exists());
         let mut store = Store::open(Some(dir.clone()), Run::default());
-        assert!(!store.settings.mic);
+        assert!(!store.settings.audio);
         // Arranged in the headset: kept.
         store.start_with(&[]);
         let mut moved = SavedScreens::first();

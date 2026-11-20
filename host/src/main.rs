@@ -28,13 +28,17 @@ use clap::Parser;
 use log::{debug, error, info, warn};
 use prostir_proto::link::{Closer, Link, Via};
 use prostir_proto::request::{Asked, Command, Outcome};
-use prostir_proto::state::{ErrorCode, HeadsetState, Part, ReqId, caps, clip, perms};
+use prostir_proto::state::{
+    ErrorCode, HeadsetState, Part, ReqId, UpKind, caps, clip, permission, perms,
+};
 use prostir_proto::stats::Period;
+use prostir_proto::volume::{Act, PcVolume};
 use prostir_proto::{ClientMsg, Codec, HeadsetGoodbye, HostMsg, PcGoodbye};
 
 use displays::Displays;
 use encoder::EncoderConfig;
 use platform::MonitorSpec;
+use platform::audio::SinkVolume;
 use platform::{TrayCommand, TrayStatus, focus, notifications, sound_source, tray};
 use screen::ScreenId;
 use store::Store;
@@ -98,6 +102,8 @@ struct Control {
     via: Option<&'static str>,
     /// The headset's "No limits", while one that takes commands is connected.
     no_limits: Option<bool>,
+    /// The connected headset's microphone is on but the system does not let it record.
+    mic_denied: bool,
     /// Commands for the headset from the tray and the test hook, and who waits for
     /// what came of each.
     for_headset: VecDeque<(Asked<Command>, Option<Sender<String>>)>,
@@ -164,6 +170,7 @@ impl Control {
     fn show(&mut self, displays: Option<&Displays>, store: &Store) {
         let status = TrayStatus {
             no_limits: self.no_limits,
+            mic_denied: self.mic_denied,
             connected: self.via,
             monitors: displays.map_or(0, Displays::monitor_count),
             mirror: displays.is_some_and(Displays::mirror_active),
@@ -273,11 +280,15 @@ fn serve_client(
     // The session opens now that it can be served: the monitors exist, and the writer
     // (which also pings) starts below. The headset counts silence from here. The
     // snapshot is the first message, before any stream can start.
+    // The headset's sound device, where the PC can follow its volume.
+    let sink = SinkVolume::open();
+    let shares_volume = sink.is_some();
     let snapshot = publisher.snapshot(&publish::Sources {
         displays,
         wanted: &store.wanted(),
         focus: None,
         sound_from: None,
+        volume: shares_volume,
     })?;
     outbox.control(snapshot);
     packets.set_limits(ClientMsg::limits(true));
@@ -406,9 +417,19 @@ fn serve_client(
         replies: Vec::new(),
         commands: BTreeMap::new(),
         last_command: 0,
+        volume: None,
+        ups: BTreeMap::new(),
     };
+    // One volume for the PC's slider and the headset's buttons, where both can.
+    if session.publisher.caps().has(caps::headset::VOLUME) {
+        session.volume = sink.map(|sink| (sink, PcVolume::default()));
+    }
+    let opened_with = session.publisher.headset.volume;
+    if let Some(v) = opened_with {
+        session.volume_from_headset(v);
+    }
     session.headset_changed(displays, control);
-    session.publish(displays, store, None, None);
+    session.publish(displays, store, None, None, shares_volume);
     usage::headset_connected(store.wanted().count);
 
     // Housekeeping runs on a clock: the headset acknowledges every frame, so the
@@ -423,7 +444,8 @@ fn serve_client(
         // What changed in the last pass: the desktop laid out once, the headset told,
         // then the replies, and the files written, off this thread.
         displays.place();
-        session.publish(displays, store, focus, sound_from);
+        session.volume_due(displays);
+        session.publish(displays, store, focus, sound_from, shares_volume);
         store.flush();
         if Instant::now() >= next_focus {
             next_focus = Instant::now() + Duration::from_millis(150);
@@ -466,6 +488,7 @@ fn serve_client(
         }
         let wait = next_tick
             .min(next_focus)
+            .min(session.volume_at().unwrap_or(next_tick))
             .saturating_duration_since(Instant::now());
         match msg_rx.recv_timeout(wait) {
             Ok(Ok(ClientMsg::Goodbye { reason })) => {
@@ -525,11 +548,30 @@ struct Session {
     /// for what came of it, and since when.
     commands: BTreeMap<ReqId, (String, Option<Sender<String>>, Instant)>,
     last_command: u32,
+    /// The headset's sound device and the logic of one volume, where both can.
+    volume: Option<(SinkVolume, PcVolume)>,
+    /// Up streams the headset started: by number, what each carries.
+    ups: BTreeMap<u8, UpKind>,
 }
 
 /// A command the headset does not answer within this is given up (a late answer is
 /// let go).
 const COMMAND_ANSWER: Duration = Duration::from_secs(30);
+
+/// Does what the volume logic says: asks the headset (`displays` routes it) or puts
+/// the device at the headset's level.
+fn do_volume(sink: &SinkVolume, act: Option<Act>, displays: Option<&Displays>) {
+    match act {
+        Some(Act::Ask(asked)) => {
+            if let Some(d) = displays {
+                debug!("volume: asking the headset for {}", asked.level);
+                d.router.send(HostMsg::VolumeAsk { asked });
+            }
+        }
+        Some(Act::Write { level, muted }) => sink.set(level, muted),
+        None => {}
+    }
+}
 
 /// What came of a command, as the one who asked reads it.
 fn command_result(outcome: &Outcome) -> String {
@@ -583,6 +625,7 @@ impl Session {
     fn end(&mut self, control: &mut Control) {
         control.via = None;
         control.no_limits = None;
+        control.mic_denied = false;
         for (_, (what, reply, _)) in std::mem::take(&mut self.commands) {
             info!("{what}: the headset left");
             if let Some(r) = reply {
@@ -592,6 +635,38 @@ impl Session {
         control.no_headset();
     }
 
+    /// A volume from the headset (in `Open` or since): the main headset's goes to the
+    /// device.
+    fn volume_from_headset(&mut self, v: prostir_proto::state::Volume) {
+        if !self.publisher.access.is_main() {
+            return;
+        }
+        if let Some((sink, pc)) = &mut self.volume {
+            let act = pc.from_headset(&v, Instant::now());
+            do_volume(sink, act, None);
+        }
+    }
+
+    /// Follows the device's volume: changes ask the headset, its answers go to the
+    /// device once the slider rests.
+    fn volume_due(&mut self, displays: &Displays) {
+        let Some((sink, pc)) = &mut self.volume else {
+            return;
+        };
+        let now = Instant::now();
+        while let Some((level, muted)) = sink.changed() {
+            let act = pc.device(level, muted, now);
+            do_volume(sink, act, Some(displays));
+        }
+        let act = pc.tick(now);
+        do_volume(sink, act, Some(displays));
+    }
+
+    /// When the volume has something to do next.
+    fn volume_at(&self) -> Option<Instant> {
+        self.volume.as_ref().and_then(|(_, pc)| pc.due())
+    }
+
     /// Tells the headset what changed, then the replies.
     fn publish(
         &mut self,
@@ -599,12 +674,14 @@ impl Session {
         store: &Store,
         focus: Option<ScreenId>,
         sound_from: Option<ScreenId>,
+        volume: bool,
     ) {
         let sources = publish::Sources {
             displays,
             wanted: &store.wanted(),
             focus,
             sound_from,
+            volume,
         };
         for msg in self.publisher.changed(&sources) {
             displays.router.send(msg);
@@ -619,11 +696,20 @@ impl Session {
     }
 
     /// Follows what the headset said about itself: worn or not (the main headset
-    /// pauses the desktop), its battery, and the watchers its preferences ask for
-    /// (notifications only for a headset with the right to private things).
-    fn headset_changed(&mut self, displays: &mut Displays, control: &Control) {
+    /// pauses the desktop), its battery, its microphone, and the watchers its
+    /// preferences ask for (notifications only for a headset with the right to private
+    /// things).
+    fn headset_changed(&mut self, displays: &mut Displays, control: &mut Control) {
         let access = self.publisher.access;
         let headset = &self.publisher.headset;
+        // The PC's end of the microphone is there while the headset's switch is on.
+        let mic = headset.up.get(&UpKind::Mic).copied();
+        displays.set_mic(mic.is_some_and(|m| m.switch) && access.may(perms::MIC));
+        let denied = mic.is_some_and(|m| m.switch && m.permission == permission::DENIED);
+        if denied && !control.mic_denied {
+            warn!("the headset's microphone has no permission: the system does not let it record");
+        }
+        control.mic_denied = denied;
         if let Some(p) = headset.presence
             && access.is_main()
         {
@@ -664,11 +750,39 @@ impl Session {
         control: &mut Control,
         store: &mut Store,
     ) {
+        let volume = match &msg {
+            ClientMsg::Volume { part } => Some(*part),
+            _ => None,
+        };
         let msg = match self.publisher.headset.apply(msg) {
-            None => return self.headset_changed(displays, control),
+            None => {
+                if let Some(v) = volume {
+                    self.volume_from_headset(v);
+                }
+                return self.headset_changed(displays, control);
+            }
             Some(msg) => msg,
         };
         match msg {
+            // The microphone, from a headset with the right to it.
+            ClientMsg::UpStart { up, kind, format } => {
+                if kind == UpKind::Mic && self.publisher.access.may(perms::MIC) {
+                    info!("the headset's microphone streams ({format:?})");
+                    self.ups.insert(up, kind);
+                } else {
+                    info!("an up stream of {kind:?} this PC does not take");
+                }
+            }
+            ClientMsg::Up { up, data } => {
+                if self.ups.get(&up) == Some(&UpKind::Mic) {
+                    displays.push_mic(data);
+                }
+            }
+            ClientMsg::UpEnd { up } => {
+                if self.ups.remove(&up).is_some() {
+                    info!("the headset's microphone stopped");
+                }
+            }
             ClientMsg::RequestKeyframe { id, generation } => {
                 let id = ScreenId::from_wire(id);
                 if displays.router.is_current(id, generation) {
@@ -712,11 +826,6 @@ impl Session {
                 keep_screens(store, displays, false);
             }
             ClientMsg::Arrange { .. } => info!("a guest's arrangement leaves the desktop as it is"),
-            ClientMsg::Mic { pcm } => displays.push_mic(pcm),
-            ClientMsg::SetMic { enabled } => {
-                store.change(|s| s.mic = enabled);
-                displays.apply(&store.wanted());
-            }
             ClientMsg::MouseTo { id, u, v } if self.publisher.access.may(perms::INPUT) => {
                 displays.mouse_to(ScreenId::from_wire(id), u, v);
             }
@@ -883,6 +992,7 @@ fn main() -> Result<()> {
         shown_settings: None,
         via: None,
         no_limits: None,
+        mic_denied: false,
         for_headset: VecDeque::new(),
     };
     ctl_hook::spawn(command_tx);

@@ -4,9 +4,11 @@
 //!
 //! Two classes, each in a lane of its own:
 //! - control (requests, settings, the layout, pairing): always sent, in order;
-//! - microphone sound and the "frame shown" acknowledgements: sent after control, and
-//!   dropped while the network is stuck (sound would be late anyway, the
-//!   acknowledgements are for latency figures only).
+//! - up streams (the microphone) and the "frame shown" acknowledgements: sent after
+//!   control, and their data and acknowledgements dropped while the network is stuck
+//!   (sound would be late anyway, the acknowledgements are for latency figures only);
+//!   the start and end of an up stream go in the same lane, in order, and are never
+//!   dropped.
 
 use std::collections::VecDeque;
 use std::io;
@@ -24,9 +26,20 @@ pub const MAX_LOSSY: usize = 256;
 /// connection never falls silent while it is fine.
 pub const PING_EVERY: Duration = Duration::from_secs(1);
 
+/// Messages that go in the sound lane.
+fn in_sound_lane(msg: &ClientMsg) -> bool {
+    matches!(
+        msg,
+        ClientMsg::Up { .. }
+            | ClientMsg::UpStart { .. }
+            | ClientMsg::UpEnd { .. }
+            | ClientMsg::FrameShown { .. }
+    )
+}
+
 /// Messages it costs little to lose when the network is stuck.
 fn lossy(msg: &ClientMsg) -> bool {
-    matches!(msg, ClientMsg::Mic { .. } | ClientMsg::FrameShown { .. })
+    matches!(msg, ClientMsg::Up { .. } | ClientMsg::FrameShown { .. })
 }
 
 #[derive(Default)]
@@ -82,14 +95,14 @@ impl Outbox {
     /// Queues `msg`. A lossy message beyond [`MAX_LOSSY`] waiting is dropped. An error
     /// means the session is over, or the message cannot be sent at all.
     pub fn push(&self, msg: ClientMsg) -> io::Result<()> {
-        let is_lossy = lossy(&msg);
+        let (sound, is_lossy) = (in_sound_lane(&msg), lossy(&msg));
         let msg = msg.encode()?;
         let mut s = self.state.lock().unwrap();
         if s.closed || s.leaving {
             return Err(io::ErrorKind::BrokenPipe.into());
         }
-        if is_lossy {
-            if s.lossy.len() >= MAX_LOSSY {
+        if sound {
+            if is_lossy && s.lossy.len() >= MAX_LOSSY {
                 return Ok(());
             }
             s.lossy.push_back(msg);
@@ -217,7 +230,13 @@ mod tests {
     use super::*;
     use prostir_proto::link::memory;
     use prostir_proto::request::Request;
-    use prostir_proto::state::{DisplayId, Gen, ReqId};
+    use prostir_proto::state::{DisplayId, Gen, Presence, ReqId, UpFormat, UpKind};
+
+    fn worn(worn: bool) -> ClientMsg {
+        ClientMsg::Presence {
+            part: Presence { worn },
+        }
+    }
 
     /// Sends everything waiting through a link and reads it back as the PC would.
     fn sent(o: &Outbox) -> Vec<(u8, ClientMsg)> {
@@ -253,19 +272,29 @@ mod tests {
     #[test]
     fn control_goes_first_and_each_class_has_its_lane() {
         let o = Outbox::default();
-        o.push(ClientMsg::Mic { pcm: vec![1; 960] }).unwrap();
+        o.push(ClientMsg::Up {
+            up: 0,
+            data: vec![1; 960],
+        })
+        .unwrap();
         o.push(ClientMsg::FrameShown {
             id: DisplayId(0),
             generation: Gen(1),
             seq: 5,
         })
         .unwrap();
-        o.push(ClientMsg::SetMic { enabled: true }).unwrap();
+        o.push(worn(true)).unwrap();
         assert_eq!(
             sent(&o),
             [
-                (lane::CONTROL, ClientMsg::SetMic { enabled: true }),
-                (lane::SOUND, ClientMsg::Mic { pcm: vec![1; 960] }),
+                (lane::CONTROL, worn(true)),
+                (
+                    lane::SOUND,
+                    ClientMsg::Up {
+                        up: 0,
+                        data: vec![1; 960],
+                    }
+                ),
                 (
                     lane::SOUND,
                     ClientMsg::FrameShown {
@@ -283,9 +312,23 @@ mod tests {
     #[test]
     fn only_lossy_messages_are_dropped() {
         let o = Outbox::default();
+        o.push(ClientMsg::UpStart {
+            up: 0,
+            kind: UpKind::Mic,
+            format: UpFormat::Pcm16 {
+                rate: 48_000,
+                channels: 1,
+            },
+        })
+        .unwrap();
         for _ in 0..MAX_LOSSY + 10 {
-            o.push(ClientMsg::Mic { pcm: vec![0; 2] }).unwrap();
+            o.push(ClientMsg::Up {
+                up: 0,
+                data: vec![0; 2],
+            })
+            .unwrap();
         }
+        o.push(ClientMsg::UpEnd { up: 0 }).unwrap();
         for i in 0..MAX_LOSSY + 10 {
             let id = DisplayId((i % 100) as u32);
             o.push(ClientMsg::request(
@@ -295,9 +338,16 @@ mod tests {
             .unwrap();
         }
         let msgs = sent(&o);
-        let mic = msgs.iter().filter(|(l, _)| *l == lane::SOUND).count();
-        assert_eq!(mic, MAX_LOSSY);
-        assert_eq!(msgs.len() - mic, MAX_LOSSY + 10);
+        let mic: Vec<&ClientMsg> = msgs
+            .iter()
+            .filter(|(l, _)| *l == lane::SOUND)
+            .map(|(_, m)| m)
+            .collect();
+        // The stream's start and end, never dropped, around the data that fit.
+        assert_eq!(mic.len(), MAX_LOSSY + 1);
+        assert!(matches!(mic[0], ClientMsg::UpStart { .. }));
+        assert_eq!(mic.last(), Some(&&ClientMsg::UpEnd { up: 0 }));
+        assert_eq!(msgs.len() - mic.len(), MAX_LOSSY + 10);
     }
 
     /// Pings start with the session, one a second, and pongs give the round trip.
@@ -328,14 +378,18 @@ mod tests {
     #[test]
     fn a_goodbye_is_the_last_thing_sent() {
         let o = Outbox::default();
-        o.push(ClientMsg::Mic { pcm: vec![1; 960] }).unwrap();
-        o.push(ClientMsg::SetMic { enabled: false }).unwrap();
+        o.push(ClientMsg::Up {
+            up: 0,
+            data: vec![1; 960],
+        })
+        .unwrap();
+        o.push(worn(false)).unwrap();
         o.say_goodbye(HeadsetGoodbye::OtherPc);
         assert!(o.push(ClientMsg::Open { parts: Vec::new() }).is_err());
         assert_eq!(
             sent(&o),
             [
-                (lane::CONTROL, ClientMsg::SetMic { enabled: false }),
+                (lane::CONTROL, worn(false)),
                 (lane::CONTROL, ClientMsg::Goodbye { reason: 2 }),
             ]
         );

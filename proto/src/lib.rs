@@ -19,7 +19,7 @@
 //! fields, then a UTF-8 text running to the end of the payload. They must never
 //! change; what a new version needs goes into other messages.
 //!
-//! Only the media messages ([`HostMsg::Frame`], [`HostMsg::Audio`], [`ClientMsg::Mic`])
+//! Only the media messages ([`HostMsg::Frame`], [`HostMsg::Audio`], [`ClientMsg::Up`])
 //! end in bytes running to the end of the payload too. They are read and written by
 //! hand, so their data is never copied on the way.
 //!
@@ -52,7 +52,7 @@ use request::{Asked, Command, Outcome, Request};
 use state::{
     Access, Battery, DisplayId, Displays, Encoding, ErrorCode, Focus, Gen, HeadsetCaps, HostCaps,
     MAX_DETAIL, MAX_DISPLAYS, MAX_GROWING, Part, PcInfo, Prefs, Presence, ReqId, Row, Sound,
-    SoundFrom,
+    SoundFrom, UpFormat, UpKind, UpState, UpWanted, Volume, VolumeAsk,
 };
 use wire::{Reader, Wire, WireError, wire_enum};
 
@@ -77,7 +77,7 @@ pub fn compatible(version: u32, min: u32) -> bool {
 /// PC turn a build of another revision away with a clear word instead of a session
 /// that fails to parse. `None` in released builds, where the protocol version alone
 /// decides.
-pub const PROTO_REVISION: Option<u32> = Some(3);
+pub const PROTO_REVISION: Option<u32> = Some(4);
 
 /// The app version this build says in the handshake: `base` (the crate version), with
 /// `-dev+pN` on a development branch (see [`PROTO_REVISION`]).
@@ -112,7 +112,8 @@ pub fn peer_is_newer(protocol: u32, app: &str) -> bool {
 /// PC sound sent to the headset: interleaved signed 16-bit little-endian stereo.
 pub const AUDIO_RATE: u32 = 48_000;
 pub const AUDIO_CHANNELS: u32 = 2;
-/// Headset microphone sent to the PC: interleaved signed 16-bit little-endian mono.
+/// Headset microphone sent to the PC (an up stream, [`ClientMsg::UpStart`]):
+/// interleaved signed 16-bit little-endian mono.
 pub const MIC_CHANNELS: u32 = 1;
 
 /// Why the PC ends a session ([`HostMsg::Goodbye`]). A code a reader does not know
@@ -263,6 +264,12 @@ wire_enum! {
         16 => Focus { part: Focus },
         /// Part: the display the sound comes from, while the headset asks for it.
         23 => SoundFrom { part: SoundFrom },
+        /// Part, one for each kind: a program on the PC records from the headset's
+        /// microphone (or camera) now, so the headset streams it.
+        40 => UpWanted { part: UpWanted },
+        /// The PC's volume slider or keys moved: the headset takes the level, unless it
+        /// changed its own since the PC last saw (see [`volume`]).
+        39 => VolumeAsk { asked: VolumeAsk },
         /// The answer to [`ClientMsg::Request`] `req`, after the parts it changed.
         29 => Reply { req: ReqId, outcome: Outcome },
         /// Something the PC (its tray, later `prostir ctl` and hotkeys) asks the
@@ -313,8 +320,6 @@ wire_enum! {
             #[wire(rest)]
             pcm: Vec<u8>,
         },
-        /// A PC app is recording from the headset microphone right now: capture it.
-        15 => MicActive { active: bool },
         /// The headset speaks another protocol version: one side has to be updated.
         /// Sent instead of [`HostMsg::Welcome`], after an [`HostMsg::Error`] saying the
         /// same; the PC closes the connection after it. Frozen (see the crate root).
@@ -377,6 +382,23 @@ wire_enum! {
         115 => Presence { part: Presence },
         /// Part: the headset's battery, for the PC's tray.
         119 => Battery { part: Battery },
+        /// Part: the headset's volume (see [`volume`]): on its buttons, and in answer to
+        /// [`HostMsg::VolumeAsk`].
+        135 => Volume { part: Volume },
+        /// Part, one for each kind: the headset's switch for its microphone (or camera),
+        /// and whether the system lets it record.
+        136 => UpState { part: UpState },
+        /// The headset starts an up stream `up` (the microphone) of `kind`, in `format`.
+        /// In the sound lane, so it never overtakes the stream's data.
+        139 => UpStart { up: u8, kind: UpKind, format: UpFormat },
+        /// A piece of up stream `up` (10 ms of the microphone).
+        140 => Up {
+            up: u8,
+            #[wire(rest)]
+            data: Vec<u8>,
+        },
+        /// Up stream `up` ended.
+        141 => UpEnd { up: u8 },
         /// How the displays stand around the user, for the desktop's arrangement: rows
         /// from top to bottom (see [`state::Row`]); the PC lays its outputs out to match.
         /// At most [`MAX_DISPLAYS`] displays in all rows together, each once.
@@ -400,13 +422,6 @@ wire_enum! {
         102 => RequestKeyframe { id: DisplayId, generation: Gen },
         /// The decoder handed frame `seq` of this generation to the compositor.
         103 => FrameShown { id: DisplayId, generation: Gen, seq: u32 },
-        /// Use the headset microphone as the PC's microphone.
-        113 => SetMic { enabled: bool },
-        /// A slice of headset microphone sound (see [`MIC_CHANNELS`]).
-        114 => Mic {
-            #[wire(rest)]
-            pcm: Vec<u8>,
-        },
         /// Start pairing. `headset_shows`: the headset displays the code and the PC
         /// asks for it; otherwise the PC displays it and the headset asks.
         109 => PairBegin {
@@ -431,9 +446,9 @@ wire_enum! {
 /// Tags no message of this build has any more, never to be used again: messages of
 /// earlier development builds of protocol 2 (never released), whose bytes another
 /// development build could still send.
-pub const RETIRED_HOST_TAGS: &[u8] = &[5, 7, 8, 13, 14, 18, 19, 21, 22, 24];
+pub const RETIRED_HOST_TAGS: &[u8] = &[5, 7, 8, 13, 14, 15, 18, 19, 21, 22, 24];
 pub const RETIRED_CLIENT_TAGS: &[u8] = &[
-    104, 105, 106, 107, 108, 112, 116, 117, 118, 120, 121, 122, 123, 125, 126,
+    104, 105, 106, 107, 108, 112, 113, 114, 116, 117, 118, 120, 121, 122, 123, 125, 126,
 ];
 
 impl ClientMsg {
@@ -461,7 +476,7 @@ impl HostMsg {
 mod tag {
     pub const FRAME: u8 = 3;
     pub const AUDIO: u8 = 12;
-    pub const MIC: u8 = 114;
+    pub const UP: u8 = 140;
     pub const HELLO: u8 = 101;
 }
 
@@ -474,9 +489,9 @@ fn host_head(tag: u8) -> usize {
     if tag == tag::FRAME { FRAME_HEAD } else { 0 }
 }
 
-/// Messages from the headset carry nothing before their data.
-fn client_head(_tag: u8) -> usize {
-    0
+/// [`ClientMsg::Up`] keeps its stream's number apart from its data.
+fn client_head(tag: u8) -> usize {
+    if tag == tag::UP { 1 } else { 0 }
 }
 
 /// A message this side cannot send: a field over its limit, or too large as a whole.
@@ -656,6 +671,7 @@ impl HostMsg {
         match self {
             Self::Displays { part } => part.check(),
             Self::Limits { part } => part.check(),
+            Self::VolumeAsk { asked } => asked.check(),
             _ => Ok(()),
         }
     }
@@ -690,11 +706,11 @@ impl ClientMsg {
         Assembler::new(Self::limits(false), client_head)
     }
 
-    /// The message's bytes, to send in packets. Microphone sound moves into them as
-    /// it is.
+    /// The message's bytes, to send in packets. The data of an up stream moves into
+    /// them as it is.
     pub fn encode(self) -> io::Result<Encoded> {
         match self {
-            ClientMsg::Mic { pcm } => Encoded::new(tag::MIC, &[], pcm),
+            ClientMsg::Up { up, data } => Encoded::new(tag::UP, &[up], data),
             other => {
                 let mut fields = Vec::new();
                 other.put_fields(&mut fields).map_err(unsendable)?;
@@ -706,7 +722,12 @@ impl ClientMsg {
     /// The message put together in `m`; `None` for a tag this build does not know.
     pub fn from_message(m: Message) -> io::Result<Option<Self>> {
         Ok(Some(match m.tag {
-            tag::MIC => ClientMsg::Mic { pcm: m.body },
+            tag::UP => {
+                let mut h = Reader::new(m.head());
+                let up = u8::get(&mut h)?;
+                h.finish()?;
+                ClientMsg::Up { up, data: m.body }
+            }
             tag if Self::TAGS.contains(&tag) => Self::decode(tag, &m.body)?,
             _ => return Ok(None),
         }))
@@ -780,6 +801,8 @@ impl ClientMsg {
             // Each display once, so the order the PC makes from it fits in a message.
             Self::Arrange { rows } => state::check_rows(rows),
             Self::HeadsetCaps { part } => part.check(),
+            Self::Volume { part } => part.check(),
+            Self::UpStart { format, .. } => format.check(),
             _ => Ok(()),
         }
     }

@@ -8,7 +8,11 @@
 //!   over puts its size back;
 //! - `resize-sticky Fake-2 320x240`: the same, but only making the output anew does;
 //! - `unplug eDP-1`, `plug eDP-1`: a display of the PC goes away (the lid closed, the
-//!   cable out) and comes back.
+//!   cable out) and comes back;
+//! - `volume 40`, `volume 40 muted`: the slider of the headset's sound device moved;
+//!   `drag 0 100 1000`: the slider dragged from 0 to 100 in 1000 ms, a step of 2 at a
+//!   time;
+//! - `record on`, `record off`: a program records from the headset's microphone.
 //!
 //! The PC's own displays are `PROSTIR_FAKE_PHYSICAL`: `CONNECTOR=EDID@WxH` separated
 //! by `;` (an empty EDID: the display says nothing), all plugged in at the start.
@@ -419,6 +423,47 @@ fn watch_commands() {
 /// One command from the file.
 fn command(line: &str) -> Result<()> {
     let words: Vec<&str> = line.split_whitespace().collect();
+    let device = |level: u8, muted: bool| {
+        if let Some(tx) = super::audio::VOLUME.lock().unwrap().as_ref() {
+            let _ = tx.send((level, muted));
+        }
+        info!(
+            "fake desktop: volume moved to {level}{}",
+            if muted { " muted" } else { "" }
+        );
+    };
+    match words[..] {
+        ["volume", level] => {
+            device(level.parse()?, false);
+            return Ok(());
+        }
+        ["volume", level, "muted"] => {
+            device(level.parse()?, true);
+            return Ok(());
+        }
+        ["drag", from, to, ms] => {
+            let (from, to, ms): (u8, u8, u64) = (from.parse()?, to.parse()?, ms.parse()?);
+            let steps = u64::from(from.abs_diff(to) / 2).max(1);
+            std::thread::spawn(move || {
+                for i in 0..=steps {
+                    let level = if to >= from {
+                        from + (u64::from(to - from) * i / steps) as u8
+                    } else {
+                        from - (u64::from(from - to) * i / steps) as u8
+                    };
+                    device(level, false);
+                    std::thread::sleep(Duration::from_millis(ms / steps));
+                }
+            });
+            return Ok(());
+        }
+        ["record", on @ ("on" | "off")] => {
+            super::audio::RECORDING.store(on == "on", Ordering::Relaxed);
+            info!("fake desktop: a program records: {on}");
+            return Ok(());
+        }
+        _ => {}
+    }
     if let [verb @ ("plug" | "unplug"), name] = words[..] {
         let mut physical = PHYSICAL.lock().unwrap();
         let p = physical

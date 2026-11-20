@@ -223,6 +223,20 @@ impl ksni::Tray for Tray {
             }
             .into(),
         ]);
+        if self.status.mic_denied {
+            items.push(
+                StandardItem {
+                    label: t(
+                        "Мікрофон шолома: немає дозволу",
+                        "Headset microphone: no permission",
+                    )
+                    .into(),
+                    enabled: false,
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
         if let Some((percent, charging)) = self.battery {
             items.push(
                 StandardItem {
