@@ -519,6 +519,44 @@ fn monitors_kept_after_a_disconnect_show_again() {
     assert_eq!(pc.count_log("fake desktop: removed"), 0);
 }
 
+/// Under H.265 the headset decodes a 5120x1440 monitor, under H.264 it does not
+/// (4096 at most): asked for H.264 then, the PC refuses with `BAD_SIZE` and keeps
+/// encoding as it does. Only where the PC encodes H.265 on its graphics card.
+#[test]
+fn a_codec_the_headset_cannot_show_a_monitor_in_is_refused() {
+    let (_dir, _pc, _keys, mut headset) = session("codec-size", &Options::default());
+    let can = headset.view().encoding().unwrap().choices.clone();
+    if !can.contains(&(Codec::H265, true)) {
+        eprintln!("no H.265 on the graphics card here ({can:?}): nothing to try");
+        return;
+    }
+    let set = |codec| Request::SetEncoding {
+        bitrate: None,
+        codec: Some(codec),
+        software: Some(false),
+        sharp: None,
+    };
+    assert_eq!(headset.ask(set(Codec::H265)).unwrap(), Outcome::Done);
+    let wide = Mode::new(5120, 1440);
+    let added = headset.ask(Request::AddDisplay { mode: wide }).unwrap();
+    let Outcome::Added { id } = added else {
+        panic!("{added:?}")
+    };
+    headset
+        .wait(SOON, "the wide monitor streams", |v| {
+            v.streams.get(&id).is_some_and(|s| s.has_picture())
+        })
+        .unwrap();
+    let refused = headset.ask(set(Codec::H264)).unwrap();
+    assert!(
+        matches!(&refused, Outcome::Failed { error, .. } if *error == prostir_proto::state::ErrorCode::BAD_SIZE),
+        "{refused:?}"
+    );
+    let using = headset.view().encoding().unwrap().using;
+    assert_eq!(using, Some((Codec::H265, true)), "encoding as before");
+    assert!(headset.view().broken.is_empty());
+}
+
 /// Another codec from the headset menu restarts every stream with what the PC really
 /// encodes with now, as far as it said it can (`choices` in `Encoding`): H.265 on
 /// the graphics card where it can, else H.264 there, else the CPU's H.264 again.

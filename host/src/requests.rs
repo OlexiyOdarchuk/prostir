@@ -5,7 +5,7 @@
 //! also those that did not start: they stand in the list as `Failed`, keeping their
 //! place.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use log::info;
 use prostir_proto::Codec;
 use prostir_proto::request::{Outcome, Primary, Request};
@@ -190,6 +190,14 @@ fn carry_out(
             let bitrate = bitrate.map_or(now.bitrate, |b| u32::from(b).clamp(5, 100));
             let codec = codec.unwrap_or(now.codec);
             let software = software.unwrap_or(now.software);
+            // Nothing changes while a display streaming now would be too big for the
+            // headset in what the PC would encode with.
+            let (_, would) = crate::encoder::pick(codec, software).context(UserError::Encoder)?;
+            if would != displays.codec()
+                && let Some((w, h)) = displays.too_big_for(would, asker.caps)
+            {
+                bail!(UserError::BadSize { w, h, scale: 100 });
+            }
             store.set_encoding(bitrate, sharp.unwrap_or(now.sharp), codec, software);
             // Quality and clearer text apply even when the codec cannot change.
             displays.apply(&store.wanted());

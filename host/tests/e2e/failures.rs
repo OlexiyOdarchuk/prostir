@@ -166,3 +166,46 @@ fn sound_goes_between_the_packets_of_frames() {
     let over = view.sound_gaps.over();
     assert_eq!(over[3], 0, "no pause in the sound over 250 ms: {over:?}");
 }
+
+/// A display of the PC wider than the headset decodes in H.264 (5120 against 4096)
+/// stands failed with `BAD_SIZE`, saying why, and never streams; the monitors stream,
+/// and the session goes on.
+#[test]
+fn a_display_too_big_for_the_headset_fails_alone() {
+    use prostir_proto::state::{DisplayState, ErrorCode};
+    let options = Options {
+        physical: "HDMI-A-1=Wide 0x1 0@5120x1440".into(),
+        ..Options::default()
+    };
+    let dir = TestDir::new("too-big");
+    dir.save_monitors("row\n640x360\nmirror on\n");
+    let mut keys = dir.pair();
+    let pc = Pc::start(&dir, &options);
+    let mut headset = connect(&pc, &mut keys);
+    let failed = |v: &View| {
+        v.displays()
+            .iter()
+            .find(|d| {
+                d.is_physical()
+                    && matches!(&d.state, DisplayState::Failed { error, detail }
+                    if *error == ErrorCode::BAD_SIZE && detail.contains("5120x1440"))
+            })
+            .map(|d| d.id)
+    };
+    headset
+        .wait(SOON, "the wide display failed, saying why", |v| {
+            failed(v).is_some() && v.all_monitors_show()
+        })
+        .unwrap();
+    let wide = failed(headset.view()).unwrap();
+    headset.take_for(Duration::from_secs(3)).unwrap();
+    let view = headset.view();
+    assert!(!view.streams.contains_key(&wide), "it never streamed");
+    assert!(view.all_monitors_show());
+    assert!(
+        !view.closed && view.goodbye.is_none(),
+        "the session goes on"
+    );
+    assert!(view.broken.is_empty(), "{:?}", view.broken);
+    assert!(!pc.lines("is larger than the headset decodes").is_empty());
+}

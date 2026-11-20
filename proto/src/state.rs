@@ -671,6 +671,16 @@ impl HeadsetCaps {
         self.decoders.iter().find(|d| d.codec == n)
     }
 
+    /// Whether it decodes a picture of `w`x`h` in `codec`: within its decoder for
+    /// that codec, and H.264, which every headset decodes, at any size when it names
+    /// no decoder for it. The PC never starts a stream that does not fit.
+    pub fn fits(&self, codec: Codec, w: u32, h: u32) -> bool {
+        match self.decoder(codec) {
+            Some(d) => w <= d.max_w && h <= d.max_h,
+            None => codec == Codec::H264,
+        }
+    }
+
     pub fn check(&self) -> Result<(), WireError> {
         if self.decoders.iter().any(|d| d.max_w == 0 || d.max_h == 0) {
             return Err(WireError::Invalid("a decoder of no size"));

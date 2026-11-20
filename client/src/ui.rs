@@ -232,8 +232,8 @@ impl Failure {
                 }
                 ErrorCode::LIMIT => l.t("Досягнуто межі", "The limit is reached"),
                 ErrorCode::BAD_SIZE => l.t(
-                    "ПК не створює такий розмір",
-                    "The PC does not make this size",
+                    "Розмір, якого ПК не робить або шолом не покаже",
+                    "A size the PC does not make or the headset cannot show",
                 ),
                 ErrorCode::LAST_DISPLAY => {
                     l.t("Останній монітор лишається", "The last monitor stays")

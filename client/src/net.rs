@@ -181,6 +181,13 @@ pub enum NetEvent {
     StreamEnd {
         id: DisplayId,
     },
+    /// A stream larger than this headset decodes came (from an older PC): display
+    /// `name` (as the user reads it) shows nothing.
+    TooBig {
+        name: String,
+        size: (u32, u32),
+        codec: Codec,
+    },
     /// Pairing with a new PC: show `code` (the PC asks for it), or, with `None`,
     /// ask for the code the PC shows.
     Pairing {
@@ -1134,21 +1141,29 @@ fn run_session(
                 h,
                 codec,
             } => {
-                // The PC sends only what this headset decodes: anything else is its bug.
-                if !caps
-                    .decoder(codec)
-                    .is_some_and(|d| w <= d.max_w && h <= d.max_h)
-                {
-                    break Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!(
-                            "a stream of {w}x{h} in {codec:?}, which this headset does not decode"
-                        ),
-                    ));
-                }
                 info!("stream {} {generation:?}: {w}x{h} {codec:?}", id.0);
                 if streams.remove(&id).is_some() {
                     let _ = events.send(NetEvent::StreamEnd { id });
+                }
+                // The PC sends only what this headset decodes. One that does not
+                // (an older PC) is that display's trouble, not the session's: it
+                // shows nothing, and its frames go nowhere.
+                if !caps.fits(codec, w, h) {
+                    warn!(
+                        "stream {}: {w}x{h} in {codec:?} is too large to decode",
+                        id.0
+                    );
+                    let name = pc
+                        .displays
+                        .as_ref()
+                        .and_then(|d| d.get(id))
+                        .map_or_else(String::new, |d| crate::ui::display_label(&d.name));
+                    let _ = events.send(NetEvent::TooBig {
+                        name,
+                        size: (w, h),
+                        codec,
+                    });
+                    continue;
                 }
                 let (tx, rx) = mpsc::sync_channel(32);
                 let waiting = Arc::new(AtomicUsize::new(0));

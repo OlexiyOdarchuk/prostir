@@ -51,6 +51,10 @@
   into a staircase. The map in the menu shows exactly the desktop the PC makes.
 - A monitor whose picture cannot start on the PC keeps its place and is tried again at
   the next connection; the headset says why. Before, it was dropped from the saved set.
+- A display larger than the headset can show (a 5120-pixel-wide monitor of the PC
+  where the headset decodes H.264 up to 4096) is shown as failed, saying why, instead
+  of ending the connection again and again; the others stay. Switching to a codec in
+  which a monitor would be too large is refused, and nothing changes.
 - Each display of the PC itself (the laptop's panel, a monitor on a cable) is now one
   of its own: it is recognised by its make and model, keeps its own place in the
   headset, and comes back there after the lid was closed or the cable pulled out.

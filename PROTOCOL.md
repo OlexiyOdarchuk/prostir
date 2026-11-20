@@ -868,7 +868,7 @@ and a new place.
 | 3 | `SetDisplays` | `modes:list<Mode>(max 32), primary:opt<Primary>, shown_physical:list<DisplayId>(max 32)` | `Ids`, in the order of `modes` | changes | `LIMIT`, `BAD_SIZE`, `UNKNOWN_DISPLAY` |
 | 4 | `SetPrimary` | `id:DisplayId` | `Done` | changes | `UNKNOWN_DISPLAY` |
 | 5 | `ShowPhysical` | `id:DisplayId, shown:bool` | `Done` | changes | `UNKNOWN_DISPLAY`, `LIMIT`, `CAPTURE` |
-| 6 | `SetEncoding` | `bitrate:opt<u16>, codec:opt<Codec>, software:opt<bool>, sharp:opt<bool>` (none: as it is) | `Done` (what came of it is in `Encoding`) | changes | `ENCODER`, `BAD_ARGUMENT` |
+| 6 | `SetEncoding` | `bitrate:opt<u16>, codec:opt<Codec>, software:opt<bool>, sharp:opt<bool>` (none: as it is) | `Done` (what came of it is in `Encoding`) | changes | `ENCODER`, `BAD_ARGUMENT`, `BAD_SIZE` (a display streaming now would be larger than the headset decodes in the new codec: nothing changes) |
 | 7 | `SetSound` | `to_headset:bool` | `Done` | changes | `SOUND` |
 | 9 | `DetachWindow` | | `Added` | changes, private | `NO_WINDOW`, `LIMIT` |
 | 10 | `WindowHere` | `id:DisplayId` | `Done` | input | `NO_WINDOW`, `UNKNOWN_DISPLAY` |
@@ -913,7 +913,7 @@ version. The headset shows its own text for a code it knows, in its language, wi
 | 2 | `NOT_ALLOWED` | This headset has no right to it. |
 | 3 | `UNKNOWN_DISPLAY` | No such display (any more). |
 | 4 | `LIMIT` | As many as the host allows. |
-| 5 | `BAD_SIZE` | A size or scale the host does not make. |
+| 5 | `BAD_SIZE` | A size or scale the host does not make, or a picture larger than the headset decodes. |
 | 6 | `LAST_DISPLAY` | The last monitor cannot be removed. |
 | 7 | `NO_WINDOW` | No active window on the PC. |
 | 8 | `DESKTOP` | The desktop did not do it (an output not made, KScreen stuck). |
@@ -956,6 +956,16 @@ stream in its own, so the host holds a `StreamStart` back (and drops the frames 
 it) until the `Displays` it sent this session lists the display. A client still
 tolerates a `StreamStart` for a display it does not know: it may set up the decoder
 and show nothing until `Displays` lists it.
+
+**No stream larger than the headset decodes.** The host never sends a `StreamStart`
+larger than the headset's decoder for its codec (`HeadsetCaps.decoders`; H.264, which
+every headset decodes, at any size when the headset names no decoder for it). A
+display whose picture would be larger (a display of the PC, a monitor kept from a
+session in H.265 when the PC now encodes H.264) stands in `Displays` as
+`Failed{BAD_SIZE}` with its size in the detail, sends nothing, and is tried again with
+the next headset or codec; a window panel that large is closed, with a
+`Problem{BAD_SIZE}`. A client that still gets a stream it cannot decode (from an older
+host) shows nothing of that display and goes on with the others.
 
 At most `Limits.streams_max` streams go at once (30 at most: a lane each). A display
 whose stream cannot start (its output or encoder fails) stands in `Displays` as

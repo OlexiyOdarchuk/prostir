@@ -3415,6 +3415,17 @@ fn handle_net_event(
             warn!("a problem on the PC (code {})", error.code());
             scene.show_error(detail);
         }
+        NetEvent::TooBig {
+            name,
+            size: (w, h),
+            codec,
+        } => {
+            let what = scene.lang().t(
+                "завеликий, щоб цей шолом його показав",
+                "is too large for this headset to show",
+            );
+            scene.show_error(format!("{name}: {w}×{h} ({codec:?}) {what}"));
+        }
         NetEvent::Pairing { host, code } => {
             let failed = scene.pairing.as_ref().is_some_and(|p| p.failed);
             scene.pairing = Some(ui::PairingView {

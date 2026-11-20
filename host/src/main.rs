@@ -416,7 +416,12 @@ fn serve_client(
     }
 
     control.via = Some(via);
-    displays.router.attach(outbox.clone());
+    displays
+        .router
+        .attach(outbox.clone(), publisher.caps().clone());
+    // Streams too big for this headset stand failed in the first `Displays` after
+    // the snapshot, before anything of them could go.
+    displays.stop_too_big();
     // The streams the snapshot listed may start (each starts over just below).
     let listed = publisher.listed().map(ScreenId::from_wire).collect();
     displays.router.publish(&listed);

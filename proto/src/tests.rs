@@ -1107,3 +1107,32 @@ fn damaged_messages_never_panic_and_read_back_exactly() {
         "{read} read, {refused} refused"
     );
 }
+
+/// A stream fits a headset within its decoder for the codec; H.264 without a decoder
+/// named fits at any size, another codec without one never.
+#[test]
+fn a_stream_fits_the_decoder_of_its_codec() {
+    use crate::state::HeadsetCaps;
+    let caps = HeadsetCaps {
+        decoders: vec![Decoder {
+            codec: 1,
+            max_w: 8192,
+            max_h: 4320,
+        }],
+        ..HeadsetCaps::default()
+    };
+    assert!(caps.fits(Codec::H265, 5120, 1440));
+    assert!(!caps.fits(Codec::H265, 8193, 1440));
+    assert!(caps.fits(Codec::H264, 5120, 1440), "nothing said of H.264");
+    assert!(!caps.fits(Codec::Av1, 640, 360));
+    let h264 = HeadsetCaps {
+        decoders: vec![Decoder {
+            codec: 0,
+            max_w: 4096,
+            max_h: 4096,
+        }],
+        ..HeadsetCaps::default()
+    };
+    assert!(!h264.fits(Codec::H264, 5120, 1440));
+    assert!(h264.fits(Codec::H264, 4096, 2160));
+}
