@@ -20,6 +20,7 @@ side-connecting = Підключаю { $name }
 side-waiting = Чекаю на шолом
 side-failed = Монітор не додано
 side-not-running = Prostir не запущено
+side-silent = Prostir не відповідає
 side-no-headsets = Шоломів ще немає
 
 ## Огляд
@@ -87,6 +88,8 @@ nr-no-program = Програми prostir не знайдено. Перевірт
 nr-old-title = Prostir уже працює
 nr-old-body = Ця версія Prostir ще не працює з вікном налаштувань. Оновіть Prostir і спробуйте ще раз.
 nr-retry = Спробувати ще раз
+nr-silent-title = Prostir не відповідає
+nr-silent-body = Prostir працює, але не відповів цьому вікну. Вікно запитує ще раз само.
 nr-no-bus = Немає сеансової шини D-Bus, тож вікно не може зв'язатися з Prostir.
 
 ## Монітори
@@ -224,6 +227,7 @@ fr-2-title = Відкрийте Prostir у шоломі поруч із цим �
 fr-2-body = Шолом і ПК мають бути в одній мережі Wi-Fi. Шолом знайде цей ПК сам.
 fr-2-looking = Шукаю шолом у мережі
 fr-2-found = { $name } бачить цей ПК
+fr-2-closed = Сполучення закрито, тож новий шолом не знайде цей ПК.
 fr-3-title = Сполучіть кодом
 fr-3-body = Код потрібен один раз: далі цей шолом підключатиметься сам.
 fr-4-title = Запускати Prostir разом із системою?

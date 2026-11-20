@@ -394,7 +394,7 @@ impl App {
                     .create_new(true)
                     .open(&path)
                     .and_then(|mut f| {
-                        std::io::Write::write_all(&mut f, crate::theme::INK.as_bytes())
+                        std::io::Write::write_all(&mut f, crate::theme::template().as_bytes())
                     });
                 if let Err(e) = made {
                     self.ui.notice = Some(
@@ -680,6 +680,7 @@ fn status_line(tk: &Tk, conn: &Conn) -> (egui::Color32, String) {
     let p = tk.p;
     match conn {
         Conn::Loading => (p.text_muted, tk.t("side-loading")),
+        Conn::Absent { why, .. } if crate::pages::silent(why) => (p.warning, tk.t("side-silent")),
         Conn::Absent { .. } => (p.warning, tk.t("side-not-running")),
         Conn::Live { snap, .. } => {
             let s = &snap.state;

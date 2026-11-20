@@ -138,6 +138,16 @@ fn not_running(ui: &mut Ui, v: &mut View, why: &ClientError, start: &Start) {
             text(ui, tk.t("nr-no-bus"), tk.body(), p.text_muted);
             return;
         }
+        if silent(why) {
+            hero(ui, tk, Some(p.warning), &tk.t("nr-silent-title"));
+            ui.add_space(6.0);
+            text(ui, tk.t("nr-silent-body"), tk.body(), p.text_muted);
+            ui.add_space(tk.th.shape.padding);
+            if w::button(ui, tk, &tk.t("nr-retry"), Kind::Secondary, true).clicked() {
+                v.out.push(Action::Refresh);
+            }
+            return;
+        }
         match start {
             Start::Waiting { .. } => {
                 ui.horizontal(|ui| {
@@ -189,6 +199,14 @@ fn not_running(ui: &mut Ui, v: &mut View, why: &ClientError, start: &Start) {
             }
         }
     });
+}
+
+/// The service is there but did not answer (rather than not there at all).
+pub fn silent(why: &ClientError) -> bool {
+    matches!(
+        why,
+        ClientError::TimedOut | ClientError::Broken(_) | ClientError::Refused { .. }
+    )
 }
 
 fn percent(tk: &Tk, n: impl Into<Arg>) -> String {
@@ -1195,6 +1213,14 @@ fn first_run(ui: &mut Ui, v: &mut View, s: &State) {
                 match found {
                     Some(name) => {
                         w::status(ui, tk, p.ok, &tk.f("fr-2-found", &[("name", name.into())]))
+                    }
+                    None if s.pairing.is_none() => {
+                        w::status(ui, tk, p.text_muted, &tk.t("fr-2-closed"));
+                        ui.add_space(tk.th.shape.spacing);
+                        if w::button(ui, tk, &tk.t("pair-reopen"), Kind::Secondary, true).clicked()
+                        {
+                            v.send(Request::PairNewHeadset);
+                        }
                     }
                     // Next stays open: a headset reached by its address or over USB
                     // is not "seen" first, it asks for the code straight away.

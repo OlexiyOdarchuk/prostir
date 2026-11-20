@@ -23,6 +23,7 @@ side-connecting = Connecting { $name }
 side-waiting = Waiting for a headset
 side-failed = A monitor was not added
 side-not-running = Prostir is not running
+side-silent = Prostir does not answer
 side-no-headsets = No headsets yet
 
 ## Overview
@@ -90,6 +91,8 @@ nr-no-program = The prostir program was not found. Check that Prostir is install
 nr-old-title = Prostir is running
 nr-old-body = This version of Prostir does not work with the settings window yet. Update Prostir, then try again.
 nr-retry = Try again
+nr-silent-title = Prostir does not answer
+nr-silent-body = Prostir is running but did not answer this window. The window asks again by itself.
 nr-no-bus = There is no D-Bus session bus, so this window cannot reach Prostir.
 
 ## Monitors
@@ -232,6 +235,7 @@ fr-2-title = Open Prostir in the headset near this PC
 fr-2-body = The headset and the PC need to be on the same Wi-Fi network. The headset finds this PC by itself.
 fr-2-looking = Looking for the headset on the network
 fr-2-found = { $name } sees this PC
+fr-2-closed = Pairing is closed, so a new headset cannot find this PC.
 fr-3-title = Pair with a code
 fr-3-body = The code is needed once: after that, this headset connects by itself.
 fr-4-title = Start Prostir with the system?

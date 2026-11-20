@@ -339,7 +339,10 @@ pub fn switch(ui: &mut Ui, tk: &Tk, label: &str, on: bool, enabled: bool) -> Opt
         rect,
         cr(hgt / 2.0),
         faded(mix(off_fill, on_fill, t), k),
-        Stroke::new(tk.th.shape.stroke, faded(mix(p.border, on_fill, t), k)),
+        Stroke::new(
+            tk.th.shape.stroke,
+            faded(mix(p.control_border, on_fill, t), k),
+        ),
         StrokeKind::Inside,
     );
     let r = hgt / 2.0 - 3.0;
@@ -470,7 +473,9 @@ pub fn spinner(ui: &mut Ui, tk: &Tk, size: f32) {
     ui.painter()
         .add(Shape::line(pts, Stroke::new(size * 0.09, tk.p.accent_ink)));
     resp.widget_info(|| WidgetInfo::new(Role::ProgressIndicator));
-    ui.ctx().request_repaint();
+    // About 16 turns of the ring a second look smooth; the display's rate is not needed.
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(60));
 }
 
 pub fn battery(ui: &mut Ui, tk: &Tk, level: f32, charging: bool) {
@@ -616,7 +621,7 @@ pub fn code_field(ui: &mut Ui, tk: &Tk, label: &str, code: &mut String, enabled:
         let stroke = if current {
             Stroke::new(tk.th.shape.focus_width, p.focus)
         } else {
-            Stroke::new(tk.th.shape.stroke, p.border)
+            Stroke::new(tk.th.shape.stroke, p.control_border)
         };
         ui.painter()
             .rect(*r, tk.r(), p.well, stroke, StrokeKind::Inside);
@@ -651,7 +656,7 @@ pub fn code_display(ui: &mut Ui, tk: &Tk, code: &str) {
             *r,
             tk.r(),
             p.well,
-            Stroke::new(tk.th.shape.stroke, p.border),
+            Stroke::new(tk.th.shape.stroke, p.control_border),
             StrokeKind::Inside,
         );
         if let Some(ch) = code.chars().nth(i) {

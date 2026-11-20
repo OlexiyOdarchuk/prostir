@@ -24,6 +24,8 @@ struct Inner {
     calls: Vec<Request>,
     /// The next request is refused with this error.
     refuse: Option<ClientError>,
+    /// Asked for the state, it does not answer in time.
+    silent: bool,
 }
 
 /// The mock service.
@@ -145,6 +147,7 @@ impl Mock {
                 pairing_since: None,
                 calls: Vec::new(),
                 refuse: None,
+                silent: false,
             })),
         }
     }
@@ -302,6 +305,11 @@ impl MockHandle {
     /// Prostir, or a missed signal, looks like.
     pub fn set_running_quietly(&self, on: bool) {
         self.inner.lock().unwrap().running = on;
+    }
+
+    /// Lets the service stop answering for its state, or answer again.
+    pub fn set_silent(&self, on: bool) {
+        self.inner.lock().unwrap().silent = on;
     }
 
     /// Every request asked so far.
@@ -525,10 +533,13 @@ fn refused(code: &str, message: &str) -> ClientError {
 }
 
 impl Client for Mock {
-    fn get_state(&mut self) -> Result<Snapshot, ClientError> {
+    fn get_state(&self) -> Result<Snapshot, ClientError> {
         let mut i = self.inner.lock().unwrap();
         if !i.running {
             return Err(ClientError::NotRunning);
+        }
+        if i.silent {
+            return Err(ClientError::TimedOut);
         }
         i.tick();
         Ok(Snapshot {
@@ -537,7 +548,7 @@ impl Client for Mock {
         })
     }
 
-    fn call(&mut self, request: &Request) -> Result<Reply, ClientError> {
+    fn call(&self, request: &Request) -> Result<Reply, ClientError> {
         let mut i = self.inner.lock().unwrap();
         if !i.running {
             return Err(ClientError::NotRunning);
@@ -551,7 +562,7 @@ impl Client for Mock {
         Ok(reply)
     }
 
-    fn watch(&mut self, sink: Sink) -> Result<(), ClientError> {
+    fn watch(&self, sink: Sink) -> Result<(), ClientError> {
         let live = {
             let mut i = self.inner.lock().unwrap();
             i.sink = Some(Arc::new(sink));

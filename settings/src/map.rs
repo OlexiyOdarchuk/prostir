@@ -208,7 +208,10 @@ pub fn flat(
             tk.r(),
             faded(fill, k),
             if t.pc {
-                Stroke::new(tk.th.shape.stroke * 1.5, mix(p.border, p.accent_ink, h))
+                Stroke::new(
+                    tk.th.shape.stroke * 1.5,
+                    mix(p.control_border, p.accent_ink, h),
+                )
             } else {
                 Stroke::NONE
             },
@@ -463,7 +466,7 @@ pub fn arc(
         let stroke = if t.pc || hov {
             Stroke::new(
                 tk.th.shape.stroke * 1.5,
-                if hov { p.accent_ink } else { p.border },
+                if hov { p.accent_ink } else { p.control_border },
             )
         } else {
             Stroke::NONE

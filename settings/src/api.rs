@@ -74,11 +74,13 @@ pub struct Pc {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemeMode {
-    /// As the desktop says (the XDG portal's `color-scheme`).
-    #[default]
-    System,
     Light,
     Dark,
+    /// As the desktop says (the XDG portal's `color-scheme`); also any mode a newer
+    /// service knows and this window does not.
+    #[default]
+    #[serde(other)]
+    System,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -268,15 +270,30 @@ pub struct Pairing {
     pub last: Option<PairResult>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PairResult {
     /// A new headset is trusted now.
     Paired { name: String },
     /// The codes did not match.
     Wrong,
-    #[serde(other)]
+    /// One this window does not know, with or without data.
     Other,
+}
+
+impl<'de> Deserialize<'de> for PairResult {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        // Read by hand: serde's `other` takes only unknown names without data.
+        let v = serde_json::Value::deserialize(d)?;
+        Ok(match &v {
+            serde_json::Value::String(s) if s == "wrong" => PairResult::Wrong,
+            serde_json::Value::Object(m) => match m.get("paired").and_then(|p| p.get("name")) {
+                Some(serde_json::Value::String(name)) => PairResult::Paired { name: name.clone() },
+                _ => PairResult::Other,
+            },
+            _ => PairResult::Other,
+        })
+    }
 }
 
 /// Something wrong, with the service's error code and its text in the PC's language.
@@ -434,13 +451,20 @@ pub type Sink = Box<dyn Fn(Change) + Send + Sync>;
 
 /// A way to talk to the service: D-Bus on Linux, a mock in tests and pictures, later a
 /// named pipe on Windows. Calls block; the window makes them off its own thread.
-pub trait Client: Send + 'static {
+/// Calls and changes come from different threads, so a slow call never holds up a
+/// change: the client is shared.
+pub trait Client: Send + Sync + 'static {
     /// The whole state.
-    fn get_state(&mut self) -> Result<Snapshot, ClientError>;
+    fn get_state(&self) -> Result<Snapshot, ClientError>;
     /// One request and its reply.
-    fn call(&mut self, request: &Request) -> Result<Reply, ClientError>;
+    fn call(&self, request: &Request) -> Result<Reply, ClientError>;
     /// Starts telling `sink` about changes, for as long as the client lives.
-    fn watch(&mut self, sink: Sink) -> Result<(), ClientError>;
+    fn watch(&self, sink: Sink) -> Result<(), ClientError>;
+    /// Whether the service is there at all (its name has an owner); none: cannot
+    /// tell. A service that is there but did not answer is asked again.
+    fn present(&self) -> Option<bool> {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -492,6 +516,26 @@ mod tests {
             Snapshot::parse(1, "[1"),
             Err(ClientError::Broken(_))
         ));
+    }
+
+    #[test]
+    fn unknown_values_of_a_newer_service_read_as_something_known() {
+        let s = Snapshot::parse(
+            1,
+            r#"{"window":{"theme":"high-contrast"},"pairing":{"last":{"cancelled":{"by":"headset"}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(s.state.window.theme, ThemeMode::System);
+        assert_eq!(s.state.pairing.unwrap().last, Some(PairResult::Other));
+        let s = Snapshot::parse(
+            1,
+            r#"{"window":{"theme":"dark"},"pairing":{"last":"timeout"}}"#,
+        )
+        .unwrap();
+        assert_eq!(s.state.window.theme, ThemeMode::Dark);
+        assert_eq!(s.state.pairing.unwrap().last, Some(PairResult::Other));
+        let s = Snapshot::parse(1, r#"{"pairing":{"last":"wrong"}}"#).unwrap();
+        assert_eq!(s.state.pairing.unwrap().last, Some(PairResult::Wrong));
     }
 
     #[test]

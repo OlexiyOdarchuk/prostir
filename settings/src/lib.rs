@@ -32,15 +32,15 @@ pub use app::{App, Options};
 pub struct NoBus(pub String);
 
 impl api::Client for NoBus {
-    fn get_state(&mut self) -> Result<api::Snapshot, api::ClientError> {
+    fn get_state(&self) -> Result<api::Snapshot, api::ClientError> {
         Err(api::ClientError::NoBus(self.0.clone()))
     }
 
-    fn call(&mut self, _: &api::Request) -> Result<api::Reply, api::ClientError> {
+    fn call(&self, _: &api::Request) -> Result<api::Reply, api::ClientError> {
         Err(api::ClientError::NoBus(self.0.clone()))
     }
 
-    fn watch(&mut self, _: api::Sink) -> Result<(), api::ClientError> {
+    fn watch(&self, _: api::Sink) -> Result<(), api::ClientError> {
         Ok(())
     }
 }

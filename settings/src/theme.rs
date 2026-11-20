@@ -25,6 +25,28 @@ pub const FILE_MAX: u64 = 1 << 20;
 /// A font file larger than this is not read: big CJK fonts are about 20 MB.
 pub const FONT_MAX: u64 = 50 << 20;
 
+/// A starting point for the person's file: the built-in theme with every value
+/// commented out. Copying the values themselves would pin every colour, so the
+/// palette chosen on the Look page would no longer change anything.
+pub fn template() -> String {
+    let mut out = String::from(
+        "# Your theme for the Prostir settings window. Remove the # in front of a value\n\
+         # and change it; the window shows the change at once. A value left commented\n\
+         # follows the built-in theme and the palette chosen on the Look page.\n\n",
+    );
+    for line in INK.lines() {
+        let t = line.trim_start();
+        let keep =
+            t.is_empty() || t.starts_with('#') || t.starts_with('[') || t.starts_with("format");
+        if !keep {
+            out.push_str("# ");
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 /// The built-in palettes, chosen on the Look page.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum PaletteName {
@@ -143,6 +165,7 @@ tokens!(
         control: Color32 = color,
         control_hover: Color32 = color,
         border: Color32 = color,
+        control_border: Color32 = color,
         text: Color32 = color,
         text_muted: Color32 = color,
         accent: Color32 = color,
@@ -225,6 +248,7 @@ impl Palette {
             control,
             control_hover,
             border,
+            control_border,
             text,
             text_muted,
             accent,
@@ -474,8 +498,9 @@ impl Theme {
         theme
     }
 
-    /// Text and the backgrounds it is drawn on, against WCAG AA: 4.5:1 for text, 3:1
-    /// for the focus ring and large text.
+    /// Text and the backgrounds it is drawn on, against WCAG AA: 4.5:1 for text
+    /// (also on a hovered button), 3:1 for what shows a control and its state (1.4.11:
+    /// the focus ring, a control's edge, a switch's knob and its on colour).
     fn check_contrast(&self) -> Vec<LowContrast> {
         let mut out = Vec::new();
         for scheme in [Scheme::Light, Scheme::Dark] {
@@ -496,6 +521,32 @@ impl Theme {
                 ("screen_text", p.screen_text, "screen_pc", p.screen_pc, 4.5),
                 ("focus", p.focus, "background", p.background, 3.0),
                 ("focus", p.focus, "surface", p.surface, 3.0),
+                (
+                    "accent_text",
+                    p.accent_text,
+                    "accent_hover",
+                    p.accent_hover,
+                    4.5,
+                ),
+                ("danger", p.danger, "control", p.control, 4.5),
+                ("text", p.text, "control_hover", p.control_hover, 4.5),
+                (
+                    "control_border",
+                    p.control_border,
+                    "surface",
+                    p.surface,
+                    3.0,
+                ),
+                ("control_border", p.control_border, "well", p.well, 3.0),
+                (
+                    "control_border",
+                    p.control_border,
+                    "background",
+                    p.background,
+                    3.0,
+                ),
+                ("text_muted", p.text_muted, "control", p.control, 3.0),
+                ("accent", p.accent, "surface", p.surface, 3.0),
             ];
             for (fg, cf, bg, cb, need) in pairs {
                 let ratio = contrast(cf, cb);
@@ -815,10 +866,39 @@ mod tests {
     }
 
     #[test]
+    fn the_template_pins_nothing() {
+        let t = template();
+        assert!(t.contains("format = 1\n") && t.contains("# text          = "));
+        for p in PaletteName::ALL {
+            let loaded = Theme::load(p, Some(&t));
+            assert!(loaded.issues.is_empty(), "{:?}", loaded.issues);
+            let base = Theme::builtin(p);
+            assert_eq!((loaded.light, loaded.dark), (base.light, base.dark));
+        }
+        // Uncommenting a value takes it.
+        let one = t.replacen("# radius            = 10", "radius = 3", 1);
+        assert_eq!(Theme::load(PaletteName::Ink, Some(&one)).shape.radius, 3.0);
+    }
+
+    #[test]
     fn low_contrast_is_found() {
         let t = Theme::load(
             PaletteName::Ink,
             Some("[dark]\ntext_muted = \"#33405A\"\n[light]\naccent = \"#7FA0F0\"\n"),
+        );
+        let t2 = Theme::load(
+            PaletteName::Graphite,
+            Some("[light]\ncontrol_border = \"#C0C0C0\"\n[dark]\naccent_hover = \"#6F9DFF\"\n"),
+        );
+        let found2: Vec<(Scheme, &str, &str)> =
+            t2.contrast.iter().map(|c| (c.scheme, c.fg, c.bg)).collect();
+        assert!(
+            found2.contains(&(Scheme::Light, "control_border", "surface")),
+            "{found2:?}"
+        );
+        assert!(
+            found2.contains(&(Scheme::Dark, "accent_text", "accent_hover")),
+            "{found2:?}"
         );
         let found: Vec<(Scheme, &str, &str)> =
             t.contrast.iter().map(|c| (c.scheme, c.fg, c.bg)).collect();

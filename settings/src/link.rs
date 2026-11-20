@@ -1,15 +1,18 @@
-//! The window's line to the service: one thread owns the client, so a slow or hung
-//! service never stops the window from drawing. The window sends requests and reads
-//! updates; the thread asks for the state again whenever the service appears.
+//! The window's line to the service, off the window's thread, so a slow or hung
+//! service never stops the window from drawing. Two threads share the client: one
+//! follows the state (asks for it, takes the changes the service sends, asks again
+//! when it appears or did not answer), the other makes the calls, so a call that
+//! waits up to 35 s for the headset holds up no change meanwhile.
 //!
 //! In tests the same logic runs on the window's thread instead (`Link::inline`), so a
 //! picture is taken of exactly the state that was asked for.
 
 use std::collections::VecDeque;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use crate::api::{Change, Client, ClientError, Reply, Request, Snapshot};
+use crate::api::{Change, Client, ClientError, Reply, Request, Sink, Snapshot};
 
 /// What the window learns.
 #[derive(Clone, Debug, PartialEq)]
@@ -27,18 +30,30 @@ pub enum Update {
 
 enum Job {
     Refresh,
-    Call(Request),
     Changed(Change),
 }
 
-/// The logic, the same on the thread and inline.
-struct Driver {
-    client: Box<dyn Client>,
+/// The longest pause between two tries of a service that does not answer.
+const RETRY_MAX: Duration = Duration::from_secs(30);
+
+/// The state side, the same on the thread and inline.
+struct Follower {
+    client: Arc<dyn Client>,
     revision: Option<u32>,
+    /// Tries in a row the service was there and did not answer.
+    failures: u32,
 }
 
-impl Driver {
-    fn start(&mut self, sink: crate::api::Sink) -> Vec<Update> {
+impl Follower {
+    fn new(client: Arc<dyn Client>) -> Self {
+        Self {
+            client,
+            revision: None,
+            failures: 0,
+        }
+    }
+
+    fn start(&mut self, sink: Sink) -> Vec<Update> {
         if let Err(e) = self.client.watch(sink) {
             return vec![Update::Absent(e)];
         }
@@ -46,6 +61,7 @@ impl Driver {
     }
 
     fn state(&mut self, s: Snapshot) -> Vec<Update> {
+        self.failures = 0;
         // Signals and replies can cross: an older state never replaces a newer one. A
         // service that started again counts from the beginning, after Absent.
         if self.revision.is_some_and(|r| s.revision < r) {
@@ -57,7 +73,27 @@ impl Driver {
 
     fn absent(&mut self, e: ClientError) -> Vec<Update> {
         self.revision = None;
+        // Asked again later only when it is there and did not answer; gone, the bus
+        // says when it is back.
+        self.failures = match e {
+            ClientError::NotRunning | ClientError::NoBus(_) => 0,
+            _ => self.failures + 1,
+        };
         vec![Update::Absent(e)]
+    }
+
+    /// When to ask again, if the service did not answer.
+    fn retry_in(&self) -> Option<Duration> {
+        (self.failures > 0)
+            .then(|| Duration::from_secs(1u64 << (self.failures - 1).min(5)).min(RETRY_MAX))
+    }
+
+    /// The pause is over: ask again, unless the service has gone meanwhile.
+    fn retry(&mut self) -> Vec<Update> {
+        if self.client.present() == Some(false) {
+            return self.absent(ClientError::NotRunning);
+        }
+        self.handle(Job::Refresh)
     }
 
     fn handle(&mut self, job: Job) -> Vec<Update> {
@@ -66,15 +102,6 @@ impl Driver {
                 Ok(s) => self.state(s),
                 Err(e) => self.absent(e),
             },
-            Job::Call(request) => {
-                let result = self.client.call(&request);
-                let mut out = Vec::new();
-                if result == Err(ClientError::NotRunning) {
-                    out.extend(self.absent(ClientError::NotRunning));
-                }
-                out.push(Update::Replied { request, result });
-                out
-            }
             Job::Changed(Change::State(s)) => self.state(s),
             Job::Changed(Change::Appeared) => self.handle(Job::Refresh),
             Job::Changed(Change::Vanished) => self.absent(ClientError::NotRunning),
@@ -82,14 +109,23 @@ impl Driver {
     }
 }
 
+/// One call; a service found gone is followed up by asking for the state.
+fn call(client: &dyn Client, request: Request) -> (Update, bool) {
+    let result = client.call(&request);
+    let gone = result == Err(ClientError::NotRunning);
+    (Update::Replied { request, result }, gone)
+}
+
 enum Mode {
     Thread {
         jobs: Sender<Job>,
+        calls: Sender<Request>,
         updates: Receiver<Update>,
     },
     Inline {
-        driver: Driver,
+        follower: Follower,
         jobs: Arc<Mutex<VecDeque<Job>>>,
+        calls: VecDeque<Request>,
         started: bool,
     },
 }
@@ -99,76 +135,105 @@ pub struct Link {
 }
 
 impl Link {
-    /// The client on its own thread; `wake` is called after every update (the
+    /// The client on threads of its own; `wake` is called after every update (the
     /// window's repaint).
-    pub fn spawn(client: Box<dyn Client>, wake: impl Fn() + Send + 'static) -> Self {
+    pub fn spawn(client: Box<dyn Client>, wake: impl Fn() + Send + Sync + 'static) -> Self {
+        let client: Arc<dyn Client> = Arc::from(client);
+        let wake = Arc::new(wake);
         let (jobs, job_rx) = mpsc::channel::<Job>();
+        let (calls, call_rx) = mpsc::channel::<Request>();
         let (update_tx, updates) = mpsc::channel();
+
+        let send = {
+            let (tx, wake) = (update_tx.clone(), wake.clone());
+            move |out: Vec<Update>| {
+                let ok = out.into_iter().all(|u| tx.send(u).is_ok());
+                wake();
+                ok
+            }
+        };
         let changes = jobs.clone();
+        let mut follower = Follower::new(client.clone());
         std::thread::Builder::new()
-            .name("api".into())
+            .name("api-state".into())
             .spawn(move || {
-                let mut driver = Driver {
-                    client,
-                    revision: None,
-                };
-                let send = |out: Vec<Update>| {
-                    for u in out {
-                        if update_tx.send(u).is_err() {
-                            return false;
-                        }
-                    }
-                    wake();
-                    true
-                };
-                let sink: crate::api::Sink = Box::new(move |c| {
+                let sink: Sink = Box::new(move |c| {
                     let _ = changes.send(Job::Changed(c));
                 });
-                if !send(driver.start(sink)) {
+                if !send(follower.start(sink)) {
                     return;
                 }
-                while let Ok(job) = job_rx.recv() {
-                    if !send(driver.handle(job)) {
+                loop {
+                    let next = match follower.retry_in() {
+                        Some(pause) => job_rx.recv_timeout(pause),
+                        None => job_rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+                    };
+                    let out = match next {
+                        Ok(job) => follower.handle(job),
+                        Err(RecvTimeoutError::Timeout) => follower.retry(),
+                        Err(RecvTimeoutError::Disconnected) => return,
+                    };
+                    if !send(out) {
                         return;
                     }
                 }
             })
-            .expect("a thread for the API");
+            .expect("a thread for the API's state");
+
+        let refresh = jobs.clone();
+        std::thread::Builder::new()
+            .name("api-calls".into())
+            .spawn(move || {
+                while let Ok(request) = call_rx.recv() {
+                    let (update, gone) = call(&*client, request);
+                    if update_tx.send(update).is_err() {
+                        return;
+                    }
+                    wake();
+                    if gone {
+                        let _ = refresh.send(Job::Refresh);
+                    }
+                }
+            })
+            .expect("a thread for the API's calls");
         Self {
-            mode: Mode::Thread { jobs, updates },
+            mode: Mode::Thread {
+                jobs,
+                calls,
+                updates,
+            },
         }
     }
 
-    /// The client on the caller's thread: every job runs inside [`Link::poll`].
+    /// The client on the caller's thread: everything runs inside [`Link::poll`].
     pub fn inline(client: Box<dyn Client>) -> Self {
         Self {
             mode: Mode::Inline {
-                driver: Driver {
-                    client,
-                    revision: None,
-                },
+                follower: Follower::new(Arc::from(client)),
                 jobs: Arc::new(Mutex::new(VecDeque::new())),
+                calls: VecDeque::new(),
                 started: false,
             },
         }
     }
 
-    fn push(&self, job: Job) {
-        match &self.mode {
-            Mode::Thread { jobs, .. } => {
-                let _ = jobs.send(job);
+    pub fn send(&mut self, request: Request) {
+        match &mut self.mode {
+            Mode::Thread { calls, .. } => {
+                let _ = calls.send(request);
             }
-            Mode::Inline { jobs, .. } => jobs.lock().unwrap().push_back(job),
+            Mode::Inline { calls, .. } => calls.push_back(request),
         }
-    }
-
-    pub fn send(&self, request: Request) {
-        self.push(Job::Call(request));
     }
 
     /// Ask for the whole state again.
     pub fn refresh(&self) {
-        self.push(Job::Refresh);
+        match &self.mode {
+            Mode::Thread { jobs, .. } => {
+                let _ = jobs.send(Job::Refresh);
+            }
+            Mode::Inline { jobs, .. } => jobs.lock().unwrap().push_back(Job::Refresh),
+        }
     }
 
     /// Everything learnt since the last poll.
@@ -176,22 +241,30 @@ impl Link {
         match &mut self.mode {
             Mode::Thread { updates, .. } => updates.try_iter().collect(),
             Mode::Inline {
-                driver,
+                follower,
                 jobs,
+                calls,
                 started,
             } => {
                 let mut out = Vec::new();
                 if !*started {
                     *started = true;
                     let queue = jobs.clone();
-                    out.extend(driver.start(Box::new(move |c| {
+                    out.extend(follower.start(Box::new(move |c| {
                         queue.lock().unwrap().push_back(Job::Changed(c));
                     })));
+                }
+                while let Some(request) = calls.pop_front() {
+                    let (update, gone) = call(&*follower.client, request);
+                    out.push(update);
+                    if gone {
+                        jobs.lock().unwrap().push_back(Job::Refresh);
+                    }
                 }
                 loop {
                     let next = jobs.lock().unwrap().pop_front();
                     let Some(job) = next else { break };
-                    out.extend(driver.handle(job));
+                    out.extend(follower.handle(job));
                 }
                 out
             }
@@ -203,6 +276,17 @@ impl Link {
 mod tests {
     use super::*;
     use crate::mock::Mock;
+    use std::time::Instant;
+
+    fn collect(link: &mut Link, until: impl Fn(&[Update]) -> bool) -> Vec<Update> {
+        let mut got = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !until(&got) && Instant::now() < deadline {
+            got.extend(link.poll());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        got
+    }
 
     #[test]
     fn inline_gets_the_state_then_replies_and_changes() {
@@ -231,40 +315,120 @@ mod tests {
 
     #[test]
     fn an_older_state_never_replaces_a_newer_one() {
-        let mut d = Driver {
-            client: Box::new(Mock::connected()),
-            revision: None,
-        };
+        let mut f = Follower::new(Arc::new(Mock::connected()));
         let s = |revision| Snapshot {
             revision,
             ..Default::default()
         };
-        assert_eq!(d.handle(Job::Changed(Change::State(s(5)))).len(), 1);
-        assert!(d.handle(Job::Changed(Change::State(s(4)))).is_empty());
-        assert_eq!(d.handle(Job::Changed(Change::State(s(5)))).len(), 1);
-        d.handle(Job::Changed(Change::Vanished));
-        assert_eq!(d.handle(Job::Changed(Change::State(s(1)))).len(), 1);
+        assert_eq!(f.handle(Job::Changed(Change::State(s(5)))).len(), 1);
+        assert!(f.handle(Job::Changed(Change::State(s(4)))).is_empty());
+        assert_eq!(f.handle(Job::Changed(Change::State(s(5)))).len(), 1);
+        f.handle(Job::Changed(Change::Vanished));
+        assert_eq!(f.handle(Job::Changed(Change::State(s(1)))).len(), 1);
     }
 
     #[test]
-    fn the_thread_wakes_the_window() {
+    fn a_service_that_does_not_answer_is_asked_again_ever_later() {
+        let mut f = Follower::new(Arc::new(Mock::connected()));
+        assert_eq!(f.retry_in(), None);
+        f.absent(ClientError::TimedOut);
+        assert_eq!(f.retry_in(), Some(Duration::from_secs(1)));
+        f.absent(ClientError::Broken("?".into()));
+        assert_eq!(f.retry_in(), Some(Duration::from_secs(2)));
+        for _ in 0..10 {
+            f.absent(ClientError::TimedOut);
+        }
+        assert_eq!(f.retry_in(), Some(RETRY_MAX));
+        // It answers: no more tries.
+        assert!(matches!(&f.retry()[..], [Update::State(_)]));
+        assert_eq!(f.retry_in(), None);
+        // Gone: the bus says when it is back, nothing is asked meanwhile.
+        f.absent(ClientError::TimedOut);
+        f.absent(ClientError::NotRunning);
+        assert_eq!(f.retry_in(), None);
+    }
+
+    #[test]
+    fn the_threads_wake_the_window() {
         let woken = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let w = woken.clone();
         let mut link = Link::spawn(Box::new(Mock::connected()), move || {
             w.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         });
         link.send(Request::SetPrimary { id: 3 });
-        let mut got = Vec::new();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while got.len() < 3 && std::time::Instant::now() < deadline {
-            got.extend(link.poll());
-            std::thread::yield_now();
-        }
-        assert!(matches!(got[0], Update::State(_)));
+        let got = collect(&mut link, |g| {
+            g.iter().filter(|u| matches!(u, Update::State(_))).count() >= 2
+                && g.iter().any(|u| matches!(u, Update::Replied { .. }))
+        });
+        assert!(matches!(got[0], Update::State(_)), "{got:?}");
         assert!(
             got.iter()
                 .any(|u| matches!(u, Update::Replied { result: Ok(_), .. }))
         );
         assert!(woken.load(std::sync::atomic::Ordering::SeqCst) >= 2);
+    }
+
+    /// A service whose calls wait until the test lets them go.
+    struct Slow {
+        sink: Mutex<Option<Sink>>,
+        release: Mutex<Receiver<()>>,
+    }
+
+    impl Client for Slow {
+        fn get_state(&self) -> Result<Snapshot, ClientError> {
+            Ok(Snapshot::default())
+        }
+
+        fn call(&self, _: &Request) -> Result<Reply, ClientError> {
+            let _ = self.release.lock().unwrap().recv();
+            Ok(Reply::default())
+        }
+
+        fn watch(&self, sink: Sink) -> Result<(), ClientError> {
+            *self.sink.lock().unwrap() = Some(sink);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_slow_call_holds_up_no_change() {
+        let (release, rx) = mpsc::channel();
+        let slow = Arc::new(Slow {
+            sink: Mutex::new(None),
+            release: Mutex::new(rx),
+        });
+        struct Shared(Arc<Slow>);
+        impl Client for Shared {
+            fn get_state(&self) -> Result<Snapshot, ClientError> {
+                self.0.get_state()
+            }
+            fn call(&self, r: &Request) -> Result<Reply, ClientError> {
+                self.0.call(r)
+            }
+            fn watch(&self, sink: Sink) -> Result<(), ClientError> {
+                self.0.watch(sink)
+            }
+        }
+        let mut link = Link::spawn(Box::new(Shared(slow.clone())), || {});
+        collect(&mut link, |g| !g.is_empty());
+        link.send(Request::StopPairing);
+        std::thread::sleep(Duration::from_millis(50));
+        // The call waits; a change comes meanwhile and reaches the window at once.
+        let changed = Snapshot {
+            revision: 7,
+            ..Default::default()
+        };
+        (slow.sink.lock().unwrap().as_ref().unwrap())(Change::State(changed));
+        let got = collect(&mut link, |g| !g.is_empty());
+        assert!(
+            matches!(&got[..], [Update::State(s)] if s.revision == 7),
+            "{got:?}"
+        );
+        release.send(()).unwrap();
+        let got = collect(&mut link, |g| !g.is_empty());
+        assert!(
+            matches!(&got[..], [Update::Replied { result: Ok(_), .. }]),
+            "{got:?}"
+        );
     }
 }

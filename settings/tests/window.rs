@@ -280,3 +280,53 @@ fn a_refused_request_says_why_until_closed() {
     h.run_steps(2);
     assert!(h.query_by_label("Не вдалося: KWin не відповів.").is_none());
 }
+
+#[test]
+fn a_service_that_does_not_answer_is_asked_again() {
+    let mock = Mock::connected();
+    mock.handle().set_silent(true);
+    let (mut h, handle) = window(mock, Setup::default());
+    assert_eq!(h.get_all_by_label("Prostir не відповідає").count(), 2);
+    assert!(h.query_by_label("Запустити Prostir").is_none());
+    handle.set_silent(false);
+    press(&mut h, "Спробувати ще раз");
+    assert!(matches!(h.state().conn, Conn::Live { .. }));
+}
+
+#[test]
+fn the_first_run_says_when_pairing_is_closed() {
+    let (mut h, handle) = window(Mock::no_headsets(), Setup::default());
+    h.state_mut().ui.fr_step = 1;
+    h.run_steps(3);
+    h.get_by_label("Сполучення закрито, тож новий шолом не знайде цей ПК.");
+    assert!(h.query_by_label("Пошук шолома в мережі").is_none());
+    assert!(h.query_by_label("Шукаю шолом у мережі").is_none());
+    press(&mut h, "Відкрити знову");
+    assert_eq!(handle.calls(), [Request::PairNewHeadset]);
+}
+
+#[test]
+fn a_new_theme_file_pins_nothing() {
+    let dir = std::env::temp_dir().join(format!("prostir-settings-new-{}", std::process::id()));
+    let path = dir.join("window-theme.toml");
+    let (mut h, _) = window(
+        Mock::connected(),
+        Setup {
+            theme_file: path.clone(),
+            ..Setup::default()
+        },
+    );
+    open(&mut h, Page::Look);
+    press(&mut h, "Створити файл");
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("format = 1"));
+    h.run_steps(90);
+    // The file is in use, clean, and the palette still changes the colours.
+    h.get_by_label("Застосовано. Зміни у файлі видно одразу, перезапуск не потрібен.");
+    press(&mut h, "Нейтральна");
+    h.run_steps(30);
+    let graphite =
+        prostir_settings::theme::Theme::builtin(prostir_settings::theme::PaletteName::Graphite);
+    assert_eq!(h.state().theme().dark, graphite.dark);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

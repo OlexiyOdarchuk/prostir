@@ -98,12 +98,12 @@ fn iterate(
 }
 
 impl Client for DbusClient {
-    fn get_state(&mut self) -> Result<Snapshot, ClientError> {
+    fn get_state(&self) -> Result<Snapshot, ClientError> {
         let msg = self.proxy.call_method("GetState", &()).map_err(error)?;
         state_of(&msg)
     }
 
-    fn call(&mut self, request: &Request) -> Result<Reply, ClientError> {
+    fn call(&self, request: &Request) -> Result<Reply, ClientError> {
         let json: String = self
             .proxy
             .call("Call", &(request.to_json(),))
@@ -111,7 +111,12 @@ impl Client for DbusClient {
         Reply::parse(&json)
     }
 
-    fn watch(&mut self, sink: Sink) -> Result<(), ClientError> {
+    fn present(&self) -> Option<bool> {
+        let bus = zbus::blocking::fdo::DBusProxy::new(&self.conn).ok()?;
+        bus.name_has_owner(BUS_NAME.try_into().ok()?).ok()
+    }
+
+    fn watch(&self, sink: Sink) -> Result<(), ClientError> {
         let sink = std::sync::Arc::new(sink);
         // Signals from whoever owns the name; matched by path and interface, so the
         // subscription works before the service has appeared.
@@ -239,7 +244,7 @@ pub(crate) mod tests {
     #[test]
     fn talks_to_the_service_and_follows_it() {
         let Some(bus) = bus() else { return };
-        let mut client = DbusClient::new(connect(&bus)).unwrap();
+        let client = DbusClient::new(connect(&bus)).unwrap();
         assert_eq!(client.get_state(), Err(ClientError::NotRunning));
         let (tx, rx) = mpsc::channel();
         client
