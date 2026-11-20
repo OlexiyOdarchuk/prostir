@@ -393,6 +393,8 @@ impl Security {
 pub struct Connection {
     pub link: Link,
     pub packets: Assembler,
+    /// The headset app's version, as its hello said (`0.2.0`, `0.2.0-dev+p6`).
+    pub app: String,
 }
 
 impl Connection {
@@ -456,7 +458,12 @@ fn accept_within(
     let peer = link.peer.clone();
     // Versions first, before pairing: this exchange is the same in every version, so
     // a headset of any version learns which side to update.
-    match handshake::read_first(&mut *link.receiver)? {
+    let first = handshake::read_first(&mut *link.receiver)?;
+    let headset_app = match &first {
+        First::Hello { app, .. } => peer_version(app),
+        First::Other => String::new(),
+    };
+    match first {
         First::Hello {
             version, min, app, ..
         } if !prostir_proto::compatible(version, min) => {
@@ -513,6 +520,7 @@ fn accept_within(
     let mut conn = Connection {
         link,
         packets: ClientMsg::assembler(),
+        app: headset_app,
     };
     let mut attempts = 0;
     loop {

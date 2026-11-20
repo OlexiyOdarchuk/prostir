@@ -260,6 +260,7 @@ impl Displays {
                 label: p.key.connector.clone(),
                 builtin: p.builtin,
                 shown: p.shown,
+                size: None,
             };
             let mut screen = Screen::starting(*id, 0, kind);
             screen.state = ScreenState::Absent;

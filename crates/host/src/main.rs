@@ -547,14 +547,52 @@ fn create_displays(set_primary: bool, store: &mut Store, events: &EventSink) -> 
     displays
 }
 
+/// Seconds since 1970, now.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// The log filter unless `RUST_LOG` says otherwise: Prostir's own lines from `level`
+/// on, other crates' only from warnings (zbus logs every call of the local API at
+/// info).
+fn log_filter(level: &str) -> String {
+    format!("warn,prostir={level}")
+}
+
+/// Starts the log with Prostir's own lines from `level` on (see [`log_filter`]).
+fn init_log(level: &str) {
+    let env = env_logger::Env::default().default_filter_or(log_filter(level));
+    env_logger::Builder::from_env(env).init();
+}
+
+/// `Prostir 0.2.0` (with its message revision in a development build), as `--version`
+/// prints it and the log starts with it.
+fn version_line() -> String {
+    format!(
+        "Prostir {}",
+        prostir_proto::app_version(env!("CARGO_PKG_VERSION"))
+    )
+}
+
+/// `prostir ctl -v` and `prostir ctl --version`, which the commands of `ctl` take whole.
+fn asks_version(cli: &Cli) -> bool {
+    cli.version
+        || matches!(&cli.command, Some(Sub::Ctl { args })
+            if args.first().is_some_and(|a| a == "-v" || a == "--version"))
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let quiet = || {
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
-    };
+    if asks_version(&cli) {
+        println!("{}", version_line());
+        return Ok(());
+    }
+    let quiet = || init_log("warn");
     let code = match cli.command {
-        None => serve(&cli.serve)?,
-        Some(Sub::Serve(args)) => serve(&args)?,
+        None => serve(cli.serve)?,
+        Some(Sub::Serve(args)) => serve(args)?,
         Some(Sub::Ctl { args }) => {
             quiet();
             let client = platform::local_api::Client::connect(ctl::WAIT);
@@ -594,10 +632,10 @@ enum Origin {
 }
 
 /// `prostir serve`: waits for the headset and serves it. Its exit code.
-fn serve(args: &Args) -> Result<i32> {
+fn serve(args: Args) -> Result<i32> {
     // Before any thread starts: it clears the variables that passed them.
     let passed = platform::sockets::take()?;
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    init_log("info");
     let discovery = (!args.no_discovery).then_some(args.discovery_port);
     match passed {
         Some(mut sockets) => {
@@ -605,14 +643,14 @@ fn serve(args: &Args) -> Result<i32> {
                 sockets.udp = None;
             }
             if args.woken {
-                return full(args, sockets, Origin::Watcher, None);
+                return full(&args, sockets, Origin::Watcher, None);
             }
             // systemd started it for what came: sorted first, light.
             match wake::sort(&sockets)? {
                 Some(sorted) => {
                     platform::import_session_environment();
                     sockets.first = sorted.first;
-                    full(args, sockets, Origin::Systemd, Some(sorted.why))
+                    full(&args, sockets, Origin::Systemd, Some(sorted.why))
                 }
                 None => {
                     info!("nothing for Prostir to do: back to sleep");
@@ -621,17 +659,58 @@ fn serve(args: &Args) -> Result<i32> {
             }
         }
         None if args.stay => {
-            let instance = platform::single_instance("serve")?;
-            let sockets = open_sockets(args, discovery)?;
-            full_with(args, sockets, Origin::Own, None, Some(instance))
+            let args = window_at_first_start(args);
+            let instance = match platform::single_instance("serve") {
+                Err(e) if platform::runs_already(&e) => return Ok(open_the_running_one()),
+                taken => taken?,
+            };
+            let sockets = open_sockets(&args, discovery)?;
+            full_with(&args, sockets, Origin::Own, None, Some(instance))
         }
         None => {
-            let _instance = platform::single_instance("watcher")?;
-            let sockets = open_sockets(args, discovery)?;
+            let args = window_at_first_start(args);
+            let instance = match platform::single_instance("watcher") {
+                Err(e) if platform::runs_already(&e) => return Ok(open_the_running_one()),
+                taken => taken?,
+            };
+            let sockets = match open_sockets(&args, discovery) {
+                // systemd's socket waits for the headset: Prostir is there, asleep.
+                Err(_) if platform::autostart::socket_waits() => {
+                    drop(instance);
+                    return Ok(open_the_running_one());
+                }
+                opened => opened?,
+            };
+            let _instance = instance;
             if !args.no_adb {
                 platform::keep_adb_reverse(sockets.port());
             }
             wake::watch(sockets, wake::Start::this_program()?, args.open_settings)
+        }
+    }
+}
+
+/// The settings window opens at the very first start (the menu, a terminal): Prostir
+/// shows it is there. A start at login is never the first, which turns autostart on,
+/// so it stays silent.
+fn window_at_first_start(mut args: Args) -> Args {
+    if !args.open_settings && store::config_dir().is_some_and(|d| store::first_start(&d)) {
+        info!("the first start: the settings window opens");
+        args.open_settings = true;
+    }
+    args
+}
+
+/// Prostir started again while it runs (the menu, `prostir`, `prostir serve` of an
+/// older menu entry or autostart line): the running one opens its settings window, or
+/// brings it forward, as `prostir open` does, and this one ends. Its exit code.
+fn open_the_running_one() -> i32 {
+    info!("Prostir runs already: its settings window opens");
+    match platform::local_api::Client::connect(ctl::WAIT) {
+        Ok(client) => ctl::open(&client, &local::wake_for_window),
+        Err(e) => {
+            eprintln!("prostir: Prostir runs already, and there is no session bus ({e:?})");
+            ctl::NOT_RUNNING
         }
     }
 }
@@ -734,10 +813,7 @@ fn full_with(
     platform::clean_up_after_crash();
 
     let port = sockets.port();
-    info!(
-        "Prostir {} waiting for the headset on port {port}",
-        prostir_proto::app_version(env!("CARGO_PKG_VERSION")),
-    );
+    info!("{} waiting for the headset on port {port}", version_line());
     // Under the watcher, the watcher keeps `adb reverse` (it runs all along).
     if !args.no_adb && origin != Origin::Watcher {
         platform::keep_adb_reverse(port);
@@ -855,4 +931,59 @@ fn full_with(
         platform::end_now(code);
     }
     Ok(code)
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+    use log::{Level, Log, Metadata};
+
+    /// `-v` and `--version` from every way in; `-m` stays the monitor.
+    #[test]
+    fn the_version_from_every_way_in() {
+        let asks = |args: &[&str]| {
+            let cli =
+                super::Cli::try_parse_from(std::iter::once("prostir").chain(args.iter().copied()))
+                    .unwrap_or_else(|e| panic!("{args:?}: {e}"));
+            super::asks_version(&cli)
+        };
+        for args in [
+            &["-v"][..],
+            &["--version"],
+            &["serve", "-v"],
+            &["serve", "--version"],
+            &["open", "--version"],
+            &["ctl", "--version"],
+            &["ctl", "-v"],
+        ] {
+            assert!(asks(args), "{args:?}");
+        }
+        for args in [
+            &[][..],
+            &["serve"],
+            &["ctl", "status"],
+            &["-m", "1920x1080"],
+        ] {
+            assert!(!asks(args), "{args:?}");
+        }
+        assert!(super::version_line().starts_with("Prostir 0."));
+    }
+
+    /// Prostir's own lines at info, a dependency's only from warnings: zbus logs
+    /// every call of the local API at info.
+    #[test]
+    fn dependencies_log_only_warnings() {
+        let logger = env_logger::Builder::new()
+            .parse_filters(&super::log_filter("info"))
+            .build();
+        let on = |target: &str, level: Level| {
+            logger.enabled(&Metadata::builder().target(target).level(level).build())
+        };
+        assert!(on("prostir::session", Level::Info));
+        assert!(on("prostir", Level::Info));
+        assert!(!on("prostir::session", Level::Debug));
+        assert!(!on("zbus::object_server", Level::Info));
+        assert!(!on("tracing::span", Level::Info));
+        assert!(on("zbus::connection", Level::Warn));
+    }
 }

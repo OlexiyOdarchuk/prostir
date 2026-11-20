@@ -1,6 +1,7 @@
-//! What the PC keeps between runs, with one owner: the settings (`settings.txt`) and
-//! the set of screens with the rows the headset shows them in (`screens.txt`), both
-//! plain `key value` text in `~/.config/prostir/`.
+//! What the PC keeps between runs, with one owner: the settings (`settings.txt`), the
+//! set of screens with the rows the headset shows them in (`screens.txt`) and when
+//! each paired headset was last seen (`headsets.txt`), all plain `key value` text in
+//! `~/.config/prostir/`.
 //!
 //! - What is kept is what the person wants, not what came out of it: the codec chosen
 //!   stays chosen when the graphics card made another one.
@@ -41,7 +42,7 @@ mod settings;
 pub use screens::{LEGACY_LAPTOP, Physical, PhysicalKey, SavedScreens, startup_set};
 use screens::{migrate, parse_screens, screens_text};
 pub use settings::{Settings, is_word, perm_words};
-use settings::{parse_settings, settings_text};
+use settings::{hex, parse_settings, settings_text};
 
 /// The file format this version writes.
 const VERSION: u32 = 2;
@@ -88,6 +89,48 @@ impl Kept {
         }
         text
     }
+}
+
+/// When a paired headset last had a session, and its app then.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Seen {
+    /// Seconds since 1970.
+    pub at: u64,
+    /// The headset app's version (`0.2.0-dev+p6`), as its hello said.
+    pub app: String,
+}
+
+/// The file `headsets.txt`: `seen KEY SECONDS [APP]`, a line for each headset, KEY its
+/// whole key in hex. Lines it cannot read are left out.
+fn parse_seen_headsets(text: &str) -> BTreeMap<String, Seen> {
+    text.lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            if words.next()? != "seen" {
+                return None;
+            }
+            let key = words.next()?;
+            if key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
+            let at = words.next()?.parse().ok()?;
+            let app = words.next().unwrap_or_default().to_owned();
+            Some((key.to_ascii_lowercase(), Seen { at, app }))
+        })
+        .collect()
+}
+
+fn seen_headsets_text(seen: &BTreeMap<String, Seen>) -> String {
+    seen.iter()
+        .map(|(key, s)| {
+            let app: String = s.app.chars().filter(|c| !c.is_whitespace()).collect();
+            if app.is_empty() {
+                format!("seen {key} {}\n", s.at)
+            } else {
+                format!("seen {key} {} {app}\n", s.at)
+            }
+        })
+        .collect()
 }
 
 /// The writes waiting for the writer thread, the latest of each file.
@@ -156,6 +199,20 @@ pub fn config_dir() -> Option<PathBuf> {
     Some(dir)
 }
 
+/// Prostir never ran for this user (nothing of it in `dir`, `~/.config/prostir`): not
+/// its settings, its screens, the settings of 0.1, its key or a paired headset.
+pub fn first_start(dir: &Path) -> bool {
+    [
+        "settings.txt",
+        "screens.txt",
+        "monitors.txt",
+        "identity",
+        "paired_headsets",
+    ]
+    .iter()
+    .all(|name| !dir.join(name).exists())
+}
+
 /// The settings and the set of screens, owned by the main loop.
 pub struct Store {
     /// `~/.config/prostir`; none: nothing is saved (no home directory).
@@ -170,6 +227,10 @@ pub struct Store {
     run: Run,
     settings_changed: bool,
     screens_changed: bool,
+    /// When each paired headset last had a session (`headsets.txt`), by its key in
+    /// hex.
+    seen: BTreeMap<String, Seen>,
+    seen_changed: bool,
     writer: Option<(Sender<Job>, Receiver<()>)>,
 }
 
@@ -188,6 +249,8 @@ impl Store {
             run,
             settings_changed: false,
             screens_changed: false,
+            seen: BTreeMap::new(),
+            seen_changed: false,
             writer: None,
         };
         store.load();
@@ -230,10 +293,13 @@ impl Store {
     fn load(&mut self) {
         let Some(dir) = self.dir.clone() else { return };
         // A write cut short leaves its temporary file; the real one is whole.
-        for name in ["settings.txt.tmp", "screens.txt.tmp"] {
+        for name in ["settings.txt.tmp", "screens.txt.tmp", "headsets.txt.tmp"] {
             let _ = std::fs::remove_file(dir.join(name));
         }
         let read = |name: &str| std::fs::read_to_string(dir.join(name)).ok();
+        if let Some(text) = read("headsets.txt") {
+            self.seen = parse_seen_headsets(&text);
+        }
         let (settings, screens) = (read("settings.txt"), read("screens.txt"));
         if settings.is_none() && screens.is_none() {
             // A first start: nothing to move over.
@@ -348,9 +414,38 @@ impl Store {
         }
     }
 
+    /// Headset `key` has a session now, or its session ended: seen now, with its app
+    /// (`app`, from its hello; none keeps the one known).
+    pub fn headset_seen(&mut self, key: &[u8; 32], at: u64, app: Option<&str>) {
+        let seen = self.seen.entry(hex(key)).or_default();
+        seen.at = at;
+        if let Some(app) = app.filter(|a| !a.is_empty()) {
+            app.clone_into(&mut seen.app);
+        }
+        self.seen_changed = true;
+    }
+
+    /// When headset `key` last had a session, and its app then, if known.
+    pub fn last_seen(&self, key: &[u8; 32]) -> Option<&Seen> {
+        self.seen.get(&hex(key))
+    }
+
+    /// Forgets when the headsets not in `paired` were seen (they were forgotten).
+    pub fn keep_seen_of(&mut self, paired: &[[u8; 32]]) {
+        let keep: Vec<String> = paired.iter().map(hex).collect();
+        let before = self.seen.len();
+        self.seen.retain(|key, _| keep.contains(key));
+        self.seen_changed |= self.seen.len() != before;
+    }
+
     /// Hands what changed to the writer thread.
     pub fn flush(&mut self) {
         let mut jobs = Vec::new();
+        if std::mem::take(&mut self.seen_changed)
+            && let Some(path) = self.path("headsets.txt")
+        {
+            jobs.push((path, seen_headsets_text(&self.seen)));
+        }
         if std::mem::take(&mut self.settings_changed)
             && let Some(path) = self.path("settings.txt")
         {

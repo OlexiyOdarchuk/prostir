@@ -13,6 +13,9 @@ nav-headsets = Headsets
 nav-sound = Sound
 nav-quality = Quality
 nav-look = Look
+quit-prostir = Quit Prostir
+close-note-title = Prostir keeps running
+close-note = Prostir keeps running in the tray. To open it again: the Prostir icon in the menu or in the tray.
 nav-first-run = First run
 
 ## The status line under the pages
@@ -140,7 +143,9 @@ hs-title = Headsets
 hs-sub = Headsets this PC trusts. A new headset needs a code only once.
 hs-now = Connected now
 hs-last = Last connected { $when }
-hs-never = Not connected yet
+hs-never = Last connected: not known
+hs-app = Prostir { $app }, key { $key }
+hs-key = Key { $key }
 ago-now = just now
 ago-minutes = { $n ->
     [one] { $n } minute ago

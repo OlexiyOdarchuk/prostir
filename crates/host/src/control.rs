@@ -107,6 +107,7 @@ impl Brain {
                     warn!("cannot forget headsets: {e}");
                 }
                 drop(trusted);
+                self.keep_seen_of_paired();
                 self.security.new_find_secret();
                 let keys: Vec<[u8; 32]> = self.sessions.keys().copied().collect();
                 self.end_sessions(

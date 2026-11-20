@@ -8,6 +8,9 @@ use super::*;
     args_conflicts_with_subcommands = true
 )]
 pub(super) struct Cli {
+    /// Print the version (as the log says it: `Prostir 0.2.0`) and exit.
+    #[arg(short = 'v', long = "version", global = true)]
+    pub(crate) version: bool,
     #[command(subcommand)]
     pub(crate) command: Option<Sub>,
     /// Without a command: as `prostir serve`.

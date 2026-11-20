@@ -161,13 +161,19 @@ fn carry_out(
             if shown.iter().any(|id| !physical.contains(id)) {
                 bail!(UserError::UnknownDisplay);
             }
-            if shown.len() > physical_max {
+            // One not connected now (a closed laptop's panel) streams nothing: it
+            // counts for neither limit.
+            let connected = shown
+                .iter()
+                .filter(|id| displays.is_connected_physical(**id))
+                .count();
+            if connected > physical_max {
                 bail!(UserError::Limit {
                     max: physical_max,
                     of: Counted::Physical
                 });
             }
-            streams_within(specs.len() + shown.len() + displays.window_count(), limits)?;
+            streams_within(specs.len() + connected + displays.window_count(), limits)?;
             let (index, main) = match primary {
                 Some(Primary::Index { index }) if usize::from(index) < specs.len() => {
                     (Some(usize::from(index)), None)
@@ -211,7 +217,7 @@ fn carry_out(
                 bail!(UserError::Unsupported);
             }
             let id = ScreenId::from_wire(id);
-            if shown && !displays.is_shown_physical(id) {
+            if shown && !displays.is_shown_physical(id) && displays.is_connected_physical(id) {
                 streams_within(displays.stream_count() + 1, limits)?;
             }
             displays.show_physical(id, shown, usize::from(limits.physical_max))?;

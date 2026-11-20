@@ -81,13 +81,13 @@ impl std::fmt::Display for UserError {
             )),
             Self::UnknownDisplay => f.write_str(t("Такого екрана немає", "No such display")),
             Self::Limit { max, of } => {
-                let what = match of {
-                    Counted::Monitors => t("моніторів", "monitors"),
-                    Counted::Windows => t("вікон", "windows"),
-                    Counted::Physical => t("екранів ПК", "displays of the PC"),
-                    Counted::Streams => t("екранів разом", "displays in all"),
+                let id = match of {
+                    Counted::Monitors => "limit-monitors",
+                    Counted::Windows => "limit-windows",
+                    Counted::Physical => "limit-physical",
+                    Counted::Streams => "limit-streams",
                 };
-                write!(f, "{} {max} {what}", t("Щонайбільше", "At most"))
+                f.write_str(&crate::i18n::count(id, *max))
             }
             Self::BadSize { w, h, scale } => write!(
                 f,

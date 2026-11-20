@@ -31,9 +31,12 @@ const SCALES: [u16; 3] = [100, 125, 150];
 /// The smallest and the largest monitor the PC makes, in pixels.
 pub const MIN_SIZE: (u32, u32) = (320, 240);
 pub const MAX_SIZE: (u32, u32) = (7680, 4320);
-/// Displays of the PC itself shown at once, and with "No limits".
-const PHYSICAL_MAX: u8 = 1;
-const PHYSICAL_NO_LIMITS: u8 = 4;
+/// Displays of the PC itself shown at once, and with "No limits": as many as a PC
+/// usually has, so each connected one can be shown. The streams the headset takes at
+/// once bound them together with the monitors (`streams_max`); displays not
+/// connected count for none.
+const PHYSICAL_MAX: u8 = 4;
+const PHYSICAL_NO_LIMITS: u8 = 8;
 
 /// What the parts are built from at one moment.
 pub struct Sources<'a> {
@@ -298,7 +301,7 @@ mod tests {
         };
         let caps = headset(vec![h264, h265]);
         let safe = limits(Prefs::default(), &caps, Codec::H264);
-        assert_eq!((safe.virtual_max, safe.physical_max), (6, 1));
+        assert_eq!((safe.virtual_max, safe.physical_max), (6, 4));
         assert_eq!(safe.streams_max, 12);
         assert_eq!(safe.max, (4096, 4096));
         assert!(
@@ -310,7 +313,7 @@ mod tests {
             ..Prefs::default()
         };
         let wide = limits(free, &caps, Codec::H265);
-        assert_eq!((wide.virtual_max, wide.physical_max), (10, 4));
+        assert_eq!((wide.virtual_max, wide.physical_max), (10, 8));
         assert!(wide.sizes.contains(&Mode::new(5120, 1440)));
         assert_eq!(wide.max, (7680, 4320));
         assert!(wide.check().is_ok());

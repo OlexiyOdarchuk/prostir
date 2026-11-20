@@ -136,10 +136,7 @@ impl Tray {
 
     fn monitors_line(&self) -> String {
         let mirror = if self.status.mirror {
-            t(
-                ", екран ноутбука в шоломі",
-                ", laptop screen in the headset",
-            )
+            t(", екран ПК у шоломі", ", a PC display in the headset")
         } else {
             ""
         };
@@ -164,6 +161,12 @@ impl ksni::Tray for Tray {
 
     fn icon_name(&self) -> String {
         icon()
+    }
+
+    /// A click on the icon (a double click where the panel says so): the settings
+    /// window opens or comes forward; the menu keeps its own item too.
+    fn activate(&mut self, _x: i32, _y: i32) {
+        self.commands.tray(Command::clicked());
     }
 
     fn status(&self) -> ksni::Status {

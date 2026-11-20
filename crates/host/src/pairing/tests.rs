@@ -112,6 +112,7 @@ fn run(pc_code: &'static str, headset_code: &'static str) -> (bool, bool) {
     let mut conn = Connection {
         link,
         packets: ClientMsg::assembler(),
+        app: String::new(),
     };
     let pc = pair(&mut conn, &id, &peer, pc_code).unwrap();
     (pc, h.join().unwrap())

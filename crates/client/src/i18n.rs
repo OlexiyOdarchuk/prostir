@@ -60,6 +60,21 @@ impl Lang {
             Lang::En => en,
         }
     }
+
+    /// A word's form for a count of `n`, by the plural rules Fluent follows (CLDR):
+    /// Ukrainian `uk` is one (1, 21, 101), few (2 to 4, 22 to 24) and many (0, 5 to
+    /// 20, 25); English `en` is one and other. "1 монітор", "2 монітори", "5 моніторів".
+    pub fn count<'a>(self, n: u64, uk: [&'a str; 3], en: [&'a str; 2]) -> &'a str {
+        match self {
+            Lang::Uk => match (n % 10, n % 100) {
+                (1, r) if r != 11 => uk[0],
+                (2..=4, r) if !(12..=14).contains(&r) => uk[1],
+                _ => uk[2],
+            },
+            Lang::En if n == 1 => en[0],
+            Lang::En => en[1],
+        }
+    }
 }
 
 /// The language chosen in the menu.
@@ -81,5 +96,37 @@ mod tests {
         assert_eq!(Lang::from_code("en-US"), Some(Lang::En));
         assert_eq!(Lang::from_code("de"), Some(Lang::En));
         assert_eq!(Lang::from_code(""), None);
+    }
+
+    /// The forms for counts are the ones Fluent picks, for every count up to a
+    /// thousand, in both languages.
+    #[test]
+    fn counts_take_the_forms_fluent_picks() {
+        const UK: &str = "n = { $n ->\n [one] 0\n [few] 1\n *[many] 2\n}\n";
+        const EN: &str = "n = { $n ->\n [one] 0\n *[other] 1\n}\n";
+        let catalog = prostir_lang::Catalog::with_dirs(&[("en", EN), ("uk", UK)], Vec::new());
+        for (lang, code) in [(Lang::Uk, "uk"), (Lang::En, "en")] {
+            let fluent = catalog.load(code);
+            for n in 0..1000u64 {
+                let ours = lang.count(n, ["0", "1", "2"], ["0", "1"]);
+                assert_eq!(ours, fluent.f("n", &[("n", n.into())]), "{code} {n}");
+            }
+        }
+        assert_eq!(
+            [1, 2, 5, 11, 21, 22, 112].map(|n| Lang::Uk.count(
+                n,
+                ["екран", "екрани", "екранів"],
+                ["", ""]
+            )),
+            [
+                "екран",
+                "екрани",
+                "екранів",
+                "екранів",
+                "екран",
+                "екрани",
+                "екранів"
+            ]
+        );
     }
 }

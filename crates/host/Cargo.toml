@@ -30,6 +30,8 @@ prostir-proto.workspace = true
 prostir-layout.workspace = true
 # The local API's types (JSON), shared with its clients.
 prostir-api.workspace = true
+# Texts with a count, in the plural form each language needs (Fluent).
+prostir-lang.workspace = true
 anyhow.workspace = true
 # A reply for a D-Bus method that waits for the control loop (the local API).
 async-channel = "2"

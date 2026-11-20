@@ -96,6 +96,7 @@ impl Brain {
             .as_mut()
             .expect("made above if it was missing");
         self.last_id += 1;
+        let app = conn.app.clone();
         match Session::start(
             self.last_id,
             conn,
@@ -113,6 +114,7 @@ impl Brain {
                     secret: self.security.find_secret(),
                 });
                 let via = session.api_session().via;
+                self.store.headset_seen(&key, unix_now(), Some(&app));
                 self.worn_told.insert(key, session.worn());
                 self.sessions.insert(key, session);
                 self.phase.session_opened(Instant::now());
@@ -274,6 +276,10 @@ impl Brain {
     ) -> Option<bool> {
         let session = self.sessions.remove(&key)?;
         self.headset_left(&key, why);
+        // Seen until now (a forgotten headset's time goes with it).
+        if self.security.trusted.lock().unwrap().contains(&key) {
+            self.store.headset_seen(&key, unix_now(), None);
+        }
         let displays = self.displays.as_mut()?;
         self.arrivals.left(key);
         let taken_off = session.taken_off_for().is_some();

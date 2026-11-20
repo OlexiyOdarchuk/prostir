@@ -101,13 +101,15 @@ impl Displays {
             if !self.router.still_too_big(id) {
                 continue;
             }
-            let why = too_big_why(&s.name(), (w, h), codec);
-            warn!("{why}");
+            let why = too_big_why((w, h), codec);
+            warn!("{}: {why}", s.name());
             if s.is_window() {
+                // Said with no display: its name says which.
+                let named = format!("{}: {why}", s.name());
                 self.close_window_panel(id);
                 self.router.send_all(&HostMsg::Problem {
                     error: state::ErrorCode::BAD_SIZE,
-                    detail: state::clip(&why, state::MAX_DETAIL),
+                    detail: state::clip(&named, state::MAX_DETAIL),
                     display: None,
                 });
                 continue;
@@ -260,11 +262,12 @@ impl Displays {
     }
 }
 
-/// Why display `name` does not stream to a headset: its picture of `w`x`h` is larger
-/// than the headset decodes in `codec`.
-pub(super) fn too_big_why(name: &str, (w, h): (u32, u32), codec: Codec) -> String {
+/// Why a display does not stream to a headset: its picture of `w`x`h` is larger than
+/// the headset decodes in `codec`. Without the display's name: it goes with the
+/// display, which the reader sees named already.
+pub(super) fn too_big_why((w, h): (u32, u32), codec: Codec) -> String {
     format!(
-        "{name}: {w}x{h} {} {codec:?}",
+        "{w}x{h} {} {codec:?}",
         t(
             "більше, ніж шолом декодує в",
             "is larger than the headset decodes in"

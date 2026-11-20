@@ -106,6 +106,18 @@ fn failed(e: &anyhow::Error) -> CtlReply {
     CtlReply::failed(api::of_code(errors::code_of(e)), text)
 }
 
+/// A request as the log says it: its JSON, what it asks and with what (`sound_to_headset`
+/// with `"on":false`), but a pairing code, which stays out of the log.
+fn logged(request: &Request) -> String {
+    let Ok(mut json) = serde_json::to_value(request) else {
+        return String::new();
+    };
+    if let Some(code) = json.get_mut("code") {
+        *code = "…".into();
+    }
+    json.to_string()
+}
+
 /// The PC's name, as headsets list it: looked up once.
 fn hostname() -> &'static str {
     static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -115,11 +127,7 @@ fn hostname() -> &'static str {
 impl Brain {
     /// One request of the local API.
     pub(crate) fn ctl(&mut self, request: Request, reply: Reply) {
-        let kind = serde_json::to_value(&request)
-            .ok()
-            .and_then(|v| v.get("request").and_then(|k| k.as_str().map(str::to_owned)))
-            .unwrap_or_default();
-        info!("local API: {kind}");
+        info!("local API: {}", logged(&request));
         if let Some(command) = command_of(&request) {
             if self.sessions.is_empty() {
                 let text = t("Шолом не підключено", "No headset is connected");
@@ -616,6 +624,7 @@ impl Brain {
             "forgot headset {}",
             prostir_proto::secure::fingerprint(&key)
         );
+        self.keep_seen_of_paired();
         // It can no longer find the PC; the headsets still trusted get the new secret
         // now, in their sessions, or at their next.
         let secret = self.security.new_find_secret();
@@ -631,6 +640,15 @@ impl Brain {
             Ok(()),
         );
         done()
+    }
+
+    /// When each headset was seen is kept for the paired ones only.
+    pub(crate) fn keep_seen_of_paired(&mut self) {
+        let paired: Vec<[u8; 32]> = {
+            let trusted = self.security.trusted.lock().unwrap();
+            trusted.entries().iter().map(|(key, _)| *key).collect()
+        };
+        self.store.keep_seen_of(&paired);
     }
 
     /// A headset's name as it was paired.
@@ -707,11 +725,13 @@ impl Brain {
                 .map(|key| {
                     let access = wanted.access_of(key);
                     let session = self.sessions.get(key);
+                    let seen = self.store.last_seen(key);
                     api::Headset {
                         key: prostir_proto::secure::fingerprint(key),
                         name: trusted.label(key).unwrap_or_default().to_owned(),
                         model: session.map(|s| s.caps().model.clone()).unwrap_or_default(),
-                        last_seen: None,
+                        app: seen.map(|s| s.app.clone()).unwrap_or_default(),
+                        last_seen: seen.map(|s| s.at),
                         role: if access.is_main() {
                             api::Role::Main
                         } else {
@@ -725,13 +745,24 @@ impl Brain {
         };
         let (displays, primary) = match &self.displays {
             Some(d) => {
-                let part = d.displays_part(&pc_caps());
+                // As it is on the PC; what the leading headset cannot show, as it was
+                // told, failed (by its own decoders and streams, never by a stand-in).
+                let part = d.pc_view();
+                let lead_part = lead.map(|s| d.displays_part(s.caps()));
                 let list = part
                     .displays
                     .iter()
                     .map(|w| {
                         let output = d.output_of(ScreenId::from_wire(w.id));
-                        api_display(w, output.unwrap_or_default())
+                        let failed_there = lead_part
+                            .as_ref()
+                            .and_then(|p| p.get(w.id))
+                            .filter(|t| matches!(t.state, wire::DisplayState::Failed { .. }));
+                        let mut w = w.clone();
+                        if let Some(t) = failed_there {
+                            w.state = t.state.clone();
+                        }
+                        api_display(&w, output.unwrap_or_default())
                     })
                     .collect();
                 (list, part.primary.map(|p| p.0))
@@ -992,6 +1023,11 @@ fn settings_program() -> Option<std::path::PathBuf> {
 /// forward). Its process is waited for on a thread of its own, which sleeps until it
 /// closes.
 pub fn open_settings() -> Result<(), Failure> {
+    // A test build never opens a real window on the desktop the tests run on.
+    if cfg!(feature = "fake-desktop") {
+        info!("fake desktop: the settings window opens");
+        return Ok(());
+    }
     let missing = || {
         Failure::new(
             ApiError::Unsupported,
@@ -1062,6 +1098,21 @@ fn start_detached() -> std::io::Result<std::process::Child> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The log says what a request asks and with what, never a pairing code.
+    #[test]
+    fn the_log_says_what_was_asked() {
+        let sound = logged(&Request::SoundToHeadset { on: false });
+        assert!(sound.contains(r#""request":"sound_to_headset""#), "{sound}");
+        assert!(sound.contains(r#""on":false"#), "{sound}");
+        let code = logged(&Request::PairingCode {
+            code: "482913".into(),
+        });
+        assert!(
+            code.contains("pairing_code") && !code.contains("482913"),
+            "{code}"
+        );
+    }
 
     /// A command whose arguments the protocol does not carry is refused before it
     /// goes; the longest that fits goes.

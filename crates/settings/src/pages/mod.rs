@@ -41,6 +41,8 @@ pub enum Action {
     OpenFolder(PathBuf),
     CreateThemeFile(PathBuf),
     Dismiss,
+    /// Quit the whole program, as the tray's "Quit" does; the window closes with it.
+    QuitProstir,
 }
 
 /// What a page sees and where it puts what it wants.
@@ -229,8 +231,37 @@ fn percent(tk: &Tk<'_>, n: impl Into<Arg>) -> String {
     tk.f("percent", &[("n", n.into())])
 }
 
+/// `1920 × 1080`; nothing for a size not known (a display of the PC not seen yet).
 fn size(tk: &Tk<'_>, m: &Mode) -> String {
+    if m.w == 0 || m.h == 0 {
+        return String::new();
+    }
     tk.f("mon-size", &[("w", m.w.into()), ("h", m.h.into())])
+}
+
+/// `1920 × 1080, 125 %`; nothing for a size not known.
+fn size_scaled(tk: &Tk<'_>, m: &Mode) -> String {
+    if m.w == 0 || m.h == 0 {
+        return String::new();
+    }
+    tk.f(
+        "mon-size-scaled",
+        &[
+            ("w", m.w.into()),
+            ("h", m.h.into()),
+            ("scale", m.scale.into()),
+        ],
+    )
+}
+
+/// `text` as a sentence: a full stop after it unless it ends in one already.
+fn sentence(text: &str) -> String {
+    let text = text.trim();
+    if text.is_empty() || text.ends_with(['.', '!', '?', '…']) {
+        text.to_owned()
+    } else {
+        format!("{text}.")
+    }
 }
 
 /// How a display is named to a person.

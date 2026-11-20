@@ -17,6 +17,7 @@ mod requests;
 mod resize;
 mod saved;
 mod sound;
+mod start;
 mod window;
 
 use std::collections::BTreeMap;

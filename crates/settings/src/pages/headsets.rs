@@ -141,14 +141,7 @@ pub(super) fn kept_monitors(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
         text(ui, tk.t("mon-kept-desc"), tk.small(), p.text_muted);
         for d in kept {
             w::divider(ui, tk);
-            let desc = tk.f(
-                "mon-size-scaled",
-                &[
-                    ("w", d.mode.w.into()),
-                    ("h", d.mode.h.into()),
-                    ("scale", d.mode.scale.into()),
-                ],
-            );
+            let desc = size_scaled(tk, &d.mode);
             w::row(ui, tk, &display_name(tk, d), Some(&desc), |ui| {
                 let named = tk.f("mon-remove-named", &[("name", (&d.name).into())]);
                 if w::button_named(ui, tk, &tk.t("mon-remove"), &named, Kind::Danger, true)
@@ -281,6 +274,16 @@ pub(super) fn headsets(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
                                 };
                                 text(ui, when, tk.small(), p.text_muted);
                             }
+                            // Two apps on one headset (a release and a test build) are
+                            // two headsets of one name: the app and the key tell them
+                            // apart.
+                            let key = ("key", Arg::from(&h.key));
+                            let which = if h.app.is_empty() {
+                                tk.f("hs-key", &[key])
+                            } else {
+                                tk.f("hs-app", &[("app", (&h.app).into()), key])
+                            };
+                            text(ui, which, tk.small(), p.text_muted);
                         });
                     },
                 );

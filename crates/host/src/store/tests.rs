@@ -411,3 +411,32 @@ fn moving_over_and_broken_files() {
     store.close();
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// When each paired headset was last seen, with its app, is kept between runs;
+/// a forgotten headset's goes, and lines that cannot be read are left out.
+#[test]
+fn when_each_headset_was_seen_is_kept() {
+    let dir = temp_dir("seen");
+    let (a, b) = ([0xa1; 32], [0xb2; 32]);
+    let mut store = Store::open(Some(dir.clone()), Run::default());
+    assert_eq!(store.last_seen(&a), None);
+    store.headset_seen(&a, 100, Some("0.2.0-dev+p6"));
+    store.headset_seen(&b, 200, None);
+    store.headset_seen(&a, 300, None);
+    store.close();
+    let mut store = Store::open(Some(dir.clone()), Run::default());
+    let seen = |at, app: &str| Seen {
+        at,
+        app: app.into(),
+    };
+    assert_eq!(store.last_seen(&a), Some(&seen(300, "0.2.0-dev+p6")));
+    assert_eq!(store.last_seen(&b), Some(&seen(200, "")));
+    store.keep_seen_of(&[a]);
+    assert_eq!(store.last_seen(&b), None);
+    store.close();
+    let text = std::fs::read_to_string(dir.join("headsets.txt")).unwrap();
+    assert_eq!(text, format!("seen {} 300 0.2.0-dev+p6\n", hex(&a)));
+    let odd = format!("seen nothex 1\nseen {} soon\nwhatever\n", hex(&a));
+    assert!(parse_seen_headsets(&odd).is_empty());
+    let _ = std::fs::remove_dir_all(dir);
+}

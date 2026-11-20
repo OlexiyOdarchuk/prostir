@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use eframe::egui;
 use prostir_settings::api::Client;
+use prostir_settings::app::CloseNote;
 use prostir_settings::app::start_prostir;
 use prostir_settings::instance::{self, Start};
 use prostir_settings::mock::Mock;
@@ -31,6 +32,10 @@ impl eframe::App for Timed {
 }
 
 fn main() -> eframe::Result {
+    if prostir_settings::asks_version(std::env::args().skip(1)) {
+        println!("{}", prostir_settings::version_line());
+        return Ok(());
+    }
     let started = Instant::now();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     let mock = std::env::args().any(|a| a == "--mock")
@@ -62,6 +67,23 @@ fn main() -> eframe::Result {
         }
     }
     let system = SystemScheme::default();
+    // The note the first time the window closes while Prostir runs on, as a desktop
+    // notification; remembered next to the window's theme file.
+    let close_note = match (&bus, mock) {
+        (Ok(conn), false) => {
+            let conn = conn.clone();
+            let shown = theme::user_path().with_file_name("window-closed-note");
+            Some(CloseNote {
+                shown,
+                notify: Box::new(move |summary, body| {
+                    dbus::notify(&conn, summary, body)
+                        .inspect_err(|e| log::warn!("no desktop notification: {e}"))
+                        .is_ok()
+                }),
+            })
+        }
+        _ => None,
+    };
     let (client, start): (Box<dyn Client>, prostir_settings::app::Starter) = if mock {
         let m = Mock::connected().live();
         let handle = m.handle();
@@ -112,6 +134,7 @@ fn main() -> eframe::Result {
                     system,
                     start,
                     presented,
+                    close_note,
                 },
             );
             Ok(Box::new(Timed {

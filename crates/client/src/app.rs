@@ -37,7 +37,7 @@ use crate::profiles::{self, Profile};
 use crate::settings::{Background, HandMode, Settings};
 use crate::ui::{self, Action, MonitorEntry, Panel, Tab, UiState};
 use crate::xrutil::{self, Gfx, ImageLayer, as_layer, pose, posef, vec3};
-use crate::{background, decoder, egl, net, passthrough};
+use crate::{background, decoder, egl, net, passthrough, physical};
 
 /// The keyboard window's depth as a share of its width (a keyboard's shape).
 const KEYBOARD_ASPECT: f32 = 0.44;
@@ -518,29 +518,21 @@ impl Scene {
         matches!(self.kind(id), Some(DisplayKind::Window { .. }))
     }
 
-    /// The display of the PC itself shown in the headset (the laptop screen), if one is.
+    /// The display of the PC itself shown in the headset, if one is (see
+    /// [`physical::mirror`]).
     fn mirror_id(&self) -> Option<ScreenId> {
-        self.pc
-            .displays
-            .as_ref()?
-            .displays
-            .iter()
-            .find(|d| d.is_shown_physical())
-            .map(|d| d.id.0)
+        physical::mirror(self.pc.displays.as_ref()?)
     }
 
-    /// The display of the PC itself the "laptop screen" switch shows or hides: the one
-    /// shown, else the laptop's own panel, else the first one.
+    /// The display of the PC itself the switch shows or hides: one connected now,
+    /// never a closed laptop's panel (see [`physical::switch`]).
     fn physical_id(&self) -> Option<ScreenId> {
-        let displays = &self.pc.displays.as_ref()?.displays;
-        let physical = || displays.iter().filter(|d| d.is_physical());
-        self.mirror_id()
-            .or_else(|| {
-                physical()
-                    .find(|d| matches!(d.kind, DisplayKind::Physical { builtin: true, .. }))
-                    .map(|d| d.id.0)
-            })
-            .or_else(|| physical().next().map(|d| d.id.0))
+        physical::switch(self.pc.displays.as_ref()?).map(|d| d.id.0)
+    }
+
+    /// What the switch's display is called, if a display of the PC is connected.
+    fn physical_name(&self) -> Option<String> {
+        physical::switch(self.pc.displays.as_ref()?).map(|d| physical::label(d, self.lang()))
     }
 
     /// Quest monitors left to right: in the host's order, unknown ones at the end.
@@ -1837,9 +1829,7 @@ impl Scene {
             audio_wanted: self.audio_wanted,
             mic_wanted: self.mic_wanted,
             mic_denied: self.mic_wanted && crate::mic::denied(),
-            mirror_active: self
-                .mirror_id()
-                .is_some_and(|id| self.monitors.contains_key(&id)),
+            mirror_name: self.physical_name(),
             settings: self.settings,
             room_available: room,
             panorama_available: panorama,
@@ -3637,10 +3627,16 @@ fn displays_changed(scene: &mut Scene, before: Option<&state::Displays>) {
         .map(|d| d.id.0)
         .collect();
     let primary = displays.primary.map(|p| p.0);
-    scene.mirror_wanted = displays
-        .displays
-        .iter()
-        .any(state::Display::is_shown_physical);
+    // As the switch says: its display shown; with none connected, any one kept shown.
+    scene.mirror_wanted = physical::switch(&displays).map_or_else(
+        || {
+            displays
+                .displays
+                .iter()
+                .any(state::Display::is_shown_physical)
+        },
+        state::Display::is_shown_physical,
+    );
     for id in &gone {
         scene.placements.remove(id);
         scene.monitors.remove(id);

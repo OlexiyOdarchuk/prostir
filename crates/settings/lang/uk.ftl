@@ -10,6 +10,9 @@ nav-headsets = Шоломи
 nav-sound = Звук
 nav-quality = Якість
 nav-look = Вигляд
+quit-prostir = Вийти з Prostir
+close-note-title = Prostir працює далі
+close-note = Prostir працює далі у треї. Відкрити знову: значок Prostir у меню або в треї.
 nav-first-run = Перший запуск
 
 ## Рядок стану під сторінками
@@ -137,7 +140,9 @@ hs-title = Шоломи
 hs-sub = Шоломи, яким цей ПК довіряє. Новому шолому код потрібен лише раз.
 hs-now = Підключено зараз
 hs-last = Востаннє { $when }
-hs-never = Ще не підключався
+hs-never = Востаннє: невідомо
+hs-app = Prostir { $app }, ключ { $key }
+hs-key = Ключ { $key }
 ago-now = щойно
 ago-minutes = { $n } хв тому
 ago-hours = { $n } год тому

@@ -122,15 +122,10 @@ pub(super) fn selected_monitor(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
         name = format!("{name} ({})", d.output);
     }
     text(ui, name, tk.heading(), p.text);
-    let line = tk.f(
-        "mon-size-scaled",
-        &[
-            ("w", d.mode.w.into()),
-            ("h", d.mode.h.into()),
-            ("scale", d.mode.scale.into()),
-        ],
-    );
-    text(ui, line, tk.small(), p.text_muted);
+    let line = size_scaled(tk, &d.mode);
+    if !line.is_empty() {
+        text(ui, line, tk.small(), p.text_muted);
+    }
     if let (DisplayState::Failed, Some(f)) = (d.state, &d.failure) {
         ui.add_space(tk.th.shape.spacing);
         w::status(

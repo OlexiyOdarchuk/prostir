@@ -718,7 +718,7 @@ pub mod autostart {
 /// A tray without an icon: a test "clicks" its items by writing their names, one a
 /// line, to `$XDG_RUNTIME_DIR/fake-tray` (`forget`, `recenter`, `settings`, `pair`,
 /// `pair stop`, `autostart on`, `autostart off`, `quit`, `sharp on`, `sharp off`,
-/// `quality 15`, `quality 50`), which is
+/// `quality 15`, `quality 50`; `activate`: a click on the icon itself), which is
 /// read and removed once written.
 pub mod tray {
     use crate::events::EventSink;
@@ -736,6 +736,8 @@ pub mod tray {
                         prostir_proto::request::Command::Recenter,
                     )),
                     "settings" => TrayCommand::ShowSettings,
+                    // A click on the icon itself.
+                    "activate" => TrayCommand::clicked(),
                     "pair" => TrayCommand::PairNewHeadset,
                     "pair stop" => TrayCommand::StopPairing,
                     "quit" => TrayCommand::Quit,

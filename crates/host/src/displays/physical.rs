@@ -31,9 +31,14 @@ impl Displays {
             };
             present.push(id);
             if let Some(s) = self.screens.get_mut(&id)
-                && let ScreenKind::Physical { key, label, .. } = &mut s.kind
+                && let ScreenKind::Physical {
+                    key, label, size, ..
+                } = &mut s.kind
             {
                 label.clone_from(&display.label);
+                if display.size.is_some() {
+                    *size = display.size;
+                }
                 if key.connector != display.key.as_str() {
                     info!("{id} is on {} now", display.key);
                     key.connector = display.key.to_string();
@@ -163,6 +168,7 @@ impl Displays {
             label: display.label.clone(),
             builtin: display.builtin,
             shown,
+            size: display.size,
         };
         self.screens.insert(id, Screen::starting(id, 0, kind));
         id
@@ -191,11 +197,13 @@ impl Displays {
     }
 
     /// Shows or hides display `id` of the PC in the headset, with at most `max` of them
-    /// shown.
+    /// shown among those connected: one not connected (a closed laptop's panel) shows
+    /// nothing, so it counts for none.
     pub fn show_physical(&mut self, id: ScreenId, show: bool, max: usize) -> Result<()> {
         let others = self
             .physical()
             .filter(|s| s.id != id && s.is_shown_physical())
+            .filter(|s| !matches!(s.state, ScreenState::Absent))
             .count();
         let Some(ScreenKind::Physical { shown, .. }) =
             self.screens.get_mut(&id).map(|s| &mut s.kind)
@@ -295,4 +303,13 @@ pub(super) fn least_recently_seen(mut absent: Vec<(ScreenId, u64)>, keep: usize)
     // The most recent first; of the same moment, the newer number.
     absent.sort_by(|a, b| b.1.cmp(&a.1).then(b.0.cmp(&a.0)));
     absent.into_iter().skip(keep).map(|(id, _)| id).collect()
+}
+
+impl Displays {
+    /// Whether `id` is a display of the PC itself connected now.
+    pub fn is_connected_physical(&self, id: ScreenId) -> bool {
+        self.screens
+            .get(&id)
+            .is_some_and(|s| s.is_physical() && !matches!(s.state, ScreenState::Absent))
+    }
 }

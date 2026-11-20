@@ -48,7 +48,12 @@ pub(super) fn overview(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
                     if let Some(d) = failed {
                         hero(ui, tk, Some(p.danger), &tk.t("ov-failed-title"));
                         ui.add_space(6.0);
-                        let reason = d.failure.as_ref().map_or("", |f| f.text.trim());
+                        // A sentence of its own before "The other monitors work."
+                        let reason = d
+                            .failure
+                            .as_ref()
+                            .map_or(String::new(), |f| sentence(&f.text));
+                        let reason = reason.as_str();
                         let id = if reason.is_empty() {
                             "ov-failed-no-reason"
                         } else {
@@ -188,7 +193,8 @@ pub(super) fn overview(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
                 _ => (p.ok, "state-streaming"),
             };
             let desc = size(tk, &d.mode);
-            w::row(ui, tk, &display_name(tk, d), Some(&desc), |ui| {
+            let desc = (!desc.is_empty()).then_some(desc);
+            w::row(ui, tk, &display_name(tk, d), desc.as_deref(), |ui| {
                 text(ui, tk.t(state), tk.body(), p.text);
                 let (r, _) = ui.allocate_exact_size(vec2(12.0, 20.0), Sense::hover());
                 w::dot(ui, tk, r.center(), c);
@@ -245,9 +251,10 @@ pub(super) fn tiles(
     s.displays
         .iter()
         .filter_map(|d| {
+            // Every display on the desktop: one kept for the next headset is not, nor
+            // one of the PC that is not connected (neither has a place there).
             let r = d.desk?;
-            let elsewhere = matches!(d.state, DisplayState::Failed | DisplayState::Kept);
-            if elsewhere || r.w == 0 || r.h == 0 {
+            if d.state == DisplayState::Kept || r.w == 0 || r.h == 0 {
                 return None;
             }
             let mut rect = snap::Rect {
@@ -267,7 +274,9 @@ pub(super) fn tiles(
                 size: size(tk, &d.mode),
                 rect,
                 pc: d.kind == DisplayKind::Physical,
-                shown: d.kind != DisplayKind::Physical || d.shown,
+                // Dimmed: hidden from the headset, or not streaming to it.
+                shown: (d.kind != DisplayKind::Physical || d.shown)
+                    && d.state != DisplayState::Failed,
                 main: s.primary == Some(d.id),
             })
         })
