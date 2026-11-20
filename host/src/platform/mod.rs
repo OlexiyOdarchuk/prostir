@@ -133,6 +133,27 @@ impl std::fmt::Display for MonitorSpec {
     }
 }
 
+/// A display of the PC itself, connected now.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PhysicalDisplay {
+    /// The connector it is on: `eDP-1`, `HDMI-A-1`.
+    pub connector: String,
+    /// Maker, model and serial number as the display says them (its EDID), as far as
+    /// the desktop tells; none when it says nothing.
+    pub edid: Option<String>,
+    /// The laptop's own panel.
+    pub builtin: bool,
+    /// Its picture in pixels, when known.
+    pub size: Option<(u32, u32)>,
+}
+
+/// Whether a connector is a laptop's own panel.
+pub fn is_panel(connector: &str) -> bool {
+    ["eDP", "LVDS", "DSI"]
+        .iter()
+        .any(|p| connector.starts_with(p))
+}
+
 /// The window that has the keyboard, as found when asked.
 #[derive(Debug, Clone)]
 pub struct ActiveWindow {
@@ -219,8 +240,14 @@ pub trait DesktopBackend: Sized {
     /// A new virtual monitor, number `number` (1-based).
     fn create(&self, number: u32, spec: &MonitorSpec) -> Result<Output>;
 
-    /// The real display to mirror (the laptop panel), if one is on.
+    /// The display of the PC itself to show in the headset when nothing else was
+    /// chosen for it, if one is on (an external monitor before the laptop panel on
+    /// Hyprland, never the panel of a closed laptop).
     fn physical_output(&self) -> Option<String>;
+
+    /// The displays of the PC itself connected and on now (a closed laptop's panel is
+    /// not).
+    fn physical_displays(&self) -> Vec<PhysicalDisplay>;
 
     /// No real display to mirror although one should be there (a laptop panel left
     /// off after the lid was opened): switch it on, if the desktop needs that.

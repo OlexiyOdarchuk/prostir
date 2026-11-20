@@ -100,7 +100,9 @@ fn a_monitor_that_cannot_start_stays_in_the_set() {
     assert_eq!(headset.view().order(), ids([0, 1]));
 }
 
-/// Monitors keep their numbers between runs, so the headset finds each where it was.
+/// Monitors keep their numbers between runs, so the headset finds each where it was;
+/// a new one gets a number never given before (from 101: above what earlier versions
+/// gave out), also after a restart, while its output takes the lowest free name.
 #[test]
 fn monitors_keep_their_numbers_after_a_restart() {
     let (dir, pc, mut keys, mut headset) = session("numbers", &Options::default());
@@ -109,25 +111,46 @@ fn monitors_keep_their_numbers_after_a_restart() {
             mode: Mode::new(800, 450),
         })
         .unwrap();
-    assert_eq!(added, Outcome::Added { id: DisplayId(2) });
+    assert_eq!(added, Outcome::Added { id: DisplayId(101) });
+    let named = |headset: &prostir_testkit::FakeHeadset, id| {
+        headset.view().display(DisplayId(id)).unwrap().name.clone()
+    };
+    assert_eq!(named(&headset, 101), "Prostir-3");
     let removed = headset
         .ask(Request::RemoveDisplay { id: DisplayId(0) })
         .unwrap();
     assert_eq!(removed, Outcome::Done);
-    assert_eq!(headset.view().order(), ids([1, 2]));
+    assert_eq!(headset.view().order(), ids([1, 101]));
     // Written off the main loop within a pass.
     headset.take_for(Duration::from_millis(500)).unwrap();
     headset.disconnect();
     pc.quit();
-    assert_eq!(saved_numbers(&dir), [1, 2]);
+    assert_eq!(saved_numbers(&dir), [1, 101]);
 
     let pc = Pc::start(&dir, &Options::default());
     let mut headset = connect(&pc, &mut keys);
     headset
         .wait(START, "every monitor showing", View::all_monitors_show)
         .unwrap();
-    assert_eq!(headset.view().order(), ids([1, 2]), "the same numbers");
-    assert_eq!(headset.view().streams[&DisplayId(2)].width, 800);
+    assert_eq!(headset.view().order(), ids([1, 101]), "the same numbers");
+    assert_eq!(headset.view().streams[&DisplayId(101)].width, 800);
+    // Never a number given before the restart: the next block.
+    let again = headset
+        .ask(Request::AddDisplay {
+            mode: Mode::new(640, 360),
+        })
+        .unwrap();
+    let Outcome::Added { id } = again else {
+        panic!("a monitor, not {again:?}")
+    };
+    assert_eq!(
+        id,
+        DisplayId(117),
+        "after the block reserved before the restart"
+    );
+    // The lowest free name (monitor 1 keeps Prostir-2 as before the counter, 101 took
+    // the lowest free one at the start).
+    assert_eq!(named(&headset, 117), "Prostir-3");
 }
 
 /// Two rows from the headset reach the desktop (one monitor over the other), and a
@@ -214,4 +237,102 @@ fn killed_mid_change_leaves_readable_files() {
     assert_eq!(headset.view().order().len(), 2);
     assert_eq!(pc.count_log("screens.txt.bad"), 0);
     pc.wait_log(SOON, "fake desktop: placed");
+}
+
+/// A display of the PC unplugged (the lid closed) stays in the list as absent, with
+/// its number, and comes back with it when plugged in again; it has its place on the
+/// desktop, shown or not.
+#[test]
+fn a_display_of_the_pc_comes_back_with_its_number() {
+    let options = Options {
+        physical: "eDP-1=BOE 0x0a1c 0@1920x1080;HDMI-A-1=@1280x720".into(),
+        ..Options::default()
+    };
+    let dir = TestDir::new("physical");
+    // The laptop screen wanted, as 0.1 said it.
+    dir.save_monitors("row\n640x360\nmirror on\n");
+    let mut keys = dir.pair();
+    let pc = Pc::start(&dir, &options);
+    let mut headset = connect(&pc, &mut keys);
+    use prostir_proto::state::{DisplayKind, DisplayState};
+    let physical = |v: &View| -> Vec<prostir_proto::state::Display> {
+        v.displays()
+            .iter()
+            .filter(|d| d.is_physical())
+            .cloned()
+            .collect()
+    };
+    headset
+        .wait(SOON, "the PC's displays, the external one shown", |v| {
+            let p = physical(v);
+            p.len() == 2
+                && p.iter().all(|d| d.desk.is_some())
+                && p.iter().any(|d| {
+                    d.is_shown_physical() && v.streams.get(&d.id).is_some_and(|s| s.has_picture())
+                })
+        })
+        .unwrap();
+    let all = physical(headset.view());
+    let hdmi = all
+        .iter()
+        .find(|d| matches!(&d.kind, DisplayKind::Physical { connector, .. } if connector == "HDMI-A-1"))
+        .unwrap()
+        .id;
+    let laptop = all.iter().find(|d| d.id != hdmi).unwrap().id;
+    assert!(
+        matches!(
+            &headset.view().display(laptop).unwrap().kind,
+            DisplayKind::Physical {
+                builtin: true,
+                shown: false,
+                ..
+            }
+        ),
+        "an external display is the one shown first"
+    );
+    assert!(hdmi.0 >= 101 && laptop.0 >= 101);
+
+    pc.desktop("unplug HDMI-A-1");
+    headset
+        .wait(SOON, "the display absent, its stream ended", |v| {
+            v.display(hdmi)
+                .is_some_and(|d| d.state == DisplayState::Absent && d.desk.is_none())
+                && v.ended.contains(&hdmi)
+        })
+        .unwrap();
+    assert!(headset.view().removed.is_empty(), "still in the list");
+    pc.desktop("plug HDMI-A-1");
+    headset
+        .wait(SOON, "the same display back, streaming", |v| {
+            v.display(hdmi)
+                .is_some_and(|d| d.state == DisplayState::Running)
+                && v.streams.get(&hdmi).is_some_and(|s| s.has_picture())
+        })
+        .unwrap();
+    // Kept with its numbers for the next run.
+    headset.take_for(Duration::from_millis(500)).unwrap();
+    headset.disconnect();
+    pc.quit();
+    let screens = dir.saved("screens.txt");
+    assert!(
+        screens.contains(&format!("physical {} connector HDMI-A-1 shown", hdmi.0)),
+        "{screens}"
+    );
+    assert!(
+        screens.contains(&format!(
+            "physical {} edid \"BOE 0x0a1c 0\" connector eDP-1 builtin\n",
+            laptop.0
+        )),
+        "{screens}"
+    );
+    let pc = Pc::start(&dir, &options);
+    let mut headset = connect(&pc, &mut keys);
+    headset
+        .wait(START, "every monitor showing", View::all_monitors_show)
+        .unwrap();
+    let again: Vec<DisplayId> = physical(headset.view()).iter().map(|d| d.id).collect();
+    assert!(
+        again.contains(&hdmi) && again.contains(&laptop),
+        "{again:?}"
+    );
 }

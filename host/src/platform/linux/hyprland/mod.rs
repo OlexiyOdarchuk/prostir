@@ -20,7 +20,7 @@ use anyhow::{Context, Result, bail};
 use log::{info, warn};
 use serde_json::Value;
 
-use crate::platform::{Geometry, MonitorSpec};
+use crate::platform::{Geometry, MonitorSpec, PhysicalDisplay, is_panel};
 
 /// Names of Prostir's outputs; anything else is a real display.
 pub const PREFIX: &str = "Prostir-";
@@ -72,11 +72,22 @@ pub struct Monitor {
     pub scale: f64,
     pub focused: bool,
     pub disabled: bool,
+    /// What the display says it is (its EDID), each empty when it says nothing.
+    pub make: String,
+    pub model: String,
+    pub serial: String,
 }
 
 impl Monitor {
     fn from_json(v: &Value) -> Option<Self> {
         let int = |k: &str| v.get(k)?.as_i64().map(|n| n as i32);
+        let text = |k: &str| {
+            v.get(k)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_owned()
+        };
         Some(Self {
             name: v.get("name")?.as_str()?.to_owned(),
             width: int("width")?,
@@ -87,6 +98,9 @@ impl Monitor {
             scale: v.get("scale").and_then(Value::as_f64).unwrap_or(1.0),
             focused: v.get("focused").and_then(Value::as_bool).unwrap_or(false),
             disabled: v.get("disabled").and_then(Value::as_bool).unwrap_or(false),
+            make: text("make"),
+            model: text("model"),
+            serial: text("serial"),
         })
     }
 
@@ -151,19 +165,40 @@ pub fn physical_output() -> Option<String> {
 }
 
 fn pick_physical(monitors: &[Monitor], lid_open: bool) -> Option<String> {
-    let mut names: Vec<&str> = monitors
-        .iter()
-        // HEADLESS-N: virtual outputs of other tools (Sunshine, wayvnc), not displays.
-        .filter(|m| !m.disabled && !m.name.starts_with(PREFIX) && !m.name.starts_with("HEADLESS-"))
-        .map(|m| m.name.as_str())
-        .filter(|n| lid_open || !is_panel(n))
-        .collect();
+    let mut names: Vec<&str> = real(monitors, lid_open).map(|m| m.name.as_str()).collect();
     names.sort_by_key(|n| (is_panel(n), *n));
     names.first().map(|n| (*n).to_owned())
 }
 
-fn is_panel(name: &str) -> bool {
-    ["eDP", "LVDS", "DSI"].iter().any(|p| name.starts_with(p))
+/// The displays of the PC itself that are on: not Prostir's or other tools' virtual
+/// outputs, nor the panel of a closed laptop.
+fn real(monitors: &[Monitor], lid_open: bool) -> impl Iterator<Item = &Monitor> {
+    monitors
+        .iter()
+        // HEADLESS-N: virtual outputs of other tools (Sunshine, wayvnc), not displays.
+        .filter(|m| !m.disabled && !m.name.starts_with(PREFIX) && !m.name.starts_with("HEADLESS-"))
+        .filter(move |m| lid_open || !is_panel(&m.name))
+}
+
+/// The displays of the PC itself connected and on now.
+pub fn physical_displays() -> Vec<PhysicalDisplay> {
+    real(&monitors(), crate::platform::linux::system::lid_open())
+        .map(|m| {
+            let said: Vec<&str> = [&m.make, &m.model, &m.serial]
+                .into_iter()
+                .map(String::as_str)
+                .filter(|w| !w.is_empty())
+                .collect();
+            PhysicalDisplay {
+                connector: m.name.clone(),
+                edid: (!said.is_empty()).then(|| said.join(" ")),
+                builtin: is_panel(&m.name),
+                size: u32::try_from(m.width)
+                    .ok()
+                    .zip(u32::try_from(m.height).ok()),
+            }
+        })
+        .collect()
 }
 
 /// A monitor rule: mode, logical position and scale of one output.
@@ -570,6 +605,9 @@ mod tests {
             scale: 1.0,
             focused: false,
             disabled: false,
+            make: String::new(),
+            model: String::new(),
+            serial: String::new(),
         };
         let rule = |name: &str, x, y| Rule {
             name: name.into(),

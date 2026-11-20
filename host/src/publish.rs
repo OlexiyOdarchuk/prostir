@@ -54,13 +54,16 @@ pub struct Sources<'a> {
 /// told so far.
 pub struct Publisher {
     pub headset: HeadsetState,
+    /// This headset's role and rights (see `settings.txt`).
+    pub access: Access,
     sent: PcState,
 }
 
 impl Publisher {
-    pub fn new(headset: HeadsetState) -> Self {
+    pub fn new(headset: HeadsetState, access: Access) -> Self {
         Self {
             headset,
+            access,
             sent: PcState::default(),
         }
     }
@@ -96,7 +99,7 @@ impl Publisher {
         PcState {
             info: Some(pc_info(src.displays)),
             caps: Some(host_caps(src.displays)),
-            access: Some(Access::MAIN),
+            access: Some(self.access),
             limits: Some(limits(&prefs, headset, src.displays.codec())),
             encoding: Some(src.displays.encoding_part(src.wanted, headset)),
             sound: Some(src.displays.sound_part()),

@@ -8,23 +8,18 @@ use prostir_proto::state::DisplayId;
 use crate::encoder::Encoder;
 use crate::platform::{ActiveWindow, MonitorSpec, Output, OutputBackend};
 
-/// The PC's key for a screen: in its set, its rows and its saved files. A virtual
-/// monitor keeps its number between runs, so the headset finds it where it was.
+/// The PC's key for a screen: in its set, its rows and its saved files. Numbers come
+/// from a counter that never goes back (see `Store::new_id`), so a number is never
+/// another screen's: a virtual monitor and a display of the PC keep theirs between
+/// runs, and the headset finds each where it was.
 ///
 /// The protocol's [`DisplayId`] is the same number, so [`ScreenId::wire`] and
-/// [`ScreenId::from_wire`] are the only places they cross. For now virtual monitors
-/// have `0..`, window panels `10..13` and the laptop screen `100`.
+/// [`ScreenId::from_wire`] are the only places they cross.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ScreenId(u32);
 
-/// Numbers of window panels, given out for one session.
-const PANELS: std::ops::Range<u32> = 10..13;
-
 impl ScreenId {
-    /// The laptop screen (the physical display streamed as it is).
-    pub const BUILTIN: Self = Self(100);
-
-    /// A virtual monitor's number as saved (`0..`).
+    /// A screen's number as saved.
     pub fn saved(n: u32) -> Self {
         Self(n)
     }
@@ -32,19 +27,6 @@ impl ScreenId {
     /// The number saved for it.
     pub fn number(self) -> u32 {
         self.0
-    }
-
-    /// The lowest number for a new virtual monitor that none of `taken` has.
-    pub fn first_free(taken: impl Fn(Self) -> bool) -> Self {
-        (0..)
-            .map(Self)
-            .find(|id| !taken(*id) && !Self::panels().any(|p| p == *id) && *id != Self::BUILTIN)
-            .expect("fewer screens than numbers")
-    }
-
-    /// Numbers of window panels, given out for one session.
-    pub fn panels() -> impl Iterator<Item = Self> {
-        PANELS.map(Self)
     }
 
     /// The display in protocol messages.
@@ -56,20 +38,11 @@ impl ScreenId {
     pub fn from_wire(id: DisplayId) -> Self {
         Self(id.0)
     }
-
-    /// The name the screen's output and stream go by: `Prostir-N` from 1.
-    pub fn name(self) -> String {
-        if self == Self::BUILTIN {
-            "mirror".into()
-        } else {
-            format!("Prostir-{}", self.0 + 1)
-        }
-    }
 }
 
 impl std::fmt::Display for ScreenId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.name())
+        write!(f, "screen {}", self.0)
     }
 }
 
@@ -84,8 +57,13 @@ pub enum ScreenKind {
         origin: ActiveWindow,
         spec: MonitorSpec,
     },
-    /// A real display streamed as it is (`builtin`: the laptop's own panel).
-    Physical { connector: String, builtin: bool },
+    /// A display of the PC itself (`builtin`: the laptop's own panel), streamed as it
+    /// is while `shown`; `key` is how it is told from others.
+    Physical {
+        key: crate::store::PhysicalKey,
+        builtin: bool,
+        shown: bool,
+    },
 }
 
 impl ScreenKind {
@@ -109,12 +87,19 @@ pub enum ScreenState {
     Failed {
         why: String,
     },
+    /// A display of the PC that is not connected now (the lid closed, the cable out):
+    /// it keeps its number and its place.
+    Absent,
 }
 
 /// A screen: what it is, its output on the desktop and the encoder streaming it.
 pub struct Screen {
     pub id: ScreenId,
     pub kind: ScreenKind,
+    /// The number its output goes by (`Prostir-N`): the lowest free one when it was
+    /// made, so the names do not grow and KScreen finds the outputs it remembers. A
+    /// display of the PC has one while it streams.
+    pub number: u32,
     // Field order matters: the encoder stops before the output goes away.
     pub stream: Option<Encoder>,
     pub output: Option<Output>,
@@ -124,23 +109,12 @@ pub struct Screen {
 }
 
 impl Screen {
-    /// A screen streaming `output` with `stream`.
-    pub fn streaming(id: ScreenId, kind: ScreenKind, output: Output, stream: Encoder) -> Self {
-        Self {
-            id,
-            kind,
-            stream: Some(stream),
-            output: Some(output),
-            state: ScreenState::Running,
-            size_guard: SizeGuard::default(),
-        }
-    }
-
     /// A screen still to be made.
-    pub fn starting(id: ScreenId, kind: ScreenKind) -> Self {
+    pub fn starting(id: ScreenId, number: u32, kind: ScreenKind) -> Self {
         Self {
             id,
             kind,
+            number,
             stream: None,
             output: None,
             state: ScreenState::Starting,
@@ -165,8 +139,22 @@ impl Screen {
         matches!(self.kind, ScreenKind::Window { .. })
     }
 
-    pub fn is_builtin(&self) -> bool {
-        matches!(self.kind, ScreenKind::Physical { builtin: true, .. })
+    pub fn is_physical(&self) -> bool {
+        matches!(self.kind, ScreenKind::Physical { .. })
+    }
+
+    /// A display of the PC the headset is to show.
+    pub fn is_shown_physical(&self) -> bool {
+        matches!(self.kind, ScreenKind::Physical { shown: true, .. })
+    }
+
+    /// The name its output and stream go by: `Prostir-N`, or the connector of a
+    /// display of the PC.
+    pub fn name(&self) -> String {
+        match &self.kind {
+            ScreenKind::Physical { key, .. } => key.connector.clone(),
+            _ => format!("Prostir-{}", self.number),
+        }
     }
 }
 
@@ -247,22 +235,12 @@ impl SizeGuard {
 mod tests {
     use super::*;
 
-    /// The numbers are the protocol's: virtual monitors from 0, never a panel's or the
-    /// laptop screen's.
+    /// The numbers are the protocol's.
     #[test]
     fn numbers_are_the_protocols() {
-        assert_eq!(ScreenId::BUILTIN.wire(), DisplayId(100));
         let id = |n| ScreenId::from_wire(DisplayId(n));
         assert_eq!(id(3).wire(), DisplayId(3));
-        let taken = [0, 1, 3].map(id);
-        assert_eq!(ScreenId::first_free(|i| taken.contains(&i)), id(2));
-        let ten: Vec<ScreenId> = (0..10).map(id).collect();
-        assert_eq!(
-            ScreenId::first_free(|i| ten.contains(&i)),
-            id(13),
-            "past the window panels"
-        );
-        assert_eq!(id(0).name(), "Prostir-1");
+        assert_eq!(id(70_000).number(), 70_000);
     }
 
     const SHRUNK: Option<(u32, u32)> = Some((320, 240));

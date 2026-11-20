@@ -250,7 +250,7 @@ fn serve_client(
     let via = via_name(peer.via);
     // What the headset said about itself; without it there is no session.
     let headset = HeadsetState::from_open(&open).context("the headset's Open")?;
-    let mut publisher = publish::Publisher::new(headset);
+    let mut publisher = publish::Publisher::new(headset, store.wanted().access_of(&peer.key));
     displays.fit_codec(publisher.caps());
     let outbox = Arc::new(outbox::Outbox::default());
     // The session opens now that it can be served: the monitors exist, and the writer
@@ -424,7 +424,9 @@ fn serve_client(
                 break (Ok(()), Some(reason));
             }
             control.show(Some(via), Some(displays), store);
-            displays.tick();
+            displays.tick(&mut || store.new_id());
+            // A display of the PC seen for the first time is kept.
+            keep_screens(store, displays, false);
             if displays.taken_off_for() >= Some(TAKEN_OFF_GRACE) {
                 info!("headset taken off");
                 break (Ok(()), Some(PcGoodbye::TakenOff));
@@ -682,7 +684,7 @@ fn spawn_adb_reverse(port: u16) {
         });
 }
 
-fn create_displays(args: &Args, store: &Store) -> Result<Displays> {
+fn create_displays(args: &Args, store: &mut Store) -> Result<Displays> {
     let wanted = store.wanted();
     let (backend, codec) = encoder::pick(wanted.codec, wanted.software)?;
     info!("encoding with {backend:?} {codec:?}");
@@ -692,7 +694,12 @@ fn create_displays(args: &Args, store: &Store) -> Result<Displays> {
         backend,
         sharp: wanted.sharp,
     };
-    Displays::create(store.screens(), &wanted, cfg, !args.keep_primary)
+    let set = store.screens().clone();
+    let displays = Displays::create(&set, &wanted, cfg, !args.keep_primary, &mut || {
+        store.new_id()
+    })?;
+    keep_screens(store, &displays, false);
+    Ok(displays)
 }
 
 /// The headset's battery is low: say so on the PC, where the user is looking.
@@ -794,7 +801,7 @@ fn main() -> Result<()> {
                     displays = None;
                 }
                 if displays.is_none() {
-                    match create_displays(&args, &store) {
+                    match create_displays(&args, &mut store) {
                         Ok(d) => displays = Some(d),
                         Err(e) => {
                             error!("{e:#}");

@@ -97,6 +97,8 @@ pub struct Options {
     pub typed_code: Option<String>,
     /// Monitors (by number, from 1) the fake desktop cannot make.
     pub broken_monitors: String,
+    /// The fake PC's own displays (`PROSTIR_FAKE_PHYSICAL`: `eDP-1=EDID@1920x1080;…`).
+    pub physical: String,
 }
 
 impl Default for Options {
@@ -109,6 +111,7 @@ impl Default for Options {
             linger: 30,
             typed_code: None,
             broken_monitors: String::new(),
+            physical: String::new(),
         }
     }
 }
@@ -143,6 +146,7 @@ impl Pc {
                 options.slow_monitors.as_millis().to_string(),
             )
             .env("PROSTIR_FAKE_BROKEN_MONITORS", &options.broken_monitors)
+            .env("PROSTIR_FAKE_PHYSICAL", &options.physical)
             .env(
                 "PROSTIR_FAKE_PICTURE",
                 if options.noise { "noise" } else { "bands" },

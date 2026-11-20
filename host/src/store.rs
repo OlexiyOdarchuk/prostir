@@ -15,6 +15,10 @@
 //! - The first start of this version moves the settings of 0.1 over from
 //!   `monitors.txt` (and the counter switch from `count`), which stay as they are for
 //!   a downgrade to read.
+//! - Screens are numbered from a counter that never goes back ([`Store::new_id`]):
+//!   before the first number of each block of [`ID_BLOCK`] is given out, the end of the
+//!   block is written and on disk, so a crash can leave numbers unused but never give
+//!   one out twice.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -23,13 +27,20 @@ use std::time::Duration;
 
 use log::{info, warn};
 use prostir_layout::desk::Entry;
+use prostir_proto::state::{Access, perms, role};
 use prostir_proto::{Codec, MAX_MONITORS};
 
 use crate::platform::MonitorSpec;
 use crate::screen::ScreenId;
 
 /// The file format this version writes.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
+/// Numbers of screens are reserved this many at a time (see [`Store::new_id`]).
+pub const ID_BLOCK: u32 = 16;
+/// The first number the counter gives: above every number earlier builds gave out
+/// (monitors from 0, window panels 10 to 12, the laptop screen 100), so a new screen
+/// never takes a place the headset kept for an old one.
+const FIRST_ID: u32 = 101;
 /// How long quitting waits for the files to be written.
 const CLOSE_WAIT: Duration = Duration::from_secs(2);
 
@@ -51,6 +62,62 @@ pub struct Settings {
     pub mirror: bool,
     /// Count this PC among users (see `usage`).
     pub count: bool,
+    /// Each headset's role and rights, by its key (hex): `access KEY main input mic`.
+    /// A headset without a line is the main one, with every right.
+    pub access: BTreeMap<String, Access>,
+}
+
+impl Settings {
+    /// The role and rights of the headset with key `key`.
+    pub fn access_of(&self, key: &[u8; 32]) -> Access {
+        self.access.get(&hex(key)).copied().unwrap_or(Access::MAIN)
+    }
+}
+
+/// A key as `access` lines name it.
+fn hex(key: &[u8; 32]) -> String {
+    key.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The words of rights in `access` lines.
+const PERMS: [(&str, u32); 6] = [
+    ("input", perms::INPUT),
+    ("mic", perms::MIC),
+    ("camera", perms::CAMERA),
+    ("clipboard", perms::CLIPBOARD),
+    ("changes", perms::CHANGES),
+    ("private", perms::PRIVATE),
+];
+
+/// `KEY main input mic …`: a headset's role and rights.
+fn parse_access(value: &str) -> Option<(String, Access)> {
+    let mut words = value.split_whitespace();
+    let key = words.next()?;
+    if key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let role = match words.next()? {
+        "main" => role::MAIN,
+        "guest" => role::GUEST,
+        _ => return None,
+    };
+    let mut perms = 0;
+    for w in words {
+        perms |= PERMS.iter().find(|(name, _)| *name == w)?.1;
+    }
+    Some((key.to_ascii_lowercase(), Access { role, perms }))
+}
+
+fn access_text(key: &str, a: &Access) -> String {
+    let role = if a.is_main() { "main" } else { "guest" };
+    let mut text = format!("access {key} {role}");
+    for (name, bit) in PERMS {
+        if a.may(bit) {
+            text.push(' ');
+            text.push_str(name);
+        }
+    }
+    text
 }
 
 impl Default for Settings {
@@ -64,16 +131,38 @@ impl Default for Settings {
             mic: true,
             mirror: true,
             count: true,
+            access: BTreeMap::new(),
         }
     }
 }
 
-/// The set of virtual monitors and how the headset shows them.
+/// How a display of the PC is told from others: by what it says it is (its EDID:
+/// maker, model, serial number), or where that says nothing or is not unique, by the
+/// connector it is on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PhysicalKey {
+    pub edid: Option<String>,
+    pub connector: String,
+}
+
+/// A display of the PC itself, as kept: how it is known, whether it is the laptop's
+/// own panel, and whether the headset shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Physical {
+    pub key: PhysicalKey,
+    pub builtin: bool,
+    pub shown: bool,
+}
+
+/// The set of virtual monitors, the PC's own displays it knows, and how the headset
+/// shows them.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SavedScreens {
     pub specs: BTreeMap<ScreenId, MonitorSpec>,
-    /// Rows from top to bottom, left to right, with where each is seen; the laptop
-    /// screen ([`ScreenId::BUILTIN`]) too, where the headset put it.
+    /// The PC's own displays seen so far, connected now or not.
+    pub physical: BTreeMap<ScreenId, Physical>,
+    /// Rows from top to bottom, left to right, with where each is seen; the PC's own
+    /// displays too, where the headset put them.
     pub rows: Vec<Vec<Entry<ScreenId>>>,
     pub primary: Option<ScreenId>,
 }
@@ -85,7 +174,7 @@ impl SavedScreens {
         Self {
             specs: BTreeMap::from([(id, "2560x1440".parse().expect("a valid size"))]),
             rows: vec![vec![Entry::new(id)]],
-            primary: None,
+            ..Self::default()
         }
     }
 
@@ -95,8 +184,20 @@ impl SavedScreens {
         Self {
             specs: ids.iter().copied().zip(specs.iter().cloned()).collect(),
             rows: vec![ids.iter().map(|&id| Entry::new(id)).collect()],
-            primary: None,
+            ..Self::default()
         }
+    }
+
+    /// The highest number among the screens and in the rows.
+    fn highest(&self) -> Option<u32> {
+        let rows = self.rows.iter().flatten().map(|e| e.id);
+        self.specs
+            .keys()
+            .chain(self.physical.keys())
+            .copied()
+            .chain(rows)
+            .map(ScreenId::number)
+            .max()
     }
 }
 
@@ -115,14 +216,17 @@ pub struct Run {
 pub fn startup_set(saved: &SavedScreens, args: &[MonitorSpec]) -> Option<SavedScreens> {
     if !args.is_empty() {
         let mut set = SavedScreens::of(&args[..args.len().min(MAX_MONITORS)]);
-        // The laptop screen stays where it was seen.
-        if let Some(e) = saved
+        // The PC's own displays stay as they were, where they were seen.
+        set.physical = saved.physical.clone();
+        let places: Vec<Entry<ScreenId>> = saved
             .rows
             .iter()
             .flatten()
-            .find(|e| e.id == ScreenId::BUILTIN)
-        {
-            set.rows.push(vec![*e]);
+            .filter(|e| !saved.specs.contains_key(&e.id))
+            .copied()
+            .collect();
+        if !places.is_empty() {
+            set.rows.push(places);
         }
         Some(set)
     } else if saved.specs.is_empty() {
@@ -210,6 +314,9 @@ fn parse_settings(text: &str) -> (Settings, Kept) {
                 s.count = v;
                 true
             }
+            ("access", _) => parse_access(value)
+                .map(|(key, a)| s.access.insert(key, a))
+                .is_some(),
             _ => false,
         };
         if !known {
@@ -220,7 +327,7 @@ fn parse_settings(text: &str) -> (Settings, Kept) {
 }
 
 fn settings_text(s: &Settings, kept: &Kept) -> String {
-    format!(
+    let mut text = format!(
         "{}bitrate {}\nsharp {}\ncodec {}\nsoftware {}\naudio {}\nmic {}\nmirror {}\ncount {}\n",
         kept.head(),
         s.bitrate,
@@ -231,7 +338,12 @@ fn settings_text(s: &Settings, kept: &Kept) -> String {
         on_off(s.mic),
         on_off(s.mirror),
         on_off(s.count),
-    )
+    );
+    for (key, a) in &s.access {
+        text.push_str(&access_text(key, a));
+        text.push('\n');
+    }
+    text
 }
 
 /// `at CENTER MIDDLE`, either `next` (unknown centre) or missing (unknown middle).
@@ -252,10 +364,88 @@ fn seen_text(e: &Entry<ScreenId>) -> String {
     }
 }
 
-/// `row`, then `screen N WxH[@scale] [at C M] [primary]` and `mirror [at C M]`.
-fn parse_screens(text: &str) -> (SavedScreens, Kept) {
+/// The laptop screen's number in version 1 of `screens.txt` (its `mirror` lines).
+pub const LEGACY_LAPTOP: u32 = 100;
+
+/// `ID [edid "TEXT"] connector NAME [builtin] [shown]`: a display of the PC itself.
+fn parse_physical(rest: &str) -> Option<(ScreenId, Physical)> {
+    let (id, rest) = rest.split_once(' ')?;
+    let id = ScreenId::saved(id.parse().ok()?);
+    let (edid, rest) = match rest.strip_prefix("edid \"") {
+        Some(r) => {
+            let (edid, r) = r.split_once('"')?;
+            (Some(edid.to_owned()), r.trim_start())
+        }
+        None => (None, rest),
+    };
+    let mut words = rest.split_whitespace();
+    if words.next()? != "connector" {
+        return None;
+    }
+    let connector = words.next()?.to_owned();
+    let (mut builtin, mut shown) = (false, false);
+    for w in words {
+        match w {
+            "builtin" => builtin = true,
+            "shown" => shown = true,
+            _ => return None,
+        }
+    }
+    Some((
+        id,
+        Physical {
+            key: PhysicalKey { edid, connector },
+            builtin,
+            shown,
+        },
+    ))
+}
+
+fn physical_text(id: ScreenId, p: &Physical) -> String {
+    let mut text = format!("physical {}", id.number());
+    if let Some(edid) = &p.key.edid {
+        text.push_str(&format!(" edid \"{}\"", edid.replace('"', "'")));
+    }
+    text.push_str(&format!(" connector {}", p.key.connector));
+    if p.builtin {
+        text.push_str(" builtin");
+    }
+    if p.shown {
+        text.push_str(" shown");
+    }
+    text.push('\n');
+    text
+}
+
+/// The file `screens.txt`: `next N` (the counter, see [`Store::new_id`]), `physical …`
+/// for each display of the PC itself, then `row` and in each row `screen N WxH[@scale]
+/// [at C M] [primary]` for a monitor and `place N [at C M] [primary]` for a display of
+/// the PC (version 1 had `mirror [at C M]` for the laptop screen, number 100). The
+/// counter read, if there is one.
+fn parse_screens(text: &str) -> (SavedScreens, Kept, Option<u32>) {
     let mut set = SavedScreens::default();
     let mut kept = Kept::default();
+    let mut next = None;
+    let place =
+        |set: &mut SavedScreens, id: ScreenId, seen: (Option<i32>, Option<i32>), primary: bool| {
+            if set.rows.iter().flatten().any(|e| e.id == id) {
+                return false;
+            }
+            if primary {
+                set.primary = Some(id);
+            }
+            if set.rows.is_empty() {
+                set.rows.push(Vec::new());
+            }
+            if let Some(row) = set.rows.last_mut() {
+                row.push(Entry {
+                    id,
+                    center: seen.0,
+                    middle: seen.1,
+                });
+            }
+            true
+        };
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
         let mut words = line.split_whitespace();
         let known = match words.next() {
@@ -264,6 +454,20 @@ fn parse_screens(text: &str) -> (SavedScreens, Kept) {
                 .and_then(|v| v.parse().ok())
                 .map(|v| kept.version = v)
                 .is_some(),
+            Some("next") => words
+                .next()
+                .and_then(|v| v.parse().ok())
+                .map(|v| next = Some(v))
+                .is_some(),
+            Some("physical") => match line.strip_prefix("physical ").and_then(parse_physical) {
+                Some((id, p))
+                    if !set.physical.contains_key(&id) && !set.specs.contains_key(&id) =>
+                {
+                    set.physical.insert(id, p);
+                    true
+                }
+                _ => false,
+            },
             Some("row") => {
                 set.rows.push(Vec::new());
                 true
@@ -277,41 +481,27 @@ fn parse_screens(text: &str) -> (SavedScreens, Kept) {
                     Some(&"at") => parse_seen(rest[1..].iter().copied()),
                     _ => (None, None),
                 };
-                if id == ScreenId::BUILTIN || set.specs.contains_key(&id) {
+                if set.specs.contains_key(&id) || set.physical.contains_key(&id) {
                     return None;
                 }
-                set.specs.insert(id, spec);
-                if primary {
-                    set.primary = Some(id);
-                }
-                if set.rows.is_empty() {
-                    set.rows.push(Vec::new());
-                }
-                set.rows.last_mut()?.push(Entry {
-                    id,
-                    center: seen.0,
-                    middle: seen.1,
-                });
-                Some(())
+                place(&mut set, id, seen, primary).then(|| set.specs.insert(id, spec))
             })()
             .is_some(),
-            Some("mirror") => {
-                let seen = match words.next() {
-                    Some("at") => parse_seen(words),
+            Some(word @ ("place" | "mirror")) => (|| {
+                let id = if word == "mirror" {
+                    ScreenId::saved(LEGACY_LAPTOP)
+                } else {
+                    ScreenId::saved(words.next()?.parse().ok()?)
+                };
+                let rest: Vec<&str> = words.collect();
+                let primary = rest.last() == Some(&"primary");
+                let seen = match rest.first() {
+                    Some(&"at") => parse_seen(rest[1..].iter().copied()),
                     _ => (None, None),
                 };
-                if set.rows.is_empty() {
-                    set.rows.push(Vec::new());
-                }
-                if let Some(row) = set.rows.last_mut() {
-                    row.push(Entry {
-                        id: ScreenId::BUILTIN,
-                        center: seen.0,
-                        middle: seen.1,
-                    });
-                }
-                true
-            }
+                place(&mut set, id, seen, primary).then_some(())
+            })()
+            .is_some(),
             _ => false,
         };
         if !known {
@@ -319,27 +509,34 @@ fn parse_screens(text: &str) -> (SavedScreens, Kept) {
         }
     }
     set.rows.retain(|r| !r.is_empty());
-    (set, kept)
+    (set, kept, next)
 }
 
-fn screens_text(set: &SavedScreens, kept: &Kept) -> String {
+fn screens_text(set: &SavedScreens, kept: &Kept, next: u32) -> String {
     let mut text = kept.head();
+    text.push_str(&format!("next {next}\n"));
+    for (id, p) in &set.physical {
+        text.push_str(&physical_text(*id, p));
+    }
     for row in &set.rows {
         text.push_str("row\n");
         for e in row {
-            if e.id == ScreenId::BUILTIN {
-                text.push_str(&format!("mirror{}\n", seen_text(e)));
-            } else if let Some(spec) = set.specs.get(&e.id) {
-                let primary = if set.primary == Some(e.id) {
-                    " primary"
-                } else {
-                    ""
-                };
-                text.push_str(&format!(
+            let primary = if set.primary == Some(e.id) {
+                " primary"
+            } else {
+                ""
+            };
+            match set.specs.get(&e.id) {
+                Some(spec) => text.push_str(&format!(
                     "screen {} {spec}{}{primary}\n",
                     e.id.number(),
                     seen_text(e)
-                ));
+                )),
+                None => text.push_str(&format!(
+                    "place {}{}{primary}\n",
+                    e.id.number(),
+                    seen_text(e)
+                )),
             }
         }
     }
@@ -388,6 +585,7 @@ fn migrate(text: &str) -> (Settings, SavedScreens) {
             None => loose.push(entry),
         }
     }
+
     rows.retain(|r| !r.is_empty());
     if !loose.is_empty() {
         rows.push(loose);
@@ -399,6 +597,8 @@ fn migrate(text: &str) -> (Settings, SavedScreens) {
 /// The writes waiting for the writer thread, the latest of each file.
 enum Job {
     Write(PathBuf, String),
+    /// Says when everything before it is on disk.
+    Sync(Sender<()>),
     Stop,
 }
 
@@ -423,11 +623,13 @@ fn spawn_writer() -> Option<(Sender<Job>, Receiver<()>)> {
                 let Ok(first) = jobs.recv() else { break };
                 // The latest text of each file.
                 let mut latest: BTreeMap<PathBuf, String> = BTreeMap::new();
+                let mut synced = Vec::new();
                 for job in std::iter::once(first).chain(jobs.try_iter()) {
                     match job {
                         Job::Write(path, text) => {
                             latest.insert(path, text);
                         }
+                        Job::Sync(done) => synced.push(done),
                         Job::Stop => stop = true,
                     }
                 }
@@ -435,6 +637,9 @@ fn spawn_writer() -> Option<(Sender<Job>, Receiver<()>)> {
                     if let Err(e) = write_durably(&path, &text) {
                         warn!("cannot save {}: {e}", path.display());
                     }
+                }
+                for done in synced {
+                    let _ = done.send(());
                 }
             }
             let _ = done_tx.send(());
@@ -463,6 +668,9 @@ pub struct Store {
     settings_kept: Kept,
     screens: SavedScreens,
     screens_kept: Kept,
+    /// The next number to give, and the end of the block reserved on disk.
+    next: u32,
+    reserved: u32,
     run: Run,
     settings_changed: bool,
     screens_changed: bool,
@@ -479,6 +687,8 @@ impl Store {
             settings_kept: Kept::default(),
             screens: SavedScreens::default(),
             screens_kept: Kept::default(),
+            next: FIRST_ID,
+            reserved: FIRST_ID,
             run,
             settings_changed: false,
             screens_changed: false,
@@ -487,6 +697,34 @@ impl Store {
         store.load();
         store.writer = store.dir.as_ref().and_then(|_| spawn_writer());
         store
+    }
+
+    /// A number for a new screen, never given before: from the block reserved on disk,
+    /// reserving the next block (and waiting until that is written) when this one is
+    /// used up.
+    pub fn new_id(&mut self) -> ScreenId {
+        if self.next >= self.reserved {
+            self.reserved = self.next + ID_BLOCK;
+            self.screens_changed = true;
+            self.flush_and_wait();
+        }
+        let id = ScreenId::saved(self.next);
+        self.next += 1;
+        id
+    }
+
+    /// Writes what changed and waits until it is on disk.
+    fn flush_and_wait(&mut self) {
+        self.flush();
+        if let Some((tx, _)) = &self.writer {
+            let (done_tx, done) = mpsc::channel();
+            if tx.send(Job::Sync(done_tx)).is_ok() && done.recv_timeout(CLOSE_WAIT).is_err() {
+                warn!(
+                    "the screens' numbers not saved within {} s",
+                    CLOSE_WAIT.as_secs()
+                );
+            }
+        }
     }
 
     fn path(&self, name: &str) -> Option<PathBuf> {
@@ -514,14 +752,17 @@ impl Store {
             info!("settings moved over from monitors.txt");
             self.settings_changed = true;
             self.screens_changed = !self.screens.specs.is_empty();
+            self.start_counter(None);
             return;
         }
         if let Some(text) = settings {
             (self.settings, self.settings_kept) = parse_settings(&text);
         }
+        let mut next = None;
         if let Some(text) = screens {
-            let (set, kept) = parse_screens(&text);
-            if set.specs.is_empty() {
+            let (set, kept, counter) = parse_screens(&text);
+            next = counter;
+            if set.specs.is_empty() && counter.is_none() {
                 // Nothing in it could be read: kept aside, so the next write does not
                 // wipe out what went wrong.
                 warn!("screens.txt has no monitor in it; kept as screens.txt.bad");
@@ -530,6 +771,15 @@ impl Store {
                 (self.screens, self.screens_kept) = (set, kept);
             }
         }
+        self.start_counter(next);
+    }
+
+    /// The counter goes on above every number saved and every number the file says may
+    /// have been given out (`saved`), and never below [`FIRST_ID`].
+    fn start_counter(&mut self, saved: Option<u32>) {
+        let above = self.screens.highest().map_or(0, |n| n + 1);
+        self.next = saved.unwrap_or(0).max(above).max(FIRST_ID);
+        self.reserved = self.next;
     }
 
     /// The settings that hold now: as saved, but for what the command line says for
@@ -610,12 +860,11 @@ impl Store {
         {
             jobs.push((path, settings_text(&self.settings, &self.settings_kept)));
         }
-        // Never a set without monitors: that would read as a broken file.
         if std::mem::take(&mut self.screens_changed)
-            && !self.screens.specs.is_empty()
             && let Some(path) = self.path("screens.txt")
         {
-            jobs.push((path, screens_text(&self.screens, &self.screens_kept)));
+            let text = screens_text(&self.screens, &self.screens_kept, self.reserved);
+            jobs.push((path, text));
         }
         for (path, text) in jobs {
             match &self.writer {
@@ -703,6 +952,7 @@ mod tests {
                 mic: false,
                 mirror: true,
                 count: true,
+                access: BTreeMap::new(),
             }
         );
     }
@@ -721,7 +971,7 @@ mod tests {
         assert_eq!(set.primary, Some(ScreenId::saved(2)));
         assert!(s.sharp && s.mirror);
         // Read back from the new file as it was moved over.
-        let text = screens_text(&set, &Kept::default());
+        let text = screens_text(&set, &Kept::default(), FIRST_ID);
         assert_eq!(parse_screens(&text).0, set);
     }
 
@@ -743,22 +993,132 @@ mod tests {
         let mut set = SavedScreens::of(&[spec("2560x1440"), spec("1440x2560@1.25")]);
         set.rows[0][1].center = Some(720);
         set.rows[0][1].middle = Some(-40);
+        let laptop = ScreenId::saved(100);
+        let hdmi = ScreenId::saved(117);
+        set.physical.insert(
+            laptop,
+            Physical {
+                key: PhysicalKey {
+                    edid: Some("BOE 0x0a1c 0".into()),
+                    connector: "eDP-1".into(),
+                },
+                builtin: true,
+                shown: true,
+            },
+        );
+        set.physical.insert(
+            hdmi,
+            Physical {
+                key: PhysicalKey {
+                    edid: None,
+                    connector: "HDMI-A-1".into(),
+                },
+                builtin: false,
+                shown: false,
+            },
+        );
         set.rows.push(vec![Entry {
-            id: ScreenId::BUILTIN,
+            id: laptop,
             center: None,
             middle: Some(2200),
         }]);
         set.primary = Some(ScreenId::saved(1));
-        let text = screens_text(&set, &kept);
+        let text = screens_text(&set, &kept, 133);
+        assert!(text.contains("next 133\n"), "{text}");
         assert!(text.contains("screen 1 1440x2560@1.25 at 720 -40 primary\n"));
-        assert!(text.contains("mirror at next 2200\n"));
-        assert_eq!(parse_screens(&text), (set, kept));
+        assert!(
+            text.contains("physical 100 edid \"BOE 0x0a1c 0\" connector eDP-1 builtin shown\n")
+        );
+        assert!(text.contains("physical 117 connector HDMI-A-1\n"));
+        assert!(text.contains("place 100 at next 2200\n"));
+        assert_eq!(parse_screens(&text), (set, kept, Some(133)));
+        // The laptop screen of version 1 is number 100.
+        let (old, _, next) = parse_screens("row\nscreen 0 2560x1440\nmirror at 10 20\n");
+        assert_eq!(old.rows[0][1].id, laptop);
+        assert_eq!(old.rows[0][1].middle, Some(20));
+        assert_eq!(next, None);
+    }
+
+    /// Each headset's rights: a line for a headset with other rights than all; one
+    /// without a line is the main one with every right.
+    #[test]
+    fn rights_are_kept_by_headset() {
+        let key = [0xab; 32];
+        let line = format!("access {} guest input mic", "AB".repeat(32));
+        let (s, kept) = parse_settings(&line);
+        assert!(kept.unknown.is_empty());
+        let a = s.access_of(&key);
+        assert!(!a.is_main() && a.may(perms::INPUT | perms::MIC) && !a.may(perms::CHANGES));
+        assert_eq!(s.access_of(&[1; 32]), Access::MAIN);
+        assert!(
+            settings_text(&s, &kept)
+                .contains(&format!("access {} guest input mic\n", "ab".repeat(32)))
+        );
+        // A key that is not one, a role or right that is not one: kept as it was.
+        for bad in ["access 12 main", "access {k} boss", "access {k} main fly"] {
+            let bad = bad.replace("{k}", &"ab".repeat(32));
+            let (s, kept) = parse_settings(&bad);
+            assert!(
+                s.access.is_empty() && kept.unknown == [bad.clone()],
+                "{bad}"
+            );
+        }
+    }
+
+    /// Numbers never come back: the next block is on disk before its first number is
+    /// given out, so after a crash the counter goes on after it (a gap, never a number
+    /// twice). It starts above every number earlier versions gave out.
+    #[test]
+    fn numbers_never_come_back() {
+        let dir = temp_dir("counter");
+        std::fs::write(
+            dir.join("screens.txt"),
+            "row\nscreen 0 2560x1440\nscreen 5 1920x1080\n",
+        )
+        .unwrap();
+        let mut store = Store::open(Some(dir.clone()), Run::default());
+        let first = store.new_id();
+        assert_eq!(
+            first,
+            ScreenId::saved(FIRST_ID),
+            "above 0..5, 10..12 and 100"
+        );
+        let on_disk = std::fs::read_to_string(dir.join("screens.txt")).unwrap();
+        assert!(
+            on_disk.contains(&format!("next {}\n", FIRST_ID + ID_BLOCK)),
+            "{on_disk}"
+        );
+        let given: Vec<ScreenId> = (0..20).map(|_| store.new_id()).collect();
+        // Crashed: nothing more written.
+        drop(store);
+        let mut again = Store::open(Some(dir.clone()), Run::default());
+        let after = again.new_id();
+        assert!(
+            given.iter().all(|g| *g < after),
+            "{after:?} after {given:?}"
+        );
+        assert_eq!(
+            after,
+            ScreenId::saved(FIRST_ID + 2 * ID_BLOCK),
+            "the gap of a block"
+        );
+        again.close();
+        // Saved numbers above the counter push it up.
+        std::fs::write(
+            dir.join("screens.txt"),
+            "next 150\nrow\nscreen 400 2560x1440\n",
+        )
+        .unwrap();
+        let mut high = Store::open(Some(dir.clone()), Run::default());
+        assert_eq!(high.new_id(), ScreenId::saved(401));
+        high.close();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Bad lines are skipped and kept; a monitor listed twice counts once.
     #[test]
     fn bad_lines_are_skipped() {
-        let (set, kept) = parse_screens(
+        let (set, kept, _) = parse_screens(
             "row\nscreen 0 2560x1440\nscreen 0 1920x1080\nscreen x 1x1\nscreen 1 9x9\n",
         );
         assert_eq!(set.specs.len(), 1);

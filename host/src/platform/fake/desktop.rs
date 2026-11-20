@@ -6,7 +6,12 @@
 //! - `resize Fake-2 320x240`: another program's stream of the output makes it that
 //!   size, as sharing a monitor in Discord does on KDE; starting Prostir's own stream
 //!   over puts its size back;
-//! - `resize-sticky Fake-2 320x240`: the same, but only making the output anew does.
+//! - `resize-sticky Fake-2 320x240`: the same, but only making the output anew does;
+//! - `unplug eDP-1`, `plug eDP-1`: a display of the PC goes away (the lid closed, the
+//!   cable out) and comes back.
+//!
+//! The PC's own displays are `PROSTIR_FAKE_PHYSICAL`: `CONNECTOR=EDID@WxH` separated
+//! by `;` (an empty EDID: the display says nothing), all plugged in at the start.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -20,7 +25,50 @@ use log::{info, warn};
 
 use super::screen::{self, Picture, Screen};
 use crate::encoder::{Encoder, Input};
-use crate::platform::{DesktopBackend, Geometry, MonitorSpec, OutputBackend};
+use crate::platform::{
+    DesktopBackend, Geometry, MonitorSpec, OutputBackend, PhysicalDisplay, is_panel,
+};
+
+/// A display of the fake PC itself, and whether it is plugged in.
+struct FakePhysical {
+    display: PhysicalDisplay,
+    plugged: bool,
+}
+
+/// The fake PC's own displays, shared with the thread that carries out the test's
+/// commands.
+static PHYSICAL: Mutex<Vec<FakePhysical>> = Mutex::new(Vec::new());
+
+/// `CONNECTOR=EDID@WxH;…` (see the top of this file).
+fn parse_physical(text: &str) -> Result<Vec<FakePhysical>> {
+    text.split(';')
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(|t| {
+            let (connector, rest) = t.split_once('=').context("CONNECTOR=EDID@WxH")?;
+            let (edid, size) = rest.rsplit_once('@').context("CONNECTOR=EDID@WxH")?;
+            let (w, h) = size.split_once('x').context("a size is WxH")?;
+            Ok(FakePhysical {
+                display: PhysicalDisplay {
+                    connector: connector.to_owned(),
+                    edid: (!edid.is_empty()).then(|| edid.to_owned()),
+                    builtin: is_panel(connector),
+                    size: Some((w.parse()?, h.parse()?)),
+                },
+                plugged: true,
+            })
+        })
+        .collect()
+}
+
+/// Whether display `name` of the fake PC is plugged in.
+fn plugged(name: &str) -> bool {
+    PHYSICAL
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|p| p.plugged && p.display.connector == name)
+}
 
 /// Name prefix of the fake outputs.
 const PREFIX: &str = "Fake-";
@@ -61,7 +109,13 @@ impl DesktopBackend for FakeDesktop {
             .split(',')
             .filter_map(|n| n.trim().parse().ok())
             .collect();
-        info!("desktop: fake, the picture ({picture:?}) changes {fps} times a second");
+        let physical = parse_physical(&std::env::var("PROSTIR_FAKE_PHYSICAL").unwrap_or_default())
+            .context("PROSTIR_FAKE_PHYSICAL")?;
+        info!(
+            "desktop: fake, the picture ({picture:?}) changes {fps} times a second; {} display(s) of its own",
+            physical.len()
+        );
+        *PHYSICAL.lock().unwrap() = physical;
         static WATCHED: Once = Once::new();
         WATCHED.call_once(watch_commands);
         Ok(Self {
@@ -94,25 +148,81 @@ impl DesktopBackend for FakeDesktop {
             self.fps,
             self.picture,
             self.layout.clone(),
+            true,
         )?;
         info!("fake desktop: created {name} ({spec})");
         Ok(output)
     }
 
+    /// An external display before the laptop's panel, as on Hyprland.
     fn physical_output(&self) -> Option<String> {
-        None
+        let mut found = self.physical_displays();
+        found.sort_by_key(|d| (d.builtin, d.connector.clone()));
+        found.first().map(|d| d.connector.clone())
+    }
+
+    fn physical_displays(&self) -> Vec<PhysicalDisplay> {
+        PHYSICAL
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| p.plugged)
+            .map(|p| p.display.clone())
+            .collect()
     }
 
     fn wake_physical_display(&mut self) {}
 
     fn mirror(&self, _number: u32, name: &str) -> Result<FakeOutput> {
-        anyhow::bail!("the fake desktop has no display {name} to mirror")
+        let size = PHYSICAL
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|p| p.plugged && p.display.connector == name)
+            .and_then(|p| p.display.size)
+            .with_context(|| format!("the fake desktop has no display {name}"))?;
+        let spec = MonitorSpec {
+            width: size.0,
+            height: size.1,
+            scale: 1.0,
+        };
+        let output = FakeOutput::start(
+            name.to_owned(),
+            &spec,
+            self.fps,
+            self.picture,
+            self.layout.clone(),
+            false,
+        )?;
+        info!("fake desktop: mirroring {name}");
+        Ok(output)
     }
 
     fn geometries(&self) -> HashMap<String, Geometry> {
-        self.layout
-            .lock()
-            .unwrap()
+        let mut layout = self.layout.lock().unwrap();
+        // The PC's own displays are on the desktop while plugged in.
+        for p in PHYSICAL.lock().unwrap().iter() {
+            let name = &p.display.connector;
+            match (p.plugged, layout.contains_key(name)) {
+                (true, false) => {
+                    let (w, h) = p.display.size.unwrap_or((1920, 1080));
+                    let g = Geometry {
+                        x: 0,
+                        y: 0,
+                        w: w as i32,
+                        h: h as i32,
+                        priority: None,
+                        enabled: true,
+                    };
+                    layout.insert(name.clone(), g);
+                }
+                (false, true) => {
+                    layout.remove(name);
+                }
+                _ => {}
+            }
+        }
+        layout
             .iter()
             .map(|(name, g)| {
                 let mut g = *g;
@@ -173,6 +283,8 @@ pub struct FakeOutput {
     stop: Arc<AtomicBool>,
     changer: Option<JoinHandle<()>>,
     layout: Layout,
+    /// Made here (and gone with it), not a display of the PC streamed as it is.
+    owned: bool,
 }
 
 impl FakeOutput {
@@ -182,6 +294,7 @@ impl FakeOutput {
         fps: u32,
         picture: Picture,
         layout: Layout,
+        owned: bool,
     ) -> Result<Self> {
         let screen = Screen::add(&name, spec.width, spec.height, picture)?;
         let stop = Arc::new(AtomicBool::new(false));
@@ -204,23 +317,26 @@ impl FakeOutput {
             None
         };
         let logical = |px: u32| (f64::from(px) / spec.scale).round() as i32;
-        layout.lock().unwrap().insert(
-            name.clone(),
-            Geometry {
-                x: 0,
-                y: 0,
-                w: logical(spec.width),
-                h: logical(spec.height),
-                priority: None,
-                enabled: true,
-            },
-        );
+        if owned {
+            layout.lock().unwrap().insert(
+                name.clone(),
+                Geometry {
+                    x: 0,
+                    y: 0,
+                    w: logical(spec.width),
+                    h: logical(spec.height),
+                    priority: None,
+                    enabled: true,
+                },
+            );
+        }
         Ok(Self {
             name,
             screen,
             stop,
             changer,
             layout,
+            owned,
         })
     }
 }
@@ -232,8 +348,12 @@ impl Drop for FakeOutput {
             let _ = t.join();
         }
         self.screen.remove();
-        self.layout.lock().unwrap().remove(&self.name);
-        info!("fake desktop: removed {}", self.name);
+        if self.owned {
+            self.layout.lock().unwrap().remove(&self.name);
+            info!("fake desktop: removed {}", self.name);
+        } else {
+            info!("fake desktop: stopped mirroring {}", self.name);
+        }
     }
 }
 
@@ -242,8 +362,9 @@ impl OutputBackend for FakeOutput {
         &self.name
     }
 
+    /// A display of the PC is closed once it is unplugged.
     fn closed(&self) -> bool {
-        false
+        !self.owned && !plugged(&self.name)
     }
 
     fn resized(&self) -> Option<(u32, u32)> {
@@ -298,6 +419,16 @@ fn watch_commands() {
 /// One command from the file.
 fn command(line: &str) -> Result<()> {
     let words: Vec<&str> = line.split_whitespace().collect();
+    if let [verb @ ("plug" | "unplug"), name] = words[..] {
+        let mut physical = PHYSICAL.lock().unwrap();
+        let p = physical
+            .iter_mut()
+            .find(|p| p.display.connector == name)
+            .with_context(|| format!("no display {name}"))?;
+        p.plugged = verb == "plug";
+        info!("fake desktop: {name} {verb}ged");
+        return Ok(());
+    }
     let [verb @ ("resize" | "resize-sticky"), name, size] = words[..] else {
         anyhow::bail!("not a command");
     };

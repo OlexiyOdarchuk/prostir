@@ -17,10 +17,18 @@ use crate::encoder::{Encoder, EncoderConfig, EncoderEvent};
 use crate::layout::panel_size;
 use crate::outbox::Outbox;
 use crate::platform::audio::{AudioOut, MicIn};
-use crate::platform::{Desktop, DesktopBackend, Geometry, MonitorSpec, Output, OutputBackend};
+use crate::platform::{
+    Desktop, DesktopBackend, Geometry, MonitorSpec, Output, OutputBackend, PhysicalDisplay,
+};
 use crate::platform::{dialogs, windows};
 use crate::screen::{Screen, ScreenId, ScreenKind, ScreenState, SizeAction};
-use crate::store::{SavedScreens, Settings};
+use crate::store::{LEGACY_LAPTOP, Physical, PhysicalKey, SavedScreens, Settings};
+
+/// Monitors of versions before the counter were numbered from 0 (and their outputs
+/// `Prostir-(n + 1)`), below this.
+const LEGACY_IDS: u32 = 100;
+/// Window panels at once: the headset has only so many video decoders.
+pub const WINDOWS_MAX: usize = 3;
 
 /// Retry timing after failures: 2 s, then doubling up to 2 min.
 #[derive(Default)]
@@ -59,6 +67,10 @@ fn next_gen() -> Gen {
 
 /// Per-stream delivery state for the currently connected client.
 struct StreamSlot {
+    /// The screen's name, for the log.
+    name: String,
+    /// A display of the PC: a broken stream is started again, not the end of all.
+    physical: bool,
     size: Option<(u32, u32)>,
     /// What the encoder makes, announced with the stream.
     codec: Codec,
@@ -97,8 +109,10 @@ impl StreamSlot {
         due
     }
 
-    fn new(codec: Codec, known: bool, generation: Gen) -> Self {
+    fn new(codec: Codec, known: bool, generation: Gen, name: String, physical: bool) -> Self {
         Self {
+            name,
+            physical,
             size: None,
             codec,
             announced: false,
@@ -121,7 +135,8 @@ pub struct Router {
     snapshot: Mutex<Option<(ScreenId, std::sync::mpsc::SyncSender<Vec<u8>>)>>,
     inner: Mutex<RouterInner>,
     failed: AtomicBool,
-    mirror_failed: AtomicBool,
+    /// Displays of the PC whose stream broke, to start again.
+    broken: Mutex<Vec<ScreenId>>,
 }
 
 struct RouterInner {
@@ -144,7 +159,7 @@ impl Router {
                 report: Period::new(REPORT_EVERY),
             }),
             failed: AtomicBool::new(false),
-            mirror_failed: AtomicBool::new(false),
+            broken: Mutex::new(Vec::new()),
             snapshot: Mutex::new(None),
         }
     }
@@ -197,17 +212,18 @@ impl Router {
             let Some(window) = report.due(Instant::now()) else {
                 return;
             };
-            let streams: Vec<(ScreenId, Histogram, u32)> = streams
+            let streams: Vec<(ScreenId, String, Histogram, u32)> = streams
                 .iter_mut()
                 .map(|(id, slot)| {
                     let shown = std::mem::take(&mut slot.shown);
-                    (*id, shown, std::mem::take(&mut slot.skipped))
+                    let skipped = std::mem::take(&mut slot.skipped);
+                    (*id, slot.name.clone(), shown, skipped)
                 })
                 .collect();
             (window, tx.take_stats(), streams)
         };
         // Logged without the lock, which every encoded frame takes.
-        for (id, shown, skipped) in streams {
+        for (id, name, shown, skipped) in streams {
             let video = stats.video.remove(&id.wire()).unwrap_or_default();
             if video.frames == 0 && video.dropped.total() == 0 && skipped == 0 {
                 continue;
@@ -217,7 +233,7 @@ impl Router {
                 n => format!("{} ({n} reports)", shown.summary_ms()),
             };
             info!(
-                "{id}: {}; {skipped} skipped waiting for a keyframe; encoded → shown in headset {shown}",
+                "{name}: {}; {skipped} skipped waiting for a keyframe; encoded → shown in headset {shown}",
                 video.summary(window),
             );
         }
@@ -268,16 +284,21 @@ impl Router {
             .is_some_and(|s| s.announced && s.generation == generation)
     }
 
-    /// Stream `id` starts, or starts over with a new encoder making `codec`.
-    fn add_stream(&self, id: ScreenId, codec: Codec) {
+    /// Stream `id` (named `name`, a display of the PC with `physical`) starts, or
+    /// starts over with a new encoder making `codec`.
+    fn add_stream(&self, id: ScreenId, codec: Codec, name: String, physical: bool) {
         let mut inner = self.inner.lock().unwrap();
         let (known, generation) = inner
             .streams
             .get(&id)
             .map_or((false, Gen(0)), |s| (s.known, s.generation));
-        inner
-            .streams
-            .insert(id, StreamSlot::new(codec, known, generation));
+        let slot = StreamSlot::new(codec, known, generation, name, physical);
+        inner.streams.insert(id, slot);
+    }
+
+    /// Displays of the PC whose stream broke since the last call.
+    fn take_broken(&self) -> Vec<ScreenId> {
+        std::mem::take(&mut *self.broken.lock().unwrap())
     }
 
     fn remove_stream(&self, id: ScreenId) {
@@ -344,17 +365,18 @@ impl Router {
         };
         match event {
             EncoderEvent::Size { width, height } => {
-                info!("{id}: streaming {width}x{height}");
+                info!("{}: streaming {width}x{height}", slot.name);
                 slot.size = Some((width, height));
                 slot.announced = false;
                 slot.need_keyframe = true;
                 true
             }
             EncoderEvent::Failed(reason) => {
-                error!("{id}: {reason}");
-                // A broken mirror is restarted by `Displays::tick`; anything else ends the session.
-                if id == ScreenId::BUILTIN {
-                    self.mirror_failed.store(true, Ordering::Relaxed);
+                error!("{}: {reason}", slot.name);
+                // A display of the PC is started again by `Displays::tick`; anything
+                // else ends the session.
+                if slot.physical {
+                    self.broken.lock().unwrap().push(id);
                 } else {
                     self.failed.store(true, Ordering::Relaxed);
                 }
@@ -440,8 +462,8 @@ impl Router {
 
 pub struct Displays {
     // Field order matters: streams close before the desktop connection.
-    /// Every screen shown in the headset: virtual monitors, window panels, the laptop
-    /// screen.
+    /// Every screen: virtual monitors, window panels, and every display of the PC
+    /// itself seen so far, connected now or not.
     screens: BTreeMap<ScreenId, Screen>,
     /// When the window panels are next checked for a closed window.
     windows_checked: Instant,
@@ -453,11 +475,15 @@ pub struct Displays {
     layout_due: bool,
     /// The rows and the layout the desktop took last (see [`Displays::place_now`]).
     applied: (Vec<Vec<Out>>, Vec<desk::Spot<Out>>),
+    /// Where each output is on the desktop as laid out last, by name: Prostir's and the
+    /// PC's own displays, shown or not.
+    on_desk: BTreeMap<String, state::DeskRect>,
     /// Laid out without an output the desktop did not list yet: again once it does.
     layout_waits: bool,
     /// After the desktop refused a layout: when to try again, and how many times it did.
     layout_retry: (Instant, u32),
-    mirror_retry: Instant,
+    /// When the PC's own displays are looked at next (see `sync_physical`).
+    physical_due: Instant,
     /// The settings as last applied from the store (see [`Displays::apply`]).
     settings: Settings,
     /// PC sound to the headset, while one is connected.
@@ -489,12 +515,14 @@ pub struct Displays {
 
 impl Displays {
     /// The screens of `set`, each with its own number, streaming with `cfg`; sound,
-    /// microphone and the laptop screen as `settings` say.
+    /// microphone and the laptop screen as `settings` say. A display of the PC seen for
+    /// the first time gets its number from `new_id`.
     pub fn create(
         set: &SavedScreens,
         settings: &Settings,
         cfg: EncoderConfig,
         manage_primary: bool,
+        new_id: &mut dyn FnMut() -> ScreenId,
     ) -> Result<Self> {
         let desktop = Desktop::connect()?;
         // Only some desktops (KDE) have a primary output.
@@ -505,8 +533,10 @@ impl Displays {
             rows: set.rows.clone(),
             layout_due: true,
             applied: (Vec::new(), Vec::new()),
+            on_desk: BTreeMap::new(),
             layout_waits: false,
             layout_retry: (Instant::now(), 0),
+            physical_due: Instant::now(),
             settings: settings.clone(),
             audio: None,
             mic: None,
@@ -517,7 +547,6 @@ impl Displays {
             choices: crate::encoder::available(),
             streaming: true,
             taken_off_at: None,
-            mirror_retry: Instant::now(),
             primary_checked: Instant::now(),
             desktop,
             router: Arc::new(Router::new()),
@@ -540,11 +569,40 @@ impl Displays {
             .copied()
             .collect();
         ids.extend(rest);
+        // The PC's own displays as they were known, absent until seen.
+        for (id, p) in &set.physical {
+            let kind = ScreenKind::Physical {
+                key: p.key.clone(),
+                builtin: p.builtin,
+                shown: p.shown,
+            };
+            let mut screen = Screen::starting(*id, 0, kind);
+            screen.state = ScreenState::Absent;
+            displays.screens.insert(*id, screen);
+        }
+        // Monitors keep the output names they had: monitor 0 is `Prostir-1` as
+        // before, others the lowest free number.
+        let ids: Vec<ScreenId> = ids.into_iter().take(MAX_MONITORS).collect();
+        let mut numbers: BTreeMap<ScreenId, u32> = BTreeMap::new();
+        for id in &ids {
+            let n = id.number() + 1;
+            if id.number() < LEGACY_IDS && !numbers.values().any(|v| *v == n) {
+                numbers.insert(*id, n);
+            }
+        }
+        for id in &ids {
+            if !numbers.contains_key(id) {
+                let n = (1..)
+                    .find(|n| !numbers.values().any(|v| v == n))
+                    .unwrap_or(1);
+                numbers.insert(*id, n);
+            }
+        }
         // One that cannot start stays in the set, Failed; without any running, there
         // is nothing to show.
         let mut first_error = None;
-        for id in ids.into_iter().take(MAX_MONITORS) {
-            if let Err(e) = displays.add_as(id, set.specs[&id].clone()) {
+        for id in ids {
+            if let Err(e) = displays.add_as(id, numbers[&id], set.specs[&id].clone()) {
                 first_error.get_or_insert(e);
             }
         }
@@ -557,7 +615,7 @@ impl Displays {
             Some(id) if displays.is_monitor(id) => displays.set_primary(id),
             _ => displays.ensure_primary(),
         }
-        displays.tick();
+        displays.tick(new_id);
         displays.place();
         displays.sync_wallpapers();
         Ok(displays)
@@ -573,9 +631,21 @@ impl Displays {
         self.screens.values().filter(|s| s.is_window())
     }
 
-    /// The laptop screen, while it is streamed.
-    fn mirror(&self) -> Option<&Screen> {
-        self.screens.get(&ScreenId::BUILTIN)
+    /// The PC's own displays, connected or not.
+    fn physical(&self) -> impl Iterator<Item = &Screen> {
+        self.screens.values().filter(|s| s.is_physical())
+    }
+
+    /// The lowest output number no screen has now.
+    fn free_number(&self) -> u32 {
+        (1..)
+            .find(|n| {
+                !self
+                    .screens
+                    .values()
+                    .any(|s| s.number == *n && (!s.is_physical() || s.output.is_some()))
+            })
+            .unwrap_or(1)
     }
 
     /// Whether `id` is one of the virtual monitors.
@@ -583,10 +653,10 @@ impl Displays {
         self.screens.get(&id).is_some_and(Screen::is_virtual)
     }
 
-    /// Adds a monitor and returns its id; ids are reused so `Prostir-N` keeps the
-    /// position and scale KScreen remembers for that name. One that cannot start is
-    /// not added.
-    pub fn add(&mut self, spec: MonitorSpec) -> Result<ScreenId> {
+    /// Adds monitor `id` (a number never given before); its output takes the lowest
+    /// free `Prostir-N`, so KScreen keeps the position and scale it remembers for that
+    /// name. One that cannot start is not added.
+    pub fn add(&mut self, id: ScreenId, spec: MonitorSpec) -> Result<()> {
         if self.monitor_count() >= MAX_MONITORS {
             bail!(
                 "{} {MAX_MONITORS} {}",
@@ -594,20 +664,23 @@ impl Displays {
                 t("моніторів", "monitors")
             );
         }
-        let id = ScreenId::first_free(|id| self.screens.contains_key(&id));
-        if let Err(e) = self.add_as(id, spec) {
+        let number = self.free_number();
+        if let Err(e) = self.add_as(id, number, spec) {
             self.screens.remove(&id);
             self.forget(id);
             return Err(e);
         }
-        Ok(id)
+        Ok(())
     }
 
-    /// Adds monitor `id` to the set, at the end of the bottom row unless the rows have
-    /// it, and starts it; one that cannot start stays, Failed (and says why).
-    fn add_as(&mut self, id: ScreenId, spec: MonitorSpec) -> Result<()> {
-        self.screens
-            .insert(id, Screen::starting(id, ScreenKind::Virtual { spec }));
+    /// Adds monitor `id` (output `number`) to the set, at the end of the bottom row
+    /// unless the rows have it, and starts it; one that cannot start stays, Failed
+    /// (and says why).
+    fn add_as(&mut self, id: ScreenId, number: u32, spec: MonitorSpec) -> Result<()> {
+        self.screens.insert(
+            id,
+            Screen::starting(id, number, ScreenKind::Virtual { spec }),
+        );
         if !self.rows.iter().flatten().any(|e| e.id == id) {
             match self.rows.last_mut() {
                 Some(row) => row.push(desk::Entry::new(id)),
@@ -627,8 +700,9 @@ impl Displays {
             return Ok(());
         };
         let output = screen.output.take();
+        let number = screen.number;
         let started = output
-            .map_or_else(|| self.desktop.create(id.number() + 1, &spec), Ok)
+            .map_or_else(|| self.desktop.create(number, &spec), Ok)
             .and_then(|mut output| match self.start_stream(id, &mut output) {
                 Ok(encoder) => Ok((output, encoder)),
                 // The output stays for the next try.
@@ -654,7 +728,7 @@ impl Displays {
                 Ok(())
             }
             Err(e) => {
-                error!("{id} cannot start: {e:#}");
+                error!("{} cannot start: {e:#}", screen.name());
                 screen.state = ScreenState::Failed {
                     why: format!("{e:#}"),
                 };
@@ -693,7 +767,11 @@ impl Displays {
         output: &mut Output,
         cfg: &EncoderConfig,
     ) -> Result<Encoder> {
-        self.router.add_stream(id, cfg.codec);
+        let (name, physical) = self
+            .screens
+            .get(&id)
+            .map_or((id.to_string(), false), |s| (s.name(), s.is_physical()));
+        self.router.add_stream(id, cfg.codec, name, physical);
         let router = self.router.clone();
         let encoder = Encoder::start(&output.input(), cfg, move |ev| router.on_event(id, ev))?;
         output.attach(&encoder, cfg.backend.takes_dmabuf())?;
@@ -701,15 +779,16 @@ impl Displays {
     }
 
     /// Housekeeping, about twice a second: logs what the streams sent now and then,
-    /// and keeps the mirror in step with the physical display (it disappears when the
-    /// laptop lid closes and comes back when it opens).
-    pub fn tick(&mut self) {
+    /// and follows the PC's own displays (a laptop's panel goes when its lid closes and
+    /// comes back when it opens); one seen for the first time gets its number from
+    /// `new_id`.
+    pub fn tick(&mut self, new_id: &mut dyn FnMut() -> ScreenId) {
         self.router.report();
         self.sync_audio();
         self.check_sizes();
         self.check_primary();
         self.check_window_panels();
-        self.sync_mirror();
+        self.sync_physical(new_id);
     }
 
     /// Puts back the size of monitors another program changed (on KDE, sharing one in
@@ -808,48 +887,220 @@ impl Displays {
         self.sync_wallpapers();
     }
 
-    /// Streams the laptop screen while it is wanted and there, and starts it again
-    /// when it stopped (the laptop lid closed and opened, say).
-    fn sync_mirror(&mut self) {
-        let broken = self.router.mirror_failed.swap(false, Ordering::Relaxed);
-        if let Some(m) = self.mirror()
-            && (broken || m.output.as_ref().is_none_or(|o| o.closed()))
-        {
-            if let ScreenKind::Physical { connector, .. } = &m.kind {
-                info!("mirror of {connector} stopped, restarting it shortly");
-            }
-            self.stop_mirror();
-            self.mirror_retry = Instant::now() + Duration::from_secs(2);
+    /// Follows the PC's own displays: each connected one is matched to one known (see
+    /// [`match_physical`]); one seen for the first time gets a number from `new_id` and
+    /// is shown if it is the one the desktop shows by default and the laptop screen is
+    /// wanted. Shown ones that are connected stream (and start again when their
+    /// stream stopped); one not connected is `Absent`, keeping its number and place.
+    fn sync_physical(&mut self, new_id: &mut dyn FnMut() -> ScreenId) {
+        let mut stopped = self.router.take_broken();
+        stopped.extend(
+            self.physical()
+                .filter(|s| s.output.as_ref().is_some_and(|o| o.closed()))
+                .map(|s| s.id),
+        );
+        for id in &stopped {
+            info!("the stream of {id} stopped, starting it again shortly");
+            self.stop_physical(*id);
         }
-        if !self.settings.mirror || self.mirror().is_some() || self.mirror_retry > Instant::now() {
+        if !stopped.is_empty() {
+            self.physical_due = Instant::now() + Duration::from_secs(2);
+        }
+        if Instant::now() < self.physical_due {
             return;
         }
-        self.mirror_retry = Instant::now() + Duration::from_secs(2);
-        let Some(name) = self.desktop.physical_output() else {
+        self.physical_due = Instant::now() + Duration::from_secs(2);
+        let seen = self.desktop.physical_displays();
+        let known: Vec<(ScreenId, PhysicalKey)> = self
+            .physical()
+            .filter_map(|s| match &s.kind {
+                ScreenKind::Physical { key, .. } => Some((s.id, key.clone())),
+                _ => None,
+            })
+            .collect();
+        let matched = match_physical(&known, &seen);
+        let default = self.desktop.physical_output();
+        let mut present = Vec::new();
+        for (display, id) in seen.iter().zip(matched) {
+            let id = match id {
+                Some(id) => id,
+                None => self.found_physical(display, &seen, default.as_deref(), new_id),
+            };
+            present.push(id);
+            if let Some(s) = self.screens.get_mut(&id)
+                && let ScreenKind::Physical { key, .. } = &mut s.kind
+                && key.connector != display.connector
+            {
+                info!("{id} is on {} now", display.connector);
+                key.connector = display.connector.clone();
+            }
+        }
+        let ids: Vec<ScreenId> = self.physical().map(|s| s.id).collect();
+        let mut changed = false;
+        for id in ids {
+            let shown = self.screens.get(&id).is_some_and(Screen::is_shown_physical);
+            let here = present.contains(&id);
+            let Some(s) = self.screens.get_mut(&id) else {
+                continue;
+            };
+            let streaming = s.output.is_some();
+            if !here {
+                if !matches!(s.state, ScreenState::Absent) {
+                    info!("{} is not connected", s.name());
+                    changed = true;
+                }
+                self.stop_physical(id);
+                if let Some(s) = self.screens.get_mut(&id) {
+                    s.state = ScreenState::Absent;
+                }
+            } else if !shown {
+                if streaming {
+                    self.stop_physical(id);
+                    changed = true;
+                }
+                if let Some(s) = self.screens.get_mut(&id)
+                    && !matches!(s.state, ScreenState::Running)
+                {
+                    s.state = ScreenState::Running;
+                    changed = true;
+                }
+            } else if !streaming {
+                self.start_physical(id);
+                changed = true;
+            }
+        }
+        if seen.is_empty() && self.physical().any(Screen::is_shown_physical) {
             self.desktop.wake_physical_display();
+        }
+        if changed {
+            self.layout_changed();
+        }
+    }
+
+    /// A display of the PC seen for the first time: a new number (the laptop screen of
+    /// earlier versions keeps 100 and its place), shown if it is the one the desktop
+    /// shows by default and the laptop screen is wanted. Known by its EDID where no
+    /// other connected display says the same, else by its connector.
+    fn found_physical(
+        &mut self,
+        display: &PhysicalDisplay,
+        seen: &[PhysicalDisplay],
+        default: Option<&str>,
+        new_id: &mut dyn FnMut() -> ScreenId,
+    ) -> ScreenId {
+        let is_default = default == Some(display.connector.as_str());
+        let legacy = ScreenId::saved(LEGACY_LAPTOP);
+        let id = if is_default
+            && !self.screens.contains_key(&legacy)
+            && self.rows.iter().flatten().any(|e| e.id == legacy)
+        {
+            legacy
+        } else {
+            new_id()
+        };
+        let unique = |edid: &String| {
+            seen.iter()
+                .filter(|d| d.edid.as_ref() == Some(edid))
+                .count()
+                == 1
+        };
+        let key = PhysicalKey {
+            edid: display.edid.clone().filter(unique),
+            connector: display.connector.clone(),
+        };
+        let shown = is_default && self.settings.mirror;
+        info!(
+            "{} is {id} ({}), {}",
+            display.connector,
+            key.edid.as_deref().unwrap_or("no EDID"),
+            if shown { "shown" } else { "not shown" }
+        );
+        let kind = ScreenKind::Physical {
+            key,
+            builtin: display.builtin,
+            shown,
+        };
+        self.screens.insert(id, Screen::starting(id, 0, kind));
+        self.layout_changed();
+        id
+    }
+
+    /// Streams display `id` of the PC: `Running`, or `Failed` with why (tried again).
+    fn start_physical(&mut self, id: ScreenId) {
+        let number = self.free_number();
+        let Some(s) = self.screens.get_mut(&id) else {
             return;
         };
-        let id = ScreenId::BUILTIN;
-        let started = self
-            .desktop
-            .mirror(id.number() + 1, &name)
-            .and_then(|mut output| {
-                let encoder = self.start_stream(id, &mut output)?;
-                Ok((output, encoder))
-            });
+        s.number = number;
+        let name = s.name();
+        let started = self.desktop.mirror(number, &name).and_then(|mut output| {
+            let encoder = self.start_stream(id, &mut output)?;
+            Ok((output, encoder))
+        });
+        let Some(s) = self.screens.get_mut(&id) else {
+            return;
+        };
         match started {
             Ok((output, encoder)) => {
+                if !self.streaming {
+                    encoder.set_paused(true);
+                }
                 encoder.force_keyframe();
-                let kind = ScreenKind::Physical {
-                    connector: name,
-                    builtin: true,
-                };
-                self.screens
-                    .insert(id, Screen::streaming(id, kind, output, encoder));
-                self.layout_changed();
+                s.output = Some(output);
+                s.stream = Some(encoder);
+                s.state = ScreenState::Running;
             }
-            Err(e) => warn!("cannot mirror {name}: {e:#}"),
+            Err(e) => {
+                warn!("cannot show {name}: {e:#}");
+                s.state = ScreenState::Failed {
+                    why: format!("{e:#}"),
+                };
+            }
         }
+    }
+
+    /// Stops the stream of display `id` of the PC, if it streams.
+    fn stop_physical(&mut self, id: ScreenId) {
+        let Some(s) = self.screens.get_mut(&id) else {
+            return;
+        };
+        // The encoder stops before the output goes away.
+        let had = s.stream.take().is_some();
+        drop(s.output.take());
+        if had {
+            self.router.remove_stream(id);
+            self.layout_changed();
+        }
+    }
+
+    /// Shows or hides display `id` of the PC in the headset; the choice is also what a
+    /// display seen for the first time gets. `false` when there is no such display.
+    pub fn show_physical(&mut self, id: ScreenId, show: bool) -> bool {
+        let Some(s) = self.screens.get_mut(&id) else {
+            return false;
+        };
+        let ScreenKind::Physical { shown, .. } = &mut s.kind else {
+            return false;
+        };
+        *shown = show;
+        // Streamed or stopped at the next look, right away.
+        self.physical_due = Instant::now();
+        true
+    }
+
+    /// The displays of the PC itself, connected or not.
+    pub fn physical_ids(&self) -> Vec<ScreenId> {
+        self.physical().map(|s| s.id).collect()
+    }
+
+    /// Whether `id` is a display of the PC itself.
+    pub fn is_physical(&self, id: ScreenId) -> bool {
+        self.screens.get(&id).is_some_and(Screen::is_physical)
+    }
+
+    /// The displays of the PC shown in the headset now.
+    pub fn physical_shown(&self) -> usize {
+        self.physical().filter(|s| s.is_shown_physical()).count()
     }
 
     /// Makes sure the desktop's primary output (where the Plasma panel lives) is ours.
@@ -867,12 +1118,6 @@ impl Displays {
             return;
         };
         self.desktop.keep_primary(output);
-    }
-
-    fn stop_mirror(&mut self) {
-        if self.screens.remove(&ScreenId::BUILTIN).is_some() {
-            self.router.remove_stream(ScreenId::BUILTIN);
-        }
     }
 
     /// Follows the settings `wanted` (as the store has them now): quality and the text
@@ -901,13 +1146,6 @@ impl Displays {
             self.mic_retry.succeeded();
         }
         self.sync_audio();
-        if wanted.mirror != was.mirror {
-            self.mirror_retry = Instant::now();
-            if !wanted.mirror {
-                self.stop_mirror();
-            }
-            self.sync_mirror();
-        }
     }
 
     /// The codec the streams are in now.
@@ -971,10 +1209,14 @@ impl Displays {
                     ScreenKind::Window { .. } => DisplayKind::Window {
                         title: String::new(),
                     },
-                    ScreenKind::Physical { connector, builtin } => DisplayKind::Physical {
+                    ScreenKind::Physical {
+                        key,
+                        builtin,
+                        shown,
+                    } => DisplayKind::Physical {
                         builtin: *builtin,
-                        connector: clip(connector, state::MAX_CONNECTOR),
-                        shown: true,
+                        connector: clip(&key.connector, state::MAX_CONNECTOR),
+                        shown: *shown,
                     },
                 };
                 let (w, h) = self
@@ -986,17 +1228,14 @@ impl Displays {
                     .kind
                     .spec()
                     .map_or(100, |m| (m.scale * 100.0).round() as u16);
-                let desk = self
-                    .applied
-                    .1
-                    .iter()
-                    .find(|p| p.id == Out::Screen(s.id))
-                    .map(|p| DeskRect {
-                        x: p.x,
-                        y: p.y,
-                        w: p.w.max(0) as u32,
-                        h: p.h.max(0) as u32,
-                    });
+                // A display of the PC is on the desktop under its connector, shown or not.
+                let output = match &s.kind {
+                    ScreenKind::Physical { key, .. } => Some(key.connector.as_str()),
+                    _ => s.output_name(),
+                };
+                let desk: Option<DeskRect> = output
+                    .filter(|_| !matches!(s.state, ScreenState::Absent))
+                    .and_then(|name| self.on_desk.get(name).copied());
                 let state = match &s.state {
                     ScreenState::Starting => DisplayState::Starting,
                     ScreenState::Running => DisplayState::Running,
@@ -1004,11 +1243,12 @@ impl Displays {
                         error: state::ErrorCode::OTHER,
                         detail: clip(why, state::MAX_DETAIL),
                     },
+                    ScreenState::Absent => DisplayState::Absent,
                 };
                 Display {
                     id: s.id.wire(),
                     kind,
-                    name: clip(&s.id.name(), state::MAX_DISPLAY_NAME),
+                    name: clip(&s.name(), state::MAX_DISPLAY_NAME),
                     mode: Mode {
                         w,
                         h,
@@ -1149,10 +1389,14 @@ impl Displays {
             }
             return Err(e);
         }
-        // Window panels are made again when wanted; the mirror restarts by itself.
+        // Window panels are made again when wanted; the PC's displays start again by
+        // themselves, right away.
         self.close_window_panels();
-        self.stop_mirror();
-        self.mirror_retry = Instant::now();
+        let physical: Vec<ScreenId> = self.physical().map(|s| s.id).collect();
+        for id in physical {
+            self.stop_physical(id);
+        }
+        self.physical_due = Instant::now();
         Ok(())
     }
 
@@ -1211,8 +1455,9 @@ impl Displays {
         self.monitors().count()
     }
 
+    /// Whether a display of the PC streams to the headset.
     pub fn mirror_active(&self) -> bool {
-        self.mirror().is_some()
+        self.physical().any(|s| s.output.is_some())
     }
 
     /// Streams while a headset is connected and worn; otherwise the encoders pause and
@@ -1455,6 +1700,20 @@ impl Displays {
             .values()
             .any(|s| s.output_name().is_some_and(|n| !geometries.contains_key(n)));
         let rows = self.effective_rows();
+        // Displays of the PC shown here: the laptop's panel first, under the primary
+        // monitor, unless the headset placed them.
+        let mut streaming_physical: Vec<(bool, Out)> = self
+            .physical()
+            .filter(|s| s.output.is_some())
+            .map(|s| {
+                (
+                    !matches!(s.kind, ScreenKind::Physical { builtin: true, .. }),
+                    Out::Screen(s.id),
+                )
+            })
+            .collect();
+        streaming_physical.sort();
+        let streaming_physical: Vec<Out> = streaming_physical.into_iter().map(|(_, o)| o).collect();
         let row_ids: Vec<Vec<Out>> = rows
             .iter()
             .map(|r| r.iter().map(|e| Out::Screen(e.id)).collect())
@@ -1480,11 +1739,12 @@ impl Displays {
                     .primary
                     .or_else(|| self.order().first().copied())
                     .map(Out::Screen),
-                under_main: self.mirror().map(|_| Out::Screen(ScreenId::BUILTIN)),
-                bottom: names
-                    .keys()
-                    .filter(|o| matches!(o, Out::Other(_)))
+                under_main: streaming_physical.first().copied(),
+                bottom: streaming_physical
+                    .iter()
+                    .skip(1)
                     .copied()
+                    .chain(names.keys().filter(|o| matches!(o, Out::Other(_))).copied())
                     .collect(),
                 column: self.windows().map(|s| Out::Screen(s.id)).collect(),
             },
@@ -1512,6 +1772,18 @@ impl Displays {
             .filter(|_| self.manage_primary)
             .and_then(Screen::output_name);
         self.desktop.place(&positions, primary, &geometries)?;
+        self.on_desk = plan
+            .iter()
+            .map(|p| {
+                let rect = state::DeskRect {
+                    x: p.x,
+                    y: p.y,
+                    w: p.w.max(0) as u32,
+                    h: p.h.max(0) as u32,
+                };
+                (names[&p.id].clone(), rect)
+            })
+            .collect();
         self.applied = (row_ids, plan);
         Ok(())
     }
@@ -1533,6 +1805,7 @@ impl Displays {
         &mut self,
         specs: &[MonitorSpec],
         primary: Option<usize>,
+        new_id: &mut dyn FnMut() -> ScreenId,
     ) -> Result<Vec<ScreenId>> {
         if specs.is_empty() || specs.len() > MAX_MONITORS {
             bail!("1 to {MAX_MONITORS} monitors");
@@ -1564,7 +1837,9 @@ impl Displays {
         }
         for (slot, spec) in plan.iter_mut().zip(specs) {
             if slot.is_none() {
-                *slot = Some(self.add(spec.clone())?);
+                let id = new_id();
+                self.add(id, spec.clone())?;
+                *slot = Some(id);
             }
         }
         if let Some(id) = last {
@@ -1578,15 +1853,20 @@ impl Displays {
         Ok(ids)
     }
 
-    /// The headset's rows, kept in step with the monitors (see [`rows_in_step`]).
+    /// The headset's rows, kept in step with the monitors (see [`rows_in_step`]), with
+    /// the displays of the PC where the headset put them, while they stream.
     fn effective_rows(&self) -> Vec<Vec<desk::Entry<ScreenId>>> {
+        self.rows_with(|s| s.is_physical() && s.output.is_some())
+    }
+
+    /// The rows with every monitor, and the other screens `kept` says.
+    fn rows_with(&self, kept: impl Fn(&Screen) -> bool) -> Vec<Vec<desk::Entry<ScreenId>>> {
         let monitors: Vec<ScreenId> = self.monitors().map(|s| s.id).collect();
         rows_in_step(
             &self.rows,
             &monitors,
             |id| self.is_monitor(id),
-            // The laptop screen too, where the headset put it (while it shows).
-            |id| id == ScreenId::BUILTIN && self.mirror().is_some(),
+            |id| self.screens.get(&id).is_some_and(&kept),
         )
     }
 
@@ -1607,16 +1887,22 @@ impl Displays {
                     .collect()
             })
             .collect();
-        // The laptop screen's stream is cut for a moment whenever KDE rearranges its
-        // outputs, and a headset that sends a layout meanwhile leaves it out. Its spot
-        // is kept, or it would come back elsewhere, the headset would move it back, and
-        // that would cut it again, round and round.
-        let has_mirror = |rows: &[Vec<desk::Entry<ScreenId>>]| {
-            rows.iter().flatten().any(|e| e.id == ScreenId::BUILTIN)
-        };
-        if self.settings.mirror && self.mirror().is_none() && !has_mirror(&rows) {
+        // A laptop screen's stream is cut for a moment whenever KDE rearranges its
+        // outputs, and a headset that sends a layout meanwhile leaves it out; a display
+        // of the PC that is not connected is not in the headset's rows either. Their
+        // spots are kept, or they would come back elsewhere, the headset would move
+        // them back, and that would cut them again, round and round.
+        let resting: Vec<ScreenId> = self
+            .physical()
+            .filter(|s| s.output.is_none())
+            .map(|s| s.id)
+            .collect();
+        for id in resting {
+            if rows.iter().flatten().any(|e| e.id == id) {
+                continue;
+            }
             for (i, old) in self.rows.iter().enumerate() {
-                let Some(spot) = old.iter().find(|e| e.id == ScreenId::BUILTIN) else {
+                let Some(spot) = old.iter().find(|e| e.id == id) else {
                     continue;
                 };
                 let at = if i < rows.len() {
@@ -1695,10 +1981,10 @@ impl Displays {
             .filter_map(|s| Some((s.id, s.stream.as_ref()?)))
     }
 
-    /// Puts the PC's active window on a panel of its own: an output its size, which
-    /// the headset shows as a floating panel. Returns the panel's id.
-    pub fn detach_window(&mut self) -> Result<ScreenId> {
-        let Some(id) = ScreenId::panels().find(|id| !self.screens.contains_key(id)) else {
+    /// Puts the PC's active window on a panel of its own, numbered `id` (a number never
+    /// given before): an output its size, which the headset shows as a floating panel.
+    pub fn detach_window(&mut self, id: ScreenId) -> Result<()> {
+        if self.windows().count() >= WINDOWS_MAX {
             bail!(
                 "{}",
                 t(
@@ -1706,7 +1992,7 @@ impl Displays {
                     "Three windows are detached already: close one first"
                 )
             );
-        };
+        }
         let window = windows::active().context(t(
             "Немає активного вікна на ПК",
             "No active window on the PC",
@@ -1717,15 +2003,30 @@ impl Displays {
             height,
             scale: window.scale,
         };
-        let mut output = self.desktop.create(id.number() + 1, &spec)?;
-        let encoder = self.start_stream(id, &mut output)?;
-        let name = output.output_name().to_owned();
+        let number = self.free_number();
         let kind = ScreenKind::Window {
             origin: window.clone(),
-            spec,
+            spec: spec.clone(),
         };
-        self.screens
-            .insert(id, Screen::streaming(id, kind, output, encoder));
+        // Listed before its stream starts, so the stream knows its name.
+        self.screens.insert(id, Screen::starting(id, number, kind));
+        let started = self.desktop.create(number, &spec).and_then(|mut output| {
+            let encoder = self.start_stream(id, &mut output)?;
+            Ok((output, encoder))
+        });
+        let (output, encoder) = match started {
+            Ok(started) => started,
+            Err(e) => {
+                self.screens.remove(&id);
+                return Err(e);
+            }
+        };
+        let name = output.output_name().to_owned();
+        if let Some(s) = self.screens.get_mut(&id) {
+            s.output = Some(output);
+            s.stream = Some(encoder);
+            s.state = ScreenState::Running;
+        }
         self.layout_changed();
         if let Err(e) = windows::move_to(&window, &name, true) {
             self.close_window_panel(id);
@@ -1738,7 +2039,7 @@ impl Displays {
         }
         self.windows_checked = Instant::now() + Duration::from_secs(1);
         info!("window panel {id} on {name} ({width}x{height})");
-        Ok(id)
+        Ok(())
     }
 
     /// Removes a window panel; its window goes back where it was detached from (or,
@@ -1799,7 +2100,7 @@ impl Displays {
         let output = self
             .screens
             .get(&id)
-            .filter(|s| s.is_virtual() || s.is_builtin())
+            .filter(|s| s.is_virtual() || (s.is_physical() && s.output.is_some()))
             .and_then(Screen::output_name)
             .map(str::to_owned)
             .context(t("Немає такого монітора", "No such monitor"))?;
@@ -1869,7 +2170,7 @@ impl Displays {
             && !self
                 .screens
                 .values()
-                .filter(|s| s.running() && !s.is_builtin())
+                .filter(|s| s.running() && !s.is_physical())
                 .any(|s| s.output.as_ref().is_none_or(|o| o.closed()))
     }
 
@@ -1883,9 +2184,29 @@ impl Displays {
         if specs.is_empty() {
             return None;
         }
+        let physical = self
+            .physical()
+            .filter_map(|s| match &s.kind {
+                ScreenKind::Physical {
+                    key,
+                    builtin,
+                    shown,
+                } => Some((
+                    s.id,
+                    Physical {
+                        key: key.clone(),
+                        builtin: *builtin,
+                        shown: *shown,
+                    },
+                )),
+                _ => None,
+            })
+            .collect();
         Some(SavedScreens {
             specs,
-            rows: self.effective_rows(),
+            physical,
+            // The PC's displays keep their places while not connected or not shown.
+            rows: self.rows_with(Screen::is_physical),
             primary: self.primary,
         })
     }
@@ -1911,6 +2232,36 @@ fn show_sharing_tip(id: ScreenId) {
         )
     );
     dialogs::notify(t("Показ екрана", "Screen sharing"), &body);
+}
+
+/// Which known display of the PC (`known`: number and how it is known) each connected
+/// one (`seen`) is: by its EDID where it says one that no other connected display says
+/// too; else by its connector, among those known by their connector. Another display
+/// in the same connector is another display. `None`: seen for the first time.
+fn match_physical(
+    known: &[(ScreenId, PhysicalKey)],
+    seen: &[PhysicalDisplay],
+) -> Vec<Option<ScreenId>> {
+    let mut taken: Vec<ScreenId> = Vec::new();
+    seen.iter()
+        .map(|d| {
+            let unique = d
+                .edid
+                .as_ref()
+                .filter(|e| seen.iter().filter(|o| o.edid.as_ref() == Some(*e)).count() == 1);
+            let found = known.iter().find(|(id, key)| {
+                !taken.contains(id)
+                    && match (unique, &key.edid) {
+                        (Some(edid), Some(k)) => edid == k,
+                        (None, None) => key.connector == d.connector,
+                        _ => false,
+                    }
+            });
+            let id = found.map(|(id, _)| *id);
+            taken.extend(id);
+            id
+        })
+        .collect()
 }
 
 /// An output on the desktop: a screen, or another real display.
@@ -2021,7 +2372,7 @@ mod tests {
         let id = |n| ScreenId::from_wire(state::DisplayId(n));
         let (s0, s1) = (id(0), id(1));
         router.publish(&BTreeSet::from([s0, s1]));
-        router.add_stream(s0, Codec::H265);
+        router.add_stream(s0, Codec::H265, "test".into(), false);
         keyframe(&router, s0);
         let [
             HostMsg::StreamStart {
@@ -2040,7 +2391,7 @@ mod tests {
         };
         assert_eq!(first, g);
         assert!(router.is_current(s0, first));
-        router.add_stream(s0, Codec::H264);
+        router.add_stream(s0, Codec::H264, "test".into(), false);
         keyframe(&router, s0);
         let [
             HostMsg::StreamStart {
@@ -2055,7 +2406,7 @@ mod tests {
         };
         assert!(second > first, "a new generation");
         assert!(!router.is_current(s0, first), "the old one is over");
-        router.add_stream(s0, Codec::H265);
+        router.add_stream(s0, Codec::H265, "test".into(), false);
         router.remove_stream(s0);
         assert_eq!(
             sent(&outbox),
@@ -2065,7 +2416,7 @@ mod tests {
             }]
         );
         // Never shown: nothing to end.
-        router.add_stream(s1, Codec::H265);
+        router.add_stream(s1, Codec::H265, "test".into(), false);
         router.remove_stream(s1);
         assert!(sent(&outbox).is_empty());
     }
@@ -2078,7 +2429,7 @@ mod tests {
         let outbox = Arc::new(Outbox::default());
         router.attach(outbox.clone());
         let s = ScreenId::from_wire(state::DisplayId(7));
-        router.add_stream(s, Codec::H264);
+        router.add_stream(s, Codec::H264, "test".into(), false);
         keyframe(&router, s);
         assert!(sent(&outbox).is_empty(), "not listed yet");
         assert_eq!(router.publish(&BTreeSet::from([s])), [s], "a picture now");
@@ -2092,6 +2443,51 @@ mod tests {
         router.attach(outbox.clone());
         keyframe(&router, s);
         assert!(sent(&outbox).is_empty());
+    }
+
+    /// A display of the PC is known by its EDID wherever it is plugged in; one that says
+    /// nothing, or the same as another, by its connector; another display in the same
+    /// connector is another display.
+    #[test]
+    fn displays_of_the_pc_are_known_by_edid_else_by_connector() {
+        let id = ScreenId::saved;
+        let display = |connector: &str, edid: Option<&str>| PhysicalDisplay {
+            connector: connector.into(),
+            edid: edid.map(Into::into),
+            builtin: false,
+            size: None,
+        };
+        let key = |edid: Option<&str>, connector: &str| PhysicalKey {
+            edid: edid.map(Into::into),
+            connector: connector.into(),
+        };
+        let known = [
+            (id(100), key(Some("BOE 1"), "eDP-1")),
+            (id(101), key(Some("DEL 7"), "HDMI-A-1")),
+            (id(102), key(None, "DP-2")),
+        ];
+        // The Dell moved to DP-1; a display without EDID on DP-2; another one in
+        // HDMI-A-1.
+        let seen = [
+            display("eDP-1", Some("BOE 1")),
+            display("DP-1", Some("DEL 7")),
+            display("DP-2", None),
+            display("HDMI-A-1", Some("LG 3")),
+        ];
+        assert_eq!(
+            match_physical(&known, &seen),
+            [Some(id(100)), Some(id(101)), Some(id(102)), None]
+        );
+        // Two of the same model and serial: by connector, and none of them is the one
+        // known by that EDID.
+        let twins = [
+            display("DP-1", Some("DEL 7")),
+            display("DP-2", Some("DEL 7")),
+        ];
+        assert_eq!(match_physical(&known, &twins), [None, Some(id(102))]);
+        // Each known display matches once.
+        let two_on_dp2 = [display("DP-2", None), display("DP-2", None)];
+        assert_eq!(match_physical(&known, &two_on_dp2), [Some(id(102)), None]);
     }
 
     /// The headset's plan read back from `SetLayout` is recognised as its plan,

@@ -23,7 +23,7 @@ use anyhow::{Context, Result, bail};
 
 use super::kscreen;
 use crate::encoder::Input;
-use crate::platform::MonitorSpec;
+use crate::platform::{MonitorSpec, PhysicalDisplay, is_panel};
 use log::{info, warn};
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
 use wayland_client::protocol::{wl_output, wl_registry};
@@ -52,12 +52,18 @@ struct OutputInfo {
     mode: Option<(u32, u32)>,
     /// Current mode announced since that `done`.
     next_mode: Option<(u32, u32)>,
+    /// What the display says it is (its EDID, as KWin passes it on).
+    make: String,
+    model: String,
 }
 
 impl OutputInfo {
     fn on_event(&mut self, event: wl_output::Event) {
         match event {
             wl_output::Event::Name { name } => self.name = Some(name),
+            wl_output::Event::Geometry { make, model, .. } => {
+                (self.make, self.model) = (make, model);
+            }
             wl_output::Event::Mode {
                 flags: WEnum::Value(flags),
                 width,
@@ -282,6 +288,30 @@ impl Screencast {
             .collect();
         names.sort();
         names.first().map(|n| (*n).clone())
+    }
+
+    /// The displays of the PC itself that are on (KWin lists no output of a closed
+    /// laptop's panel, or of a display switched off).
+    pub fn physical_displays(&self) -> Vec<PhysicalDisplay> {
+        let outputs = self.shared.outputs.lock().unwrap();
+        let mut found: Vec<PhysicalDisplay> = outputs
+            .values()
+            .filter_map(|(_, info)| {
+                let name = info.name.as_ref().filter(|n| !n.starts_with("Virtual-"))?;
+                let said: Vec<&str> = [info.make.trim(), info.model.trim()]
+                    .into_iter()
+                    .filter(|w| !w.is_empty() && *w != "unknown")
+                    .collect();
+                Some(PhysicalDisplay {
+                    connector: name.clone(),
+                    edid: (!said.is_empty()).then(|| said.join(" ")),
+                    builtin: is_panel(name),
+                    size: info.mode,
+                })
+            })
+            .collect();
+        found.sort_by(|a, b| a.connector.cmp(&b.connector));
+        found
     }
 
     /// Streams an existing display (e.g. the laptop panel) without creating anything.

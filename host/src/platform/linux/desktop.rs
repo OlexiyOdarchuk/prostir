@@ -10,7 +10,7 @@ use crate::platform::linux::hyprland;
 use crate::platform::linux::hyprland::screencopy::{self, Capture};
 use crate::platform::linux::kde::virtual_output::{Screencast, VirtualOutput};
 use crate::platform::linux::kde::{Kde, kscreen, plasma};
-use crate::platform::{DesktopBackend, Geometry, MonitorSpec, OutputBackend};
+use crate::platform::{DesktopBackend, Geometry, MonitorSpec, OutputBackend, PhysicalDisplay};
 
 pub enum Desktop {
     Kde(Kde),
@@ -68,6 +68,13 @@ impl DesktopBackend for Desktop {
         match self {
             Self::Kde(k) => k.screencast.physical_output(),
             Self::Hyprland => hyprland::physical_output(),
+        }
+    }
+
+    fn physical_displays(&self) -> Vec<PhysicalDisplay> {
+        match self {
+            Self::Kde(k) => k.screencast.physical_displays(),
+            Self::Hyprland => hyprland::physical_displays(),
         }
     }
 

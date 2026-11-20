@@ -20,16 +20,19 @@ pub fn handle(
 ) -> Outcome {
     let failed = |e: anyhow::Error| Outcome::failed(ErrorCode::OTHER, &format!("{e:#}"));
     match request {
-        Request::AddDisplay { mode } => match displays.add(spec(mode)) {
-            Ok(id) => {
-                info!("headset added {id}");
-                displays.force_keyframe(id);
-                keep_screens(store, displays, true);
-                displays.sync_wallpapers();
-                Outcome::Added { id: id.wire() }
+        Request::AddDisplay { mode } => {
+            let id = store.new_id();
+            match displays.add(id, spec(mode)) {
+                Ok(()) => {
+                    info!("headset added {id}");
+                    displays.force_keyframe(id);
+                    keep_screens(store, displays, true);
+                    displays.sync_wallpapers();
+                    Outcome::Added { id: id.wire() }
+                }
+                Err(e) => failed(e),
             }
-            Err(e) => failed(e),
-        },
+        }
         Request::RemoveDisplay { id } => {
             let id = ScreenId::from_wire(id);
             let monitor = displays.is_monitor(id);
@@ -53,11 +56,12 @@ pub fn handle(
                 _ => None,
             };
             if headset.has(caps::headset::PHYSICAL) {
-                let mirror = shown_physical.contains(&ScreenId::BUILTIN.wire());
-                store.change(|s| s.mirror = mirror);
-                displays.apply(&store.wanted());
+                for id in displays.physical_ids() {
+                    let show = shown_physical.contains(&id.wire());
+                    displays.show_physical(id, show);
+                }
             }
-            let result = displays.set_monitors(&specs, primary);
+            let result = displays.set_monitors(&specs, primary, &mut || store.new_id());
             displays.force_keyframes();
             keep_screens(store, displays, true);
             displays.sync_wallpapers();
@@ -83,11 +87,14 @@ pub fn handle(
             Outcome::Done
         }
         Request::ShowPhysical { id, shown } => {
-            if ScreenId::from_wire(id) != ScreenId::BUILTIN {
+            let id = ScreenId::from_wire(id);
+            if !displays.show_physical(id, shown) {
                 return Outcome::failed(ErrorCode::OTHER, &format!("no {id}"));
             }
+            // What a display seen for the first time gets, from now on.
             store.change(|s| s.mirror = shown);
             displays.apply(&store.wanted());
+            keep_screens(store, displays, false);
             Outcome::Done
         }
         Request::SetEncoding {
@@ -118,10 +125,13 @@ pub fn handle(
             displays.apply(&store.wanted());
             Outcome::Done
         }
-        Request::DetachWindow => match displays.detach_window() {
-            Ok(id) => Outcome::Added { id: id.wire() },
-            Err(e) => failed(e),
-        },
+        Request::DetachWindow => {
+            let id = store.new_id();
+            match displays.detach_window(id) {
+                Ok(()) => Outcome::Added { id: id.wire() },
+                Err(e) => failed(e),
+            }
+        }
         Request::WindowHere { id } => match displays.window_here(ScreenId::from_wire(id)) {
             Ok(()) => Outcome::Done,
             Err(e) => failed(e),
