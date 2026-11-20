@@ -98,6 +98,10 @@
   silent microphone is no longer a mystery.
 - The PC no longer keeps a microphone setting of its own: its microphone follows the
   switch in the headset.
+- The PC no longer asks the sound system twice a second whether a program records
+  from the headset microphone: the sound system tells it, so the headset microphone
+  starts within a few hundredths of a second of a program starting to record (before:
+  up to half a second), and nothing on the PC wakes while the sound is idle.
 
 ### Connection
 
