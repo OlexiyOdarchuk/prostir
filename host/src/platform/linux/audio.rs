@@ -1,11 +1,14 @@
 //! PC sound to the headset: a virtual output device ("Prostir — шолом") that is the
 //! default while the headset is connected; whatever plays into it is captured as raw
 //! PCM and sent over the (encrypted) connection. And back: the headset's microphone
-//! as the PC's default input ([`MicIn`]).
+//! as the PC's default input ([`MicIn`]). The level of that output device is the
+//! shared volume ([`SinkVolume`]), and one `pactl subscribe` tells when it moves and
+//! when a program records from the microphone ([`watch`]).
 
 use std::os::fd::AsRawFd;
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -15,7 +18,12 @@ use gstreamer_app as gst_app;
 use log::{info, warn};
 use prostir_proto::{AUDIO_CHANNELS, AUDIO_RATE, MIC_CHANNELS};
 
+use crate::events::EventSink;
 use crate::platform::run;
+use crate::platform::sound::{OutputDevice, Route};
+use crate::platform::sound_events::{End, Indices, Reading, SoundSystem, Subscription};
+
+pub use crate::platform::sound_events::Watcher;
 
 const SINK: &str = "prostir_headset";
 
@@ -84,8 +92,15 @@ pub fn restore_after_crash() {
     }
 }
 
+/// `pactl` with its output in English, as it is parsed.
+fn pactl_command() -> Command {
+    let mut cmd = Command::new("pactl");
+    cmd.env("LC_ALL", "C");
+    cmd
+}
+
 fn pactl(args: &[&str]) -> Option<String> {
-    let out = run(Command::new("pactl").args(args), TIMEOUT).ok()?;
+    let out = run(pactl_command().args(args), TIMEOUT).ok()?;
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
@@ -148,6 +163,18 @@ impl AudioOut {
     }
 }
 
+impl AudioOut {
+    /// Where the sound plays: only in the headset, its device being the default.
+    pub fn route(&self) -> Route {
+        Route::HeadsetOnly
+    }
+
+    /// The device the sound is captured from (its monitor, before its volume).
+    pub fn device(&self) -> OutputDevice {
+        OutputDevice(SINK.into())
+    }
+}
+
 impl Drop for AudioOut {
     fn drop(&mut self) {
         // Give the sound back to the PC, unless the user picked something else meanwhile.
@@ -158,6 +185,162 @@ impl Drop for AudioOut {
         }
         let _ = self.pipeline.set_state(gst::State::Null);
         info!("PC sound back on the PC");
+    }
+}
+
+/// Reading or setting the headset's device, one at a time: a level is never read
+/// between the two halves of a write (the volume, then the mute).
+static DEVICE: Mutex<()> = Mutex::new(());
+/// How many times the PC set the headset's device, counted under [`DEVICE`].
+static WRITES: AtomicU64 = AtomicU64::new(0);
+
+/// The volume of the sound device for the headset ("Prostir: headset"), as the PC's
+/// slider and keys show it: read and set with `pactl`; its changes come as events
+/// from [`watch`]. The capture reads the device's monitor, before its volume and
+/// mute, so a level written here does not change what the headset gets.
+pub struct SinkVolume {
+    sink: String,
+}
+
+impl SinkVolume {
+    /// Where the PC can share its volume: `pactl` is there.
+    pub fn open() -> Option<Self> {
+        static PACTL: OnceLock<bool> = OnceLock::new();
+        let there = *PACTL.get_or_init(|| pactl(&["--version"]).is_some());
+        there.then_some(Self { sink: SINK.into() })
+    }
+
+    /// Puts the device at `level` percent, `muted` or not.
+    pub fn set(&self, level: u8, muted: bool) {
+        let _one = DEVICE.lock().unwrap();
+        let volume = format!("{}%", level.min(100));
+        let mute = if muted { "1" } else { "0" };
+        let set = pactl(&["set-sink-volume", &self.sink, &volume]).is_some()
+            && pactl(&["set-sink-mute", &self.sink, mute]).is_some();
+        WRITES.fetch_add(1, Ordering::SeqCst);
+        if set {
+            info!(
+                "volume: the headset's device at {level}{}",
+                if muted { " muted" } else { "" }
+            );
+        } else {
+            warn!("volume: the headset's device could not be set");
+        }
+    }
+
+    /// Where the device is now, if known.
+    pub fn level(&self) -> Option<(u8, bool)> {
+        let _one = DEVICE.lock().unwrap();
+        read_volume(&self.sink).map(|r| (r.level, r.muted))
+    }
+
+    /// Whether a reading of the device taken after `writes` writes is old: the PC set
+    /// it since, and that write's own echo comes after.
+    pub fn outdated(&self, writes: u64) -> bool {
+        writes < WRITES.load(Ordering::SeqCst)
+    }
+}
+
+/// The level of `sink` now; [`DEVICE`] is held.
+fn read_volume(sink: &str) -> Option<Reading> {
+    let level = parse_volume(&pactl(&["get-sink-volume", sink])?)?;
+    let muted = parse_mute(&pactl(&["get-sink-mute", sink])?)?;
+    Some(Reading {
+        level: level.min(100) as u8,
+        muted,
+        writes: WRITES.load(Ordering::SeqCst),
+    })
+}
+
+/// The loudest channel of `pactl get-sink-volume`, in percent:
+/// `Volume: front-left: 26214 /  40% / -23.88 dB,   front-right: ...`.
+fn parse_volume(text: &str) -> Option<u32> {
+    let line = text
+        .lines()
+        .find(|l| l.trim_start().starts_with("Volume:"))?;
+    line.split_whitespace()
+        .filter_map(|w| w.strip_suffix('%')?.parse::<u32>().ok())
+        .max()
+}
+
+/// `Mute: yes` or `Mute: no`.
+fn parse_mute(text: &str) -> Option<bool> {
+    match text.trim().strip_prefix("Mute:")?.trim() {
+        "yes" => Some(true),
+        "no" => Some(false),
+        _ => None,
+    }
+}
+
+/// The number of the device named `name` in `pactl list short sinks` (or sources).
+fn index_in(list: &str, name: &str) -> Option<u32> {
+    list.lines().find_map(|l| {
+        let mut cols = l.split('\t');
+        let index = cols.next()?.trim().parse().ok()?;
+        (cols.next() == Some(name)).then_some(index)
+    })
+}
+
+/// Follows the sound system while Prostir's devices exist (the headset's output device
+/// and the headset microphone): their changes go to `events`.
+pub fn watch(events: EventSink) -> Option<Watcher> {
+    Watcher::start(Pactl::named(SINK, MIC), events)
+}
+
+/// The sound system through `pactl`, for the devices named so.
+struct Pactl {
+    sink: String,
+    mic: String,
+}
+
+/// A running `pactl subscribe`: killed to end it.
+struct Subscribed(Mutex<Option<Child>>);
+
+impl End for Subscribed {
+    fn end(&self) {
+        if let Some(mut child) = self.0.lock().unwrap().take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+impl SoundSystem for Pactl {
+    fn subscribe(&mut self) -> std::io::Result<Subscription> {
+        let mut cmd = pactl_command();
+        cmd.arg("subscribe")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        // Started from the watcher's thread: it dies with that thread, and with Prostir.
+        let mut child = spawn_tied(&mut cmd)?;
+        let out = child
+            .stdout
+            .take()
+            .ok_or_else(|| std::io::Error::other("no output"))?;
+        Ok(Subscription {
+            lines: std::fs::File::from(std::os::fd::OwnedFd::from(out)),
+            end: Arc::new(Subscribed(Mutex::new(Some(child)))),
+        })
+    }
+
+    fn indices(&mut self) -> Option<Indices> {
+        let sinks = pactl(&["list", "short", "sinks"])?;
+        let sources = pactl(&["list", "short", "sources"])?;
+        Some(Indices {
+            sink: index_in(&sinks, &self.sink),
+            mic: index_in(&sources, &self.mic),
+        })
+    }
+
+    fn volume(&mut self) -> Option<Reading> {
+        let _one = DEVICE.lock().unwrap();
+        read_volume(&self.sink)
+    }
+
+    fn recording(&mut self) -> Option<bool> {
+        let list = pactl(&["list", "short", "sources"])?;
+        Some(state_in(&list, &self.mic).is_some_and(|s| s == "RUNNING"))
     }
 }
 
@@ -182,31 +365,6 @@ const FEED_PIPE: usize = 4096;
 /// muted: WirePlumber does not remember its settings (it used to, keyed by its name,
 /// so a mute once set silenced the microphone on every later run), and they are set
 /// again at the start of each recording.
-/// The volume of the sound device for the headset ("Prostir: headset"), as the PC's
-/// slider and keys show it. Followed with `pactl subscribe` from 0.2.0 step 6; until
-/// then there is none, and the PC says it cannot share the volume.
-pub struct SinkVolume;
-
-impl SinkVolume {
-    pub fn open() -> Option<Self> {
-        None
-    }
-
-    /// Puts the device at `level` percent, `muted` or not.
-    pub fn set(&self, _level: u8, _muted: bool) {}
-
-    /// A change of the device since the last call, if there was one, and when it
-    /// happened.
-    pub fn changed(&self) -> Option<(u8, bool, std::time::Instant)> {
-        None
-    }
-
-    /// Where the device is now, if known.
-    pub fn level(&self) -> Option<(u8, bool)> {
-        None
-    }
-}
-
 pub struct MicIn {
     loopback: Child,
     mic: String,
@@ -269,11 +427,11 @@ impl MicIn {
         }
     }
 
-    /// Whether some PC app is recording from the microphone right now (asked every
-    /// half second). A recording that begins gets a fresh way in; one that ends takes
-    /// whatever still waits with it.
-    pub fn recording(&self) -> bool {
-        let on = source_state(&self.mic).is_some_and(|s| s == "RUNNING");
+    /// Whether some PC app records from the microphone, as the sound system said (see
+    /// [`watch`]). A recording that begins gets a fresh way in; one that ends takes
+    /// whatever still waits with it. Said again while it records, a way in that broke
+    /// (`pacat` stopped) is made anew.
+    pub fn set_recording(&self, on: bool) {
         let mut feed = self.feed.lock().unwrap();
         if !on {
             *feed = None;
@@ -285,7 +443,6 @@ impl MicIn {
                 .inspect_err(|e| warn!("no headset microphone: {e:#}"))
                 .ok();
         }
-        on
     }
 }
 
@@ -431,11 +588,24 @@ fn spawn_tied(cmd: &mut Command) -> std::io::Result<Child> {
 
 /// `RUNNING`, `IDLE` or `SUSPENDED` for a source, from `pactl list short sources`.
 fn source_state(name: &str) -> Option<String> {
-    let list = pactl(&["list", "short", "sources"])?;
+    state_in(&pactl(&["list", "short", "sources"])?, name).map(str::to_owned)
+}
+
+/// The state of source `name` in `list` (`pactl list short sources`): its last column.
+fn state_in<'a>(list: &'a str, name: &str) -> Option<&'a str> {
     list.lines().find_map(|l| {
         let cols: Vec<&str> = l.split('\t').collect();
-        (cols.get(1) == Some(&name)).then(|| cols.last().unwrap_or(&"").trim().to_owned())
+        (cols.get(1) == Some(&name)).then(|| cols.last().unwrap_or(&"").trim())
     })
+}
+
+impl Pactl {
+    fn named(sink: &str, mic: &str) -> Self {
+        Self {
+            sink: sink.into(),
+            mic: mic.into(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -466,6 +636,38 @@ mod tests {
                 .any(|a| a == "--property=state.restore-props=false")
         );
         assert!(pa.iter().any(|a| a == "--device=feed"));
+    }
+
+    /// What `pactl` says (with `LC_ALL=C`) about the headset's device.
+    #[test]
+    fn the_device_as_pactl_says_it() {
+        let stereo = "Volume: front-left: 26214 /  40% / -23.88 dB,   front-right: 26869 /  41% \
+                      / -23.23 dB\n        balance 0.02\n";
+        assert_eq!(parse_volume(stereo), Some(41), "the loudest channel");
+        assert_eq!(
+            parse_volume("Volume: mono: 98304 / 150% / 10.57 dB\n"),
+            Some(150)
+        );
+        assert_eq!(
+            parse_volume("Volume: front-left: 0 /   0% / -inf dB"),
+            Some(0)
+        );
+        assert_eq!(parse_volume("Гучність: 40%"), None);
+        assert_eq!(parse_volume(""), None);
+        assert_eq!(parse_mute("Mute: yes\n"), Some(true));
+        assert_eq!(parse_mute("Mute: no"), Some(false));
+        assert_eq!(parse_mute("Mute: maybe"), None);
+        let sinks = "61\talsa_output.pci-0000_00_1f.3.HiFi__HDMI3__sink\tPipeWire\ts32le 2ch \
+                     48000Hz\tSUSPENDED\n183693\tprostir_headset\tPipeWire\tfloat32le 2ch \
+                     48000Hz\tRUNNING\n";
+        assert_eq!(index_in(sinks, "prostir_headset"), Some(183693));
+        assert_eq!(index_in(sinks, "prostir"), None);
+        let sources = "183693\tprostir_headset.monitor\tPipeWire\tfloat32le 2ch 48000Hz\tIDLE\n\
+                       183776\tprostir_mic\tPipeWire\tfloat32le 1ch 48000Hz\tRUNNING\n";
+        assert_eq!(index_in(sources, "prostir_mic"), Some(183776));
+        assert_eq!(state_in(sources, "prostir_mic"), Some("RUNNING"));
+        assert_eq!(state_in(sources, "prostir_headset.monitor"), Some("IDLE"));
+        assert_eq!(state_in(sources, "prostir_headset"), None);
     }
 
     /// Nobody takes the sound: the session loop does not wait, at most a pipe's worth
@@ -696,8 +898,8 @@ mod mic_harness {
     /// The whole path on this PC's PipeWire, with throwaway devices (it does not touch
     /// Prostir's own, nor the default input). A test app (`parecord`) records while a
     /// fake headset pushes 10 ms blocks numbered in their samples, so every block
-    /// that comes out tells how late it is. `recording()` is called where the PC's
-    /// half-second tick would notice the change. Run by hand:
+    /// that comes out tells how late it is. The recording is looked at where the sound
+    /// system's event would come (see `sound_harness` for those). Run by hand:
     /// `cargo test -p prostir-host -- --ignored mic_harness --nocapture`.
     #[test]
     #[ignore]
@@ -713,8 +915,12 @@ mod mic_harness {
             next: 0,
             pushed: Vec::new(),
         };
-        let tick =
-            |mic: &MicIn| eprintln!("   tick: recording {}, {}", mic.recording(), levels(mic));
+        // What the sound system's event would say, where it would come.
+        let tick = |mic: &MicIn| {
+            let on = source_state(&mic.mic).is_some_and(|s| s == "RUNNING");
+            mic.set_recording(on);
+            eprintln!("   tick: recording {on}, {}", levels(mic));
+        };
 
         // 1. The first recording: the PC notices it, the headset's microphone follows.
         let r = Reader::start(&name);
@@ -817,5 +1023,258 @@ mod mic_harness {
         assert!(after.lost_first_ms <= 70 && after.median_ms < 50.0 && after.late_ms == 0);
         tick(&mic);
         drop(mic);
+    }
+}
+
+#[cfg(test)]
+mod sound_harness {
+    //! Follows this PC's PipeWire (through its PulseAudio server) as Prostir does, with
+    //! throwaway devices of its own (`prostir_test_sink_<pid>`, `prostir_test_mic_<pid>`,
+    //! gone when it ends): `cargo test -p prostir-host -- --ignored sound_harness
+    //! --nocapture`. It leaves Prostir's devices, the defaults and every other volume
+    //! alone, and can run while Prostir does. It prints how often the watcher woke while
+    //! the sound was idle, how soon each change came as an event, and what is captured
+    //! of a tone at the levels the PC writes (the same at each: the headset applies the
+    //! level once).
+    use std::sync::mpsc::Receiver;
+    use std::time::Instant;
+
+    use super::*;
+    use crate::events::Event;
+    use crate::platform::sound::SoundEvent;
+
+    /// The watcher's thread in this process, and how often it went to sleep and woke.
+    fn watcher_wakeups() -> Option<(u32, u64)> {
+        let tasks = std::fs::read_dir("/proc/self/task").ok()?;
+        tasks.flatten().find_map(|task| {
+            let name = std::fs::read_to_string(task.path().join("comm")).ok()?;
+            (name.trim() == "sound-events").then_some(())?;
+            let tid = task.file_name().to_string_lossy().parse().ok()?;
+            Some((tid, switches(&task.path().join("status"))?))
+        })
+    }
+
+    fn switches(status: &std::path::Path) -> Option<u64> {
+        std::fs::read_to_string(status)
+            .ok()?
+            .lines()
+            .find_map(|l| l.strip_prefix("voluntary_ctxt_switches:"))?
+            .trim()
+            .parse()
+            .ok()
+    }
+
+    /// The `pactl subscribe` the watcher's thread started.
+    fn subscriber(tid: u32) -> Option<u32> {
+        let children = std::fs::read_to_string(format!("/proc/self/task/{tid}/children")).ok()?;
+        children.split_whitespace().find_map(|pid| {
+            let cmd = std::fs::read_to_string(format!("/proc/{pid}/cmdline")).ok()?;
+            cmd.contains("subscribe").then(|| pid.parse().ok())?
+        })
+    }
+
+    /// The next sound event within `within`, and how long it took.
+    fn next(events: &Receiver<Event>, within: Duration) -> Option<(SoundEvent, Duration)> {
+        let started = Instant::now();
+        match events.recv_timeout(within) {
+            Ok(Event::Sound(e)) => Some((e, started.elapsed())),
+            _ => None,
+        }
+    }
+
+    fn pactl_ok(args: &[&str]) {
+        assert!(pactl(args).is_some(), "pactl {args:?}");
+    }
+
+    /// Plays a second of a 440 Hz tone at peak 8000 into `sink` and records its
+    /// monitor as Prostir captures it: the loudest sample recorded.
+    fn captured_peak(sink: &str) -> i16 {
+        use std::io::{Read, Write};
+        let raw = ["--raw", "--format=s16le", "--rate=48000", "--channels=2"];
+        let mut rec = Command::new("parecord")
+            // Small pieces: by default it holds two seconds before writing any.
+            .args(["-d", &format!("{sink}.monitor"), "--latency-msec=10"])
+            .args(raw)
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut out = rec.stdout.take().unwrap();
+        let got = std::thread::spawn(move || {
+            let mut all = Vec::new();
+            let _ = out.read_to_end(&mut all);
+            all
+        });
+        let tone: Vec<u8> = (0..48_000)
+            .flat_map(|i| {
+                let v = (8000.0 * (2.0 * std::f64::consts::PI * 440.0 * f64::from(i) / 48e3).sin())
+                    as i16;
+                [v.to_le_bytes(), v.to_le_bytes()].concat()
+            })
+            .collect();
+        let mut play = Command::new("pacat")
+            .args(["--playback", &format!("--device={sink}"), "--volume=65536"])
+            .args(raw)
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        play.stdin.take().unwrap().write_all(&tone).unwrap();
+        let _ = play.wait();
+        std::thread::sleep(Duration::from_millis(200));
+        // Asked to stop, it writes out what it holds (killed, it would not).
+        // SAFETY: a signal to the child started above.
+        unsafe { libc::kill(rec.id() as libc::pid_t, libc::SIGTERM) };
+        let _ = rec.wait();
+        let pcm = got.join().unwrap();
+        pcm.as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| i16::from_le_bytes(*b).saturating_abs())
+            .max()
+            .unwrap_or(0)
+    }
+
+    #[test]
+    #[ignore]
+    fn sound_harness() {
+        let _ = env_logger::try_init();
+        let tag = std::process::id();
+        let sink: &'static str = Box::leak(format!("prostir_test_sink_{tag}").into_boxed_str());
+        let (mic_name, feed) = (
+            format!("prostir_test_mic_{tag}"),
+            format!("prostir_test_feed_{tag}"),
+        );
+        let (events, received) = crate::events::channel();
+        // The watcher first, then the devices, as Prostir starts them.
+        let watcher = Watcher::start(Pactl::named(sink, &mic_name), events).unwrap();
+        let device = VirtualNode::create(sink, "Prostir test", "Audio/Sink").unwrap();
+        let mic = MicIn::start_as(&mic_name, &feed, false).unwrap();
+        let volume = SinkVolume { sink: sink.into() };
+        // What the new devices are: their first events.
+        let until = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < until {
+            if let Some((e, _)) = next(&received, Duration::from_millis(300)) {
+                eprintln!("at the start: {e:?}");
+            }
+        }
+        let (tid, _) = watcher_wakeups().expect("the watcher's thread");
+        let pactl_pid = subscriber(tid).expect("pactl subscribe");
+
+        // 1. Idle: how often the watcher and its pactl woke in 10 s.
+        let child_status = std::path::PathBuf::from(format!("/proc/{pactl_pid}/status"));
+        let (w0, c0) = (
+            watcher_wakeups().unwrap().1,
+            switches(&child_status).unwrap(),
+        );
+        std::thread::sleep(Duration::from_secs(10));
+        let (w1, c1) = (
+            watcher_wakeups().unwrap().1,
+            switches(&child_status).unwrap(),
+        );
+        let stray: Vec<SoundEvent> = received
+            .try_iter()
+            .filter_map(|e| match e {
+                Event::Sound(e) => Some(e),
+                _ => None,
+            })
+            .collect();
+        eprintln!(
+            "idle 10 s: the watcher woke {} times, pactl subscribe {} times, events {stray:?}",
+            w1 - w0,
+            c1 - c0
+        );
+
+        // 2. The slider (another program sets the device): one event.
+        pactl_ok(&["set-sink-volume", sink, "37%"]);
+        let (e, took) = next(&received, Duration::from_secs(2)).expect("no event for the slider");
+        eprintln!("the slider at 37 %: {e:?} after {took:?}");
+        assert!(matches!(
+            e,
+            SoundEvent::Volume {
+                level: 37,
+                muted: false,
+                ..
+            }
+        ));
+
+        // 3. The PC writes the headset's level: its echo, once, not outdated.
+        volume.set(55, true);
+        let (e, took) = next(&received, Duration::from_secs(2)).expect("no echo");
+        eprintln!("the PC wrote 55 muted: {e:?} after {took:?}");
+        let SoundEvent::Volume {
+            level,
+            muted,
+            writes,
+            ..
+        } = e
+        else {
+            panic!("not a volume: {e:?}");
+        };
+        assert_eq!((level, muted), (55, true));
+        assert!(!volume.outdated(writes));
+        let more = next(&received, Duration::from_millis(500));
+        assert!(more.is_none(), "the write said twice: {more:?}");
+        assert_eq!(volume.level(), Some((55, true)));
+        pactl_ok(&["set-sink-mute", sink, "0"]);
+        let _ = next(&received, Duration::from_secs(2));
+
+        // 4. A program records from the microphone, then stops.
+        let started = Instant::now();
+        let mut rec = Command::new("parecord")
+            .args(["-d", &mic_name, "--raw", "--latency-msec=10", "/dev/null"])
+            .spawn()
+            .unwrap();
+        let (e, _) = next(&received, Duration::from_secs(3)).expect("no event for the recording");
+        eprintln!("a recording: {e:?} after {:?}", started.elapsed());
+        assert_eq!(e, SoundEvent::Recording(true));
+        std::thread::sleep(Duration::from_millis(500));
+        let stopped = Instant::now();
+        let _ = rec.kill();
+        let _ = rec.wait();
+        let (e, _) = next(&received, Duration::from_secs(3)).expect("no event for its end");
+        eprintln!("its end: {e:?} after {:?}", stopped.elapsed());
+        assert_eq!(e, SoundEvent::Recording(false));
+
+        // 5. pactl subscribe killed: it starts again, and what changed meanwhile comes.
+        // SAFETY: a signal to the child this test found.
+        unsafe { libc::kill(pactl_pid as libc::pid_t, libc::SIGKILL) };
+        std::thread::sleep(Duration::from_millis(200));
+        pactl_ok(&["set-sink-volume", sink, "23%"]);
+        let killed = Instant::now();
+        let (e, _) = next(&received, Duration::from_secs(5)).expect("no event after a restart");
+        eprintln!("killed, moved to 23 %: {e:?} after {:?}", killed.elapsed());
+        assert!(matches!(e, SoundEvent::Volume { level: 23, .. }));
+        let again = subscriber(tid).expect("a new pactl subscribe");
+        assert_ne!(again, pactl_pid);
+
+        // 6. The level the PC writes does not change what the headset gets: the
+        // capture reads the monitor, before the device's volume and mute.
+        let peaks: Vec<(&str, &str, i16)> = [("100%", "0"), ("30%", "0"), ("100%", "1")]
+            .into_iter()
+            .map(|(level, mute)| {
+                pactl_ok(&["set-sink-volume", sink, level]);
+                pactl_ok(&["set-sink-mute", sink, mute]);
+                (level, mute, captured_peak(sink))
+            })
+            .collect();
+        eprintln!("a tone at peak 8000, captured: {peaks:?}");
+        for (_, _, peak) in &peaks {
+            assert!((7600..=8400).contains(peak), "captured at {peak}");
+        }
+
+        // Gone with the watcher: no pactl left.
+        drop(watcher);
+        let until = Instant::now() + Duration::from_secs(3);
+        while std::fs::read_to_string(format!("/proc/{again}/status"))
+            .is_ok_and(|s| !s.contains("State:\tZ"))
+        {
+            assert!(
+                Instant::now() < until,
+                "pactl subscribe outlived the watcher"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        drop(mic);
+        drop(device);
+        assert!(node_id(sink).is_none(), "the test sink is gone");
     }
 }

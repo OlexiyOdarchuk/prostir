@@ -16,6 +16,7 @@ use prostir_proto::state::Part;
 
 use crate::pairing;
 use crate::platform::TrayCommand;
+use crate::platform::sound::SoundEvent;
 
 /// A session's number, new for every connection: a message of a session that ended
 /// (or was replaced) is never taken for one of the next.
@@ -28,6 +29,9 @@ pub enum Event {
     /// A message from the headset of a session, with when it came (`Ping`, `Pong` and
     /// `FrameShown` are answered in the session's reader and never come here).
     Headset(SessionId, Instant, ClientMsg),
+    /// The sound system changed: the headset's device moved, or a program began or
+    /// stopped recording from the headset microphone.
+    Sound(SoundEvent),
     /// A session's connection ended: its end (`UnexpectedEof`), silence (`TimedOut`),
     /// or an error. Nothing more comes from it.
     SessionEnded(SessionId, std::io::Error),

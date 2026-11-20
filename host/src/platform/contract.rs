@@ -69,9 +69,9 @@
 //! 9. A limit on encoder sessions: found when an encoder does not start (step 6.5), not
 //!    a field here.
 //! 10. The cursor in the frames or apart: [`FrameSource::cursor`].
-//! 11. Sound also in the speakers, and no microphone without VB-CABLE: the sound module
-//!     of step 6.6 (`Route`, `MicAvailability`, an explicit output device to capture
-//!     from), not the desktop.
+//! 11. Sound also in the speakers, and no microphone without VB-CABLE: the sound part
+//!     of the platform (`sound.rs`: `Route`, `MicAvailability`, an explicit
+//!     `OutputDevice` to capture from), not the desktop.
 //! 12. No signals: the system module (`on_quit_request`, step 6.8). Cleaning up after a
 //!     crash is the desktop's when it connects, and nothing at all where
 //!     [`DesktopCaps::cleans_up_after_crash`] (our driver's watchdog).
