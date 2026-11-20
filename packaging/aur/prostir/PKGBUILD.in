@@ -25,7 +25,13 @@ optdepends=('gst-plugins-ugly: encoding on the CPU with x264 (NVIDIA, or no VA-A
             'libnotify: notifications'
             'grim: screenshots on Hyprland'
             'spectacle: whole-desktop screenshots on KDE when a monitor cannot be captured'
-            'android-tools: connecting the headset over USB (developer mode)')
+            'android-tools: connecting the headset over USB (developer mode)'
+            'libx11: the settings window in an X11 session'
+            'libxcursor: the settings window in an X11 session'
+            'libxi: the settings window in an X11 session'
+            'libxrandr: the settings window in an X11 session'
+            'libxrender: the settings window in an X11 session'
+            'libxkbcommon-x11: the settings window in an X11 session')
 provides=('prostir-bin')
 conflicts=('prostir-bin')
 # The release's THIRD-PARTY-LICENSES.txt lists the crates compiled into the program;

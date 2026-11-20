@@ -44,7 +44,7 @@ Recommends: mesa-va-drivers | intel-media-va-driver-non-free | intel-media-va-dr
             libnotify-bin,
             libkscreen-bin | hyprland,
             qdbus-qt6 | hyprland
-Suggests: adb, grim
+Suggests: adb, grim, libx11-6, libx11-xcb1, libxcursor1, libxi6, libxkbcommon-x11-0, libxrandr2, libxrender1
 Description: Extra KDE Plasma 6 and Hyprland monitors in a Meta Quest 3 or 3S headset
  Prostir puts extra monitors for a KDE Plasma 6 or Hyprland desktop into a Meta
  Quest 3 or 3S headset. They are real outputs of the desktop, streamed to the

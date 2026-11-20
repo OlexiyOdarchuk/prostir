@@ -55,6 +55,14 @@ Suggests:       kdialog
 Suggests:       zenity
 Suggests:       grim
 Suggests:       android-tools
+# The settings window in an X11 session.
+Suggests:       libX11-6
+Suggests:       libX11-xcb1
+Suggests:       libXcursor1
+Suggests:       libXi6
+Suggests:       libXrandr2
+Suggests:       libXrender1
+Suggests:       libxkbcommon-x11-0
 %else
 Requires:       libglvnd-egl
 Requires:       libwayland-client
@@ -79,6 +87,14 @@ Suggests:       kdialog
 Suggests:       zenity
 Suggests:       grim
 Suggests:       android-tools
+# The settings window in an X11 session.
+Suggests:       libX11
+Suggests:       libX11-xcb
+Suggests:       libXcursor
+Suggests:       libXi
+Suggests:       libXrandr
+Suggests:       libXrender
+Suggests:       libxkbcommon-x11
 %endif
 
 %description

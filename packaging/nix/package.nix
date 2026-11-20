@@ -72,6 +72,8 @@ let
     xorg.libXcursor
     xorg.libXi
     xorg.libXrandr
+    xorg.libXrender
+    xorg.libxcb
   ];
 in
 rustPlatform.buildRustPackage {
@@ -128,8 +130,10 @@ rustPlatform.buildRustPackage {
     install -Dm644 packaging/prostir.svg $out/share/icons/hicolor/scalable/apps/prostir.svg
     install -Dm644 packaging/io.github.OlexiyOdarchuk.Prostir.Settings.desktop \
       $out/share/applications/io.github.OlexiyOdarchuk.Prostir.Settings.desktop
+    # PATH: "Start Prostir" runs the prostir next to it.
     wrapProgram $out/bin/prostir-settings \
-      --prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath windowLibs}"
+      --prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath windowLibs}" \
+      --prefix PATH : "$out/bin"
     wrapProgram $out/bin/prostir \
       --prefix GST_PLUGIN_SYSTEM_PATH_1_0 : "${lib.makeSearchPathOutput "lib" "lib/gstreamer-1.0" plugins}" \
       --set-default LIBVA_DRIVERS_PATH "${lib.concatStringsSep ":" vaDrivers}" \
