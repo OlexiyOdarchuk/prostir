@@ -157,6 +157,7 @@ fn base() -> State {
             codec: Codec::H265,
             cpu: false,
             using: None,
+            outputs: Vec::new(),
         },
         sound: Sound {
             to_headset: true,

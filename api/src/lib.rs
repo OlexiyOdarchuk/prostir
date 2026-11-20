@@ -801,6 +801,25 @@ pub struct Encoding {
     pub cpu: bool,
     /// What it encodes with now, while there are monitors.
     pub using: Option<Using>,
+    /// How each display that streams now encodes, in the order of `displays`.
+    pub outputs: Vec<OutputEncoding>,
+}
+
+/// How one display that streams encodes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OutputEncoding {
+    pub display: u32,
+    /// The encoder, for people: `VA-API`, `NVENC`, `x264`.
+    pub encoder: String,
+    pub codec: Codec,
+    /// On the graphics card.
+    pub hardware: bool,
+    /// Its frames go through the CPU on their way to the encoder.
+    pub copies: bool,
+    /// Why it is not on the best encoder this PC has for it, in the PC's language;
+    /// `null` when it is.
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1147,6 +1166,14 @@ mod tests {
                     codec: Codec::H264,
                     hardware: true,
                 }),
+                outputs: vec![OutputEncoding {
+                    display: 103,
+                    encoder: "x264".into(),
+                    codec: Codec::H264,
+                    hardware: false,
+                    copies: true,
+                    note: Some("y".into()),
+                }],
             },
             sound: Sound {
                 to_headset: true,
@@ -1188,7 +1215,8 @@ mod tests {
             r#""limits":{"sizes":[[1920,1080]],"scales":[100,125],"displays_max":6,"#,
             r#""physical_max":2,"streams_max":8,"min":[640,360],"max":[3840,2160]},"#,
             r#""encoding":{"bitrate":30,"sharp":false,"codec":"h265","cpu":false,"#,
-            r#""using":{"codec":"h264","hardware":true}},"#,
+            r#""using":{"codec":"h264","hardware":true},"outputs":[{"display":103,"#,
+            r#""encoder":"x264","codec":"h264","hardware":false,"copies":true,"note":"y"}]},"#,
             r#""sound":{"to_headset":true,"volume":{"level":40,"muted":false},"mic_on":false,"#,
             r#""mic":"off","mic_failure":null},"pairing":null,"nearby":[],"counting":true,"#,
             r#""problems":[{"code":"Sound","text":"x"}]}"#,

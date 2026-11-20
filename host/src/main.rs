@@ -170,6 +170,7 @@ impl Control {
             monitors: displays.map_or(0, Displays::monitor_count),
             mirror: displays.is_some_and(Displays::mirror_active),
             paused: displays.is_some_and(|d| !d.streaming()),
+            encoding: displays.and_then(Displays::encoding_line),
         };
         if self.shown.as_ref() != Some(&status) {
             tray::set_status(self.tray.as_ref(), status.clone());
@@ -1057,6 +1058,8 @@ fn serve(args: Args) -> Result<()> {
     // On the bus as early as the state can be: GStreamer's start (a scan of its
     // plugins, the first time) comes after.
     gstreamer::init().context("GStreamer init")?;
+    // What the encoders can do, found on a thread of its own before a headset needs it.
+    encoder::start_probing();
     if args.open_settings
         && let Err(e) = local::open_settings()
     {

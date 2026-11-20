@@ -692,6 +692,22 @@ impl Brain {
             Codec::H265 => api::Codec::H265,
             Codec::Av1 => api::Codec::Av1,
         };
+        // How each display that streams encodes, in the order of `displays`.
+        let mut outputs: Vec<api::OutputEncoding> = self
+            .displays
+            .as_ref()
+            .map_or_else(Vec::new, crate::displays::Displays::encoding_report)
+            .into_iter()
+            .map(|o| api::OutputEncoding {
+                display: o.id.wire().0,
+                encoder: o.encoder.to_owned(),
+                codec: codec(o.codec),
+                hardware: o.hardware,
+                copies: o.copies,
+                note: o.note,
+            })
+            .collect();
+        outputs.sort_by_key(|o| displays.iter().position(|d| d.id == o.display));
         api::State {
             v: api::STATE_VERSION,
             pc: api::Pc {
@@ -735,6 +751,7 @@ impl Brain {
                         hardware: !software,
                     }
                 }),
+                outputs,
             },
             sound: api::Sound {
                 to_headset: wanted.audio,
