@@ -3630,6 +3630,7 @@ dependencies = [
  "prostir-api",
  "prostir-layout",
  "prostir-proto",
+ "prostir-settings",
  "prostir-testkit",
  "serde",
  "serde_json",

@@ -57,6 +57,8 @@ wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 
 [dev-dependencies]
 prostir-testkit = { path = "../testkit" }
+# The settings window's D-Bus client, driven against the service (tests/e2e/window.rs).
+prostir-settings = { path = "../settings" }
 
 # Packages built in the release workflow: `cargo deb -p prostir-host` and
 # `cargo generate-rpm -p host`, after scripts/package-release.sh (which writes
