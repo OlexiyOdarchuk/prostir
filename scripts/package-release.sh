@@ -10,6 +10,10 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+# The same archives from the same commit: every file dated by the commit (the programs
+# themselves embed no time).
+SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct)}"
+export SOURCE_DATE_EPOCH
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
 DIST="$ROOT/dist"
 NAME="prostir-$VERSION-x86_64-linux"
@@ -30,7 +34,8 @@ cp packaging/prostir.svg packaging/prostir.desktop packaging/io.github.OlexiyOda
 cp -r packaging/systemd packaging/udev "$DIST/$NAME/packaging/"
 cp scripts/install.sh LICENSE LICENSE-EXCEPTION.md build/THIRD-PARTY-LICENSES.txt \
     README.md README.uk.md CHANGELOG.md "$DIST/$NAME/"
-tar -C "$DIST" -czf "$DIST/$NAME.tar.gz" "$NAME"
+tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$SOURCE_DATE_EPOCH" \
+    -C "$DIST" -cf - "$NAME" | gzip -9n > "$DIST/$NAME.tar.gz"
 rm -rf "$DIST/$NAME"
 
 (cd "$DIST" && sha256sum "$NAME.tar.gz" "prostir-$VERSION.apk" THIRD-PARTY-LICENSES.txt > SHA256SUMS)

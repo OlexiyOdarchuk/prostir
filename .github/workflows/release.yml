@@ -67,13 +67,18 @@ jobs:
       - name: Debian and RPM packages
         run: |
           cargo install --locked cargo-deb@3.8.0 cargo-generate-rpm@0.21.1
-          cargo deb -p prostir-host --no-build -o dist/
+          # Already stripped as they ship (symbol names kept): no stripping again.
+          cargo deb -p prostir-host --no-build --no-strip -o dist/
           cargo generate-rpm -p crates/host -o dist/
           (cd dist && sha256sum ./*.tar.gz ./*.apk ./*.deb ./*.rpm THIRD-PARTY-LICENSES.txt | sed 's| \./| |' > SHA256SUMS)
           # The release text: this version's part of the changelog.
           v="${GITHUB_REF_NAME#v}"
           awk -v v="$v" '$0 ~ "^## "v"( |$)" {on=1; next} /^## / {on=0} on' CHANGELOG.md > dist/NOTES.md
           test -s dist/NOTES.md
+          # What built it, so the same programs can be built again (for the exact lines
+          # of a crash report: the release has no debug information).
+          printf '\nBuilt with %s, %s, Android NDK %s.\n' "$(rustc -V)" "$(cargo -V)" \
+            "$(basename "$ANDROID_NDK_LATEST_HOME")" >> dist/NOTES.md
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dist

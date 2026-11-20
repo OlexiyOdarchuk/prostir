@@ -6,6 +6,9 @@ pkgdesc="Extra KDE Plasma 6 and Hyprland monitors in a Meta Quest 3 or 3S headse
 arch=('x86_64')
 url="https://prostir.ishawyha.dev"
 license=('GPL-3.0-or-later')
+# The released programs come without debug information but with their symbol names,
+# which backtraces need: makepkg leaves them as they are.
+options=('!strip' '!debug')
 # gst-plugin-va: the VA-API encoders (vah264enc, vah265enc, vapostproc).
 # gst-plugins-bad-libs: h264parse and h265parse. gst-plugins-good: pulsesrc.
 # libpulse: pactl, pacat. pipewire-audio: pw-loopback. mesa: libgbm and the AMD VA driver.

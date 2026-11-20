@@ -124,7 +124,11 @@ if [[ "${PROSTIR_DEBUG:-}" == 1 ]]; then
 fi
 "$BUILD_TOOLS/aapt2" link -o "$OUT/unaligned.apk" --manifest "$MANIFEST" \
     -I "$PLATFORM/android.jar" -A "$OUT/assets" "$OUT"/res/*.flat "${link_flags[@]}"
-(cd "$STAGE" && zip -q -r "$OUT/unaligned.apk" lib)
+# The same APK from the same commit: the libraries dated by the commit, no extra
+# attributes (aapt2 dates its own entries 1980).
+SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$ROOT" log -1 --format=%ct 2>/dev/null || date +%s)}"
+find "$STAGE" -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} +
+(cd "$STAGE" && zip -q -X -r "$OUT/unaligned.apk" lib)
 "$BUILD_TOOLS/zipalign" -f -p 4 "$OUT/unaligned.apk" "$OUT/aligned.apk"
 
 # Signing key, first found wins:

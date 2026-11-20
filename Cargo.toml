@@ -45,15 +45,17 @@ opt-level = 3
 [profile.dev.package.prostir-layout]
 opt-level = 3
 
-# One codegen unit: a smaller and slightly faster program for a longer build. Strip:
-# no debug information and no symbol table in what ships, as the packages already had
-# no debug information (they stripped it); a panic still names its file and line,
-# which come from the panic's location and not from debug information. Distribution
-# builds that make their own debug packages (OBS, AUR) ask for line tables back.
+# One codegen unit: a smaller and slightly faster program for a longer build. No debug
+# information in what ships, as before (the packages stripped it by hand); the symbol
+# names stay, so a backtrace names its functions, and a panic names its file and line.
+# Release builds are reproducible (the release notes say which Rust built them), so
+# the exact lines of an address come from building the tag again with debug
+# information. Distribution builds that make their own debug packages (OBS, AUR) ask
+# for line tables and no stripping instead.
 [profile.release]
 lto = "thin"
 codegen-units = 1
-strip = true
+strip = "debuginfo"
 
 # Lints for every crate (each takes them with `[lints] workspace = true`); CI denies
 # warnings. A deliberate pick, not whole groups: each catches a real mistake or a
