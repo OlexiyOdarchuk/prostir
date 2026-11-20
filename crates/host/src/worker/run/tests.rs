@@ -1,4 +1,6 @@
 use super::super::WantedScreen;
+use super::encoders::kept_note;
+use super::place::{is_the_headsets, origin_at};
 use super::*;
 use crate::encoder::Input;
 use crate::platform::{
