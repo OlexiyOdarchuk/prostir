@@ -1091,11 +1091,22 @@ fn create_displays(set_primary: bool, store: &mut Store, events: &EventSink) -> 
     displays
 }
 
+/// The log filter unless `RUST_LOG` says otherwise: Prostir's own lines from `level`
+/// on, other crates' only from warnings (zbus logs every call of the local API at
+/// info).
+fn log_filter(level: &str) -> String {
+    format!("warn,prostir={level}")
+}
+
+/// Starts the log with Prostir's own lines from `level` on (see [`log_filter`]).
+fn init_log(level: &str) {
+    let env = env_logger::Env::default().default_filter_or(log_filter(level));
+    env_logger::Builder::from_env(env).init();
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let quiet = || {
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
-    };
+    let quiet = || init_log("warn");
     let code = match cli.command {
         None => serve(cli.serve)?,
         Some(Sub::Serve(args)) => serve(args)?,
@@ -1141,7 +1152,7 @@ enum Origin {
 fn serve(args: Args) -> Result<i32> {
     // Before any thread starts: it clears the variables that passed them.
     let passed = platform::sockets::take()?;
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    init_log("info");
     let discovery = (!args.no_discovery).then_some(args.discovery_port);
     match passed {
         Some(mut sockets) => {
@@ -1399,4 +1410,27 @@ fn full_with(
         platform::end_now(code);
     }
     Ok(code)
+}
+
+#[cfg(test)]
+mod tests {
+    use log::{Level, Log, Metadata};
+
+    /// Prostir's own lines at info, a dependency's only from warnings: zbus logs
+    /// every call of the local API at info.
+    #[test]
+    fn dependencies_log_only_warnings() {
+        let logger = env_logger::Builder::new()
+            .parse_filters(&super::log_filter("info"))
+            .build();
+        let on = |target: &str, level: Level| {
+            logger.enabled(&Metadata::builder().target(target).level(level).build())
+        };
+        assert!(on("prostir::session", Level::Info));
+        assert!(on("prostir", Level::Info));
+        assert!(!on("prostir::session", Level::Debug));
+        assert!(!on("zbus::object_server", Level::Info));
+        assert!(!on("tracing::span", Level::Info));
+        assert!(on("zbus::connection", Level::Warn));
+    }
 }
