@@ -196,6 +196,11 @@ fn watch_file(name: &'static str, on_text: impl Fn(String) -> bool + Send + 'sta
         .is_ok()
 }
 
+/// No USB devices are ever plugged in.
+pub fn on_usb_arrival(_on_arrival: impl Fn() + Send + 'static) -> std::io::Result<()> {
+    Ok(())
+}
+
 /// No windows and no mouse.
 pub mod windows {
     use std::path::PathBuf;
