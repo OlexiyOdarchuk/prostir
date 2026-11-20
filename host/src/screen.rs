@@ -57,12 +57,14 @@ pub enum ScreenKind {
     /// A display of the PC itself (`builtin`: the laptop's own panel), streamed as it
     /// is while `shown`; `key` is how it is told from others (and saved), `label` what
     /// people see it called, as the desktop last said (the saved key's connector until
-    /// it is seen).
+    /// it is seen), `size` its picture in pixels as the desktop last said (none until
+    /// it is seen in this run).
     Physical {
         key: crate::store::PhysicalKey,
         label: String,
         builtin: bool,
         shown: bool,
+        size: Option<(u32, u32)>,
     },
 }
 

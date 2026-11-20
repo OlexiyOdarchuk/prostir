@@ -712,6 +712,197 @@ fn monitors_scaled_and_placed_from_the_pc() {
     assert_eq!(error_name(&bad), "BadSize");
 }
 
+/// The laptop's lid closed (its panel kept as shown from before, not connected) and
+/// one monitor on HDMI: the monitor shows and hides as often as asked, from the
+/// headset and from the PC, the absent panel counting for no limit; the local API
+/// tells each display as it is, the hidden monitor with its size and place, the
+/// absent panel with no size, every virtual monitor running.
+#[test]
+fn a_closed_laptop_and_a_monitor_on_hdmi() {
+    use prostir_api::{DisplayKind, DisplayState as Api};
+    use prostir_proto::request::{Outcome, Request};
+    use prostir_proto::state::{DisplayId, DisplayState};
+    let options = Options {
+        physical: "HDMI-A-1=MSI MP251 0@1920x1080".into(),
+        ..Options::default()
+    };
+    let dir = TestDir::new("api-closed-laptop");
+    dir.save_screens(
+        "next 200\nphysical 100 edid \"BOE 0x0a1c 0\" connector eDP-1 builtin shown \
+         seen 1795000000\nrow\nscreen 0 640x360\nscreen 1 480x272\n",
+    );
+    dir.save_settings("mirror on\n");
+    let mut keys = dir.pair();
+    let pc = Pc::start(&dir, &options);
+    let mut headset = connect(&pc, &mut keys);
+    let laptop = DisplayId(100);
+    headset
+        .wait(START, "the monitors, the absent panel and HDMI", |v| {
+            v.all_monitors_show()
+                && v.display(laptop)
+                    .is_some_and(|d| d.state == DisplayState::Absent && d.is_shown_physical())
+                && v.displays()
+                    .iter()
+                    .any(|d| d.id != laptop && d.is_shown_physical())
+        })
+        .unwrap();
+    let hdmi = headset
+        .view()
+        .displays()
+        .iter()
+        .find(|d| d.is_physical() && d.id != laptop)
+        .unwrap()
+        .id;
+    for shown in [false, true, false] {
+        let outcome = headset.ask(Request::ShowPhysical { id: hdmi, shown });
+        assert!(matches!(outcome, Ok(Outcome::Done)), "{shown}: {outcome:?}");
+        headset
+            .wait(SOON, "shown or hidden as asked", |v| {
+                v.display(hdmi)
+                    .is_some_and(|d| d.is_shown_physical() == shown)
+            })
+            .unwrap();
+    }
+    let hidden = headset.view().display(hdmi).unwrap().clone();
+    assert_eq!(
+        (hidden.mode.w, hidden.mode.h),
+        (1920, 1080),
+        "its size, hidden"
+    );
+    let Some(bus) = &pc.bus else {
+        return;
+    };
+    let bus = bus.connect();
+    let started = Instant::now();
+    let state = loop {
+        let (_, state) = get_state(&bus);
+        let placed = state
+            .display(hdmi.0)
+            .is_some_and(|d| d.desk.is_some() && !d.shown);
+        if placed || started.elapsed() > SOON {
+            break state;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let monitors: Vec<_> = state
+        .displays
+        .iter()
+        .filter(|d| d.kind == DisplayKind::Virtual)
+        .collect();
+    assert_eq!(monitors.len(), 2, "{:?}", state.displays);
+    for m in &monitors {
+        assert_eq!(m.state, Api::Running, "{m:?}");
+        assert!(m.failure.is_none() && m.desk.is_some(), "{m:?}");
+    }
+    let h = state.display(hdmi.0).unwrap();
+    assert_eq!((h.mode.w, h.mode.h), (1920, 1080), "{h:?}");
+    assert_eq!(h.state, Api::Running, "{h:?}");
+    assert!(h.desk.is_some(), "on the desktop, hidden or not");
+    let l = state.display(100).unwrap();
+    assert_eq!(l.state, Api::Absent);
+    assert_eq!((l.mode.w, l.mode.h), (0, 0), "no size known: none said");
+    assert!(
+        state.limits.physical_max.unwrap() >= 2,
+        "{:?}",
+        state.limits
+    );
+    // From the PC (the settings window's "Show"), with the panel still marked shown.
+    let shown = format!(
+        r#"{{"request":"show_physical","id":{},"shown":true}}"#,
+        hdmi.0
+    );
+    let reply: String = call(&bus, "Call", &(shown.as_str(),))
+        .unwrap()
+        .body()
+        .deserialize()
+        .unwrap();
+    assert!(reply.contains("revision"), "{reply}");
+    headset
+        .wait(SOON, "shown again", |v| {
+            v.display(hdmi).is_some_and(|d| d.is_shown_physical())
+                && v.streams.get(&hdmi).is_some_and(|s| s.has_picture())
+        })
+        .unwrap();
+}
+
+/// A monitor the desktop could not make stands failed in the local API, saying why
+/// once (the window names it); "Try again" (`retry_monitor`) makes it again.
+#[test]
+fn a_failed_monitor_is_tried_again() {
+    let options = Options {
+        broken_monitors: "2".into(),
+        ..Options::default()
+    };
+    let dir = TestDir::new("api-retry");
+    dir.save_monitors(TWO_MONITORS);
+    let mut keys = dir.pair();
+    let mut pc = Pc::start(&dir, &options);
+    let _headset = connect(&pc, &mut keys);
+    let Some(bus) = &pc.bus else {
+        return;
+    };
+    let bus = bus.connect();
+    let started = Instant::now();
+    let failed = loop {
+        let (_, state) = get_state(&bus);
+        let failed = state
+            .displays
+            .iter()
+            .find(|d| d.state == prostir_api::DisplayState::Failed)
+            .cloned();
+        if let Some(d) = failed {
+            break d;
+        }
+        assert!(started.elapsed() < START, "{:?}", state.displays);
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let why = failed.failure.unwrap().text;
+    assert!(why.contains("broken"), "{why}");
+    assert!(
+        !why.contains(&failed.name),
+        "named once, by the window: {why}"
+    );
+    let tries = pc.count_log("fake monitor 2 is broken");
+    assert!(tries > 0);
+    let request = format!(r#"{{"request":"retry_monitor","id":{}}}"#, failed.id);
+    call(&bus, "Call", &(request.as_str(),)).unwrap();
+    pc.wait_log_after(SOON, "fake monitor 2 is broken", tries);
+}
+
+/// Monitors that stream in H.265 to a headset that decodes it stand running in the
+/// local API too: what the PC tells it is judged by no stand-in headset that decodes
+/// nothing. Only where the PC encodes H.265 on its graphics card.
+#[test]
+fn monitors_in_h265_stand_running() {
+    use prostir_proto::Codec;
+    let options = Options {
+        software: false,
+        ..Options::default()
+    };
+    let dir = TestDir::new("api-h265");
+    dir.save_screens("next 200\nrow\nscreen 0 640x360\nscreen 1 480x272\n");
+    dir.save_settings("codec h265\nsoftware off\n");
+    let mut keys = dir.pair();
+    let pc = Pc::start(&dir, &options);
+    let mut headset = connect(&pc, &mut keys);
+    headset
+        .wait(START, "every monitor showing", View::all_monitors_show)
+        .unwrap();
+    let using = headset.view().encoding().unwrap().using;
+    if using.map(|(c, _)| c) != Some(Codec::H265) {
+        eprintln!("no H.265 on the graphics card here ({using:?}): nothing to try");
+        return;
+    }
+    let Some(bus) = &pc.bus else {
+        return;
+    };
+    let (_, state) = get_state(&bus.connect());
+    assert_eq!(state.displays.len(), 2);
+    for d in &state.displays {
+        assert_eq!(d.state, prostir_api::DisplayState::Running, "{d:?}");
+    }
+}
+
 /// A request over 64 KiB is refused unread.
 #[test]
 fn a_huge_request_is_refused() {

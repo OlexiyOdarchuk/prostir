@@ -249,6 +249,7 @@ impl Displays {
                 label: p.key.connector.clone(),
                 builtin: p.builtin,
                 shown: p.shown,
+                size: None,
             };
             let mut screen = Screen::starting(*id, 0, kind);
             screen.state = ScreenState::Absent;
@@ -756,13 +757,15 @@ impl Displays {
             if !self.router.still_too_big(id) {
                 continue;
             }
-            let why = too_big_why(&s.name(), (w, h), codec);
-            warn!("{why}");
+            let why = too_big_why((w, h), codec);
+            warn!("{}: {why}", s.name());
             if s.is_window() {
+                // Said with no display: its name says which.
+                let named = format!("{}: {why}", s.name());
                 self.close_window_panel(id);
                 self.router.send_all(HostMsg::Problem {
                     error: state::ErrorCode::BAD_SIZE,
-                    detail: state::clip(&why, state::MAX_DETAIL),
+                    detail: state::clip(&named, state::MAX_DETAIL),
                     display: None,
                 });
                 continue;
@@ -826,9 +829,14 @@ impl Displays {
             };
             present.push(id);
             if let Some(s) = self.screens.get_mut(&id)
-                && let ScreenKind::Physical { key, label, .. } = &mut s.kind
+                && let ScreenKind::Physical {
+                    key, label, size, ..
+                } = &mut s.kind
             {
                 label.clone_from(&display.label);
+                if display.size.is_some() {
+                    *size = display.size;
+                }
                 if key.connector != display.key.as_str() {
                     info!("{id} is on {} now", display.key);
                     key.connector = display.key.to_string();
@@ -958,6 +966,7 @@ impl Displays {
             label: display.label.clone(),
             builtin: display.builtin,
             shown,
+            size: display.size,
         };
         self.screens.insert(id, Screen::starting(id, 0, kind));
         id
@@ -986,11 +995,13 @@ impl Displays {
     }
 
     /// Shows or hides display `id` of the PC in the headset, with at most `max` of them
-    /// shown.
+    /// shown among those connected: one not connected (a closed laptop's panel) shows
+    /// nothing, so it counts for none.
     pub fn show_physical(&mut self, id: ScreenId, show: bool, max: usize) -> Result<()> {
         let others = self
             .physical()
             .filter(|s| s.id != id && s.is_shown_physical())
+            .filter(|s| !matches!(s.state, ScreenState::Absent))
             .count();
         let Some(ScreenKind::Physical { shown, .. }) =
             self.screens.get_mut(&id).map(|s| &mut s.kind)
@@ -1036,6 +1047,13 @@ impl Displays {
     /// Whether `id` is a display of the PC itself.
     pub fn is_physical(&self, id: ScreenId) -> bool {
         self.screens.get(&id).is_some_and(Screen::is_physical)
+    }
+
+    /// Whether `id` is a display of the PC itself connected now.
+    pub fn is_connected_physical(&self, id: ScreenId) -> bool {
+        self.screens
+            .get(&id)
+            .is_some_and(|s| s.is_physical() && !matches!(s.state, ScreenState::Absent))
     }
 
     /// The displays of the PC shown in the headset now.
@@ -1226,6 +1244,19 @@ impl Displays {
     /// streaming larger than it decodes, or beyond the streams it takes at once,
     /// failed for it. Texts are cut to fit.
     pub fn displays_part(&self, headset: &state::HeadsetCaps) -> state::Displays {
+        self.display_list(Some(headset))
+    }
+
+    /// Every screen as it is on the PC, for no headset in particular (the local API):
+    /// each kind, each in the state it is in, none failed for what one headset cannot
+    /// decode or take (see [`Displays::displays_part`] for that).
+    pub fn pc_view(&self) -> state::Displays {
+        self.display_list(None)
+    }
+
+    /// The list for `headset` (see [`Displays::displays_part`]), or for none (see
+    /// [`Displays::pc_view`]).
+    fn display_list(&self, headset: Option<&state::HeadsetCaps>) -> state::Displays {
         use prostir_proto::state::{
             DeskRect, Display, DisplayKind, DisplayState, Mode, caps, clip,
         };
@@ -1242,14 +1273,17 @@ impl Displays {
             .copied()
             .collect();
         order.extend(rest);
+        let can = |feature| headset.is_none_or(|h| h.has(feature));
         let shown = |s: &Screen| match s.kind {
             ScreenKind::Virtual { .. } => true,
-            ScreenKind::Window { .. } => headset.has(caps::headset::WINDOWS),
-            ScreenKind::Physical { .. } => headset.has(caps::headset::PHYSICAL),
+            ScreenKind::Window { .. } => can(caps::headset::WINDOWS),
+            ScreenKind::Physical { .. } => can(caps::headset::PHYSICAL),
         };
+        // The headset decodes a picture of this size in this codec (any, for none).
+        let fits = |codec, w, h| headset.is_none_or(|hs| hs.fits(codec, w, h));
         // Streams this headset takes at once: those after it, in the order of the
         // list, stand failed for it alone.
-        let streams_max = streams_max(headset);
+        let streams_max = headset.map_or(usize::MAX, streams_max);
         let mut streams = 0;
         let several = self.router.receivers() > 1;
         let displays = order
@@ -1273,10 +1307,16 @@ impl Displays {
                         shown: *shown,
                     },
                 };
+                // A display of the PC that does not stream: as large as the desktop
+                // last said it is (nothing known yet: no size).
                 let (w, h) = self
                     .router
                     .stream_size(s.id)
                     .or_else(|| s.kind.spec().map(|m| (m.width, m.height)))
+                    .or(match &s.kind {
+                        ScreenKind::Physical { size, .. } => *size,
+                        _ => None,
+                    })
                     .unwrap_or_default();
                 let scale = s.kind.spec().map_or(100, MonitorSpec::percent);
                 // A display of the PC is on the desktop under its connector, shown or not.
@@ -1291,18 +1331,19 @@ impl Displays {
                 let too_big = self
                     .router
                     .stream_format(s.id)
-                    .filter(|((w, h), codec)| !headset.fits(*codec, *w, *h));
+                    .filter(|((w, h), codec)| !fits(*codec, *w, *h));
                 // Its size not known yet: starting still for a headset it might not fit
                 // (as made, larger than it decodes; a display of the PC, as large as
                 // it is, while several headsets watch).
-                let pending = self.router.stream_format(s.id).is_none()
-                    && s.kind.spec().map_or(several, |m| {
-                        !headset.fits(self.cfg.codec, m.width, m.height)
-                    });
+                let pending = headset.is_some()
+                    && self.router.stream_format(s.id).is_none()
+                    && s.kind
+                        .spec()
+                        .map_or(several, |m| !fits(self.cfg.codec, m.width, m.height));
                 let state = match (&s.state, too_big) {
                     (ScreenState::Running, Some((size, codec))) => DisplayState::Failed {
                         error: state::ErrorCode::BAD_SIZE,
-                        detail: clip(&too_big_why(&s.name(), size, codec), state::MAX_DETAIL),
+                        detail: clip(&too_big_why(size, codec), state::MAX_DETAIL),
                     },
                     (ScreenState::Starting, _) => DisplayState::Starting,
                     (ScreenState::Running, None) if pending => DisplayState::Starting,
@@ -1317,8 +1358,7 @@ impl Displays {
                     && (!s.is_physical() || s.is_shown_physical());
                 let state = if streams_here && streams >= streams_max {
                     let why = format!(
-                        "{}: {} ({streams_max})",
-                        s.name(),
+                        "{} ({streams_max})",
                         t(
                             "більше потоків, ніж шолом бере",
                             "more streams than the headset takes"
@@ -2158,11 +2198,12 @@ pub fn streams_max(headset: &state::HeadsetCaps) -> usize {
     })
 }
 
-/// Why display `name` does not stream to a headset: its picture of `w`x`h` is larger
-/// than the headset decodes in `codec`.
-fn too_big_why(name: &str, (w, h): (u32, u32), codec: Codec) -> String {
+/// Why a display does not stream to a headset: its picture of `w`x`h` is larger than
+/// the headset decodes in `codec`. Without the display's name: it goes with the
+/// display, which the reader sees named already.
+fn too_big_why((w, h): (u32, u32), codec: Codec) -> String {
     format!(
-        "{name}: {w}x{h} {} {codec:?}",
+        "{w}x{h} {} {codec:?}",
         t(
             "більше, ніж шолом декодує в",
             "is larger than the headset decodes in"

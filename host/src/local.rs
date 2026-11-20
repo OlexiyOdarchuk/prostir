@@ -726,13 +726,24 @@ impl Brain {
         };
         let (displays, primary) = match &self.displays {
             Some(d) => {
-                let part = d.displays_part(&pc_caps());
+                // As it is on the PC; what the leading headset cannot show, as it was
+                // told, failed (by its own decoders and streams, never by a stand-in).
+                let part = d.pc_view();
+                let lead_part = lead.map(|s| d.displays_part(s.caps()));
                 let list = part
                     .displays
                     .iter()
                     .map(|w| {
                         let output = d.output_of(ScreenId::from_wire(w.id));
-                        api_display(w, output.unwrap_or_default())
+                        let failed_there = lead_part
+                            .as_ref()
+                            .and_then(|p| p.get(w.id))
+                            .filter(|t| matches!(t.state, wire::DisplayState::Failed { .. }));
+                        let mut w = w.clone();
+                        if let Some(t) = failed_there {
+                            w.state = t.state.clone();
+                        }
+                        api_display(&w, output.unwrap_or_default())
                     })
                     .collect();
                 (list, part.primary.map(|p| p.0))
