@@ -1,5 +1,7 @@
 //! The PC app under test: the `prostir` binary built with the fake desktop, started in
-//! a directory of its own (settings, keys, runtime files), on a port the system picks.
+//! a directory of its own (settings, keys, runtime files), on a port the system picks,
+//! with a session bus of its own for the local API (`dbus-daemon --session`, where
+//! it is installed).
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
@@ -157,6 +159,97 @@ impl Default for Options {
     }
 }
 
+/// A session bus of a test's own: a `dbus-daemon` stopped when dropped.
+pub struct Bus {
+    daemon: Child,
+    pub address: String,
+}
+
+impl Bus {
+    /// A new bus with its socket in `dir`; `None` (saying so) without `dbus-daemon`.
+    pub fn start(dir: &Path) -> Option<Self> {
+        let socket = dir.join("bus");
+        let _ = std::fs::remove_file(&socket);
+        let spawned = Command::new("dbus-daemon")
+            .args(["--session", "--nofork", "--print-address"])
+            .arg(format!("--address=unix:path={}", socket.display()))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn();
+        let mut daemon = match spawned {
+            Ok(d) => d,
+            // CI installs it: there the tests of the local API must run.
+            Err(e) if std::env::var_os("CI").is_some() => {
+                panic!("no dbus-daemon ({e}), which CI installs for the local API's tests")
+            }
+            Err(e) => {
+                eprintln!(
+                    "\n*** no dbus-daemon ({e}): the tests of the local API are SKIPPED ***\n"
+                );
+                return None;
+            }
+        };
+        let mut line = String::new();
+        BufReader::new(daemon.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        Some(Self {
+            daemon,
+            address: line.trim().to_owned(),
+        })
+    }
+
+    /// A connection to it, as a client of the PC app.
+    pub fn connect(&self) -> zbus::blocking::Connection {
+        zbus::blocking::connection::Builder::address(self.address.as_str())
+            .unwrap()
+            .method_timeout(Duration::from_secs(40))
+            .build()
+            .unwrap()
+    }
+}
+
+impl Drop for Bus {
+    fn drop(&mut self) {
+        let _ = self.daemon.kill();
+        let _ = self.daemon.wait();
+    }
+}
+
+/// What `prostir ctl` did: its exit code and what it wrote.
+#[derive(Debug)]
+pub struct Ctl {
+    pub code: i32,
+    pub out: String,
+    pub err: String,
+}
+
+impl Ctl {
+    /// Its output as JSON (it was run with `--json`).
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::from_str(self.out.trim())
+            .unwrap_or_else(|e| panic!("not JSON ({e}): {:?}", self.out))
+    }
+}
+
+/// Runs `prostir ctl ARGS` on the session bus at `address`.
+pub fn ctl_on(address: &str, args: &[&str]) -> Ctl {
+    let out = Command::new(env!("CARGO_BIN_EXE_prostir"))
+        .arg("ctl")
+        .args(args)
+        .env("DBUS_SESSION_BUS_ADDRESS", address)
+        .env("LANGUAGE", "en")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run prostir ctl");
+    Ctl {
+        code: out.status.code().unwrap_or(-1),
+        out: String::from_utf8_lossy(&out.stdout).into_owned(),
+        err: String::from_utf8_lossy(&out.stderr).into_owned(),
+    }
+}
+
 /// A running PC app. Stopped (killed if it has to be) when dropped.
 pub struct Pc {
     child: Child,
@@ -164,6 +257,8 @@ pub struct Pc {
     log: Arc<Mutex<Vec<String>>>,
     /// Its `XDG_RUNTIME_DIR`.
     run_dir: PathBuf,
+    /// Its session bus, where `dbus-daemon` is installed.
+    pub bus: Option<Bus>,
 }
 
 impl Pc {
@@ -172,12 +267,7 @@ impl Pc {
         for sub in ["config", "run", "home", "cache"] {
             std::fs::create_dir_all(root.join(sub)).unwrap();
         }
-        // Commands for the headset come through this pipe (see `Pc::command`).
-        let ctl = root.join("run").join("ctl");
-        let _ = std::fs::remove_file(&ctl);
-        let path = std::ffi::CString::new(ctl.as_os_str().as_encoded_bytes()).unwrap();
-        // SAFETY: a valid path, for a pipe of our own.
-        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0, "mkfifo");
+        let bus = Bus::start(&root.join("run"));
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_prostir"));
         cmd.args(["--port", "0", "--no-discovery", "--no-adb"])
             .args(options.software.then_some("--software"))
@@ -197,7 +287,6 @@ impl Pc {
             )
             .env("PROSTIR_FAKE_BROKEN_MONITORS", &options.broken_monitors)
             .env("PROSTIR_FAKE_PHYSICAL", &options.physical)
-            .env("PROSTIR_TEST_CTL", &ctl)
             .env(
                 "PROSTIR_FAKE_TYPED_CODE_DELAY_MS",
                 options.typed_code_delay.as_millis().to_string(),
@@ -216,11 +305,14 @@ impl Pc {
             // Nothing of the real desktop session, should anything look.
             .env_remove("WAYLAND_DISPLAY")
             .env_remove("DISPLAY")
-            .env_remove("DBUS_SESSION_BUS_ADDRESS")
             .env_remove("HYPRLAND_INSTANCE_SIGNATURE")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
+        match &bus {
+            Some(bus) => cmd.env("DBUS_SESSION_BUS_ADDRESS", &bus.address),
+            None => cmd.env_remove("DBUS_SESSION_BUS_ADDRESS"),
+        };
         match options.headsets {
             0 => cmd.env_remove("PROSTIR_TEST_MAX_HEADSETS"),
             n => cmd.env("PROSTIR_TEST_MAX_HEADSETS", n.to_string()),
@@ -253,11 +345,35 @@ impl Pc {
             addr: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
             log,
             run_dir: root.join("run"),
+            bus,
         };
         let line = pc.wait_log(Duration::from_secs(30), "waiting for the headset on port");
         let port = line.rsplit(' ').next().unwrap().parse().unwrap();
         pc.addr.set_port(port);
+        if pc.bus.is_some() {
+            pc.wait_log(Duration::from_secs(10), "local API on D-Bus as");
+        }
         pc
+    }
+
+    /// Stops its session bus and starts another at the same address, as a session
+    /// bus restarted would be; `false` without one.
+    pub fn restart_bus(&mut self) -> bool {
+        if self.bus.take().is_none() {
+            return false;
+        }
+        self.bus = Bus::start(&self.run_dir);
+        self.bus.is_some()
+    }
+
+    /// Runs `prostir ctl ARGS` against this PC app; `None` without a session bus
+    /// (no `dbus-daemon`: the test is skipped then, saying so).
+    pub fn ctl(&self, args: &[&str]) -> Option<Ctl> {
+        let Some(bus) = &self.bus else {
+            eprintln!("no session bus: `prostir ctl {}` skipped", args.join(" "));
+            return None;
+        };
+        Some(ctl_on(&bus.address, args))
     }
 
     /// The first log line containing `needle`, waiting up to `timeout` for it.
@@ -322,36 +438,6 @@ impl Pc {
             }
         }
         starts
-    }
-
-    /// Asks the headset to do `line` (see the PC app's `ctl_hook`), as `prostir ctl`
-    /// will: what came of it, waiting up to `timeout`.
-    pub fn command(&self, line: &str, timeout: Duration) -> String {
-        let ctl = self.run_dir.join("ctl");
-        let replies = self.run_dir.join("ctl.replies");
-        let before = std::fs::read_to_string(&replies)
-            .unwrap_or_default()
-            .lines()
-            .count();
-        {
-            use std::io::Write;
-            let mut pipe = std::fs::OpenOptions::new().write(true).open(&ctl).unwrap();
-            writeln!(pipe, "{line}").unwrap();
-        }
-        let until = Instant::now() + timeout;
-        loop {
-            let text = std::fs::read_to_string(&replies).unwrap_or_default();
-            if let Some(answer) = text.lines().nth(before) {
-                let (asked, result) = answer.split_once(" => ").unwrap();
-                assert_eq!(asked, line);
-                return result.to_owned();
-            }
-            assert!(
-                Instant::now() < until,
-                "no answer to {line:?} within {timeout:?}"
-            );
-            std::thread::sleep(Duration::from_millis(50));
-        }
     }
 
     /// Clicks `item` in the PC app's tray (see the fake tray for the items).
@@ -420,6 +506,21 @@ impl Pc {
     fn signal(&self, signal: libc::c_int) {
         // SAFETY: a signal to our own child process.
         unsafe { libc::kill(self.child.id() as libc::pid_t, signal) };
+    }
+
+    /// Waits up to `timeout` for the PC app to end by itself: how it ended.
+    pub fn wait_end(&mut self, timeout: Duration) -> std::process::ExitStatus {
+        let until = Instant::now() + timeout;
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return status;
+            }
+            assert!(
+                Instant::now() < until,
+                "the PC app did not end within {timeout:?}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     /// Asks the PC app to quit as a user would (SIGTERM) and checks that it does.

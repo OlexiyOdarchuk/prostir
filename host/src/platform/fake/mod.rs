@@ -381,9 +381,23 @@ pub mod notifications {
     }
 }
 
+/// Starting with the session: the fake PC cannot.
+pub mod autostart {
+    pub fn available() -> bool {
+        false
+    }
+
+    pub fn enabled() -> bool {
+        false
+    }
+
+    pub fn set(_on: bool) {}
+}
+
 /// A tray without an icon: a test "clicks" its items by writing their names, one a
-/// line, to `$XDG_RUNTIME_DIR/fake-tray` (`forget`, `recenter`, `quit`, `sharp on`,
-/// `sharp off`, `quality 15`, `quality 50`), which is read and removed once written.
+/// line, to `$XDG_RUNTIME_DIR/fake-tray` (`forget`, `recenter`, `settings`, `quit`,
+/// `sharp on`, `sharp off`, `quality 15`, `quality 50`), which is read and removed
+/// once written.
 pub mod tray {
     use crate::events::EventSink;
     use crate::platform::{TrayCommand, TrayStatus};
@@ -396,12 +410,10 @@ pub mod tray {
             for item in text.lines() {
                 let command = match item.trim() {
                     "forget" => TrayCommand::ForgetHeadsets,
-                    "recenter" => TrayCommand::Headset {
-                        asked: prostir_proto::request::Asked::Known(
-                            prostir_proto::request::Command::Recenter,
-                        ),
-                        reply: None,
-                    },
+                    "recenter" => TrayCommand::Headset(prostir_proto::request::Asked::Known(
+                        prostir_proto::request::Command::Recenter,
+                    )),
+                    "settings" => TrayCommand::ShowSettings,
                     "quit" => TrayCommand::Quit,
                     "sharp on" => TrayCommand::SetSharp(true),
                     "sharp off" => TrayCommand::SetSharp(false),

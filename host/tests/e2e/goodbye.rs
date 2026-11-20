@@ -63,37 +63,46 @@ fn another_development_build_gets_no_session() {
     assert_eq!(pc.count_log("fake desktop: created"), 0, "no monitors made");
 }
 
-/// Commands for the headset (from the PC's tray, later `prostir ctl`) reach it and come
-/// back with what came of them: done, unsupported for a kind it does not know, and
-/// "does not answer" from a headset that hangs, after 30 s. Without a headset, none.
+/// Commands for the headset (from `prostir ctl` and the tray) reach it and come back
+/// with what came of them, as `ctl`'s exit codes say: done, refused by the headset,
+/// no answer from a headset that hangs (after 30 s), no headset at all.
 #[test]
 fn commands_reach_the_headset_and_come_back() {
     use prostir_proto::request::{Asked, Command};
     let (_dir, mut pc, _keys, mut headset) = crate::session("commands", &Options::default());
-    assert_eq!(pc.command("recenter", SOON), "done");
+    let Some(done) = pc.ctl(&["recenter"]) else {
+        return;
+    };
+    assert_eq!(done.code, 0, "{done:?}");
     headset
         .wait(SOON, "the command", |v| {
             v.commands.contains(&Asked::Known(Command::Recenter))
         })
         .unwrap();
-    assert_eq!(pc.command("raw 200", SOON), "failed 1: ");
     // From the tray too.
     pc.tray("recenter");
     headset
-        .wait(SOON, "the tray's command", |v| v.commands.len() == 3)
+        .wait(SOON, "the tray's command", |v| v.commands.len() == 2)
         .unwrap();
+    headset.refuse_commands(prostir_proto::state::ErrorCode::NO_SUCH_PROFILE);
+    let refused = pc.ctl(&["profile", "Elsewhere", "--json"]).unwrap();
+    assert_eq!(refused.code, 1, "{refused:?}");
+    assert_eq!(refused.json()["error"], "NoSuchProfile");
     headset.stop_answering();
     let answer = std::thread::scope(|s| {
-        let waiting = s.spawn(|| pc.command("lineup", std::time::Duration::from_secs(40)));
+        let waiting = s.spawn(|| pc.ctl(&["lineup"]).unwrap());
         // The session goes on meanwhile.
         headset
             .take_for(std::time::Duration::from_secs(32))
             .unwrap();
         waiting.join().unwrap()
     });
-    assert_eq!(answer, "the headset does not answer");
+    assert_eq!(answer.code, 3, "{answer:?}");
+    assert!(answer.err.contains("TimedOut"), "{answer:?}");
     headset.disconnect();
     // Once the PC saw the session end.
     pc.wait_log(SOON, "headset disconnected");
-    assert_eq!(pc.command("recenter", SOON), "no headset");
+    let none = pc.ctl(&["recenter", "--json"]).unwrap();
+    assert_eq!(none.code, 2, "{none:?}");
+    assert_eq!(none.json()["error"], "NotConnected");
 }

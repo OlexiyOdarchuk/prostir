@@ -497,15 +497,41 @@ the headset's microphone has no permission to record (allow it in the headset's
 settings, under the app's permissions). From the tray you can bring the monitors in
 front of you, turn on No limits (up to ten monitors and four of the PC's own displays,
 for when the headset copes with more), set the video quality and sharper text (the
-same settings as in the headset menu), start Prostir with the session (KDE), turn the
-usage counter on or off, forget paired headsets, and quit.
+same settings as in the headset menu), start Prostir with the session (KDE), open the
+settings, turn the usage counter on or off, forget paired headsets, and quit.
 
 ### Command line
 
 ```
-prostir [--monitor WxH[@scale]]... [--codec h265|h264] [--bitrate MBPS] [--software]
+prostir [serve] [--monitor WxH[@scale]]... [--codec h265|h264] [--bitrate MBPS] [--software]
         [--keep-primary] [--linger SECONDS] [--port PORT] [--no-discovery] [--no-adb]
+prostir open
+prostir ctl COMMAND [--json]
 ```
+
+`prostir` (or `prostir serve`) runs Prostir. `prostir open`, which the menu entry runs,
+opens the settings window and starts Prostir first if it is not running.
+
+`prostir ctl` asks the running Prostir, from a terminal, a script or a hot key (KDE's
+Shortcuts, Hyprland's `bind`): `prostir ctl recenter`, `prostir ctl profile Work`,
+`prostir ctl closer 2`, `prostir ctl monitor add 2560x1440@125%`, `prostir ctl
+quality 50`, `prostir ctl status`, `prostir ctl watch` (a line for each change, until
+Ctrl+C). `prostir ctl help` lists every command. With `--json` each prints JSON. The
+exit code says what came of it: 0 done, 1 failed, 2 Prostir not running or no headset,
+3 no answer in time, 64 wrong arguments.
+
+Other programs reach the same on the session bus, as
+`io.github.OlexiyOdarchuk.Prostir` (only programs of your own user can). A command for
+the headset may take up to 30 s, longer than `busctl` and `gdbus` wait by default, so
+give them `--timeout=35`:
+
+```
+busctl --user --timeout=35 call io.github.OlexiyOdarchuk.Prostir \
+    /io/github/OlexiyOdarchuk/Prostir io.github.OlexiyOdarchuk.Prostir1 Recenter
+```
+
+The methods, signals, errors and the JSON of the state are in
+[LOCAL-API.md](LOCAL-API.md).
 
 Without `--monitor`, Prostir brings back the monitors from the last session, each with
 its number, so the headset finds it where it was. They are stored in

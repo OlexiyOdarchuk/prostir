@@ -1144,7 +1144,7 @@ impl Displays {
     }
 
     /// What the encoders make now: the codec, and whether on the CPU.
-    fn encoding_now(&self) -> (Codec, bool) {
+    pub fn encoding_now(&self) -> (Codec, bool) {
         (self.cfg.codec, self.cfg.backend == Backend::X264)
     }
 
@@ -2378,6 +2378,132 @@ impl Displays {
         for (_, e) in self.encoders() {
             e.force_keyframe();
         }
+    }
+
+    /// The desktop's name for the output of screen `id`, while it has one.
+    pub fn output_of(&self, id: ScreenId) -> Option<String> {
+        let screen = self.screens.get(&id)?;
+        match &screen.kind {
+            ScreenKind::Physical { key, .. } => Some(key.connector.clone()),
+            _ => screen.output_key().map(|k| k.as_str().to_owned()),
+        }
+    }
+
+    /// Where screen `id` is on the desktop now, if it is there.
+    fn desk_rect(&self, id: ScreenId) -> Option<state::DeskRect> {
+        let screen = self.screens.get(&id)?;
+        let name = match &screen.kind {
+            ScreenKind::Physical { key, .. } => key.connector.as_str(),
+            _ => screen.output_key()?.as_str(),
+        };
+        self.on_desk.get(name).copied()
+    }
+
+    /// Gives monitor `id` the scale `percent` (one the desktop gives its size): its
+    /// output is made anew under the same name, so the desktop keeps its place.
+    pub fn rescale(&mut self, id: ScreenId, percent: u16) -> Result<()> {
+        let Some(spec) = self
+            .screens
+            .get(&id)
+            .filter(|s| s.is_virtual())
+            .and_then(|s| s.kind.spec())
+            .cloned()
+        else {
+            bail!(UserError::UnknownDisplay);
+        };
+        let wanted = MonitorSpec {
+            scale: f64::from(percent) / 100.0,
+            ..spec.clone()
+        };
+        let allowed = self.scales_for(spec.width, spec.height).allows(percent);
+        if !allowed || wanted.validate().is_err() {
+            bail!(UserError::BadSize {
+                w: spec.width,
+                h: spec.height,
+                scale: percent
+            });
+        }
+        if wanted.percent() == spec.percent() {
+            return Ok(());
+        }
+        self.router.remove_stream(id);
+        if let Some(screen) = self.screens.get_mut(&id) {
+            // The old output and its encoder end here.
+            screen.stream = None;
+            screen.output = None;
+            screen.kind = ScreenKind::Virtual { spec: wanted };
+            screen.state = ScreenState::Starting;
+        }
+        self.start(id)
+    }
+
+    /// Moves screen `id` on the desktop to about `x`, `y` (its top-left corner, in
+    /// logical pixels): into the row it then is in, between the neighbours left and
+    /// right of it. The desktop's arrangement then lines it up (see `layout::desk`),
+    /// until the main headset arranges the monitors again.
+    pub fn move_to(&mut self, id: ScreenId, x: i32, y: i32) -> Result<()> {
+        let Some(me) = self.desk_rect(id) else {
+            bail!(UserError::UnknownDisplay);
+        };
+        if !self.rows.iter().flatten().any(|e| e.id == id) {
+            bail!(UserError::UnknownDisplay);
+        }
+        let (cx, cy) = (x + me.w as i32 / 2, y + me.h as i32 / 2);
+        let mut rows = self.rows.clone();
+        for row in &mut rows {
+            row.retain(|e| e.id != id);
+        }
+        rows.retain(|r| !r.is_empty());
+        // Each row's height on the desktop, from what of it is there.
+        let span = |row: &Vec<desk::Entry<ScreenId>>| {
+            row.iter()
+                .filter_map(|e| self.desk_rect(e.id))
+                .map(|r| (r.y, r.y + r.h as i32))
+                .reduce(|(a, b), (c, d)| (a.min(c), b.max(d)))
+        };
+        let spans: Vec<Option<(i32, i32)>> = rows.iter().map(span).collect();
+        let row = spans
+            .iter()
+            .position(|s| s.is_some_and(|(top, bottom)| (top..bottom).contains(&cy)));
+        let entry = desk::Entry::new(id);
+        match row {
+            Some(r) => {
+                let at = rows[r]
+                    .iter()
+                    .filter(|e| {
+                        self.desk_rect(e.id)
+                            .is_some_and(|d| d.x + (d.w as i32) / 2 < cx)
+                    })
+                    .count();
+                rows[r].insert(at, entry);
+            }
+            None => {
+                // Above every row or under them: a row of its own there.
+                let above = spans.iter().flatten().all(|(top, _)| cy < *top);
+                if above {
+                    rows.insert(0, vec![entry]);
+                } else {
+                    rows.push(vec![entry]);
+                }
+            }
+        }
+        self.rows = rows;
+        self.layout_changed();
+        Ok(())
+    }
+
+    /// Tries monitor `id` again now, if it failed (`UnknownDisplay` if there is none);
+    /// what came of it shows in its state.
+    pub fn retry(&mut self, id: ScreenId) -> Result<()> {
+        let Some(screen) = self.screens.get(&id) else {
+            bail!(UserError::UnknownDisplay);
+        };
+        // One too big for a headset waits for one it fits instead.
+        let failed = matches!(screen.state, ScreenState::Failed { .. });
+        if failed && screen.is_virtual() && !self.too_big.contains_key(&id) {
+            self.start(id)?;
+        }
+        Ok(())
     }
 
     /// Every running monitor streams, and one at least does. Otherwise the screens are

@@ -78,7 +78,9 @@ fn two_headsets_get_the_same_monitors() {
         access(&second).may(perms::CHANGES),
         "with the rights of its line"
     );
-    assert_eq!(pc.command("recenter", SOON), "done");
+    if let Some(done) = pc.ctl(&["recenter"]) {
+        assert_eq!(done.code, 0, "{done:?}");
+    }
     first.take_for(Duration::from_millis(500)).unwrap();
     second.take_for(Duration::from_millis(500)).unwrap();
     assert_eq!(first.view().commands.len(), 1, "the main one takes it");
@@ -191,7 +193,9 @@ fn one_headset_leaving_does_not_cut_the_other() {
     assert!(second.view().ended.is_empty(), "no stream of it ended");
     assert_eq!(pc.count_log("keeping virtual monitors"), 0);
     assert_eq!(pc.count_log("paused: headset not worn or gone"), 0);
-    assert_eq!(pc.command("recenter", SOON), "done");
+    if let Some(done) = pc.ctl(&["recenter"]) {
+        assert_eq!(done.code, 0, "{done:?}");
+    }
     second.take_for(Duration::from_millis(500)).unwrap();
     assert_eq!(second.view().commands.len(), 1, "commands go to it now");
     // The one that left comes back: a guest now, the same monitors.
@@ -409,7 +413,9 @@ fn a_headset_back_keeps_its_place() {
     // Its Wi-Fi went away, and it came back before the PC noticed.
     first.stall(Duration::from_secs(60));
     let mut back = showing(&pc, &mut a);
-    assert_eq!(pc.command("recenter", SOON), "done");
+    // From the tray: it goes to the first of the guests (commands from `ctl` need a
+    // main headset).
+    pc.tray("recenter");
     back.take_for(Duration::from_millis(500)).unwrap();
     second.take_for(Duration::from_millis(500)).unwrap();
     assert_eq!(back.view().commands.len(), 1, "the first one still");

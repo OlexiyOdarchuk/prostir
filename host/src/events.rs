@@ -1,6 +1,6 @@
 //! The one channel into the control loop (`main.rs`): every thread with something for
 //! it (the listening socket, a connection being set up, a session's reader, the tray,
-//! the test hook, the signals) sends an [`Event`], and the control loop alone acts on
+//! the local API, the signals) sends an [`Event`], and the control loop alone acts on
 //! them. It waits for the next event or its next deadline, whichever comes first, and
 //! without a session it has no deadline: it sleeps until something happens.
 //!
@@ -14,6 +14,7 @@ use std::time::Instant;
 use prostir_proto::ClientMsg;
 use prostir_proto::state::Part;
 
+use crate::api::{Reply, Request};
 use crate::pairing;
 use crate::platform::TrayCommand;
 
@@ -31,8 +32,13 @@ pub enum Event {
     /// A session's connection ended: its end (`UnexpectedEof`), silence (`TimedOut`),
     /// or an error. Nothing more comes from it.
     SessionEnded(SessionId, std::io::Error),
-    /// An item of the tray, or a command for the headset from the test hook.
+    /// An item of the tray.
     Tray(TrayCommand),
+    /// A request of the local API (`prostir ctl`, the settings window, D-Bus), and
+    /// where its reply goes.
+    Ctl(Request, Reply),
+    /// The PC began or stopped showing a pairing code.
+    Pairing,
     /// A signal asked the program to quit.
     Quit,
 }
@@ -55,7 +61,7 @@ impl EventSink {
         self.0.send(event).is_ok()
     }
 
-    /// Sends an item of the tray (or a command from the test hook).
+    /// Sends an item of the tray.
     pub fn tray(&self, command: TrayCommand) -> bool {
         self.send(Event::Tray(command))
     }

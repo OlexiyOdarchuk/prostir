@@ -1,7 +1,7 @@
 //! Linux: KDE Plasma or Hyprland, picked at run time.
 
 pub mod audio;
-mod autostart;
+pub mod autostart;
 mod desktop;
 pub mod dialogs;
 mod hyprland;
