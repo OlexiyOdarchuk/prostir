@@ -139,7 +139,7 @@ impl Brain {
         if let CtlReply::Failed(f) = &result {
             info!("local API: {f}");
         }
-        self.answers.push((reply, result));
+        self.answers.push(reply, result);
     }
 
     fn carry_out(&mut self, request: Request) -> CtlReply {
@@ -522,7 +522,7 @@ impl Brain {
                 .send(api::Note::State(self.revision, state.clone()));
             self.shown = Some(state);
         }
-        for (reply, result) in self.answers.drain(..) {
+        for (reply, result) in self.answers.take() {
             reply.send(result);
         }
     }

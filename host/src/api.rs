@@ -8,8 +8,8 @@
 //! before the `StateChanged` that shows what it changed. Nothing here knows the
 //! transport.
 
-use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 
 use prostir_proto::state::ErrorCode;
 
@@ -100,6 +100,22 @@ impl Drop for Reply {
         if let Some(send) = self.0.take() {
             send(CtlReply::failed(ApiError::Other, "no answer"));
         }
+    }
+}
+
+/// Replies ready to go, wherever they came from (a request carried out, a headset's
+/// answer): they go out at the end of the control loop's pass, after its state.
+#[derive(Clone, Default)]
+pub struct Answers(Arc<Mutex<Vec<(Reply, CtlReply)>>>);
+
+impl Answers {
+    pub fn push(&self, reply: Reply, result: CtlReply) {
+        self.0.lock().unwrap().push((reply, result));
+    }
+
+    /// Those ready now, in the order they came.
+    pub fn take(&self) -> Vec<(Reply, CtlReply)> {
+        std::mem::take(&mut *self.0.lock().unwrap())
     }
 }
 

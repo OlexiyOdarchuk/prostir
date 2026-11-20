@@ -11,6 +11,7 @@
 //! `StateChanged` goes out at most ten times a second. Each of them sleeps until
 //! something comes, so an idle PC still does not wake.
 
+use std::collections::VecDeque;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -118,14 +119,20 @@ const STATE_GAP: Duration = Duration::from_millis(1000 / STATES_PER_SECOND as u6
 
 /// Sends out what the control loop gives, in order, until it is gone.
 fn send_out(bus: &Connection, notes: &Receiver<Note>, shown: &Shown) {
-    // A state not sent yet (it came too soon after the last one), and when the last
-    // one went.
+    // A state not sent yet (it came too soon after the last one), what came after it
+    // (held so the order stays), and when the last state went.
     let mut waiting: Option<u32> = None;
+    let mut held: VecDeque<Note> = VecDeque::new();
     let mut last: Option<Instant> = None;
     let emit = |revision: u32, last: &mut Option<Instant>| {
         let json = shown.lock().unwrap().1.clone();
         signal(bus, "StateChanged", &(revision, json));
         *last = Some(Instant::now());
+    };
+    let deliver = |note: Note| match note {
+        Note::Event(event) => headset_signal(bus, &event),
+        Note::Answer(deliver) => deliver(shown.lock().unwrap().0),
+        Note::State(..) => unreachable!("states are never held"),
     };
     loop {
         let note = match (waiting, last) {
@@ -142,32 +149,29 @@ fn send_out(bus: &Connection, notes: &Receiver<Note>, shown: &Shown) {
                 Err(_) => return,
             },
         };
+        let due = last.is_none_or(|at| at.elapsed() >= STATE_GAP);
         match note {
+            // The gap is over: the state, then what waited behind it.
             None => {
                 if let Some(revision) = waiting.take() {
                     emit(revision, &mut last);
                 }
+                held.drain(..).for_each(deliver);
             }
             Some(Note::State(revision, state)) => {
                 *shown.lock().unwrap() = (revision, state.to_json());
-                if last.is_some_and(|at| at.elapsed() < STATE_GAP) {
-                    waiting = Some(revision);
-                } else {
+                if due {
                     waiting = None;
                     emit(revision, &mut last);
+                    held.drain(..).for_each(deliver);
+                } else {
+                    waiting = Some(revision);
                 }
             }
-            Some(note) => {
-                // Whatever comes next finds the state out already.
-                if let Some(revision) = waiting.take() {
-                    emit(revision, &mut last);
-                }
-                match note {
-                    Note::Event(event) => headset_signal(bus, &event),
-                    Note::Answer(deliver) => deliver(shown.lock().unwrap().0),
-                    Note::State(..) => unreachable!("handled above"),
-                }
-            }
+            // Behind a state still waiting: it waits too, so a reply never goes before
+            // the state with its change, and states stay ten a second at most.
+            Some(note) if waiting.is_some() => held.push_back(note),
+            Some(note) => deliver(note),
         }
     }
 }

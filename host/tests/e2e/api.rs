@@ -71,6 +71,142 @@ fn state_changes(bus: &Connection) -> mpsc::Receiver<(u32, State)> {
     rx
 }
 
+/// A request's answer (as JSON) and the states (revision and state) that came before
+/// it.
+type Seen = (serde_json::Value, Vec<(u32, State)>);
+
+/// What one connection sees, in order, after it sent `requests` through `Call`
+/// without waiting: for each, its answer (as JSON) and the states (revision and
+/// state) that came before it.
+fn calls_in_order(bus: &Connection, requests: &[String]) -> Vec<Seen> {
+    let rule = zbus::MatchRule::builder()
+        .msg_type(zbus::message::Type::Signal)
+        .interface(INTERFACE)
+        .unwrap()
+        .member("StateChanged")
+        .unwrap()
+        .build();
+    zbus::blocking::fdo::DBusProxy::new(bus)
+        .unwrap()
+        .add_match_rule(rule)
+        .unwrap();
+    // Every message to this connection, in the order the bus sends them.
+    let messages = zbus::blocking::MessageIterator::from(bus);
+    let mut serials = Vec::new();
+    for request in requests {
+        let call = zbus::Message::method_call(OBJECT_PATH, "Call")
+            .unwrap()
+            .destination(BUS_NAME)
+            .unwrap()
+            .interface(INTERFACE)
+            .unwrap()
+            .build(&(request.as_str(),))
+            .unwrap();
+        serials.push(call.primary_header().serial_num());
+        bus.send(&call).unwrap();
+    }
+    let mut states = Vec::new();
+    let mut answers: Vec<Option<Seen>> = vec![None; requests.len()];
+    for msg in messages {
+        let msg = msg.unwrap();
+        let header = msg.header();
+        match header.message_type() {
+            zbus::message::Type::Signal
+                if header
+                    .member()
+                    .is_some_and(|m| m.as_str() == "StateChanged") =>
+            {
+                let (revision, json): (u32, String) = msg.body().deserialize().unwrap();
+                states.push((revision, State::from_json(&json).unwrap()));
+            }
+            zbus::message::Type::MethodReturn => {
+                let Some(i) = serials
+                    .iter()
+                    .position(|s| Some(*s) == header.reply_serial())
+                else {
+                    continue;
+                };
+                let json: String = msg.body().deserialize().unwrap();
+                answers[i] = Some((serde_json::from_str(&json).unwrap(), states.clone()));
+            }
+            zbus::message::Type::Error => panic!("{msg:?}"),
+            _ => {}
+        }
+        if answers.iter().all(Option::is_some) {
+            break;
+        }
+    }
+    answers.into_iter().map(Option::unwrap).collect()
+}
+
+/// An answer goes out after the state with its change, for a request the PC carries
+/// out and for a command the headset answers (whose change, its "No limits", comes
+/// from the headset just before its answer).
+#[test]
+fn answers_come_after_their_state() {
+    let (_dir, pc, _keys, _headset) = session("api-order", &Options::default());
+    let Some(bus) = &pc.bus else {
+        return;
+    };
+    let bus = bus.connect();
+    let add = r#"{"request":"add_monitor","w":320,"h":240}"#.to_owned();
+    let (answer, before) = calls_in_order(&bus, &[add]).remove(0);
+    let id = answer["id"].as_u64().unwrap() as u32;
+    let (revision, state) = before.last().expect("a state before the answer");
+    assert_eq!(*revision, answer["revision"].as_u64().unwrap() as u32);
+    assert!(
+        state.display(id).is_some(),
+        "the state before it has the monitor"
+    );
+    for on in [true, false] {
+        let request = format!(r#"{{"request":"no_limits","on":{on}}}"#);
+        let (answer, before) = calls_in_order(&bus, &[request]).remove(0);
+        let (revision, state) = before.last().expect("a state before the answer");
+        assert_eq!(*revision, answer["revision"].as_u64().unwrap() as u32);
+        let (_, session) = state.connected().unwrap();
+        assert_eq!(
+            session.no_limits,
+            Some(on),
+            "the state before it has the change"
+        );
+    }
+}
+
+/// Forty changes asked at once: `StateChanged` goes out ten times a second at most,
+/// and each answer still comes after a state with its change.
+#[test]
+fn state_changes_are_ten_a_second_at_most() {
+    let (_dir, pc, _keys, _headset) = session("api-rate", &Options::default());
+    let Some(bus) = &pc.bus else {
+        return;
+    };
+    let bus = bus.connect();
+    let requests: Vec<String> = (0..40)
+        .map(|i| format!(r#"{{"request":"set_quality","mbit":{}}}"#, 10 + i))
+        .collect();
+    let started = Instant::now();
+    let answers = calls_in_order(&bus, &requests);
+    let took = started.elapsed();
+    let (_, states) = answers.iter().max_by_key(|(_, s)| s.len()).unwrap();
+    let allowed = (took.as_secs_f64() * 10.0).ceil() as usize + 1;
+    assert!(
+        states.len() <= allowed,
+        "{} states in {took:?}",
+        states.len()
+    );
+    for (i, (answer, before)) in answers.iter().enumerate() {
+        let (revision, state) = before.last().expect("a state before the answer");
+        assert!(*revision >= answer["revision"].as_u64().unwrap() as u32);
+        assert!(
+            state.encoding.bitrate >= 10 + i as u32,
+            "answer {i}: {}",
+            state.encoding.bitrate
+        );
+    }
+    let (_, last) = answers.last().unwrap().1.last().unwrap();
+    assert_eq!(last.encoding.bitrate, 49);
+}
+
 /// The whole state, and a request that changes the desktop: its answer comes at once
 /// with the new monitor's id, after the `StateChanged` that has the monitor in it.
 #[test]

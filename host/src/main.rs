@@ -134,14 +134,17 @@ struct Control {
 
 impl Control {
     /// Commands for the headset with no headset to take them.
-    fn no_headset(&mut self) {
+    fn no_headset(&mut self, answers: &api::Answers) {
         for (asked, reply) in self.for_headset.drain(..) {
             info!("{asked:?}: no headset is connected");
             if let Some(r) = reply {
-                r.send(api::CtlReply::failed(
-                    api::ApiError::NotConnected,
-                    i18n::t("Шолом не підключено", "No headset is connected"),
-                ));
+                answers.push(
+                    r,
+                    api::CtlReply::failed(
+                        api::ApiError::NotConnected,
+                        i18n::t("Шолом не підключено", "No headset is connected"),
+                    ),
+                );
             }
         }
     }
@@ -232,7 +235,7 @@ struct Brain {
     shown: Option<Arc<api::State>>,
     revision: u32,
     /// Replies of the local API that go out after this pass's state.
-    answers: Vec<(api::Reply, api::CtlReply)>,
+    answers: api::Answers,
     /// Whether each headset is worn, as last told on the local API.
     worn_told: BTreeMap<[u8; 32], bool>,
 }
@@ -433,7 +436,8 @@ impl Brain {
             &mut self.store,
             &self.events,
         ) {
-            Ok(session) => {
+            Ok(mut session) => {
+                session.set_answers(self.answers.clone());
                 let via = session.api_session().via;
                 self.worn_told.insert(key, session.worn());
                 self.sessions.insert(key, session);
@@ -629,7 +633,7 @@ impl Brain {
     /// headset was taken off (`taken_off`: it reconnects by itself once worn again)
     /// or they broke.
     fn after_the_last_session(&mut self, taken_off: bool) {
-        self.control.no_headset();
+        self.control.no_headset(&self.answers);
         self.roles = brain::Roles::NONE;
         let how = match &self.displays {
             Some(_) if taken_off => {
@@ -675,7 +679,7 @@ impl Brain {
             TrayCommand::Headset(asked) => {
                 self.control.for_headset.push_back((asked, None));
                 if self.sessions.is_empty() {
-                    self.control.no_headset();
+                    self.control.no_headset(&self.answers);
                 }
             }
             TrayCommand::ShowSettings => {
@@ -1011,7 +1015,7 @@ fn serve(args: Args) -> Result<()> {
         api: outlet,
         shown: None,
         revision: 0,
-        answers: Vec::new(),
+        answers: api::Answers::default(),
         worn_told: BTreeMap::new(),
     };
     // The local API has a state to give from the moment it is on the bus.

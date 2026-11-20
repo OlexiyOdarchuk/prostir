@@ -1087,6 +1087,17 @@ fn spawn_reader(
                                 Outcome::failed(prostir_proto::state::ErrorCode::UNSUPPORTED, "")
                             }
                         };
+                        // "No limits" changes its preferences, which it says first, as
+                        // the Quest app does.
+                        if let (Asked::Known(Command::NoLimits { on }), Outcome::Done) =
+                            (asked, &outcome)
+                        {
+                            let part = Prefs {
+                                no_limits: *on,
+                                ..Prefs::default()
+                            };
+                            let _ = send(&mut **writer.lock().unwrap(), ClientMsg::Prefs { part });
+                        }
                         let reply = ClientMsg::Reply { req: *req, outcome };
                         let _ = send(&mut **writer.lock().unwrap(), reply);
                     }

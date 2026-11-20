@@ -26,7 +26,7 @@ use prostir_proto::stats::Period;
 use prostir_proto::volume::{Act, PcVolume};
 use prostir_proto::{ClientMsg, HeadsetGoodbye, HostMsg, PcGoodbye};
 
-use crate::api::{self, ApiError, CtlReply, Reply};
+use crate::api::{self, Answers, ApiError, CtlReply, Reply};
 use crate::displays::Displays;
 use crate::events::{Event, EventSink, SessionId};
 use crate::platform::audio::SinkVolume;
@@ -170,6 +170,8 @@ pub struct Session {
     /// Commands sent to the headset without an answer yet: what each was, who waits
     /// for what came of it, and since when.
     commands: BTreeMap<ReqId, (String, Option<Reply>, Instant)>,
+    /// Where the answers to them wait for the control loop's pass (see `set_answers`).
+    answers: Answers,
     last_command: u32,
     /// The headset's sound device and the logic of one volume, where both can.
     volume: Option<(SinkVolume, PcVolume)>,
@@ -482,6 +484,7 @@ impl Session {
             mic_denied: false,
             replies: Vec::new(),
             commands: BTreeMap::new(),
+            answers: Answers::default(),
             last_command: 0,
             volume: None,
             ups: BTreeMap::new(),
@@ -542,6 +545,12 @@ impl Session {
     /// put on again).
     pub fn take_fresh(&mut self) -> Vec<ScreenId> {
         std::mem::take(&mut self.fresh)
+    }
+
+    /// Where the answers to commands go: they wait for the end of the control loop's
+    /// pass, so a reply never goes out before the state that shows what it changed.
+    pub fn set_answers(&mut self, answers: Answers) {
+        self.answers = answers;
     }
 
     /// What the PC allows this headset, as its limits say now.
@@ -688,10 +697,13 @@ impl Session {
             if !takes {
                 info!("{what}: the headset takes no commands");
                 if let Some(r) = reply {
-                    r.send(CtlReply::failed(
-                        ApiError::Unsupported,
-                        i18n::t("Шолом не виконує команд", "The headset takes no commands"),
-                    ));
+                    self.answers.push(
+                        r,
+                        CtlReply::failed(
+                            ApiError::Unsupported,
+                            i18n::t("Шолом не виконує команд", "The headset takes no commands"),
+                        ),
+                    );
                 }
                 continue;
             }
@@ -701,7 +713,7 @@ impl Session {
             {
                 warn!("{what}: {}", why.text);
                 if let Some(r) = reply {
-                    r.send(CtlReply::Failed(why));
+                    self.answers.push(r, CtlReply::Failed(why));
                 }
                 continue;
             }
@@ -721,10 +733,13 @@ impl Session {
             if let Some((what, reply, _)) = self.commands.remove(&req) {
                 warn!("command {} ({what}): the headset does not answer", req.0);
                 if let Some(r) = reply {
-                    r.send(CtlReply::failed(
-                        ApiError::TimedOut,
-                        i18n::t("Шолом не відповідає", "The headset does not answer"),
-                    ));
+                    self.answers.push(
+                        r,
+                        CtlReply::failed(
+                            ApiError::TimedOut,
+                            i18n::t("Шолом не відповідає", "The headset does not answer"),
+                        ),
+                    );
                 }
             }
         }
@@ -735,10 +750,13 @@ impl Session {
         for (_, (what, reply, _)) in std::mem::take(&mut self.commands) {
             info!("{what}: the headset left");
             if let Some(r) = reply {
-                r.send(CtlReply::failed(
-                    ApiError::Disconnected,
-                    i18n::t("Шолом відключився", "The headset disconnected"),
-                ));
+                self.answers.push(
+                    r,
+                    CtlReply::failed(
+                        ApiError::Disconnected,
+                        i18n::t("Шолом відключився", "The headset disconnected"),
+                    ),
+                );
             }
         }
     }
@@ -986,7 +1004,7 @@ impl Session {
                     let result = CtlReply::of_outcome(&outcome);
                     info!("command {} ({what}): {result:?}", req.0);
                     if let Some(r) = reply {
-                        r.send(result);
+                        self.answers.push(r, result);
                     }
                 }
                 None => info!("an answer to command {}, which nothing waits for", req.0),
