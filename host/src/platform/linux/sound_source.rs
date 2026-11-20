@@ -193,7 +193,7 @@ mod live {
     #[test]
     #[ignore]
     fn live_windows_and_sound() {
-        let mut desktop = crate::platform::connect().unwrap();
+        let mut desktop = crate::platform::connect(&Default::default()).unwrap();
         let list = desktop.windows().unwrap().list();
         for w in list.all() {
             eprintln!("window {w:?}");

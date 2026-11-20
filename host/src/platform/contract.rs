@@ -62,9 +62,10 @@
 //!    Duplication comes back by itself after up to 2.3 s): [`OutputHealth::Paused`],
 //!    neither started over nor laid out again.
 //! 8. The graphics card is part of an output: [`FrameSource::memory`]
-//!    ([`Memory::D3D11`]) and [`FrameSource::adapter`], for an encoder picked per output
-//!    on the same card (step 6.5), which shares one device per card with every capture
-//!    and encoder: neither an output nor an encoder makes its own.
+//!    ([`Memory::D3D11`], whose adapter [`FrameSource::adapter`] reads), for an encoder
+//!    picked per output on the same card (step 6.5). One device per card is shared by
+//!    every capture and encoder ([`GpuDevices`], given to the desktop when it
+//!    connects): neither an output nor an encoder makes its own.
 //! 9. A limit on encoder sessions: found when an encoder does not start (step 6.5), not
 //!    a field here.
 //! 10. The cursor in the frames or apart: [`FrameSource::cursor`].
@@ -315,17 +316,26 @@ pub struct FrameSource {
         expect(dead_code, reason = "the encoder is picked per output later")
     )]
     pub memory: Memory,
-    /// The graphics card they live on, where there can be more than one that matters.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the encoder is picked per output later")
-    )]
-    pub adapter: Option<AdapterId>,
     #[cfg_attr(
         not(test),
         expect(dead_code, reason = "the encoder is picked per output later")
     )]
     pub cursor: Cursor,
+}
+
+impl FrameSource {
+    /// The graphics card the frames live on, where the memory says one (said once, in
+    /// [`FrameSource::memory`]).
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the encoder is picked per output later")
+    )]
+    pub fn adapter(&self) -> Option<AdapterId> {
+        match self.memory {
+            Memory::D3D11 { adapter } => Some(adapter),
+            Memory::System | Memory::DmaBuf => None,
+        }
+    }
 }
 
 /// Who makes an output's frames.
@@ -366,6 +376,22 @@ pub enum Memory {
 /// changes between boots, so it is never saved).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AdapterId(pub u64);
+
+/// The graphics devices captures and encoders share: one per card, for the life of a
+/// desktop. It is handed to the desktop when it connects ([`crate::platform::connect`]),
+/// so an output that captures on a card (Desktop Duplication, our driver's swap chain)
+/// takes the card's device from here, and the encoders of step 6.5 take the same one:
+/// neither an output nor an encoder makes a device of its own (six processes, each with
+/// its own CUDA context, fell to a tenth of the frames). In GStreamer it answers each
+/// pipeline's `need-context` (`gst.va.display.handle`, `gst.cuda.context`,
+/// `gst.d3d11.device.handle` by LUID).
+///
+/// Until step 6.5 it holds nothing: no Linux output makes a device (KWin and
+/// wlr-screencopy hand over buffers, the encoder opens its own as before).
+#[derive(Debug, Clone, Default)]
+pub struct GpuDevices {
+    _devices: Arc<()>,
+}
 
 /// Where the mouse pointer is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -628,7 +654,6 @@ mod windows_shape {
             },
             origin: Origin::Monitor,
             memory: Memory::D3D11 { adapter: gpu },
-            adapter: Some(gpu),
             cursor: Cursor::Separate,
         };
         // A display of the PC through Desktop Duplication.
@@ -639,11 +664,10 @@ mod windows_shape {
             },
             origin: Origin::Capture,
             memory: Memory::D3D11 { adapter: gpu },
-            adapter: Some(gpu),
             cursor: Cursor::InFrame,
         };
         for source in [&driver, &duplication] {
-            assert_eq!(source.adapter, Some(gpu));
+            assert_eq!(source.adapter(), Some(gpu));
             assert!(matches!(source.memory, Memory::D3D11 { adapter } if adapter == gpu));
             assert!(!source.input.source.is_empty());
         }

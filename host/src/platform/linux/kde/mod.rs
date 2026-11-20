@@ -13,8 +13,9 @@ use log::info;
 
 use crate::encoder::Encoder;
 use crate::platform::{
-    AddModel, Cursor, DeskPlan, Desktop, DesktopCaps, FrameSource, Memory, Origin, Output,
-    OutputHealth, OutputKey, Outputs, PhysicalDisplay, Pointer, Scales, VirtualSpec, Windows,
+    AddModel, Cursor, DeskPlan, Desktop, DesktopCaps, FrameSource, GpuDevices, Memory, Origin,
+    Output, OutputHealth, OutputKey, Outputs, PhysicalDisplay, Pointer, Scales, VirtualSpec,
+    Windows,
 };
 use virtual_output::{Screencast, VirtualOutput};
 use windows::KdeWindows;
@@ -34,10 +35,12 @@ pub struct Kde {
     woke_display_at: Option<Instant>,
     /// Displays of the PC shown so far, to number their streams in the log.
     shown: u32,
+    /// The graphics devices to share (KWin hands buffers over: none taken yet).
+    _gpu: GpuDevices,
 }
 
 impl Kde {
-    pub fn connect() -> Result<Self> {
+    pub fn connect(gpu: GpuDevices) -> Result<Self> {
         Ok(Self {
             caps: DesktopCaps {
                 name: "KDE Plasma",
@@ -58,6 +61,7 @@ impl Kde {
             primary_nudged: None,
             woke_display_at: None,
             shown: 0,
+            _gpu: gpu,
         })
     }
 }
@@ -235,7 +239,6 @@ impl Output for KdeOutput {
             origin: self.origin,
             // PipeWire hands GPU buffers to an encoder that takes them.
             memory: Memory::DmaBuf,
-            adapter: None,
             cursor: Cursor::InFrame,
         }
     }

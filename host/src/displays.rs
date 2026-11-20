@@ -652,7 +652,8 @@ impl Displays {
         manage_primary: bool,
         new_id: &mut dyn FnMut() -> ScreenId,
     ) -> Result<Self> {
-        let desktop = crate::platform::connect()?;
+        // One device per graphics card for every capture and encoder (step 6.5).
+        let desktop = crate::platform::connect(&crate::platform::GpuDevices::default())?;
         // Only some desktops (KDE) have a primary output.
         let manage_primary = manage_primary && desktop.caps().has_primary;
         let mut displays = Self {

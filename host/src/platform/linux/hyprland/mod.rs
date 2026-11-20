@@ -23,9 +23,9 @@ use serde_json::Value;
 use crate::encoder::Encoder;
 use crate::platform::linux::{is_panel, named_virtual};
 use crate::platform::{
-    AddModel, Cursor, DeskPlan, Desktop, DesktopCaps, FrameSource, Geometry, Memory, Origin,
-    Output, OutputHealth, OutputKey, Outputs, PhysicalDisplay, Pointer, Scales, VirtualSpec,
-    Windows,
+    AddModel, Cursor, DeskPlan, Desktop, DesktopCaps, FrameSource, Geometry, GpuDevices, Memory,
+    Origin, Output, OutputHealth, OutputKey, Outputs, PhysicalDisplay, Pointer, Scales,
+    VirtualSpec, Windows,
 };
 use screencopy::Capture;
 use windows::HyprWindows;
@@ -619,12 +619,15 @@ pub struct Hyprland {
     caps: DesktopCaps,
     windows: HyprWindows,
     rules: Arc<Rules>,
+    /// The graphics devices to share (wlr-screencopy hands buffers over: none taken
+    /// yet).
+    _gpu: GpuDevices,
 }
 
 impl Hyprland {
     /// Takes over the desktop: removes what an earlier run left and keeps Prostir's
     /// monitor rules across config reloads.
-    pub fn connect() -> Self {
+    pub fn connect(gpu: GpuDevices) -> Self {
         let rules = Arc::new(Rules::default());
         rules.remove_leftovers();
         rules.keep_after_reloads();
@@ -644,6 +647,7 @@ impl Hyprland {
             },
             windows: HyprWindows::new(),
             rules,
+            _gpu: gpu,
         }
     }
 }
@@ -747,7 +751,6 @@ impl Output for HyprOutput {
             origin: Origin::Capture,
             // GPU buffers for an encoder that takes them, else shared memory.
             memory: Memory::DmaBuf,
-            adapter: None,
             cursor: Cursor::InFrame,
         }
     }

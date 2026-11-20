@@ -29,9 +29,9 @@ use log::{info, warn};
 use super::screen::{self, Picture, Screen};
 use crate::encoder::{Encoder, Input};
 use crate::platform::{
-    AddModel, Cursor, DeskPlan, Desktop, DesktopCaps, FrameSource, Geometry, Memory, Origin,
-    Output, OutputHealth, OutputKey, Outputs, PhysicalDisplay, Pointer, Scales, VirtualSpec,
-    Windows,
+    AddModel, Cursor, DeskPlan, Desktop, DesktopCaps, FrameSource, Geometry, GpuDevices, Memory,
+    Origin, Output, OutputHealth, OutputKey, Outputs, PhysicalDisplay, Pointer, Scales,
+    VirtualSpec, Windows,
 };
 
 /// A display of the fake PC itself, and whether it is plugged in.
@@ -86,8 +86,9 @@ const PREFIX: &str = "Fake-";
 /// Where each output is on the fake desktop, shared by the desktop and its outputs.
 type Layout = Arc<Mutex<BTreeMap<String, Geometry>>>;
 
-/// Connects to the fake desktop.
-pub fn connect() -> Result<Box<dyn Desktop>> {
+/// Connects to the fake desktop (its pictures are in plain memory: no graphics
+/// devices to share).
+pub fn connect(_gpu: &GpuDevices) -> Result<Box<dyn Desktop>> {
     Ok(Box::new(FakeDesktop::connect()?))
 }
 
@@ -407,7 +408,6 @@ impl Output for FakeOutput {
                 Origin::Capture
             },
             memory: Memory::System,
-            adapter: None,
             cursor: Cursor::InFrame,
         }
     }
