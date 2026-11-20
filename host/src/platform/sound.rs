@@ -174,12 +174,15 @@ pub enum SoundEvent {
     /// by the slider or the keys, or by the PC itself (its echo). `writes` is how many
     /// times the PC had set the device when it was read: a reading from before the
     /// PC's last write is old news (`SinkVolume::outdated`), and the write's own echo
-    /// comes after it.
+    /// comes after it. `new_device`: the first reading of a device made anew (the
+    /// headset taken off and put on, the sound switched off and on), whose level is
+    /// whatever the sound system gives a new device, not the person's.
     Volume {
         level: u8,
         muted: bool,
         at: Instant,
         writes: u64,
+        new_device: bool,
     },
     /// A program records from the headset microphone, or no longer does.
     Recording(bool),

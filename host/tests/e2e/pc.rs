@@ -135,6 +135,8 @@ pub struct Options {
     /// How many headsets may have a session at once (`PROSTIR_TEST_MAX_HEADSETS`, a
     /// build for these tests only); 0: as a release allows.
     pub headsets: usize,
+    /// More of the PC app's environment (`PROSTIR_FAKE_NO_SOUND`, `PATH`).
+    pub env: Vec<(String, String)>,
 }
 
 impl Default for Options {
@@ -151,6 +153,7 @@ impl Default for Options {
             physical: String::new(),
             software: true,
             headsets: 0,
+            env: Vec::new(),
         }
     }
 }
@@ -315,6 +318,7 @@ impl Pc {
             Some(code) => cmd.env("PROSTIR_FAKE_TYPED_CODE", code),
             None => cmd.env_remove("PROSTIR_FAKE_TYPED_CODE"),
         };
+        cmd.envs(options.env.iter().map(|(k, v)| (k, v)));
         let mut child = cmd.spawn().expect("start the PC app");
         let log = Arc::new(Mutex::new(Vec::new()));
         let stderr = child.stderr.take().unwrap();

@@ -226,7 +226,12 @@ pub mod audio {
     }
 
     impl AudioOut {
+        /// Silence to the headset; with `PROSTIR_FAKE_NO_SOUND=1` the sound device
+        /// cannot be made.
         pub fn start(on_sound: impl Fn(Vec<u8>) + Send + Sync + 'static) -> Result<Self> {
+            if std::env::var_os("PROSTIR_FAKE_NO_SOUND").is_some_and(|v| v == "1") {
+                anyhow::bail!("the fake desktop makes no sound device (PROSTIR_FAKE_NO_SOUND)");
+            }
             let stop = Arc::new(AtomicBool::new(false));
             let stopped = stop.clone();
             std::thread::Builder::new()
@@ -244,6 +249,10 @@ pub mod audio {
             let mut sys = system();
             let sink = sys.number();
             sys.sink = Some(sink);
+            // A device made anew is at the sound system's level for one (WirePlumber
+            // gives full volume), not the one before.
+            sys.level = Some((NEW_DEVICE_LEVEL, false));
+            log::info!("fake desktop: the headset's sound device made (#{sink})");
             // The sink, and its monitor with the same number.
             sys.say("new", "sink", sink);
             sys.say("new", "source", sink);
@@ -267,6 +276,8 @@ pub mod audio {
             self.stop.store(true, Ordering::Relaxed);
             let mut sys = system();
             if let Some(sink) = sys.sink.take() {
+                sys.level = None;
+                log::info!("fake desktop: the headset's sound device removed (#{sink})");
                 sys.say("remove", "source", sink);
                 sys.say("remove", "sink", sink);
             }
@@ -283,6 +294,9 @@ pub mod audio {
             OutputDevice("fake_headset".into())
         }
     }
+
+    /// The level a sound device made anew has.
+    const NEW_DEVICE_LEVEL: u8 = 100;
 
     /// The fake sound system, as `pactl` would show it: Prostir's devices with their
     /// numbers, the headset's device's level, whether a program records, and the

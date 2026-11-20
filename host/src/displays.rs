@@ -1627,7 +1627,10 @@ impl Displays {
         if self.mic.is_none() {
             self.recording = false;
         }
-        if self.audio.is_none() && self.mic.is_none() {
+        // Kept while sound or the microphone is wanted, even while neither could be
+        // made (they are tried again): a watcher that came and went with every try
+        // would start `pactl` again and again.
+        if !(audio || mic) {
             self.sound_events = None;
         }
         let status = self.sound_status();

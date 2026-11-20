@@ -777,12 +777,32 @@ impl Session {
 
     /// The sound system said the device is at `level` (moved at `at`, read after the
     /// PC's `writes`th write of it): a move asks the headset, the PC's own write is its
-    /// echo, and a reading from before the PC's last write is old news.
-    pub fn device_volume(&mut self, level: u8, muted: bool, at: Instant, writes: u64) {
+    /// echo, and a reading from before the PC's last write is old news. A device made
+    /// anew (`new_device`) is at the sound system's level, not the person's: the
+    /// headset owns the level, which goes on it.
+    pub fn device_volume(
+        &mut self,
+        level: u8,
+        muted: bool,
+        at: Instant,
+        writes: u64,
+        new_device: bool,
+    ) {
         let Some((sink, pc)) = &mut self.volume else {
             return;
         };
         if sink.outdated(writes) {
+            return;
+        }
+        if new_device {
+            if let Some(v) = self.publisher.headset.volume {
+                info!(
+                    "volume: a new device for the headset at {level}: it takes the headset's {}",
+                    v.level
+                );
+                let act = pc.from_headset(&v, Instant::now());
+                do_volume(sink, act, &self.outbox);
+            }
             return;
         }
         let act = pc.device(level, muted, at);

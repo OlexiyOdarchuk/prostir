@@ -347,3 +347,71 @@ fn the_sound_watcher_starts_again_and_catches_up() {
         2
     );
 }
+
+/// The sound device cannot be made and the microphone is off: the PC keeps trying to
+/// make the device, and keeps one subscription to the sound system meanwhile instead
+/// of starting `pactl` again with every try.
+#[test]
+fn the_sound_watcher_stays_while_the_device_cannot_be_made() {
+    let options = Options {
+        env: vec![("PROSTIR_FAKE_NO_SOUND".into(), "1".into())],
+        ..Options::default()
+    };
+    let (_dir, mut pc, _keys, mut headset) = session("sound-none", &options);
+    let off = UpState {
+        kind: UpKind::Mic,
+        switch: false,
+        permission: permission::GRANTED,
+    };
+    headset.send(&ClientMsg::UpState { part: off }).unwrap();
+    pc.wait_log(SOON, "no sound in the headset");
+    pc.wait_log(SOON, "sound: following the sound system");
+    // Through several of the PC's half-second rounds and a try to make the device.
+    headset.take_for(Duration::from_secs(5)).unwrap();
+    assert!(
+        pc.count_log("no sound in the headset") >= 2,
+        "tried once only"
+    );
+    assert_eq!(
+        pc.count_log("fake desktop: the sound system's events start"),
+        1,
+        "the watcher came and went"
+    );
+    assert!(watcher_woke(&pc).is_some(), "no watcher");
+}
+
+/// The sound switched off and on (or the headset taken off and put on) makes the
+/// headset's sound device anew, at the sound system's level for a new device: the PC
+/// puts the headset's level on it, and asks the headset nothing.
+#[test]
+fn a_new_sound_device_takes_the_headsets_level() {
+    let (_dir, mut pc, _keys, mut headset) = session("sound-anew", &Options::default());
+    wait_written(&pc, &mut headset, FIRST_VOLUME);
+    headset.take_for(Duration::from_millis(500)).unwrap();
+    let asks = headset.view().volume_asks.len();
+    let before = written(&pc).len();
+    for on in [false, true] {
+        let req = headset
+            .request(Request::SetSound { to_headset: on })
+            .unwrap();
+        assert_eq!(headset.reply(req, SOON).unwrap(), Outcome::Done);
+    }
+    pc.wait_log_after(SOON, "fake desktop: the headset's sound device made", 1);
+    let until = Instant::now() + SOON;
+    while written(&pc).len() == before {
+        assert!(Instant::now() < until, "the new device was not set");
+        headset.take_for(Duration::from_millis(50)).unwrap();
+    }
+    headset.take_for(Duration::from_secs(1)).unwrap();
+    assert_eq!(
+        written(&pc)[before..],
+        [FIRST_VOLUME.to_string()],
+        "the headset's level, once"
+    );
+    assert_eq!(
+        headset.view().volume_asks.len(),
+        asks,
+        "the headset was asked"
+    );
+    assert_eq!(headset.volume(), Some(FIRST_VOLUME));
+}

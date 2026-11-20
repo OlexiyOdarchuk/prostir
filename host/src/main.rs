@@ -356,9 +356,10 @@ impl Brain {
                 muted,
                 at,
                 writes,
+                new_device,
             } => {
                 for s in self.sessions.values_mut() {
-                    s.device_volume(level, muted, at, writes);
+                    s.device_volume(level, muted, at, writes, new_device);
                 }
             }
             SoundEvent::Recording(on) => {

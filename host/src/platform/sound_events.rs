@@ -159,7 +159,11 @@ pub struct Subscription {
 #[derive(Debug, Default)]
 pub struct Follow {
     at: Indices,
-    volume: Option<(u8, bool)>,
+    /// The last reading said, with the writes done by then: a reading after another
+    /// write is said even at the same level (the one before may have been old news).
+    volume: Option<Reading>,
+    /// The sink was made anew and its first reading is not said yet.
+    new_sink: bool,
     recording: bool,
 }
 
@@ -219,29 +223,42 @@ impl Follow {
         if dirty.indices
             && let Some(now) = system.indices()
         {
-            // A device made anew is said as it is, whatever the one before said.
+            // A device made anew is said as it is, whatever the one before said, and
+            // as a new one: its level is the sound system's, not the person's.
             if now.sink != self.at.sink {
                 dirty.volume = true;
                 self.volume = None;
+                self.new_sink = now.sink.is_some();
             }
-            dirty.recording |= now.mic != self.at.mic;
+            // A microphone made anew starts as nobody recording, as the PC's end of it
+            // does; one already recorded from is then said.
+            if now.mic != self.at.mic {
+                dirty.recording = true;
+                if now.mic.is_some() {
+                    self.recording = false;
+                }
+            }
             self.at = now;
         }
         let mut said = Vec::new();
         if dirty.volume {
             match self.at.sink {
                 // No device: nothing to say until one is made.
-                None => self.volume = None,
+                None => {
+                    self.volume = None;
+                    self.new_sink = false;
+                }
                 Some(_) => {
                     if let Some(r) = system.volume()
-                        && self.volume != Some((r.level, r.muted))
+                        && self.volume != Some(r)
                     {
-                        self.volume = Some((r.level, r.muted));
+                        self.volume = Some(r);
                         said.push(SoundEvent::Volume {
                             level: r.level,
                             muted: r.muted,
                             at,
                             writes: r.writes,
+                            new_device: std::mem::take(&mut self.new_sink),
                         });
                     }
                 }
@@ -726,6 +743,109 @@ mod tests {
         assert!(said.iter().any(volume(40, false)), "{said:?}");
     }
 
+    fn sink_change() -> Dirty {
+        Dirty {
+            volume: true,
+            ..Dirty::default()
+        }
+    }
+
+    /// A reading taken after another write is said even at the level said before: the
+    /// earlier one may have been old news the session dropped, and the device's level
+    /// would then never reach it.
+    #[test]
+    fn a_reading_after_a_write_is_said_at_the_same_level() {
+        let mut system = System::with(|m| {
+            m.indices.sink = Some(5);
+            m.volume = (40, false);
+        });
+        let now = Instant::now();
+        let mut known = Follow::default();
+        assert_eq!(known.look(Dirty::ALL, now, &mut system).len(), 1);
+        assert!(known.look(sink_change(), now, &mut system).is_empty());
+        system.0.lock().unwrap().writes += 1;
+        let said = known.look(sink_change(), now, &mut system);
+        assert!(
+            matches!(
+                said[..],
+                [SoundEvent::Volume {
+                    level: 40,
+                    writes: 1,
+                    ..
+                }]
+            ),
+            "{said:?}"
+        );
+        assert!(known.look(sink_change(), now, &mut system).is_empty());
+    }
+
+    /// The microphone made anew (its number changes) while a program records from it:
+    /// the PC's new end of it starts as nobody recording, so the recording is said.
+    #[test]
+    fn a_new_microphone_already_recorded_from_is_said() {
+        let mut system = System::with(|m| {
+            m.indices.mic = Some(7);
+            m.recording = true;
+        });
+        let now = Instant::now();
+        let mut known = Follow::default();
+        assert_eq!(
+            known.look(Dirty::ALL, now, &mut system),
+            [SoundEvent::Recording(true)]
+        );
+        system.0.lock().unwrap().indices.mic = Some(9);
+        let dirty = known.line(Some(Line {
+            what: What::Remove,
+            on: Facility::Source,
+            index: 7,
+        }));
+        assert_eq!(
+            known.look(dirty, now, &mut system),
+            [SoundEvent::Recording(true)]
+        );
+        // Gone for good: nobody records from it any more.
+        system.0.lock().unwrap().indices.mic = None;
+        let dirty = known.line(Some(Line {
+            what: What::Remove,
+            on: Facility::Source,
+            index: 9,
+        }));
+        assert_eq!(
+            known.look(dirty, now, &mut system),
+            [SoundEvent::Recording(false)]
+        );
+    }
+
+    /// The first reading of a sink, and of one made anew, says it is a new device;
+    /// the next ones do not. Without a sink nothing is said.
+    #[test]
+    fn a_new_sink_is_said_as_one() {
+        let mut system = System::with(|m| m.volume = (100, false));
+        let now = Instant::now();
+        let mut known = Follow::default();
+        assert!(known.look(Dirty::ALL, now, &mut system).is_empty());
+        let new = |said: &[SoundEvent]| match said {
+            [SoundEvent::Volume { new_device, .. }] => Some(*new_device),
+            _ => None,
+        };
+        system.0.lock().unwrap().indices.sink = Some(5);
+        let said = known.look(Dirty::ALL, now, &mut system);
+        assert_eq!(new(&said), Some(true), "{said:?}");
+        system.0.lock().unwrap().volume = (30, false);
+        let said = known.look(sink_change(), now, &mut system);
+        assert_eq!(new(&said), Some(false), "{said:?}");
+        // Taken off and put on: the sink goes, and comes with another number.
+        system.0.lock().unwrap().indices.sink = None;
+        assert!(known.look(Dirty::ALL, now, &mut system).is_empty());
+        {
+            let mut m = system.0.lock().unwrap();
+            m.indices.sink = Some(8);
+            m.volume = (100, false);
+        }
+        let said = known.look(Dirty::ALL, now, &mut system);
+        assert_eq!(new(&said), Some(true), "{said:?}");
+    }
+
     /// The volume rule (`PcVolume`) with what the watcher says: the slider asks the
     /// headset once; the PC's own write of the answer (the volume, then the mute: two
     /// lines) is its echo and asks nothing; a level read before the PC's write is old.
@@ -740,7 +860,8 @@ mod tests {
         let start = Instant::now();
         let ms = |n| start + Duration::from_millis(n);
         // What the session does with an event (see `Session::device_volume`), with
-        // the PC's writes so far.
+        // the PC's writes so far (a new device would take the headset's level, which
+        // this headset has not said).
         fn on(said: Vec<SoundEvent>, pc: &mut PcVolume, writes_now: u64, acts: &mut Vec<Act>) {
             for e in said {
                 if let SoundEvent::Volume {
@@ -748,6 +869,7 @@ mod tests {
                     muted,
                     at,
                     writes,
+                    new_device: false,
                 } = e
                     && writes >= writes_now
                 {
@@ -756,7 +878,7 @@ mod tests {
             }
         }
         let mut acts = Vec::new();
-        // The first look: the device as it is asks the headset.
+        // The first look: a new device, which asks nothing.
         on(
             known.look(Dirty::ALL, ms(0), &mut system),
             &mut pc,
@@ -773,7 +895,7 @@ mod tests {
             &mut acts,
         );
         assert!(
-            matches!(acts[..], [Act::Ask(a), Act::Ask(b)] if a.level == 50 && b.level == 30),
+            matches!(acts[..], [Act::Ask(a)] if a.level == 30),
             "{acts:?}"
         );
         // The headset answers with its step, muted; the PC writes it once it rests.
@@ -781,7 +903,7 @@ mod tests {
             level: 33,
             muted: true,
             seq: 0,
-            ask: 2,
+            ask: 1,
         };
         assert_eq!(pc.from_headset(&answer, ms(110)), None);
         let Some(Act::Write { level, muted }) = pc.tick(ms(200)) else {
