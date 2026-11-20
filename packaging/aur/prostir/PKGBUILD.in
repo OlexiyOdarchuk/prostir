@@ -12,7 +12,9 @@ license=('GPL-3.0-or-later')
 # libpulse: pactl, pacat. pipewire-audio: pw-loopback. mesa: libgbm and the AMD VA driver.
 depends=('glibc' 'gcc-libs' 'gstreamer' 'gst-plugins-base-libs' 'gst-plugins-good'
          'gst-plugins-bad-libs' 'gst-plugin-va' 'gst-plugin-pipewire' 'pipewire'
-         'pipewire-audio' 'pulse-native-provider' 'libpulse' 'mesa' 'curl')
+         'pipewire-audio' 'pulse-native-provider' 'libpulse' 'mesa' 'curl'
+         # The settings window loads these at run time.
+         'libglvnd' 'wayland' 'libxkbcommon')
 makedepends=('cargo' 'pkgconf')
 optdepends=('gst-plugins-ugly: encoding on the CPU with x264 (NVIDIA, or no VA-API encoder)'
             'intel-media-driver: hardware encoding on Intel graphics'
@@ -23,7 +25,13 @@ optdepends=('gst-plugins-ugly: encoding on the CPU with x264 (NVIDIA, or no VA-A
             'libnotify: notifications'
             'grim: screenshots on Hyprland'
             'spectacle: whole-desktop screenshots on KDE when a monitor cannot be captured'
-            'android-tools: connecting the headset over USB (developer mode)')
+            'android-tools: connecting the headset over USB (developer mode)'
+            'libx11: the settings window in an X11 session'
+            'libxcursor: the settings window in an X11 session'
+            'libxi: the settings window in an X11 session'
+            'libxrandr: the settings window in an X11 session'
+            'libxrender: the settings window in an X11 session'
+            'libxkbcommon-x11: the settings window in an X11 session')
 provides=('prostir-bin')
 conflicts=('prostir-bin')
 # The release's THIRD-PARTY-LICENSES.txt lists the crates compiled into the program;
@@ -43,20 +51,22 @@ build() {
   cd "prostir-${pkgver}"
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
-  cargo build --frozen --release -p prostir-host
+  cargo build --frozen --release -p prostir-host -p prostir-settings
 }
 
 check() {
   cd "prostir-${pkgver}"
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
-  cargo test --frozen --release -p prostir-host -p prostir-proto -p prostir-layout
+  cargo test --frozen --release -p prostir-host -p prostir-proto -p prostir-layout -p prostir-lang
 }
 
 package() {
   cd "prostir-${pkgver}"
   install -Dm755 target/release/prostir "${pkgdir}/usr/bin/prostir"
+  install -Dm755 target/release/prostir-settings "${pkgdir}/usr/bin/prostir-settings"
   install -Dm644 packaging/prostir.desktop "${pkgdir}/usr/share/applications/prostir.desktop"
+  install -Dm644 packaging/io.github.OlexiyOdarchuk.Prostir.Settings.desktop "${pkgdir}/usr/share/applications/io.github.OlexiyOdarchuk.Prostir.Settings.desktop"
   install -Dm644 packaging/prostir.svg "${pkgdir}/usr/share/icons/hicolor/scalable/apps/prostir.svg"
   install -Dm644 LICENSE-EXCEPTION.md "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE-EXCEPTION.md"
   install -Dm644 "${srcdir}/THIRD-PARTY-LICENSES-${pkgver}.txt" \

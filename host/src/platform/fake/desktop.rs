@@ -12,7 +12,9 @@
 //! - `volume 40`, `volume 40 muted`: the slider of the headset's sound device moved;
 //!   `drag 0 100 1000`: the slider dragged from 0 to 100 in 1000 ms, a step of 2 at a
 //!   time;
-//! - `record on`, `record off`: a program records from the headset's microphone.
+//! - `record on`, `record off`: a program records from the headset's microphone;
+//! - `sound-events stop`: the sound system's events end, as when `pactl subscribe`
+//!   dies.
 //!
 //! The PC's own displays are `PROSTIR_FAKE_PHYSICAL`: `CONNECTOR=EDID@WxH` separated
 //! by `;` (an empty EDID: the display says nothing), all plugged in at the start.
@@ -440,10 +442,7 @@ fn watch_commands() {
 fn command(line: &str) -> Result<()> {
     let words: Vec<&str> = line.split_whitespace().collect();
     let device = |level: u8, muted: bool| {
-        *super::audio::LEVEL.lock().unwrap() = Some((level, muted));
-        if let Some(tx) = super::audio::VOLUME.lock().unwrap().as_ref() {
-            let _ = tx.send((level, muted, std::time::Instant::now()));
-        }
+        super::audio::moved(level, muted);
         info!(
             "fake desktop: volume moved to {level}{}",
             if muted { " muted" } else { "" }
@@ -488,8 +487,13 @@ fn command(line: &str) -> Result<()> {
             return Ok(());
         }
         ["record", on @ ("on" | "off")] => {
-            super::audio::RECORDING.store(on == "on", Ordering::Relaxed);
+            super::audio::record(on == "on");
             info!("fake desktop: a program records: {on}");
+            return Ok(());
+        }
+        ["sound-events", "stop"] => {
+            super::audio::stop_events();
+            info!("fake desktop: the sound system's events stopped");
             return Ok(());
         }
         _ => {}

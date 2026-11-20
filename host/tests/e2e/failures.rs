@@ -212,46 +212,47 @@ fn a_display_too_big_for_the_headset_fails_alone() {
 
 /// A request for a keyframe of an earlier generation of a stream is for frames long
 /// gone: the PC makes no keyframe for it. One for the generation it sends now gets one.
+///
+/// The keyframes that come do not tell which request made them: on a busy machine the
+/// PC drops frames that waited too long to go out and makes a keyframe of its own to
+/// start the picture again. What the PC decided for each request does tell, so the
+/// test reads that from its log. The PC handles a headset's messages in order, so an
+/// old request sent after the current one shows when that one was handled too.
 #[test]
 fn a_keyframe_asked_for_an_old_generation_is_not_made() {
     use prostir_proto::ClientMsg;
     use prostir_proto::state::Gen;
-    // A moving screen, with no frame late (a late one would ask for a keyframe).
+    const NONE_MADE: &str = "not the generation it streams now: none made";
     let moving = Options {
         fps: 15,
         ..Options::default()
     };
-    let (_dir, _pc, _keys, mut headset) = session("old-generation", &moving);
+    let (_dir, mut pc, _keys, mut headset) = session("old-generation", &moving);
     let id = headset.view().order()[0];
-    // Past the keyframes of the start.
-    headset.take_for(Duration::from_secs(1)).unwrap();
     let now = headset.view().streams[&id].generation;
-    let keyframes = |h: &prostir_testkit::FakeHeadset| h.view().streams[&id].keyframes;
-    let before = keyframes(&headset);
-    for old in [Gen(now.0 - 1), Gen(0)] {
+    let ask = |headset: &mut prostir_testkit::FakeHeadset, generation| {
         headset
-            .send(&ClientMsg::RequestKeyframe {
-                id,
-                generation: old,
-            })
+            .send(&ClientMsg::RequestKeyframe { id, generation })
             .unwrap();
+    };
+    for old in [Gen(now.0 - 1), Gen(0)] {
+        ask(&mut headset, old);
     }
-    headset.take_for(Duration::from_millis(1500)).unwrap();
+    pc.wait_log_after(SOON, NONE_MADE, 1);
+    assert_eq!(pc.count_log(NONE_MADE), 2, "none made for either old one");
+    let before = headset.view().streams[&id].keyframes;
+    ask(&mut headset, now);
+    ask(&mut headset, Gen(0));
+    pc.wait_log_after(SOON, NONE_MADE, 2);
     assert_eq!(
-        keyframes(&headset),
-        before,
-        "no keyframe for an old generation"
+        pc.count_log(NONE_MADE),
+        3,
+        "the current one is not taken for an old one"
     );
-    assert_eq!(headset.view().streams[&id].generation, now);
-    headset
-        .send(&ClientMsg::RequestKeyframe {
-            id,
-            generation: now,
-        })
-        .unwrap();
     headset
         .wait(SOON, "a keyframe for the current one", |v| {
             v.streams[&id].keyframes > before
         })
         .unwrap();
+    assert_eq!(headset.view().streams[&id].generation, now);
 }

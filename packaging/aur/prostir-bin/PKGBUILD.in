@@ -11,7 +11,9 @@ license=('GPL-3.0-or-later')
 # libpulse: pactl, pacat. pipewire-audio: pw-loopback. mesa: libgbm and the AMD VA driver.
 depends=('glibc' 'gcc-libs' 'gstreamer' 'gst-plugins-base-libs' 'gst-plugins-good'
          'gst-plugins-bad-libs' 'gst-plugin-va' 'gst-plugin-pipewire' 'pipewire'
-         'pipewire-audio' 'pulse-native-provider' 'libpulse' 'mesa' 'curl')
+         'pipewire-audio' 'pulse-native-provider' 'libpulse' 'mesa' 'curl'
+         # The settings window loads these at run time.
+         'libglvnd' 'wayland' 'libxkbcommon')
 optdepends=('gst-plugins-ugly: encoding on the CPU with x264 (NVIDIA, or no VA-API encoder)'
             'intel-media-driver: hardware encoding on Intel graphics'
             'libkscreen: arranging the monitors on KDE Plasma (kscreen-doctor)'
@@ -21,7 +23,13 @@ optdepends=('gst-plugins-ugly: encoding on the CPU with x264 (NVIDIA, or no VA-A
             'libnotify: notifications'
             'grim: screenshots on Hyprland'
             'spectacle: whole-desktop screenshots on KDE when a monitor cannot be captured'
-            'android-tools: connecting the headset over USB (developer mode)')
+            'android-tools: connecting the headset over USB (developer mode)'
+            'libx11: the settings window in an X11 session'
+            'libxcursor: the settings window in an X11 session'
+            'libxi: the settings window in an X11 session'
+            'libxrandr: the settings window in an X11 session'
+            'libxrender: the settings window in an X11 session'
+            'libxkbcommon-x11: the settings window in an X11 session')
 provides=('prostir')
 conflicts=('prostir')
 source=("https://github.com/OlexiyOdarchuk/prostir/releases/download/v${pkgver}/prostir-${pkgver}-x86_64-linux.tar.gz")
@@ -30,7 +38,9 @@ sha256sums=('@SHA256@')
 package() {
   cd "prostir-${pkgver}-x86_64-linux"
   install -Dm755 prostir "${pkgdir}/usr/bin/prostir"
+  install -Dm755 prostir-settings "${pkgdir}/usr/bin/prostir-settings"
   install -Dm644 packaging/prostir.desktop "${pkgdir}/usr/share/applications/prostir.desktop"
+  install -Dm644 packaging/io.github.OlexiyOdarchuk.Prostir.Settings.desktop "${pkgdir}/usr/share/applications/io.github.OlexiyOdarchuk.Prostir.Settings.desktop"
   install -Dm644 packaging/prostir.svg "${pkgdir}/usr/share/icons/hicolor/scalable/apps/prostir.svg"
   install -Dm644 LICENSE-EXCEPTION.md "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE-EXCEPTION.md"
   install -Dm644 THIRD-PARTY-LICENSES.txt "${pkgdir}/usr/share/licenses/${pkgname}/THIRD-PARTY-LICENSES.txt"

@@ -15,6 +15,7 @@ mod requests;
 mod resize;
 mod saved;
 mod sound;
+mod window;
 
 use std::collections::BTreeMap;
 use std::time::Duration;

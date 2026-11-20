@@ -17,9 +17,11 @@ use crate::encoder::{
     Backend, Choice, Encoder, EncoderConfig, GpuDevices, Kind, Next, NotOpened, Wanted,
 };
 use crate::errors::{Counted, UserError, code_of};
+use crate::events::EventSink;
 use crate::layout::panel_size;
-use crate::platform::audio::{AudioOut, MicIn};
+use crate::platform::audio::{self, AudioOut, MicIn};
 use crate::platform::dialogs;
+use crate::platform::sound::{MicAvailability, SoundStatus};
 use crate::platform::{
     ActiveWindow, DeskPlan, Desktop, Geometry, MonitorSpec, Output, OutputHealth, OutputKey,
     PhysicalDisplay, VirtualSpec, WindowList,
@@ -145,11 +147,16 @@ pub struct Displays {
     /// The headset's microphone switch is on: the PC's end of it is there.
     mic_wanted: bool,
     /// Why the headset microphone could not be made on the PC, while it cannot.
-    mic_failed: Option<String>,
-    /// A program on the PC records from the headset microphone, as last looked at
-    /// (see [`Displays::tick`]): asking the sound system takes a process start, too
-    /// slow for every pass of the session loop.
+    mic_failed: Option<MicAvailability>,
+    /// A program on the PC records from the headset microphone, as the sound system
+    /// last said (see [`Displays::set_recording`]).
     recording: bool,
+    /// Follows the sound system while sound or the microphone is there; its changes
+    /// go to `sound_to` (the control loop).
+    sound_events: Option<audio::Watcher>,
+    sound_to: Option<EventSink>,
+    /// The sound as last written in the log.
+    sound_logged: Option<SoundStatus>,
     /// What the PC can encode with (see `encoder::available`), found once.
     choices: Vec<(Codec, bool)>,
     /// A headset with a session is worn (encoders running).
@@ -215,6 +222,9 @@ impl Displays {
             mic_wanted: false,
             mic_failed: None,
             recording: false,
+            sound_events: None,
+            sound_to: None,
+            sound_logged: None,
             choices: crate::encoder::available(),
             streaming: true,
             fitted_down: false,
@@ -674,7 +684,12 @@ impl Displays {
     pub fn tick(&mut self, new_id: &mut dyn FnMut() -> ScreenId) {
         self.router.report();
         self.sync_audio();
-        self.recording = self.mic.as_ref().is_some_and(MicIn::recording);
+        // A way in for a recording that broke is made anew (nothing is asked).
+        if self.recording
+            && let Some(mic) = &self.mic
+        {
+            mic.set_recording(true);
+        }
         self.check_sizes();
         self.check_primary();
         self.check_window_panels();
@@ -1207,10 +1222,53 @@ impl Displays {
         }
     }
 
-    /// A program on the PC records from the headset's microphone, as last looked at
-    /// (about twice a second).
+    /// A program on the PC records from the headset's microphone, as the sound system
+    /// last said.
     pub fn recording(&self) -> bool {
         self.recording && self.mic.is_some()
+    }
+
+    /// The sound system said a program began (`on`) or stopped recording from the
+    /// headset's microphone: a recording gets its own way in for the headset's sound.
+    pub fn set_recording(&mut self, on: bool) {
+        let Some(mic) = &self.mic else {
+            return;
+        };
+        if on != self.recording {
+            info!(
+                "{}",
+                if on {
+                    "a program on the PC records from the headset microphone"
+                } else {
+                    "no program on the PC records from the headset microphone"
+                }
+            );
+        }
+        self.recording = on;
+        mic.set_recording(on);
+    }
+
+    /// Where the sound system's changes go (the control loop), once sound or the
+    /// microphone is there.
+    pub fn send_sound_to(&mut self, events: EventSink) {
+        self.sound_to = Some(events);
+    }
+
+    /// Where the PC's sound goes, and the headset microphone on the PC.
+    pub fn sound_status(&self) -> SoundStatus {
+        let mic = match (&self.mic, &self.mic_failed) {
+            _ if !(self.streaming && self.mic_wanted) => None,
+            (Some(_), _) => Some(MicAvailability::Ready),
+            (None, Some(why)) => Some(why.clone()),
+            (None, None) => Some(MicAvailability::Failed(
+                t("Мікрофон ще не готовий", "The microphone is not ready yet").into(),
+            )),
+        };
+        SoundStatus {
+            route: self.audio.as_ref().map(AudioOut::route),
+            output: self.audio.as_ref().map(AudioOut::device),
+            mic,
+        }
     }
 
     /// The codec the streams are in now.
@@ -1437,10 +1495,7 @@ impl Displays {
         let mic = match (&self.mic, &self.mic_failed) {
             _ if !mic => state::MicDevice::Off,
             (Some(_), _) => state::MicDevice::Ready,
-            (None, Some(why)) if self.mic_wanted => state::MicDevice::Failed {
-                error: UserError::Sound.code(),
-                detail: state::clip(why, state::MAX_DETAIL),
-            },
+            (None, Some(why)) if self.mic_wanted => why.device(),
             (None, _) => state::MicDevice::Off,
         };
         state::Sound {
@@ -1718,9 +1773,18 @@ impl Displays {
         self.streaming
     }
 
-    /// Starts or stops PC sound and microphone to match the wishes and the state.
+    /// Starts or stops PC sound and microphone to match the wishes and the state, and
+    /// the watcher of the sound system with them (it starts first, so it sees them
+    /// come).
     fn sync_audio(&mut self) {
         let audio = self.streaming && self.settings.audio;
+        let mic = self.streaming && self.mic_wanted;
+        if (audio || mic)
+            && self.sound_events.is_none()
+            && let Some(events) = &self.sound_to
+        {
+            self.sound_events = audio::watch(events.clone());
+        }
         if audio && self.audio.is_none() && self.audio_retry.due() {
             let router = self.router.clone();
             match AudioOut::start(move |pcm| router.send_audio(pcm)) {
@@ -1736,7 +1800,6 @@ impl Displays {
         } else if !audio {
             self.audio = None;
         }
-        let mic = self.streaming && self.mic_wanted;
         if mic && self.mic.is_none() && self.mic_retry.due() {
             match MicIn::start() {
                 Ok(m) => {
@@ -1746,12 +1809,26 @@ impl Displays {
                 }
                 Err(e) => {
                     warn!("no headset microphone: {e:#}");
-                    self.mic_failed = Some(format!("{e:#}"));
+                    self.mic_failed = Some(MicAvailability::of_failure(&e));
                     self.mic_retry.failed();
                 }
             }
         } else if !mic {
             self.mic = None;
+        }
+        if self.mic.is_none() {
+            self.recording = false;
+        }
+        // Kept while sound or the microphone is wanted, even while neither could be
+        // made (they are tried again): a watcher that came and went with every try
+        // would start `pactl` again and again.
+        if !(audio || mic) {
+            self.sound_events = None;
+        }
+        let status = self.sound_status();
+        if self.sound_logged.as_ref() != Some(&status) {
+            info!("sound: {status}");
+            self.sound_logged = Some(status);
         }
     }
 

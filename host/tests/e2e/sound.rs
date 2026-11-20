@@ -1,14 +1,15 @@
-//! One volume for the PC's slider and the headset's buttons, and the headset's
-//! microphone as an up stream.
+//! One volume for the PC's slider and the headset's buttons, the headset's microphone
+//! as an up stream, and the sound system followed by its events (never asked on a
+//! clock), also when they stop for a while.
 
 use std::time::{Duration, Instant};
 
 use prostir_proto::ClientMsg;
 use prostir_proto::request::{Outcome, Request};
 use prostir_proto::state::{UpKind, UpState, permission};
-use prostir_testkit::{FIRST_VOLUME, FakeHeadset, quest_step};
+use prostir_testkit::{FIRST_VOLUME, FakeHeadset, View, quest_step};
 
-use crate::pc::{Options, Pc};
+use crate::pc::{Options, Pc, TestDir};
 use crate::{SOON, session};
 
 /// The levels the PC put its sound device at, in order (from the log).
@@ -207,4 +208,353 @@ fn a_quick_off_and_on_keeps_the_new_recording() {
     );
     headset.send(&ClientMsg::UpEnd { up: 1 }).unwrap();
     pc.wait_log(SOON, "the headset's microphone stopped (up stream 1)");
+}
+
+/// How many times the PC's thread that follows the sound system woke since it started.
+fn watcher_woke(pc: &Pc) -> Option<u64> {
+    pc.wakeups()
+        .into_values()
+        .find(|(name, _)| name == "sound-events")
+        .map(|(_, n)| n)
+}
+
+/// Whether the headset is asked for its microphone.
+fn mic_wanted(view: &View) -> bool {
+    view.pc.up_wanted.get(&UpKind::Mic).is_some_and(|u| u.on)
+}
+
+/// The PC learns that a program records from the sound system's event at once, not
+/// on a clock: nothing asks the sound system while nothing changes, and a recording
+/// that begins or ends is answered within a moment, with one look each.
+#[test]
+fn a_recording_is_seen_from_the_sound_systems_event() {
+    let (_dir, mut pc, _keys, mut headset) = session("recording-event", &Options::default());
+    const ASKED: &str = "fake desktop: asked whether a program records";
+    pc.wait_log(SOON, "sound: following the sound system");
+    headset.take_for(Duration::from_millis(500)).unwrap();
+    let asked = pc.count_log(ASKED);
+    headset.take_for(Duration::from_secs(2)).unwrap();
+    assert_eq!(pc.count_log(ASKED), asked, "asked while nothing changed");
+
+    for (on, what) in [(true, "record on"), (false, "record off")] {
+        let started = Instant::now();
+        pc.desktop(what);
+        headset
+            .wait(SOON, what, |v| {
+                v.pc.up_wanted.get(&UpKind::Mic).is_some_and(|u| u.on == on)
+            })
+            .unwrap();
+        let took = started.elapsed();
+        // Through a file the fake desktop watches, the sound system and the network:
+        // within the second a request is answered in.
+        assert!(took < Duration::from_secs(1), "{what} seen after {took:?}");
+        headset.take_for(Duration::from_millis(300)).unwrap();
+        assert!(
+            pc.count_log(ASKED) <= asked + 2,
+            "{what}: asked {} times",
+            pc.count_log(ASKED) - asked
+        );
+    }
+    let after = pc.count_log(ASKED);
+    headset.take_for(Duration::from_secs(1)).unwrap();
+    assert_eq!(pc.count_log(ASKED), after, "asked while nothing changed");
+}
+
+/// While the sound is idle, the thread that follows the sound system sleeps: it wakes
+/// only when the sound system says something, and is asleep again after.
+#[test]
+fn the_sound_watcher_sleeps_while_the_sound_is_idle() {
+    let (_dir, mut pc, _keys, mut headset) = session("sound-idle", &Options::default());
+    pc.wait_log(SOON, "sound: following the sound system");
+    // The first volume and its echo.
+    headset.take_for(Duration::from_secs(1)).unwrap();
+    for round in 0..2 {
+        let before = watcher_woke(&pc).expect("no sound-events thread");
+        headset.take_for(Duration::from_secs(3)).unwrap();
+        let after = watcher_woke(&pc).expect("the sound-events thread went");
+        assert_eq!(
+            after,
+            before,
+            "round {round}: woke {} times",
+            after - before
+        );
+        // A change wakes it, and the headset is asked once.
+        let asks = headset.view().volume_asks.len();
+        pc.desktop(&format!("volume {}", 30 + round * 20));
+        headset
+            .wait(SOON, "a request for the volume", |v| {
+                v.volume_asks.len() > asks
+            })
+            .unwrap();
+        assert!(
+            watcher_woke(&pc).unwrap() > after,
+            "the change did not wake it"
+        );
+        headset.take_for(Duration::from_millis(500)).unwrap();
+        assert_eq!(headset.view().volume_asks.len(), asks + 1);
+    }
+    // With the headset gone, so are the sound devices and the thread that follows them
+    // (the monitors stay for a while).
+    headset.disconnect();
+    let until = Instant::now() + SOON;
+    while watcher_woke(&pc).is_some() {
+        assert!(
+            Instant::now() < until,
+            "the sound-events thread outlived the sound devices"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// The sound system's events end (as when `pactl subscribe` dies): the PC follows it
+/// again after a pause, and what changed meanwhile comes then: the slider asks the
+/// headset, a program that began recording gets the microphone.
+#[test]
+fn the_sound_watcher_starts_again_and_catches_up() {
+    let (_dir, mut pc, _keys, mut headset) = session("sound-again", &Options::default());
+    pc.wait_log(SOON, "sound: following the sound system");
+    wait_written(&pc, &mut headset, FIRST_VOLUME);
+    let asks = headset.view().volume_asks.len();
+    pc.desktop("sound-events stop");
+    pc.wait_log(SOON, "sound: the sound system's events stopped");
+    // Meanwhile nothing is said: the slider moves, a program records.
+    pc.desktop("volume 60\nrecord on");
+    pc.wait_log(SOON, "fake desktop: a program records: on");
+    headset.take_for(Duration::from_millis(300)).unwrap();
+    assert_eq!(
+        headset.view().volume_asks.len(),
+        asks,
+        "asked without events"
+    );
+    assert!(!mic_wanted(headset.view()), "wanted without events");
+    // Again after the first pause (a second), with what changed.
+    pc.wait_log(SOON, "sound: following the sound system again");
+    headset
+        .wait(SOON, "the microphone wanted", mic_wanted)
+        .unwrap();
+    wait_written(&pc, &mut headset, quest_step(60));
+    assert_eq!(headset.view().volume_asks.len(), asks + 1);
+    assert_eq!(headset.volume(), Some(quest_step(60)));
+    // And it follows on.
+    pc.desktop("record off");
+    headset
+        .wait(SOON, "the microphone no longer wanted", |v| {
+            v.pc.up_wanted.get(&UpKind::Mic).is_some_and(|u| !u.on)
+        })
+        .unwrap();
+    assert_eq!(
+        pc.count_log("fake desktop: the sound system's events start"),
+        2
+    );
+}
+
+/// The sound device cannot be made and the microphone is off: the PC keeps trying to
+/// make the device, and keeps one subscription to the sound system meanwhile instead
+/// of starting `pactl` again with every try.
+#[test]
+fn the_sound_watcher_stays_while_the_device_cannot_be_made() {
+    let options = Options {
+        env: vec![("PROSTIR_FAKE_NO_SOUND".into(), "1".into())],
+        ..Options::default()
+    };
+    let (_dir, mut pc, _keys, mut headset) = session("sound-none", &options);
+    let off = UpState {
+        kind: UpKind::Mic,
+        switch: false,
+        permission: permission::GRANTED,
+    };
+    headset.send(&ClientMsg::UpState { part: off }).unwrap();
+    pc.wait_log(SOON, "no sound in the headset");
+    pc.wait_log(SOON, "sound: following the sound system");
+    // Through several of the PC's half-second rounds and a try to make the device.
+    headset.take_for(Duration::from_secs(5)).unwrap();
+    assert!(
+        pc.count_log("no sound in the headset") >= 2,
+        "tried once only"
+    );
+    assert_eq!(
+        pc.count_log("fake desktop: the sound system's events start"),
+        1,
+        "the watcher came and went"
+    );
+    assert!(watcher_woke(&pc).is_some(), "no watcher");
+}
+
+/// The sound switched off and on (or the headset taken off and put on) makes the
+/// headset's sound device anew, at the sound system's level for a new device: the PC
+/// puts the headset's level on it, and asks the headset nothing.
+#[test]
+fn a_new_sound_device_takes_the_headsets_level() {
+    let (_dir, mut pc, _keys, mut headset) = session("sound-anew", &Options::default());
+    wait_written(&pc, &mut headset, FIRST_VOLUME);
+    headset.take_for(Duration::from_millis(500)).unwrap();
+    let asks = headset.view().volume_asks.len();
+    let before = written(&pc).len();
+    for on in [false, true] {
+        let req = headset
+            .request(Request::SetSound { to_headset: on })
+            .unwrap();
+        assert_eq!(headset.reply(req, SOON).unwrap(), Outcome::Done);
+    }
+    pc.wait_log_after(SOON, "fake desktop: the headset's sound device made", 1);
+    let until = Instant::now() + SOON;
+    while written(&pc).len() == before {
+        assert!(Instant::now() < until, "the new device was not set");
+        headset.take_for(Duration::from_millis(50)).unwrap();
+    }
+    headset.take_for(Duration::from_secs(1)).unwrap();
+    assert_eq!(
+        written(&pc)[before..],
+        [FIRST_VOLUME.to_string()],
+        "the headset's level, once"
+    );
+    assert_eq!(
+        headset.view().volume_asks.len(),
+        asks,
+        "the headset was asked"
+    );
+    assert_eq!(headset.volume(), Some(FIRST_VOLUME));
+}
+
+/// A stand-in `pactl` (`fake-pactl/pactl`, first on the PC app's `PATH`) whose sound
+/// system is files in `dir`: the test moves the slider and starts recordings there.
+struct FakePactl {
+    dir: TestDir,
+    index: u32,
+}
+
+impl FakePactl {
+    fn new(name: &str) -> Self {
+        let dir = TestDir::new(name);
+        let index = 50;
+        let at = |f: &str| dir.path().join(f);
+        std::fs::write(at("sink"), format!("{index} prostir_headset\n")).unwrap();
+        std::fs::write(at("volume"), "100\n").unwrap();
+        std::fs::write(at("mute"), "no\n").unwrap();
+        std::fs::write(at("mic"), "51 prostir_mic IDLE\n").unwrap();
+        std::fs::write(at("events"), "").unwrap();
+        Self { dir, index }
+    }
+
+    /// The PC app's environment for it.
+    fn env(&self) -> Vec<(String, String)> {
+        let tools = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/e2e/fake-pactl");
+        let path = std::env::var("PATH").unwrap_or_default();
+        vec![
+            ("PROSTIR_FAKE_PACTL".into(), "1".into()),
+            (
+                "FAKE_PACTL_DIR".into(),
+                self.dir.path().to_string_lossy().into_owned(),
+            ),
+            ("PATH".into(), format!("{tools}:{path}")),
+        ]
+    }
+
+    fn read(&self, file: &str) -> String {
+        std::fs::read_to_string(self.dir.path().join(file))
+            .unwrap_or_default()
+            .trim()
+            .to_owned()
+    }
+
+    fn write(&self, file: &str, text: &str) {
+        std::fs::write(self.dir.path().join(file), format!("{text}\n")).unwrap();
+    }
+
+    /// What `pactl subscribe` says next.
+    fn say(&self, line: &str) {
+        use std::io::Write;
+        let mut events = std::fs::OpenOptions::new()
+            .append(true)
+            .open(self.dir.path().join("events"))
+            .unwrap();
+        writeln!(events, "{line}").unwrap();
+    }
+
+    /// The slider moved to `level`.
+    fn slide(&self, level: u8) {
+        self.write("volume", &level.to_string());
+        self.say(&format!("Event 'change' on sink #{}", self.index));
+    }
+
+    /// How many times `pactl subscribe` was started.
+    fn subscriptions(&self) -> usize {
+        self.read("calls")
+            .lines()
+            .filter(|l| *l == "subscribe")
+            .count()
+    }
+}
+
+/// The PC's own `pactl` code, as on Linux, against a stand-in `pactl`: the headset's
+/// level goes to the device on a thread of its own, the slider asks the headset, a
+/// program recording gets the microphone, and a `pactl subscribe` that dies starts
+/// again and catches up with what changed meanwhile.
+#[test]
+fn the_pc_follows_pactl() {
+    let pactl = FakePactl::new("pactl-state");
+    let options = Options {
+        env: pactl.env(),
+        ..Options::default()
+    };
+    let (_dir, mut pc, _keys, mut headset) = session("pactl", &options);
+    let set = |level: u8| format!("volume: the headset's device at {level}");
+    pc.wait_log(SOON, &set(FIRST_VOLUME));
+    assert_eq!(pactl.read("volume"), FIRST_VOLUME.to_string());
+    let pc_caps = headset.view().pc.caps.clone().unwrap();
+    assert!(pc_caps.has(prostir_proto::state::caps::pc::VOLUME));
+    headset.take_for(Duration::from_millis(500)).unwrap();
+    let asks = headset.view().volume_asks.len();
+
+    // The slider: one request, and the headset's step on the device.
+    pactl.slide(21);
+    pc.wait_log(SOON, &set(quest_step(21)));
+    assert_eq!(pactl.read("volume"), quest_step(21).to_string());
+    headset.take_for(Duration::from_millis(500)).unwrap();
+    assert_eq!(headset.view().volume_asks.len(), asks + 1);
+
+    // A program records, then stops.
+    pactl.write("mic", "51 prostir_mic RUNNING");
+    pactl.say("Event 'new' on source-output #77");
+    headset
+        .wait(SOON, "the microphone wanted", mic_wanted)
+        .unwrap();
+    pactl.write("mic", "51 prostir_mic IDLE");
+    pactl.say("Event 'remove' on source-output #77");
+    headset
+        .wait(SOON, "the microphone no longer wanted", |v| !mic_wanted(v))
+        .unwrap();
+
+    // `pactl subscribe` dies; the slider moves meanwhile.
+    let pid: libc::pid_t = pactl.read("subscribe.pid").parse().unwrap();
+    // SAFETY: a signal to the stand-in this test started through the PC app.
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    pc.wait_log(SOON, "sound: the sound system's events stopped");
+    pactl.write("volume", "60");
+    pc.wait_log(SOON, "sound: following the sound system again");
+    pc.wait_log(SOON, &set(quest_step(60)));
+    headset.take_for(Duration::from_millis(500)).unwrap();
+    assert_eq!(headset.view().volume_asks.len(), asks + 2);
+    assert_eq!(headset.volume(), Some(quest_step(60)));
+    assert_eq!(pactl.subscriptions(), 2);
+}
+
+/// A `pactl` too old to read a device's level (before PulseAudio 14): the PC does not
+/// offer the headset its volume, and never sets the device.
+#[test]
+fn an_old_pactl_shares_no_volume() {
+    let pactl = FakePactl::new("pactl-old-state");
+    let mut env = pactl.env();
+    env.push(("FAKE_PACTL_VERSION".into(), "13.99.1".into()));
+    let options = Options {
+        env,
+        ..Options::default()
+    };
+    let (_dir, mut pc, _keys, mut headset) = session("pactl-old", &options);
+    pc.wait_log(SOON, "volume: not shared with the headset");
+    headset.take_for(Duration::from_secs(1)).unwrap();
+    let pc_caps = headset.view().pc.caps.clone().unwrap();
+    assert!(!pc_caps.has(prostir_proto::state::caps::pc::VOLUME));
+    assert!(!pactl.read("calls").contains("set-sink-volume"));
+    assert_eq!(pactl.read("volume"), "100");
 }

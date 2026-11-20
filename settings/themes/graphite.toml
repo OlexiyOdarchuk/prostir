@@ -1,0 +1,58 @@
+# Prostir settings window: the second built-in palette ("Neutral" on the Look page).
+#
+# Graphite: the window itself has no colour, only grey. The pictures of the monitors
+# are what the window is about, and neutral grey puts no tint on them (the reason
+# photo and video editors use it); the one blue is the only colour left.
+# Only the colours are here: shape, type and motion come from ink.toml.
+format = 1
+name = "Neutral"
+
+[light]
+background    = "#F4F4F4"
+sidebar       = "#E9E9E9"
+surface       = "#FFFFFF"
+well          = "#EDEDED"
+control       = "#E3E3E3"
+control_hover = "#D6D6D6"
+border        = "#DADADA"
+control_border = "#767676"
+text          = "#171717"
+text_muted    = "#515151"
+accent        = "#2A63E0"
+accent_hover  = "#2357C8"
+accent_text   = "#FFFFFF"
+accent_ink    = "#1F53C4"
+focus         = "#2A63E0"
+ok            = "#1E8E4A"
+warning       = "#A86400"
+danger        = "#B42626"
+screen        = "#D2D2D2"
+screen_pc     = "#FFFFFF"
+screen_text   = "#171717"
+selection     = "#2A63E040"
+shadow        = "#00000014"
+
+[dark]
+background    = "#171717"
+sidebar       = "#111111"
+surface       = "#1F1F1F"
+well          = "#131313"
+control       = "#2B2B2B"
+control_hover = "#353535"
+border        = "#2F2F2F"
+control_border = "#7A7A7A"
+text          = "#ECECEC"
+text_muted    = "#A6A6A6"
+accent        = "#2C66E8"
+accent_hover  = "#2459D6"
+accent_text   = "#FFFFFF"
+accent_ink    = "#6F9DFF"
+focus         = "#3D7EFF"
+ok            = "#4ADE80"
+warning       = "#FBBF24"
+danger        = "#FF6B6B"
+screen        = "#333333"
+screen_pc     = "#1F1F1F"
+screen_text   = "#ECECEC"
+selection     = "#3D7EFF55"
+shadow        = "#00000080"

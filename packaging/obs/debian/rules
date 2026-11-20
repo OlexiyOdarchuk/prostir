@@ -21,18 +21,20 @@ override_dh_auto_configure:
 
 override_dh_auto_build:
 	cargo --version
-	cargo build $(CARGO_FLAGS) -p prostir-host --bin prostir
+	cargo build $(CARGO_FLAGS) -p prostir-host --bin prostir -p prostir-settings --bin prostir-settings
 
 override_dh_auto_test:
 # One test at a time: tests that start programs in parallel can hand each other's
 # pipes to a child process, which made a_stopped_player_is_noticed fail now and then.
 ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
-	cargo test $(CARGO_FLAGS) -p prostir-host -p prostir-proto -- --test-threads=1
+	cargo test $(CARGO_FLAGS) -p prostir-host -p prostir-proto -p prostir-lang -- --test-threads=1
 endif
 
 override_dh_auto_install:
 	install -Dm755 target/release/prostir debian/prostir/usr/bin/prostir
+	install -Dm755 target/release/prostir-settings debian/prostir/usr/bin/prostir-settings
 	install -Dm644 packaging/prostir.desktop debian/prostir/usr/share/applications/prostir.desktop
+	install -Dm644 packaging/io.github.OlexiyOdarchuk.Prostir.Settings.desktop debian/prostir/usr/share/applications/io.github.OlexiyOdarchuk.Prostir.Settings.desktop
 	install -Dm644 packaging/prostir.svg debian/prostir/usr/share/icons/hicolor/scalable/apps/prostir.svg
 	install -Dm644 LICENSE-EXCEPTION.md debian/prostir/usr/share/doc/prostir/LICENSE-EXCEPTION.md
 	install -Dm644 THIRD-PARTY-LICENSES.txt debian/prostir/usr/share/doc/prostir/THIRD-PARTY-LICENSES.txt

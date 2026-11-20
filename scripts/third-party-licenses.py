@@ -4,10 +4,11 @@ that ends up inside Prostir's release files besides Prostir itself.
 
     scripts/third-party-licenses.py [-o FILE] [--openxr-aar AAR]
 
-It walks the normal (not dev, not build) dependencies of the PC program
-(prostir-host for x86_64 Linux) and the headset app (prostir-client for Android),
-reads each crate's license files from the local Cargo registry, and adds the font and
-the Khronos OpenXR loader that the APK bundles. Only the Python standard library and
+It walks the normal (not dev, not build) dependencies of the PC programs
+(prostir-host and prostir-settings for x86_64 Linux) and the headset app
+(prostir-client for Android), reads each crate's license files from the local Cargo
+registry, and adds the font (in the APK and the settings window) and the Khronos
+OpenXR loader that the APK bundles. Only the Python standard library and
 `cargo metadata` are used. It fails when a crate's license text cannot be found, so a
 new dependency without one is noticed before a release.
 """
@@ -24,6 +25,7 @@ import zipfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PARTS = [
     ("prostir-host", "x86_64-unknown-linux-gnu", "PC"),
+    ("prostir-settings", "x86_64-unknown-linux-gnu", "PC"),
     ("prostir-client", "aarch64-linux-android", "headset"),
 ]
 # For "A OR B" the first license in this list that a crate offers is the one we use.
@@ -63,6 +65,9 @@ def classify_name(name):
 
 def classify_text(text):
     t = " ".join(text.split())
+    # First: the Unicode license grants its permission in the MIT license's words.
+    if "UNICODE LICENSE" in t.upper() and "UNICODE, INC." in t.upper():
+        return "Unicode-3.0"
     if "Apache License" in t and "Version 2.0" in t and "TERMS AND CONDITIONS" in t:
         return "Apache-2.0"
     if "Permission is hereby granted, free of charge" in t:
@@ -75,8 +80,6 @@ def classify_text(text):
         return "Unlicense"
     if "This software is provided 'as-is'" in t:
         return "Zlib"
-    if "UNICODE LICENSE" in t.upper() and "UNICODE, INC." in t.upper():
-        return "Unicode-3.0"
     return None
 
 
@@ -122,6 +125,17 @@ def dependencies(package, target):
     return [packages[i] for i in seen if packages[i]["source"] is not None]
 
 
+def apache_text(near):
+    """The Apache License 2.0 text from another crate in the same registry."""
+    registry = os.path.dirname(near)
+    for crate in sorted(os.listdir(registry)):
+        for name in ("LICENSE-APACHE", "LICENSE-APACHE.txt", "LICENSE-APACHE-2.0"):
+            path = os.path.join(registry, crate, name)
+            if os.path.isfile(path) and classify_text(read(path)) == "Apache-2.0":
+                return read(path)
+    raise SystemExit(f"no Apache License 2.0 text anywhere in {registry}")
+
+
 def read(path):
     with open(path, encoding="utf-8", errors="replace") as f:
         return f.read().replace("\r\n", "\n").strip() + "\n"
@@ -164,6 +178,10 @@ def crate_texts(pkg):
             authors = ", ".join(pkg.get("authors") or []) or f"the {pkg['name']} authors"
             texts.append(("MIT license (the crate ships no license file)",
                           f"Copyright (c) {authors}\n\n{MIT_TEXT}"))
+        elif missing == ["Apache-2.0"] and not unknown:
+            # The license text is the same for everyone; the crate only names it.
+            texts.append(("Apache License 2.0 (the crate ships no license file)",
+                          apache_text(directory)))
         elif not unknown:
             raise SystemExit(f"{pkg['name']} {pkg['version']} ({expr}): no license text for "
                              f"{', '.join(missing)} in {directory}")
@@ -209,12 +227,12 @@ def main():
     w("part keeps its own license. Where a crate lets you choose between licenses, the one")
     w("in the \"Used\" column is the one these release files rely on.")
     w("")
-    w("PC: the prostir program (tar.gz, .deb, .rpm, AUR).")
+    w("PC: the prostir and prostir-settings programs (tar.gz, .deb, .rpm, AUR).")
     w("headset: the Quest app (.apk).")
     w("")
     w("")
-    w("1. Bundled with the headset app")
-    w("-------------------------------")
+    w("1. Bundled with the headset app (and the font with the PC settings window)")
+    w("--------------------------------------------------------------------------")
     w("")
     w("Noto Sans (NotoSans-Regular.ttf, NotoSans-Medium.ttf), SIL Open Font License 1.1:")
     w("")

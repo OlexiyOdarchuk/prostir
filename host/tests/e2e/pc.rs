@@ -136,8 +136,11 @@ pub struct Options {
     /// build for these tests only); 0: as a release allows.
     pub headsets: usize,
     /// A fake hardware encoder (`PROSTIR_FAKE_ENCODER`: `works`, `sessions=N`,
-    /// `broken`, `hangs`), tried before every other; none: the PC's own encoders only.
+    /// `refuses=N`, `broken`, `hangs`), tried before every other; none: the PC's own
+    /// encoders only.
     pub encoder: Option<&'static str>,
+    /// More of the PC app's environment (`PROSTIR_FAKE_NO_SOUND`, `PATH`).
+    pub env: Vec<(String, String)>,
 }
 
 impl Default for Options {
@@ -155,6 +158,7 @@ impl Default for Options {
             software: true,
             headsets: 0,
             encoder: None,
+            env: Vec::new(),
         }
     }
 }
@@ -325,6 +329,7 @@ impl Pc {
             Some(code) => cmd.env("PROSTIR_FAKE_TYPED_CODE", code),
             None => cmd.env_remove("PROSTIR_FAKE_TYPED_CODE"),
         };
+        cmd.envs(options.env.iter().map(|(k, v)| (k, v)));
         let mut child = cmd.spawn().expect("start the PC app");
         let log = Arc::new(Mutex::new(Vec::new()));
         let stderr = child.stderr.take().unwrap();

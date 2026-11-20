@@ -1,5 +1,6 @@
-# The PC app (`prostir`), for Nix and NixOS: `nix build`, `nix run`, or the flake's
-# package in a NixOS or Home Manager configuration.
+# The PC app (`prostir`) and its settings window (`prostir-settings`), for Nix and
+# NixOS: `nix build`, `nix run`, or the flake's package in a NixOS or Home Manager
+# configuration.
 {
   lib,
   stdenv,
@@ -19,6 +20,10 @@
   zenity,
   intel-media-driver,
   mesa,
+  libGL,
+  libxkbcommon,
+  wayland,
+  xorg,
 }:
 
 let
@@ -57,6 +62,19 @@ let
   # Intel graphics only come with x86 machines.
   ++ lib.optional stdenv.hostPlatform.isx86_64 "${intel-media-driver}/lib/dri"
   ++ [ "${mesa}/lib/dri" ];
+  # The settings window loads these at run time (EGL, Wayland, the keyboard; X11 in
+  # an X11 session) rather than linking them.
+  windowLibs = [
+    libGL
+    libxkbcommon
+    wayland
+    xorg.libX11
+    xorg.libXcursor
+    xorg.libXi
+    xorg.libXrandr
+    xorg.libXrender
+    xorg.libxcb
+  ];
 in
 rustPlatform.buildRustPackage {
   pname = "prostir";
@@ -75,7 +93,10 @@ rustPlatform.buildRustPackage {
       (root + "/client")
       # A workspace member (the fake headset for tests): cargo needs it present.
       (root + "/testkit")
+      (root + "/lang")
+      (root + "/settings")
       (root + "/packaging/prostir.desktop")
+      (root + "/packaging/io.github.OlexiyOdarchuk.Prostir.Settings.desktop")
       (root + "/packaging/prostir.svg")
     ];
   };
@@ -86,6 +107,10 @@ rustPlatform.buildRustPackage {
     "prostir-host"
     "--bin"
     "prostir"
+    "-p"
+    "prostir-settings"
+    "--bin"
+    "prostir-settings"
   ];
   # The tests need a desktop session and the headset's toolchain; CI runs them.
   doCheck = false;
@@ -104,6 +129,12 @@ rustPlatform.buildRustPackage {
   postInstall = ''
     install -Dm644 packaging/prostir.desktop $out/share/applications/prostir.desktop
     install -Dm644 packaging/prostir.svg $out/share/icons/hicolor/scalable/apps/prostir.svg
+    install -Dm644 packaging/io.github.OlexiyOdarchuk.Prostir.Settings.desktop \
+      $out/share/applications/io.github.OlexiyOdarchuk.Prostir.Settings.desktop
+    # PATH: "Start Prostir" runs the prostir next to it.
+    wrapProgram $out/bin/prostir-settings \
+      --prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath windowLibs}" \
+      --prefix PATH : "$out/bin"
     wrapProgram $out/bin/prostir \
       --prefix GST_PLUGIN_SYSTEM_PATH_1_0 : "${lib.makeSearchPathOutput "lib" "lib/gstreamer-1.0" plugins}" \
       --set-default LIBVA_DRIVERS_PATH "${lib.concatStringsSep ":" vaDrivers}" \
