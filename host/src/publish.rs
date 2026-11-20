@@ -54,6 +54,9 @@ pub struct Sources<'a> {
 /// told so far.
 pub struct Publisher {
     pub headset: HeadsetState,
+    /// What the headset can do, from its `Open` (which always says, and it never
+    /// changes in a session).
+    caps: HeadsetCaps,
     /// This headset's role and rights (see `settings.txt`).
     pub access: Access,
     sent: PcState,
@@ -62,6 +65,7 @@ pub struct Publisher {
 impl Publisher {
     pub fn new(headset: HeadsetState, access: Access) -> Self {
         Self {
+            caps: headset.caps.clone().unwrap_or_default(),
             headset,
             access,
             sent: PcState::default(),
@@ -70,11 +74,7 @@ impl Publisher {
 
     /// What the headset can do (`Open` always says).
     pub fn caps(&self) -> &HeadsetCaps {
-        static NONE: std::sync::OnceLock<HeadsetCaps> = std::sync::OnceLock::new();
-        self.headset
-            .caps
-            .as_ref()
-            .unwrap_or_else(|| NONE.get_or_init(HeadsetCaps::default))
+        &self.caps
     }
 
     pub fn prefs(&self) -> Prefs {
