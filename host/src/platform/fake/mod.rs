@@ -27,7 +27,8 @@
 //!   in `$XDG_CONFIG_HOME` only, which must be set: a fake build started by mistake
 //!   never falls back to the user's own `~/.config`.
 //! - The person at the PC types the pairing code in `PROSTIR_FAKE_TYPED_CODE`, if
-//!   set; otherwise there is no dialog to type it in.
+//!   set, taking `PROSTIR_FAKE_TYPED_CODE_DELAY_MS` to do it; otherwise there is no
+//!   dialog to type it in.
 //!
 //! It provides what the core uses of the platform contract (see `platform/mod.rs`);
 //! helpers only the Linux platform calls itself (`windows::all_windows`,
@@ -418,13 +419,13 @@ pub mod notifications {
 /// line, to `$XDG_RUNTIME_DIR/fake-tray` (`forget`, `recenter`, `quit`, `sharp on`,
 /// `sharp off`, `quality 15`, `quality 50`), which is read and removed once written.
 pub mod tray {
-    use std::sync::mpsc::Sender;
-
+    use crate::events::EventSink;
     use crate::platform::{TrayCommand, TrayStatus};
 
+    #[derive(Clone)]
     pub struct Handle;
 
-    pub fn spawn(commands: Sender<TrayCommand>) -> Option<Handle> {
+    pub fn spawn(events: EventSink) -> Option<Handle> {
         super::watch_file("fake-tray", move |text| {
             for item in text.lines() {
                 let command = match item.trim() {
@@ -446,7 +447,7 @@ pub mod tray {
                     }
                 };
                 log::info!("fake tray: {item}");
-                if commands.send(command).is_err() {
+                if !events.tray(command) {
                     return false;
                 }
             }
@@ -467,9 +468,17 @@ pub mod tray {
 pub mod dialogs {
     use crate::platform::NoCode;
 
-    /// The code the test's person at the PC types (`PROSTIR_FAKE_TYPED_CODE`).
+    /// The code the test's person at the PC types (`PROSTIR_FAKE_TYPED_CODE`), after
+    /// thinking for `PROSTIR_FAKE_TYPED_CODE_DELAY_MS`.
     pub fn ask_code() -> Result<String, NoCode> {
-        std::env::var("PROSTIR_FAKE_TYPED_CODE").map_err(|_| NoCode::NoDialog)
+        let code = std::env::var("PROSTIR_FAKE_TYPED_CODE").map_err(|_| NoCode::NoDialog)?;
+        let delay: u64 = std::env::var("PROSTIR_FAKE_TYPED_CODE_DELAY_MS")
+            .ok()
+            .and_then(|ms| ms.parse().ok())
+            .unwrap_or(0);
+        log::info!("fake desktop: the person at the PC types the code in {delay} ms");
+        std::thread::sleep(std::time::Duration::from_millis(delay));
+        Ok(code)
     }
 
     /// Into the log instead of onto a screen.

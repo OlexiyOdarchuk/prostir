@@ -1,0 +1,177 @@
+//! The PC's control loop: asleep while no headset needs it, a headset back from a
+//! lost connection taking over its own session at once, another headset turned away
+//! while one has a session, and pairing that waits for the person at the PC without
+//! holding anyone else up.
+
+use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
+
+use prostir_testkit::{ConnectError, FakeHeadset, View};
+
+use crate::pc::{Options, Pc, TestDir};
+use crate::{SOON, START, TWO_MONITORS, connect, session};
+
+/// How long an idle PC is watched for wakeups.
+const WATCH: Duration = Duration::from_secs(3);
+
+/// The PC app does not wake at all for `WATCH`: no thread goes to sleep and wakes
+/// again (a loop on a clock would, every time round).
+fn assert_asleep(pc: &Pc, when: &str) {
+    let before = pc.wakeups();
+    std::thread::sleep(WATCH);
+    let after = pc.wakeups();
+    let woke: BTreeMap<String, u64> = after
+        .iter()
+        .map(|(tid, (name, n))| {
+            let was = before.get(tid).map_or(0, |(_, n)| *n);
+            (format!("{name} ({tid})"), n - was)
+        })
+        .filter(|(_, n)| *n > 0)
+        .collect();
+    let total: u64 = woke.values().sum();
+    // One at most, for a thread that was just about to sleep when watching began.
+    assert!(
+        total <= 1,
+        "{when}: woke {total} times in {WATCH:?}: {woke:?}"
+    );
+}
+
+/// Waiting for a headset, the PC sleeps: before the first session, and after one once
+/// its monitors are gone.
+#[test]
+fn an_idle_pc_sleeps() {
+    let dir = TestDir::new("idle");
+    dir.save_monitors(TWO_MONITORS);
+    let mut keys = dir.pair();
+    let options = Options {
+        linger: 1,
+        ..Options::default()
+    };
+    let mut pc = Pc::start(&dir, &options);
+    // What the start does (the settings written, say) is over by then.
+    std::thread::sleep(Duration::from_millis(500));
+    assert_asleep(&pc, "before the first headset");
+    let mut headset = connect(&pc, &mut keys);
+    headset
+        .wait(START, "every monitor showing", View::all_monitors_show)
+        .unwrap();
+    headset.disconnect();
+    pc.wait_log(SOON, "keeping virtual monitors for 1 s");
+    pc.wait_log(
+        SOON,
+        "the headset did not come back: removing virtual monitors",
+    );
+    std::thread::sleep(Duration::from_millis(500));
+    assert_asleep(&pc, "after a session");
+    // And it still wakes for a headset.
+    let mut again = connect(&pc, &mut keys);
+    again
+        .wait(START, "every monitor showing", View::all_monitors_show)
+        .unwrap();
+}
+
+/// A headset that lost its connection and came back before the PC noticed (its old
+/// session has 5 s of silence to go) takes over at once: the new session opens, with
+/// the same monitors, and the old one gives way without a goodbye.
+#[test]
+fn a_headset_back_replaces_its_old_session_at_once() {
+    let (_dir, mut pc, mut keys, headset) = session("replaced", &Options::default());
+    let ids = headset.view().order();
+    // Its Wi-Fi went away: the old connection neither reads nor sends any more.
+    headset.stall(Duration::from_secs(60));
+    let started = Instant::now();
+    let mut back = connect(&pc, &mut keys);
+    let took = started.elapsed();
+    assert!(took < Duration::from_secs(2), "the snapshot after {took:?}");
+    back.wait(START, "every monitor showing", View::all_monitors_show)
+        .unwrap();
+    assert_eq!(back.view().order(), ids, "the same monitors");
+    pc.wait_log(SOON, "its earlier session gives way");
+    assert_eq!(pc.count_log("fake desktop: created"), 2, "none made anew");
+    assert_eq!(
+        pc.count_log("saying goodbye"),
+        0,
+        "no goodbye to the old one"
+    );
+    // The new session goes on past the old one's silence.
+    back.take_for(Duration::from_secs(6)).unwrap();
+    assert!(!back.view().closed);
+    assert_eq!(pc.count_log("session ended"), 0);
+}
+
+/// While one headset has a session, another one is turned away and told why; the
+/// first one's session goes on, and the second gets its own once the first leaves.
+#[test]
+fn another_headset_is_turned_away_while_one_has_a_session() {
+    let dir = TestDir::new("another");
+    dir.save_monitors(TWO_MONITORS);
+    let mut keys = dir.pair();
+    let mut other = dir.pair_headset("other-headset");
+    let pc = Pc::start(&dir, &Options::default());
+    let mut first = connect(&pc, &mut keys);
+    first
+        .wait(START, "every monitor showing", View::all_monitors_show)
+        .unwrap();
+    match FakeHeadset::connect(pc.addr, &mut other, None) {
+        Err(ConnectError::Refused(text)) => {
+            assert!(text.contains("Another headset"), "{text}");
+        }
+        Err(e) => panic!("expected Refused, got {e}"),
+        Ok(_) => panic!("a second headset got a session"),
+    }
+    first.take_for(Duration::from_secs(1)).unwrap();
+    assert!(!first.view().closed, "the first session goes on");
+    first.disconnect();
+    let mut second = connect(&pc, &mut other);
+    second
+        .wait(START, "every monitor showing", View::all_monitors_show)
+        .unwrap();
+}
+
+/// A headset pairing waits for the person at the PC to type its code (8 s here):
+/// meanwhile a trusted headset connects and gets its monitors as quickly as ever.
+#[test]
+fn pairing_does_not_hold_up_a_trusted_headset() {
+    const THINKING: Duration = Duration::from_secs(8);
+    let dir = TestDir::new("pairing-aside");
+    dir.save_monitors(TWO_MONITORS);
+    let mut keys = dir.pair();
+    let mut stranger = dir.keys_of("stranger");
+    let pc = Pc::start(
+        &dir,
+        &Options {
+            typed_code: Some("577215".into()),
+            typed_code_delay: THINKING,
+            ..Options::default()
+        },
+    );
+    let refused = std::thread::scope(|s| {
+        let pairing =
+            s.spawn(|| FakeHeadset::connect(pc.addr, &mut stranger, Some(&mut || "577215".into())));
+        let asked = Instant::now();
+        while pc.lines("types the code in").is_empty() {
+            assert!(asked.elapsed() < SOON, "the PC never asked for the code");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let started = Instant::now();
+        let mut headset = connect(&pc, &mut keys);
+        headset
+            .wait(START, "every monitor showing", View::all_monitors_show)
+            .unwrap();
+        let took = started.elapsed();
+        assert!(
+            !pairing.is_finished() && took < THINKING / 2,
+            "the trusted headset's monitors after {took:?}, pairing still waiting"
+        );
+        let refused = pairing.join().unwrap();
+        assert!(!headset.view().closed);
+        refused
+    });
+    // Paired, then turned away: the trusted headset has the session.
+    match refused {
+        Err(ConnectError::Refused(text)) => assert!(text.contains("Another headset"), "{text}"),
+        Err(e) => panic!("expected Refused after pairing, got {e}"),
+        Ok(_) => panic!("a second headset got a session"),
+    }
+    assert_eq!(stranger.trusted.len(), 1, "paired all the same");
+}

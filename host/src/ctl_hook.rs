@@ -11,15 +11,16 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc;
 
 use log::{info, warn};
 use prostir_proto::request::{Asked, Command};
 
+use crate::events::EventSink;
 use crate::platform::TrayCommand;
 
 /// Reads commands from the pipe `PROSTIR_TEST_CTL` names, if it is set.
-pub fn spawn(commands: Sender<TrayCommand>) {
+pub fn spawn(events: EventSink) {
     let Some(path) = std::env::var_os("PROSTIR_TEST_CTL").map(PathBuf::from) else {
         return;
     };
@@ -49,11 +50,11 @@ pub fn spawn(commands: Sender<TrayCommand>) {
                     let answer = match parse(&line) {
                         Some(asked) => {
                             let (tx, rx) = mpsc::channel();
-                            let sent = commands.send(TrayCommand::Headset {
+                            let sent = events.tray(TrayCommand::Headset {
                                 asked,
                                 reply: Some(tx),
                             });
-                            if sent.is_err() {
+                            if !sent {
                                 return;
                             }
                             rx.recv().unwrap_or_else(|_| "no answer".into())

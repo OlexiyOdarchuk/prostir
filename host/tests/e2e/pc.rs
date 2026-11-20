@@ -35,16 +35,26 @@ impl TestDir {
 
     /// The fake headset's keys.
     pub fn headset_keys(&self) -> Keys {
-        Keys::load(&self.0.join("headset")).unwrap()
+        self.keys_of("headset")
+    }
+
+    /// The keys of another fake headset, `name`.
+    pub fn keys_of(&self, name: &str) -> Keys {
+        Keys::load(&self.0.join(name)).unwrap()
     }
 
     /// Makes the PC and the headset trust each other, as after pairing.
     pub fn pair(&self) -> Keys {
+        self.pair_headset("headset")
+    }
+
+    /// Makes the PC and another fake headset, `name`, trust each other.
+    pub fn pair_headset(&self, name: &str) -> Keys {
         let pc = Identity::load_or_create(&self.config().join("prostir/identity")).unwrap();
-        let mut keys = self.headset_keys();
+        let mut keys = self.keys_of(name);
         keys.trusted.add(pc.public, "fake PC").unwrap();
         TrustStore::load(&self.config().join("prostir/paired_headsets"))
-            .add(keys.identity.public, "fake headset")
+            .add(keys.identity.public, name)
             .unwrap();
         keys
     }
@@ -111,6 +121,8 @@ pub struct Options {
     pub linger: u32,
     /// The pairing code the person at the PC types, if asked.
     pub typed_code: Option<String>,
+    /// How long the person at the PC takes to type it.
+    pub typed_code_delay: Duration,
     /// Monitors (by number, from 1) the fake desktop cannot make.
     pub broken_monitors: String,
     /// The fake PC's own displays (`PROSTIR_FAKE_PHYSICAL`: `eDP-1=EDID@1920x1080;…`).
@@ -129,6 +141,7 @@ impl Default for Options {
             slow_monitors: Duration::ZERO,
             linger: 30,
             typed_code: None,
+            typed_code_delay: Duration::ZERO,
             broken_monitors: String::new(),
             physical: String::new(),
             software: true,
@@ -175,6 +188,10 @@ impl Pc {
             .env("PROSTIR_FAKE_BROKEN_MONITORS", &options.broken_monitors)
             .env("PROSTIR_FAKE_PHYSICAL", &options.physical)
             .env("PROSTIR_TEST_CTL", &ctl)
+            .env(
+                "PROSTIR_FAKE_TYPED_CODE_DELAY_MS",
+                options.typed_code_delay.as_millis().to_string(),
+            )
             .env(
                 "PROSTIR_FAKE_PICTURE",
                 if options.noise { "noise" } else { "bands" },
@@ -328,6 +345,28 @@ impl Pc {
     /// for the commands, e.g. `resize Fake-2 320x240`).
     pub fn desktop(&self, command: &str) {
         std::fs::write(self.run_dir.join("fake-desktop"), format!("{command}\n")).unwrap();
+    }
+
+    /// How many times each thread of the PC app went to sleep and woke since it
+    /// started (`voluntary_ctxt_switches`), by thread id, with the thread's name.
+    pub fn wakeups(&self) -> BTreeMap<u32, (String, u64)> {
+        let mut threads = BTreeMap::new();
+        let tasks = format!("/proc/{}/task", self.child.id());
+        for task in std::fs::read_dir(tasks).into_iter().flatten().flatten() {
+            let Ok(tid) = task.file_name().to_string_lossy().parse::<u32>() else {
+                continue;
+            };
+            let name = std::fs::read_to_string(task.path().join("comm")).unwrap_or_default();
+            let status = std::fs::read_to_string(task.path().join("status")).unwrap_or_default();
+            let woke = status
+                .lines()
+                .find_map(|l| l.strip_prefix("voluntary_ctxt_switches:"))
+                .and_then(|n| n.trim().parse().ok());
+            if let Some(woke) = woke {
+                threads.insert(tid, (name.trim().to_owned(), woke));
+            }
+        }
+        threads
     }
 
     /// Kills the PC app (`SIGKILL`), as a crash or a power cut would.

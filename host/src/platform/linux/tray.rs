@@ -3,20 +3,20 @@
 
 use crate::i18n::t;
 use std::path::PathBuf;
-use std::sync::mpsc::Sender;
 
 use ksni::blocking::TrayMethods;
 use ksni::menu::{CheckmarkItem, RadioGroup, RadioItem, StandardItem, SubMenu};
 use ksni::{MenuItem, ToolTip};
 use log::warn;
 
+use crate::events::EventSink;
 use crate::platform::linux::autostart;
 use crate::platform::{TrayCommand as Command, TrayStatus as Status};
 use prostir_proto::request::{Asked, Command as HeadsetCommand};
 
 /// Asks the headset to do `command`, from the tray.
 fn ask(tray: &Tray, command: HeadsetCommand) {
-    let _ = tray.commands.send(Command::Headset {
+    tray.commands.tray(Command::Headset {
         asked: Asked::Known(command),
         reply: None,
     });
@@ -39,13 +39,13 @@ pub struct Tray {
     counting: bool,
     /// The headset's battery: percent, charging.
     battery: Option<(u8, bool)>,
-    commands: Sender<Command>,
+    commands: EventSink,
 }
 
 pub type Handle = ksni::blocking::Handle<Tray>;
 
 /// Shows the tray icon; `None` when the desktop has no tray.
-pub fn spawn(commands: Sender<Command>) -> Option<Handle> {
+pub fn spawn(commands: EventSink) -> Option<Handle> {
     // Rewritten on each start, so it names this install's program even after an
     // upgrade moved it (a Nix store path, say).
     if autostart::enabled() {
@@ -290,7 +290,7 @@ impl ksni::Tray for Tray {
                     RadioGroup {
                         selected,
                         select: Box::new(|tray: &mut Self, i| {
-                            let _ = tray.commands.send(Command::SetBitrate(QUALITIES[i].0));
+                            tray.commands.tray(Command::SetBitrate(QUALITIES[i].0));
                         }),
                         options: QUALITIES
                             .iter()
@@ -315,7 +315,7 @@ impl ksni::Tray for Tray {
                 ),
                 checked: self.sharp,
                 activate: Box::new(|tray: &mut Self| {
-                    let _ = tray.commands.send(Command::SetSharp(!tray.sharp));
+                    tray.commands.tray(Command::SetSharp(!tray.sharp));
                 }),
                 ..Default::default()
             }
@@ -331,7 +331,7 @@ impl ksni::Tray for Tray {
                 checked: self.counting,
                 visible: crate::usage::available(),
                 activate: Box::new(|tray: &mut Self| {
-                    let _ = tray.commands.send(Command::SetCounting(!tray.counting));
+                    tray.commands.tray(Command::SetCounting(!tray.counting));
                 }),
                 ..Default::default()
             }
@@ -348,7 +348,7 @@ impl ksni::Tray for Tray {
             StandardItem {
                 label: t("Забути сполучені шоломи", "Forget paired headsets").into(),
                 activate: Box::new(|tray: &mut Self| {
-                    let _ = tray.commands.send(Command::ForgetHeadsets);
+                    tray.commands.tray(Command::ForgetHeadsets);
                 }),
                 ..Default::default()
             }
@@ -364,7 +364,7 @@ impl ksni::Tray for Tray {
                 label: t("Вийти", "Quit").into(),
                 icon_name: "application-exit".into(),
                 activate: Box::new(|tray: &mut Self| {
-                    let _ = tray.commands.send(Command::Quit);
+                    tray.commands.tray(Command::Quit);
                 }),
                 ..Default::default()
             }

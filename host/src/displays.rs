@@ -76,6 +76,9 @@ impl Backoff {
 
 /// How often the router logs what each stream sent (see [`Router::report`]).
 const REPORT_EVERY: Duration = Duration::from_secs(10);
+/// Between sessions, how often a layout waiting for the desktop to list new outputs
+/// looks again.
+const LISTING_LOOK: Duration = Duration::from_millis(500);
 
 /// The generation of the next stream start: one counter for every stream of this run
 /// of the app, so a frame or a request of an older start is never taken for a new one,
@@ -1982,6 +1985,19 @@ impl Displays {
     /// Lays the desktop out again, once, at [`Displays::place`].
     fn layout_changed(&mut self) {
         self.layout_due = true;
+    }
+
+    /// When [`Displays::place`] has something to do without anything else changing: a
+    /// layout the desktop refused, at its retry; one waiting for the desktop to list
+    /// new outputs, in a while.
+    pub fn place_due(&self) -> Option<Instant> {
+        if !self.layout_due {
+            return None;
+        }
+        if self.layout_waits {
+            return Some(self.layout_retry.0.max(Instant::now() + LISTING_LOOK));
+        }
+        Some(self.layout_retry.0)
     }
 
     /// Lays the outputs out on the desktop if anything changed since the last time,

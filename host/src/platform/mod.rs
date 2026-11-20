@@ -1,6 +1,8 @@
-//! The door from the core to the operating system: the core (`main.rs`, `displays.rs`,
-//! `layout.rs`, `encoder.rs`, `pairing.rs`, `outbox.rs`, `usage.rs`, `i18n.rs`) reaches
-//! the desktop, the sound system and the user's files only through this module.
+//! The door from the core to the operating system: the core (`main.rs`, `session.rs`,
+//! `listen.rs`, `displays.rs`, `layout.rs`, `encoder.rs`, `pairing.rs`, `outbox.rs`,
+//! `usage.rs`, `i18n.rs`) reaches the desktop, the sound system and the user's files
+//! only through this module. What the platform's threads see (the tray's items, a
+//! signal to quit) goes to the control loop as events (`crate::events`).
 //!
 //! This file holds what every platform shares: the types below and two traits. Each
 //! operating system has a module of its own (`linux/`, picked with `cfg`) whose public
@@ -34,7 +36,8 @@
 //!   stays inside the platform.
 //!
 //! The network belongs to the operating system, not to the desktop: `net.rs` holds
-//! it for every desktop, the fake one too, with a part for each operating system.
+//! it for every desktop, the fake one too, with a part for each operating system. So
+//! do the signals that ask the program to quit (`signals.rs`).
 //!
 //! The compiler checks the list: the core does not build until everything is there.
 //! `fake/` is the smallest complete example: a desktop that exists only in memory,
@@ -175,7 +178,7 @@ pub struct ActiveWindow {
     pub output: String,
 }
 
-/// What the tray asks the main loop to do.
+/// What the tray asks the control loop to do.
 #[cfg_attr(
     feature = "fake-desktop",
     expect(dead_code, reason = "the fake tray has only some of the items")
