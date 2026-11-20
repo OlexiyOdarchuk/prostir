@@ -42,6 +42,8 @@ pub struct EncodingChange {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MonitorEntry {
     pub id: ScreenId,
+    /// What the user reads for it (see [`display_label`]); never the id.
+    pub label: String,
     pub width: u32,
     pub height: u32,
     /// Where it stands around the user, to tell monitors apart.
@@ -49,6 +51,17 @@ pub struct MonitorEntry {
     /// As seen from where the user sits, in radians: centre (right, up) and half
     /// size, for the map in the menu.
     pub seen: Option<[f32; 4]>,
+}
+
+/// What the user reads for a display named `name` by the PC: the number the PC's
+/// desktop gives its output (`Prostir-3` is monitor 3, as in the PC's display
+/// settings), or the PC's own name for a display of the PC (`eDP-1`). Never the
+/// display's id, which is the PC's bookkeeping and grows with every monitor made.
+pub fn display_label(name: &str) -> String {
+    match name.strip_prefix("Prostir-") {
+        Some(n) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => n.to_owned(),
+        _ => name.to_owned(),
+    }
 }
 
 /// Where a monitor stands, as seen by the user.
@@ -1589,7 +1602,7 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
             Style::Normal
         };
         items.push(button(r, "", style, Some(Action::SelectMonitor(m.id))));
-        let label = (m.id + 1).to_string();
+        let label = &m.label;
         let size = (r.height() * 0.4).clamp(14.0, 30.0);
         items.push(text(
             r.left() + r.width() / 2.0 - size * 0.3,
@@ -1597,7 +1610,7 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
             size,
             true,
             [255, 255, 255, 255],
-            &label,
+            label,
         ));
     }
     // Monitors not placed in view (all but the one shown in cinema mode, say): a row
@@ -1614,7 +1627,7 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
         let r = rect(bx, y + map_h - 44.0, 40.0, 36.0);
         items.push(button(
             r,
-            &(m.id + 1).to_string(),
+            &m.label,
             style,
             Some(Action::SelectMonitor(m.id)),
         ));
@@ -1629,7 +1642,7 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
             22.0,
             true,
             TEXT,
-            &format!("{} {}", l.t("Монітор", "Monitor"), m.id + 1),
+            &format!("{} {}", l.t("Монітор", "Monitor"), m.label),
         ));
         // Removing it or making it primary: how that stands, in place of its size.
         let note = s
@@ -2021,9 +2034,9 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
             .iter()
             .map(|m| {
                 if short {
-                    format!("{}", m.id + 1)
+                    m.label.clone()
                 } else {
-                    format!("{} {}", l.t("Монітор", "Monitor"), m.id + 1)
+                    format!("{} {}", l.t("Монітор", "Monitor"), m.label)
                 }
             })
             .collect();
@@ -3590,7 +3603,8 @@ mod tests {
             date: "Wed, Nov 18".into(),
             confirm_forget: Some(1),
             windows: vec![MonitorEntry {
-                id: 10,
+                id: 110,
+                label: "5".into(),
                 width: 1200,
                 height: 800,
                 place: Place::Unknown,
@@ -3601,21 +3615,24 @@ mod tests {
             ip_input: None,
             monitors: vec![
                 MonitorEntry {
-                    id: 0,
+                    id: 101,
+                    label: "1".into(),
                     width: 2560,
                     height: 1440,
                     place: Place::Unknown,
                     seen: Some([-1.0, 0.0, 0.5, 0.28]),
                 },
                 MonitorEntry {
-                    id: 1,
+                    id: 102,
+                    label: "2".into(),
                     width: 2560,
                     height: 1440,
                     place: Place::Unknown,
                     seen: Some([0.0, 0.0, 0.5, 0.28]),
                 },
                 MonitorEntry {
-                    id: 2,
+                    id: 103,
+                    label: "4".into(),
                     width: 1440,
                     height: 2560,
                     place: Place::Unknown,
@@ -3624,7 +3641,7 @@ mod tests {
             ],
             selected: None,
             mirror_seen: Some([0.0, -0.55, 0.35, 0.22]),
-            primary: Some(1),
+            primary: Some(102),
             mirror_wanted: true,
             audio_wanted: true,
             mic_wanted: true,
@@ -3648,6 +3665,51 @@ mod tests {
             active_profile: None,
             asks: Vec::new(),
         }
+    }
+
+    /// The menu names monitors as the PC's desktop does (`Prostir-4` is 4), never by
+    /// their ids (101, 102, 103 here): on every page, picked or not, in cinema mode.
+    #[test]
+    fn labels_never_show_ids() {
+        assert_eq!(display_label("Prostir-4"), "4");
+        assert_eq!(display_label("eDP-1"), "eDP-1");
+        assert_eq!(display_label("Prostir-"), "Prostir-");
+        let texts = |s: &UiState| -> Vec<String> {
+            Panel::new()
+                .build(s)
+                .into_iter()
+                .filter_map(|i| match i {
+                    Item::Text { text, .. } => Some(text),
+                    Item::Button { label, .. } | Item::Wedge { label, .. } => Some(label),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut seen_labels = false;
+        for tab in [Tab::Quick, Tab::Monitors, Tab::Settings(Section::Look)] {
+            for selected in [None, Some(101), Some(103)] {
+                for cinema in [false, true] {
+                    let mut s = sample_state();
+                    s.tab = tab;
+                    s.selected = selected;
+                    s.settings.cinema = cinema;
+                    // The fourth one, off the map, shows as a small button.
+                    s.monitors.push(MonitorEntry {
+                        id: 107,
+                        label: "6".into(),
+                        seen: None,
+                        ..s.monitors[0].clone()
+                    });
+                    for t in texts(&s) {
+                        for id in ["101", "102", "103", "107", "110"] {
+                            assert!(!t.contains(id), "{t:?} shows id {id}");
+                        }
+                        seen_labels |= t == "Монітор 4" || t == "6";
+                    }
+                }
+            }
+        }
+        assert!(seen_labels, "the labels are shown");
     }
 
     #[test]
@@ -3733,7 +3795,7 @@ mod tests {
                 st.lang = lang;
                 st.tab = tab;
                 states.push(st.clone());
-                st.confirm_remove = Some(2);
+                st.confirm_remove = Some(103);
                 st.settings.cinema = true;
                 st.settings.focus = true;
                 st.mic_wanted = false;
@@ -3753,8 +3815,8 @@ mod tests {
                 );
                 let every = [
                     Asked::AddMonitor,
-                    Asked::Remove(1),
-                    Asked::MakePrimary(2),
+                    Asked::Remove(102),
+                    Asked::MakePrimary(103),
                     Asked::Mirror,
                     Asked::Sound,
                     Asked::Encoding,
@@ -3793,6 +3855,7 @@ mod tests {
                 st.monitors = (0..6)
                     .map(|id| MonitorEntry {
                         id,
+                        label: (id + 1).to_string(),
                         width: 3440,
                         height: 1440,
                         // The longest name.
@@ -3905,6 +3968,7 @@ mod tests {
             .iter()
             .map(|&(id, width, height, ..)| MonitorEntry {
                 id,
+                label: (id + 1).to_string(),
                 width,
                 height,
                 place: Place::Center,

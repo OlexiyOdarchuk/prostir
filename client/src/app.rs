@@ -1611,6 +1611,12 @@ impl Scene {
         Some(req)
     }
 
+    /// What the user reads for display `id`: as the PC's desktop names it.
+    fn label_of(&self, id: ScreenId) -> Option<String> {
+        let d = self.pc.displays.as_ref()?.get(DisplayId(id))?;
+        Some(ui::display_label(&d.name))
+    }
+
     /// Monitor `id` was asked to go and the PC has not answered yet: it is not shown
     /// meanwhile.
     fn being_removed(&self, id: ScreenId) -> bool {
@@ -1760,8 +1766,10 @@ impl Scene {
             monitors: self
                 .quest_sizes()
                 .into_iter()
-                .map(|(id, width, height)| MonitorEntry {
+                .enumerate()
+                .map(|(i, (id, width, height))| MonitorEntry {
                     id,
+                    label: self.label_of(id).unwrap_or_else(|| (i + 1).to_string()),
                     width,
                     height,
                     place: self.place_of(id),
@@ -1774,6 +1782,7 @@ impl Scene {
                 .filter(|(id, _)| self.is_window(**id))
                 .map(|(id, m)| MonitorEntry {
                     id: *id,
+                    label: self.label_of(*id).unwrap_or_default(),
                     width: m.width_px,
                     height: m.height_px,
                     place: ui::Place::Unknown,

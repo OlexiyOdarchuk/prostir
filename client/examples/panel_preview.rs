@@ -43,6 +43,7 @@ fn main() {
         windows: if std::env::var("WINDOWS").is_ok() {
             vec![MonitorEntry {
                 id: 10,
+                label: "5".into(),
                 width: 1200,
                 height: 800,
                 place: Default::default(),
@@ -107,6 +108,7 @@ fn main() {
         monitors: vec![
             MonitorEntry {
                 id: 0,
+                label: "1".into(),
                 width: 2560,
                 height: 1440,
                 place: Default::default(),
@@ -114,6 +116,7 @@ fn main() {
             },
             MonitorEntry {
                 id: 1,
+                label: "2".into(),
                 width: 2560,
                 height: 1440,
                 place: Default::default(),
@@ -121,6 +124,7 @@ fn main() {
             },
             MonitorEntry {
                 id: 2,
+                label: "3".into(),
                 width: 1440,
                 height: 2560,
                 place: Default::default(),

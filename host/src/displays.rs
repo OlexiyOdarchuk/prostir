@@ -854,6 +854,7 @@ impl Displays {
                 continue;
             }
             let name = output.output_name().to_owned();
+            let number = screen.number;
             let Some(spec) = screen.kind.spec().cloned() else {
                 continue;
             };
@@ -872,7 +873,7 @@ impl Displays {
                     if let Err(e) = self.restart_monitor(id, None) {
                         error!("{id}: {e:#}");
                     }
-                    show_sharing_tip(id);
+                    show_sharing_tip(number);
                 }
                 SizeAction::Recreate => {
                     warn!("{name} is still {w}x{h}: making it again at {spec}");
@@ -886,7 +887,7 @@ impl Displays {
                             "Інша програма раз у раз змінює розмір монітора",
                             "Another program keeps changing the size of monitor"
                         ),
-                        id.number() + 1,
+                        number,
                         t(
                             "Покажіть у ній вікно програми замість монітора, а тоді зніміть і знову вдягніть шолом.",
                             "Share an app window in it instead of the monitor, then take the headset off and put it on again."
@@ -2303,9 +2304,10 @@ impl Displays {
     }
 }
 
-/// The first time in a run that a screen sharing program resizes a monitor: says the
-/// size is back, and how to share without the jumps.
-fn show_sharing_tip(id: ScreenId) {
+/// The first time in a run that a screen sharing program resizes a monitor (output
+/// `Prostir-number`, as the desktop names it): says the size is back, and how to
+/// share without the jumps.
+fn show_sharing_tip(number: u32) {
     static SHOWN: AtomicBool = AtomicBool::new(false);
     if SHOWN.swap(true, Ordering::Relaxed) {
         return;
@@ -2316,7 +2318,7 @@ fn show_sharing_tip(id: ScreenId) {
             "Програма, що показує екран, змінила розмір монітора",
             "A screen sharing program changed the size of monitor"
         ),
-        id.number() + 1,
+        number,
         t(
             "Розмір повернено, але показ може стрибати. Щоб цього не було, показуйте вікно програми, а не монітор.",
             "Its size is back, but the share may jump. To avoid that, share an app window instead of the monitor."
