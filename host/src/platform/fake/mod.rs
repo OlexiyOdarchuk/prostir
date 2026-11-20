@@ -342,9 +342,20 @@ pub mod audio {
         /// Says a change on the subscription, if one runs; a line it has no room for
         /// is lost, as the real one would block.
         fn say(&mut self, what: &str, on: &str, index: u32) {
+            self.say_together(&[(what, on, index)]);
+        }
+
+        /// Says the changes of one event in one write, so they come together, as the
+        /// sound system's lines for one change do. Without that, a busy machine could
+        /// wake the PC between them, and it would look twice at one change.
+        fn say_together(&mut self, changes: &[(&str, &str, u32)]) {
             use std::io::Write;
+            let text: String = changes
+                .iter()
+                .map(|(what, on, index)| format!("Event '{what}' on {on} #{index}\n"))
+                .collect();
             if let Some((_, lines)) = self.events.as_mut()
-                && let Err(e) = writeln!(lines, "Event '{what}' on {on} #{index}")
+                && let Err(e) = lines.write_all(text.as_bytes())
                 && e.kind() != std::io::ErrorKind::WouldBlock
             {
                 self.events = None;
@@ -374,10 +385,11 @@ pub mod audio {
         let mut sys = system();
         sys.recording = on;
         let stream = sys.number();
-        sys.say(if on { "new" } else { "remove" }, "source-output", stream);
+        let mut changes = vec![(if on { "new" } else { "remove" }, "source-output", stream)];
         if let Some(mic) = sys.mic {
-            sys.say("change", "source", mic);
+            changes.push(("change", "source", mic));
         }
+        sys.say_together(&changes);
     }
 
     /// The subscription ends, as when `pactl subscribe` dies (a test's command).
