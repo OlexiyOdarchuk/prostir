@@ -503,7 +503,13 @@ impl App {
         {
             *start = Start::TimedOut;
         }
-        if self.presented.as_ref().is_some_and(Presented::take) {
+        if let Some(p) = self.presented.as_ref().filter(|p| p.take()) {
+            // egui cannot hand a compositor the activation token: the token is logged,
+            // and focus asked for the usual way.
+            if let Some(token) = p.token() {
+                log::debug!("brought forward with activation token {token}");
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
         self.prepare_look(&ctx, now);

@@ -284,9 +284,14 @@ fn overview(ui: &mut Ui, v: &mut View, s: &State) {
                     if let Some(d) = failed {
                         hero(ui, tk, Some(p.danger), &tk.t("ov-failed-title"));
                         ui.add_space(6.0);
-                        let reason = d.failure.as_ref().map_or("", |f| f.text.as_str());
+                        let reason = d.failure.as_ref().map_or("", |f| f.text.trim());
+                        let id = if reason.is_empty() {
+                            "ov-failed-no-reason"
+                        } else {
+                            "ov-failed-body"
+                        };
                         let body = tk.f(
-                            "ov-failed-body",
+                            id,
                             &[
                                 ("name", display_name(tk, d).into()),
                                 ("reason", reason.into()),
@@ -1127,14 +1132,19 @@ fn look(ui: &mut Ui, v: &mut View) {
                         ("scheme", scheme.into()),
                         ("fg", c.fg.into()),
                         ("bg", c.bg.into()),
-                        ("ratio", format!("{:.1}", c.ratio).into()),
-                        ("need", format!("{}", c.need).into()),
+                        ("ratio", decimal(tk, &format!("{:.1}", c.ratio)).into()),
+                        ("need", decimal(tk, &format!("{}", c.need)).into()),
                     ],
                 );
                 indented(ui, tk, line);
             }
         }
     });
+}
+
+/// A number written with a point, with the language's decimal separator.
+fn decimal(tk: &Tk, n: &str) -> String {
+    n.replace('.', &tk.t("decimal-separator"))
 }
 
 fn indented(ui: &mut Ui, tk: &Tk, line: String) {
@@ -1267,17 +1277,26 @@ fn first_run(ui: &mut Ui, v: &mut View, s: &State) {
             }
         }
         ui.add_space(tk.th.shape.section_gap);
-        let full = ui.available_width();
-        ui.allocate_ui_with_layout(
-            vec2(full, 0.0),
-            Layout::right_to_left(Align::Center),
-            |ui| {
-                let last = step + 1 == STEPS;
-                let label = if last {
-                    tk.t("fr-done")
-                } else {
-                    tk.t("fr-next")
-                };
+        let last = step + 1 == STEPS;
+        let label = if last {
+            tk.t("fr-done")
+        } else {
+            tk.t("fr-next")
+        };
+        let back = tk.t("fr-back");
+        // Laid out left to right after a gap, so Tab meets Back before Next, as seen.
+        let width = w::button_width(ui, tk, &label)
+            + if step > 0 {
+                w::button_width(ui, tk, &back) + ui.spacing().item_spacing.x
+            } else {
+                0.0
+            };
+        ui.horizontal(|ui| {
+            ui.add_space((ui.available_width() - width).max(0.0));
+            if step > 0 && w::button(ui, tk, &back, Kind::Quiet, true).clicked() {
+                v.ui.fr_step = step - 1;
+            }
+            {
                 if w::button(ui, tk, &label, Kind::Primary, next_ok).clicked() {
                     if last {
                         v.ui.fr_step = 0;
@@ -1291,10 +1310,7 @@ fn first_run(ui: &mut Ui, v: &mut View, s: &State) {
                         v.ui.fr_step = step + 1;
                     }
                 }
-                if step > 0 && w::button(ui, tk, &tk.t("fr-back"), Kind::Quiet, true).clicked() {
-                    v.ui.fr_step = step - 1;
-                }
-            },
-        );
+            }
+        });
     });
 }

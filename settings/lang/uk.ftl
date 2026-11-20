@@ -13,11 +13,11 @@ nav-first-run = Перший запуск
 
 ## Рядок стану під сторінками
 
-side-loading = Підключаюся до Prostir
+side-loading = Підключення до Prostir
 side-connected = { $name } підключено
 side-taken-off = { $name } знято
-side-connecting = Підключаю { $name }
-side-waiting = Чекаю на шолом
+side-connecting = Підключення { $name }
+side-waiting = Очікування шолома
 side-failed = Монітор не додано
 side-not-running = Prostir не запущено
 side-silent = Prostir не відповідає
@@ -37,12 +37,13 @@ ov-fact-sound = Звук ПК
 ov-fact-mic = Мікрофон шолома
 ov-fact-profile = Профіль
 ov-profile-none = Немає
-ov-connecting-title = Підключаю { $name }
-ov-connecting-body = Шолом знайшов цей ПК. Встановлюю захищене з'єднання.
-ov-waiting-title = Чекаю на шолом
+ov-connecting-title = Підключення { $name }
+ov-connecting-body = Шолом знайшов цей ПК. Встановлення захищеного з'єднання.
+ov-waiting-title = Очікування шолома
 ov-waiting-body = Відкрийте Prostir у шоломі поруч із цим ПК. Шолом знайде ПК сам, якщо вони в одній мережі.
 ov-failed-title = Монітор не додано
 ov-failed-body = { $name }: { $reason } Решта моніторів працює.
+ov-failed-no-reason = { $name } не додано. Решта моніторів працює.
 ov-retry = Спробувати ще раз
 ov-open-monitors = Перейти до моніторів
 ov-no-headsets-title = Сполучіть перший шолом
@@ -73,15 +74,16 @@ sound-in-headset = У шоломі
 sound-on-pc = На ПК
 on = Увімкнено
 off = Вимкнено
-percent = { $n } %
+percent = { $n } %
+decimal-separator = ,
 
 ## Prostir не запущено
 
-loading-title = Підключаюся до Prostir
+loading-title = Підключення до Prostir
 nr-title = Prostir не запущено
 nr-body = Налаштування беруться з Prostir, що працює у фоні. Запустіть його, і вікно оновиться само.
 nr-start = Запустити Prostir
-nr-starting = Запускаю Prostir
+nr-starting = Запуск Prostir
 nr-failed-title = Prostir не запустився
 nr-failed-body = Запустіть prostir у терміналі, щоб побачити, що йому заважає.
 nr-no-program = Програми prostir не знайдено. Перевірте, чи встановлено Prostir.
@@ -104,7 +106,7 @@ mon-empty = Поки немає моніторів, які можна показ
 mon-selected = Вибраний монітор
 mon-none = Виберіть монітор на карті.
 mon-size = { $w } × { $h }
-mon-size-scaled = { $w } × { $h }, масштаб { $scale } %
+mon-size-scaled = { $w } × { $h }, масштаб { $scale } %
 mon-scale = Масштаб
 mon-main = Головний монітор
 mon-main-desc = Тут панель і нові вікна.
@@ -147,12 +149,12 @@ hs-empty-body = Відкрийте Prostir у шоломі поруч із ци�
 pair-title = Сполучення відкрито
 pair-left = ще { $time }
 pair-wait = Відкрийте Prostir у новому шоломі поруч із цим ПК. Шолом знайде ПК і покаже код або попросить код звідси.
-pair-waiting = Чекаю на новий шолом
+pair-waiting = Очікування нового шолома
 pair-type = { $name } показує код. Введіть його тут:
 pair-pc-code = Введіть цей код у шоломі:
 pair-code = Код із шолома
 pair-go = Сполучити
-pair-checking = Перевіряю код
+pair-checking = Перевірка коду
 pair-stop = Зупинити сполучення
 pair-wrong = Код не підійшов. Перевірте цифри на шоломі й введіть ще раз.
 pair-done = { $name } сполучено. Далі він підключатиметься сам.
@@ -175,7 +177,7 @@ snd-mic-desc = Програми на ПК бачать його як мікро�
 snd-mic-ready = Мікрофон «Prostir» готовий
 snd-mic-off = Вимкнено: програми на ПК мікрофона шолома не бачать
 snd-mic-waiting = Мікрофон з'явиться, коли шолом підключиться.
-snd-mic-not-allowed = Шолом не дозволив мікрофон. Дозвольте його в шоломі: Налаштування, Програми, Prostir, Дозволи.
+snd-mic-not-allowed = Шолом не дозволив мікрофон. Дозвольте його для Prostir у налаштуваннях шолома, серед дозволів програм.
 snd-mic-failed = Мікрофон не вдалося створити: { $reason }
 
 ## Вигляд
@@ -200,11 +202,11 @@ look-file = Файл теми
 look-file-ok = Застосовано. Зміни у файлі видно одразу, перезапуск не потрібен.
 look-file-none = Файлу немає: діє вбудована тема. Створіть його, щоб змінити кольори чи розміри.
 look-file-issues = Ці значення не прочитано, замість них вбудовані:
-look-file-contrast = Замалий контраст тексту:
+look-file-contrast = Замалий контраст (текст і краї елементів керування):
 look-create = Створити файл
 look-open = Відкрити теку
 issue-not-toml = Файл не читається як TOML: { $why }
-issue-format = format = { $value }: це новіший вигляд файлу, тож його не використано зовсім.
+issue-format = format = { $value }: це вікно читає лише формат 1, тож файл не використано.
 issue-bad = { $at } = { $value } тут не підходить
 issue-unknown = { $at }: такого ключа немає
 issue-font = { $at }: шрифт не читається ({ $why })
@@ -225,7 +227,7 @@ fr-1-body = Увімкніть на шоломі режим розробника
 fr-1-link = Відкрити сторінку версій
 fr-2-title = Відкрийте Prostir у шоломі поруч із цим ПК
 fr-2-body = Шолом і ПК мають бути в одній мережі Wi-Fi. Шолом знайде цей ПК сам.
-fr-2-looking = Шукаю шолом у мережі
+fr-2-looking = Пошук шолома в мережі
 fr-2-found = { $name } бачить цей ПК
 fr-2-closed = Сполучення закрито, тож новий шолом не знайде цей ПК.
 fr-3-title = Сполучіть кодом

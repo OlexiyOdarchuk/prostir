@@ -74,6 +74,13 @@ fn error(e: zbus::Error) -> ClientError {
     }
 }
 
+/// The unique name that owns `BUS_NAME` now, if any.
+fn name_owner(conn: &Connection) -> Option<String> {
+    let bus = zbus::blocking::fdo::DBusProxy::new(conn).ok()?;
+    let owner = bus.get_name_owner(BUS_NAME.try_into().ok()?).ok()?;
+    Some(owner.as_str().to_owned())
+}
+
 fn state_of(msg: &Message) -> Result<Snapshot, ClientError> {
     let (revision, json): (u32, String) = msg.body().deserialize().map_err(broken)?;
     Snapshot::parse(revision, &json)
@@ -118,6 +125,9 @@ impl Client for DbusClient {
 
     fn watch(&self, sink: Sink) -> Result<(), ClientError> {
         let sink = std::sync::Arc::new(sink);
+        // Who owns the name now: a StateChanged from anyone else on the bus is not
+        // the service's, whatever its path and interface say.
+        let owner = std::sync::Arc::new(std::sync::Mutex::new(name_owner(&self.conn)));
         // Signals from whoever owns the name; matched by path and interface, so the
         // subscription works before the service has appeared.
         let changed = MatchRule::builder()
@@ -128,16 +138,20 @@ impl Client for DbusClient {
             .map_err(broken)?
             .build();
         let s = sink.clone();
-        iterate(
-            &self.conn,
-            changed,
-            "api-signals",
-            move |msg| match state_of(&msg) {
+        let o = owner.clone();
+        iterate(&self.conn, changed, "api-signals", move |msg| {
+            let header = msg.header();
+            let from = header.sender().map(|s| s.as_str().to_owned());
+            if from.is_none() || from != *o.lock().unwrap() {
+                log::debug!("StateChanged from {from:?}, not the service: ignored");
+                return;
+            }
+            match state_of(&msg) {
                 Ok(snap) => s(Change::State(snap)),
                 Err(e) => log::warn!("StateChanged that does not read: {e}"),
-            },
-        )?;
-        let owner = MatchRule::builder()
+            }
+        })?;
+        let owner_changed = MatchRule::builder()
             .msg_type(MessageType::Signal)
             .sender("org.freedesktop.DBus")
             .and_then(|b| b.interface("org.freedesktop.DBus"))
@@ -145,10 +159,11 @@ impl Client for DbusClient {
             .and_then(|b| b.arg(0, BUS_NAME))
             .map_err(broken)?
             .build();
-        iterate(&self.conn, owner, "api-owner", move |msg| {
+        iterate(&self.conn, owner_changed, "api-owner", move |msg| {
             let Ok((_, _, new)) = msg.body().deserialize::<(String, String, String)>() else {
                 return;
             };
+            *owner.lock().unwrap() = (!new.is_empty()).then(|| new.clone());
             sink(if new.is_empty() {
                 Change::Vanished
             } else {
@@ -288,6 +303,18 @@ pub(crate) mod tests {
             Change::State(s) => assert_eq!((s.revision, s.state.pc.name.as_str()), (9, "desk 2")),
             other => panic!("{other:?}"),
         }
+        // The same signal from someone else on the bus is not taken.
+        let stranger = connect(&bus);
+        stranger
+            .emit_signal(
+                None::<()>,
+                OBJECT_PATH,
+                INTERFACE,
+                "StateChanged",
+                &(10u32, r#"{"v":1,"pc":{"name":"not the service"}}"#),
+            )
+            .unwrap();
+        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err());
 
         service.release_name(BUS_NAME).unwrap();
         assert_eq!(next(), Change::Vanished);

@@ -60,7 +60,18 @@ impl SystemScheme {
                     log::info!("the desktop portal sends no setting changes");
                     return;
                 };
+                let mut owner = portal_owner(&conn);
                 for msg in changes.flatten() {
+                    // Only the portal's own: the owner is looked up again when a signal
+                    // comes from someone else (the portal may have started again).
+                    let header = msg.header();
+                    let from = header.sender().map(|s| s.as_str().to_owned());
+                    if from != owner {
+                        owner = portal_owner(&conn);
+                        if from != owner {
+                            continue;
+                        }
+                    }
                     if let Ok((ns, key, value)) =
                         msg.body().deserialize::<(String, String, OwnedValue)>()
                         && ns == NAMESPACE
@@ -85,6 +96,12 @@ fn changes_rule() -> zbus::Result<zbus::MatchRule<'static>> {
         .path(PATH)?
         .arg(0, NAMESPACE)?
         .build())
+}
+
+fn portal_owner(conn: &Connection) -> Option<String> {
+    let bus = zbus::blocking::fdo::DBusProxy::new(conn).ok()?;
+    let owner = bus.get_name_owner(DEST.try_into().ok()?).ok()?;
+    Some(owner.as_str().to_owned())
 }
 
 fn read(conn: &Connection) -> Option<Scheme> {

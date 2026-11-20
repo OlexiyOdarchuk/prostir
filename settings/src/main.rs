@@ -39,13 +39,26 @@ fn main() -> eframe::Result {
     let bus = dbus::session();
     let mut presented = None;
     if let Ok(conn) = &bus {
-        match instance::claim(conn) {
-            Ok(Start::Second) => {
-                log::info!("the settings window is open already: brought it forward");
-                return Ok(());
+        let name = if mock {
+            instance::MOCK_NAME
+        } else {
+            instance::NAME
+        };
+        // A first window that has its name but not yet its object answers Present
+        // with an error: ask again a few times before opening without the name.
+        for attempt in 1..=5 {
+            match instance::claim(conn, name) {
+                Ok(Start::Second) => {
+                    log::info!("the settings window is open already: brought it forward");
+                    return Ok(());
+                }
+                Ok(Start::First(p)) => {
+                    presented = Some(p);
+                    break;
+                }
+                Err(e) if attempt == 5 => log::warn!("could not claim {name}: {e}"),
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(100)),
             }
-            Ok(Start::First(p)) => presented = Some(p),
-            Err(e) => log::warn!("could not claim {}: {e}", instance::NAME),
         }
     }
     let system = SystemScheme::default();

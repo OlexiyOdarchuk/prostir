@@ -83,7 +83,7 @@ fn monitors_by_name_and_keyboard() {
     );
     assert_eq!(h.state().ui.selected, Some(3));
     // The selected monitor's controls.
-    press(&mut h, "125 %");
+    press(&mut h, "125\u{a0}%");
     assert_eq!(
         handle.calls().last(),
         Some(&Request::SetScale { id: 3, scale: 125 })
@@ -150,7 +150,7 @@ fn starting_prostir_from_the_window() {
             ..
         }
     ));
-    h.get_by_label("Запускаю Prostir");
+    h.get_by_label("Запуск Prostir");
     handle.set_running(true);
     h.run_steps(2);
     assert!(matches!(h.state().conn, Conn::Live { .. }));
@@ -300,7 +300,6 @@ fn the_first_run_says_when_pairing_is_closed() {
     h.run_steps(3);
     h.get_by_label("Сполучення закрито, тож новий шолом не знайде цей ПК.");
     assert!(h.query_by_label("Пошук шолома в мережі").is_none());
-    assert!(h.query_by_label("Шукаю шолом у мережі").is_none());
     press(&mut h, "Відкрити знову");
     assert_eq!(handle.calls(), [Request::PairNewHeadset]);
 }
@@ -329,4 +328,19 @@ fn a_new_theme_file_pins_nothing() {
         prostir_settings::theme::Theme::builtin(prostir_settings::theme::PaletteName::Graphite);
     assert_eq!(h.state().theme().dark, graphite.dark);
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn tab_meets_back_before_next_as_seen() {
+    let (mut h, _) = window(Mock::no_headsets(), Setup::default());
+    h.state_mut().ui.fr_step = 1;
+    h.run_steps(3);
+    let back = h.get_by_label("Назад").rect();
+    let next = h.get_by_label("Далі").rect();
+    assert!(back.right() < next.left(), "Back is left of Next");
+    h.get_by_label("Назад").focus();
+    h.run_steps(1);
+    h.key_press(Key::Tab);
+    h.run_steps(1);
+    assert!(h.get_by_label("Далі").is_focused());
 }

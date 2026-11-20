@@ -46,6 +46,7 @@ ov-waiting-title = Waiting for a headset
 ov-waiting-body = Open Prostir in the headset near this PC. The headset finds the PC by itself when both are on the same network.
 ov-failed-title = A monitor was not added
 ov-failed-body = { $name }: { $reason } The other monitors work.
+ov-failed-no-reason = { $name } was not added. The other monitors work.
 ov-retry = Try again
 ov-open-monitors = Go to monitors
 ov-no-headsets-title = Pair the first headset
@@ -77,6 +78,7 @@ sound-on-pc = On the PC
 on = On
 off = Off
 percent = { $n }%
+decimal-separator = .
 
 ## Prostir is not running
 
@@ -183,7 +185,7 @@ snd-mic-desc = Programs on the PC see it as the "Prostir" microphone.
 snd-mic-ready = The "Prostir" microphone is ready
 snd-mic-off = Off: programs on the PC do not see the headset microphone
 snd-mic-waiting = The microphone appears once a headset connects.
-snd-mic-not-allowed = The headset has not allowed the microphone. Allow it in the headset: Settings, Apps, Prostir, Permissions.
+snd-mic-not-allowed = The headset has not allowed the microphone. Allow it for Prostir in the headset's settings, among the app permissions.
 snd-mic-failed = The microphone could not be made: { $reason }
 
 ## Look
@@ -208,11 +210,11 @@ look-file = Theme file
 look-file-ok = In use. Changes to the file show at once, no restart needed.
 look-file-none = There is no file: the built-in theme is in use. Create one to change colours or sizes.
 look-file-issues = These values were not read; the built-in ones are used instead:
-look-file-contrast = Text with too little contrast:
+look-file-contrast = Too little contrast (text, and the edges of controls):
 look-create = Create the file
 look-open = Open the folder
 issue-not-toml = The file does not read as TOML: { $why }
-issue-format = format = { $value } is a newer kind of file, so none of it is used.
+issue-format = format = { $value }: this window reads format 1 only, so none of the file is used.
 issue-bad = { $at } = { $value } does not fit here
 issue-unknown = { $at } is not a known key
 issue-font = { $at }: the font cannot be read ({ $why })
@@ -229,7 +231,7 @@ fr-back = Back
 fr-next = Next
 fr-done = Done
 fr-1-title = Install Prostir in the headset
-fr-1-body = Turn on developer mode in the headset, connect it with a USB cable and install prostir.apk from the same release as the PC part.
+fr-1-body = Turn on developer mode in the headset, connect it with a USB cable and install prostir.apk from the same release as Prostir on this PC.
 fr-1-link = Open the releases page
 fr-2-title = Open Prostir in the headset near this PC
 fr-2-body = The headset and the PC need to be on the same Wi-Fi network. The headset finds this PC by itself.

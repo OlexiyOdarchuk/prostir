@@ -14,6 +14,22 @@ const SOURCES: &[(&str, &str)] = &[
     ("widgets.rs", include_str!("../src/widgets.rs")),
 ];
 
+/// All the code, for the dash check.
+const ALL_CODE: &[(&str, &str)] = &[
+    ("api.rs", include_str!("../src/api.rs")),
+    ("dbus.rs", include_str!("../src/dbus.rs")),
+    ("fonts.rs", include_str!("../src/fonts.rs")),
+    ("instance.rs", include_str!("../src/instance.rs")),
+    ("launch.rs", include_str!("../src/launch.rs")),
+    ("lib.rs", include_str!("../src/lib.rs")),
+    ("link.rs", include_str!("../src/link.rs")),
+    ("main.rs", include_str!("../src/main.rs")),
+    ("mock.rs", include_str!("../src/mock.rs")),
+    ("portal.rs", include_str!("../src/portal.rs")),
+    ("snap.rs", include_str!("../src/snap.rs")),
+    ("theme.rs", include_str!("../src/theme.rs")),
+];
+
 /// Quoted strings in the code that look like ids but are not messages.
 const NOT_MESSAGES: &[&str] = &["xdg-open"];
 
@@ -32,7 +48,7 @@ fn no_long_dashes_anywhere() {
         ("ink.toml", prostir_settings::theme::INK),
         ("graphite.toml", prostir_settings::theme::GRAPHITE),
     ];
-    for (name, text) in files.iter().chain(&themes).chain(SOURCES) {
+    for (name, text) in files.iter().chain(&themes).chain(SOURCES).chain(ALL_CODE) {
         for (n, line) in text.lines().enumerate() {
             assert!(
                 !line.contains('\u{2014}') && !line.contains('\u{2013}'),

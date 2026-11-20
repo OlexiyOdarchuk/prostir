@@ -356,11 +356,13 @@ mod tests {
             w.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         });
         link.send(Request::SetPrimary { id: 3 });
+        // The call and the first state run on their own threads: either may come
+        // first, and the state the window ends with has the change.
+        let changed = |u: &Update| matches!(u, Update::State(s) if s.state.primary == Some(3));
         let got = collect(&mut link, |g| {
-            g.iter().filter(|u| matches!(u, Update::State(_))).count() >= 2
-                && g.iter().any(|u| matches!(u, Update::Replied { .. }))
+            g.iter().any(changed) && g.iter().any(|u| matches!(u, Update::Replied { .. }))
         });
-        assert!(matches!(got[0], Update::State(_)), "{got:?}");
+        assert!(got.iter().any(changed), "{got:?}");
         assert!(
             got.iter()
                 .any(|u| matches!(u, Update::Replied { result: Ok(_), .. }))

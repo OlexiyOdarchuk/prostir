@@ -199,6 +199,14 @@ pub enum Kind {
     Danger,
 }
 
+/// How wide [`button`] makes a button with `label`.
+pub fn button_width(ui: &Ui, tk: &Tk, label: &str) -> f32 {
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), tk.body_m(), Color32::PLACEHOLDER);
+    galley.size().x + tk.th.shape.padding * 2.0
+}
+
 pub fn button(ui: &mut Ui, tk: &Tk, label: &str, kind: Kind, enabled: bool) -> Response {
     button_named(ui, tk, label, label, kind, enabled)
 }

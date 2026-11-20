@@ -76,14 +76,29 @@ fn bounds(tiles: &[Tile]) -> Rect {
 
 fn label(ui: &Ui, tk: &Tk, r: Rect, t: &Tile, color: Color32) {
     let c = r.center();
-    // The name where it fits, smaller on a narrow monitor, none on a tiny one.
+    // The name: smaller on a narrow monitor, and shortened with an ellipsis where
+    // even that does not fit.
+    let room = r.width() - 8.0;
+    if room < tk.th.type_.size_small || r.height() < tk.th.type_.size_small + 4.0 {
+        return;
+    }
     let fits = |font| {
         let g = ui.painter().layout_no_wrap(t.name.clone(), font, color);
-        (g.size().x <= r.width() - 8.0).then_some(g)
+        (g.size().x <= room).then_some(g)
     };
-    let Some(name) = fits(tk.body_m()).or_else(|| fits(tk.small())) else {
-        return;
-    };
+    let name = fits(tk.body_m())
+        .or_else(|| fits(tk.small()))
+        .unwrap_or_else(|| {
+            let mut job =
+                egui::text::LayoutJob::simple_singleline(t.name.clone(), tk.small(), color);
+            job.wrap = egui::text::TextWrapping {
+                max_width: room,
+                max_rows: 1,
+                break_anywhere: true,
+                overflow_character: Some('…'),
+            };
+            ui.painter().layout_job(job)
+        });
     if r.height() < 52.0 || name.size().y < tk.th.type_.size_body {
         ui.painter().galley(c - name.size() / 2.0, name, color);
     } else {
