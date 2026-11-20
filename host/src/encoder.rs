@@ -15,6 +15,10 @@ use gstreamer_video as gst_video;
 use log::{debug, error, info, warn};
 use prostir_proto::Codec;
 
+mod gpu;
+
+pub use gpu::GpuDevices;
+
 /// Which hardware (or the CPU) encodes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
@@ -224,10 +228,12 @@ fn pipeline_description(input: &Input, cfg: &EncoderConfig) -> Result<String> {
 }
 
 impl Encoder {
-    /// `on_event` returns `true` when the receiver needs a keyframe (e.g. it had to drop frames).
+    /// An encoder with `cfg`, taking its graphics device from `gpu`. `on_event` returns
+    /// `true` when the receiver needs a keyframe (e.g. it had to drop frames).
     pub fn start(
         input: &Input,
         cfg: &EncoderConfig,
+        gpu: &GpuDevices,
         on_event: impl Fn(EncoderEvent) -> bool + Send + Sync + 'static,
     ) -> Result<Self> {
         let desc = pipeline_description(input, cfg)?;
@@ -241,6 +247,7 @@ impl Encoder {
             .by_name("sink")
             .and_then(|e| e.downcast::<gst_app::AppSink>().ok())
             .ok_or_else(|| anyhow!("appsink missing"))?;
+        gpu.share_with(&pipeline);
 
         let on_event = Arc::new(on_event);
         let last_size = std::sync::Mutex::new((0u32, 0u32));

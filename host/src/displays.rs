@@ -13,7 +13,7 @@ use prostir_layout::desk;
 use prostir_proto::state;
 use prostir_proto::{Codec, HostMsg};
 
-use crate::encoder::{Encoder, EncoderConfig};
+use crate::encoder::{Encoder, EncoderConfig, GpuDevices};
 use crate::errors::{Counted, UserError, code_of};
 use crate::layout::panel_size;
 use crate::platform::audio::{AudioOut, MicIn};
@@ -141,6 +141,8 @@ pub struct Displays {
     /// When KDE's primary output was last compared with ours.
     primary_checked: Instant,
     desktop: Box<dyn Desktop>,
+    /// One graphics device per card for every encoder (and capture) of the desktop.
+    gpu: GpuDevices,
     pub router: Arc<Router>,
     cfg: EncoderConfig,
     primary: Option<ScreenId>,
@@ -168,8 +170,9 @@ impl Displays {
         manage_primary: bool,
         new_id: &mut dyn FnMut() -> ScreenId,
     ) -> Result<Self> {
-        // One device per graphics card for every capture and encoder (step 6.5).
-        let desktop = crate::platform::connect(&crate::platform::GpuDevices::default())?;
+        // One device per graphics card for every capture and encoder.
+        let gpu = GpuDevices::default();
+        let desktop = crate::platform::connect(&gpu)?;
         // Only some desktops (KDE) have a primary output.
         let manage_primary = manage_primary && desktop.caps().has_primary;
         let mut displays = Self {
@@ -198,6 +201,7 @@ impl Displays {
             fitted_down: false,
             primary_checked: Instant::now(),
             desktop,
+            gpu,
             router: Arc::new(Router::new()),
             cfg,
             primary: None,
@@ -468,7 +472,7 @@ impl Displays {
             .map_or((id.to_string(), false), |s| (s.name(), s.is_physical()));
         self.router.add_stream(id, cfg.codec, name, physical);
         let router = self.router.clone();
-        let encoder = Encoder::start(&output.source().input, cfg, move |ev| {
+        let encoder = Encoder::start(&output.source().input, cfg, &self.gpu, move |ev| {
             router.on_event(id, ev)
         })?;
         output.attach(&encoder)?;

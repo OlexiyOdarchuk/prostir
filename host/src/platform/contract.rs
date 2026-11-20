@@ -65,7 +65,7 @@
 //!    ([`Memory::D3D11`], whose adapter [`FrameSource::adapter`] reads), for an encoder
 //!    picked per output on the same card (step 6.5). One device per card is shared by
 //!    every capture and encoder ([`GpuDevices`], given to the desktop when it
-//!    connects): neither an output nor an encoder makes its own.
+//!    connects, see `encoder/gpu.rs`): neither an output nor an encoder makes its own.
 //! 9. A limit on encoder sessions: found when an encoder does not start (step 6.5), not
 //!    a field here.
 //! 10. The cursor in the frames or apart: [`FrameSource::cursor`].
@@ -380,18 +380,16 @@ pub struct AdapterId(pub u64);
 /// The graphics devices captures and encoders share: one per card, for the life of a
 /// desktop. It is handed to the desktop when it connects ([`crate::platform::connect`]),
 /// so an output that captures on a card (Desktop Duplication, our driver's swap chain)
-/// takes the card's device from here, and the encoders of step 6.5 take the same one:
-/// neither an output nor an encoder makes a device of its own (six processes, each with
-/// its own CUDA context, fell to a tenth of the frames). In GStreamer it answers each
+/// takes the card's device from here, and the encoders take the same one: neither an
+/// output nor an encoder makes a device of its own (six processes, each with its own
+/// CUDA context, fell to a tenth of the frames). In GStreamer it answers each
 /// pipeline's `need-context` (`gst.va.display.handle`, `gst.cuda.context`,
-/// `gst.d3d11.device.handle` by LUID).
+/// `gst.d3d11.device.handle` by LUID): a capture's pipeline calls
+/// [`GpuDevices::share_with`] as the encoder's does (see `encoder/gpu.rs`).
 ///
-/// Until step 6.5 it holds nothing: no Linux output makes a device (KWin and
-/// wlr-screencopy hand over buffers, the encoder opens its own as before).
-#[derive(Debug, Clone, Default)]
-pub struct GpuDevices {
-    _devices: Arc<()>,
-}
+/// On Linux no output makes a device (KWin and wlr-screencopy hand over buffers): the
+/// encoders share one VA display (or CUDA context) per card among themselves.
+pub use crate::encoder::GpuDevices;
 
 /// Where the mouse pointer is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

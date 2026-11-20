@@ -377,6 +377,20 @@ impl Pc {
         threads
     }
 
+    /// The files the PC app has open now that are graphics devices (`/dev/dri/...`):
+    /// one per card it encodes on, however many monitors it streams.
+    pub fn gpu_files(&self) -> Vec<String> {
+        let fds = format!("/proc/{}/fd", self.child.id());
+        std::fs::read_dir(fds)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|fd| std::fs::read_link(fd.path()).ok())
+            .map(|target| target.to_string_lossy().into_owned())
+            .filter(|target| target.starts_with("/dev/dri/"))
+            .collect()
+    }
+
     /// Kills the PC app (`SIGKILL`), as a crash or a power cut would.
     pub fn kill(mut self) {
         self.signal(libc::SIGKILL);
