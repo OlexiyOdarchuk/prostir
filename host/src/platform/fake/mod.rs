@@ -291,11 +291,12 @@ pub mod audio {
     /// 40`, `volume 40 muted`, `drag 0 100 1000`: the slider from 0 to 100 in a
     /// second), and what the PC sets goes into the log.
     pub struct SinkVolume {
-        changes: std::sync::mpsc::Receiver<(u8, bool)>,
+        changes: std::sync::mpsc::Receiver<(u8, bool, Instant)>,
     }
 
     /// Where the fake desktop's commands send the device's changes.
-    pub static VOLUME: std::sync::Mutex<Option<std::sync::mpsc::Sender<(u8, bool)>>> =
+    #[allow(clippy::type_complexity)]
+    pub static VOLUME: std::sync::Mutex<Option<std::sync::mpsc::Sender<(u8, bool, Instant)>>> =
         std::sync::Mutex::new(None);
 
     impl SinkVolume {
@@ -312,11 +313,11 @@ pub mod audio {
             );
             // The device says it changed, as a real one does.
             if let Some(tx) = VOLUME.lock().unwrap().as_ref() {
-                let _ = tx.send((level, muted));
+                let _ = tx.send((level, muted, Instant::now()));
             }
         }
 
-        pub fn changed(&self) -> Option<(u8, bool)> {
+        pub fn changed(&self) -> Option<(u8, bool, Instant)> {
             self.changes.try_recv().ok()
         }
     }

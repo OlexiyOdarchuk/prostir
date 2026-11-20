@@ -425,7 +425,7 @@ fn command(line: &str) -> Result<()> {
     let words: Vec<&str> = line.split_whitespace().collect();
     let device = |level: u8, muted: bool| {
         if let Some(tx) = super::audio::VOLUME.lock().unwrap().as_ref() {
-            let _ = tx.send((level, muted));
+            let _ = tx.send((level, muted, std::time::Instant::now()));
         }
         info!(
             "fake desktop: volume moved to {level}{}",

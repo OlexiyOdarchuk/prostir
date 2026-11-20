@@ -426,7 +426,7 @@ fn serve_client(
     }
     let opened_with = session.publisher.headset.volume;
     if let Some(v) = opened_with {
-        session.volume_from_headset(v);
+        session.volume_from_headset(v, displays);
     }
     session.headset_changed(displays, control);
     session.publish(displays, store, None, None, shares_volume);
@@ -636,29 +636,39 @@ impl Session {
     }
 
     /// A volume from the headset (in `Open` or since): the main headset's goes to the
-    /// device.
-    fn volume_from_headset(&mut self, v: prostir_proto::state::Volume) {
+    /// device. The device's own changes come first: one not read yet makes this level
+    /// an old one, which must not be written while the slider moves.
+    fn volume_from_headset(&mut self, v: prostir_proto::state::Volume, displays: &Displays) {
         if !self.publisher.access.is_main() {
             return;
         }
+        self.device_changes(displays);
         if let Some((sink, pc)) = &mut self.volume {
             let act = pc.from_headset(&v, Instant::now());
-            do_volume(sink, act, None);
+            do_volume(sink, act, Some(displays));
+        }
+    }
+
+    /// The device's changes since the last look, each at the moment it happened: they
+    /// ask the headset.
+    fn device_changes(&mut self, displays: &Displays) {
+        let Some((sink, pc)) = &mut self.volume else {
+            return;
+        };
+        while let Some((level, muted, at)) = sink.changed() {
+            let act = pc.device(level, muted, at);
+            do_volume(sink, act, Some(displays));
         }
     }
 
     /// Follows the device's volume: changes ask the headset, its answers go to the
     /// device once the slider rests.
     fn volume_due(&mut self, displays: &Displays) {
+        self.device_changes(displays);
         let Some((sink, pc)) = &mut self.volume else {
             return;
         };
-        let now = Instant::now();
-        while let Some((level, muted)) = sink.changed() {
-            let act = pc.device(level, muted, now);
-            do_volume(sink, act, Some(displays));
-        }
-        let act = pc.tick(now);
+        let act = pc.tick(Instant::now());
         do_volume(sink, act, Some(displays));
     }
 
@@ -757,7 +767,7 @@ impl Session {
         let msg = match self.publisher.headset.apply(msg) {
             None => {
                 if let Some(v) = volume {
-                    self.volume_from_headset(v);
+                    self.volume_from_headset(v, displays);
                 }
                 return self.headset_changed(displays, control);
             }

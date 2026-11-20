@@ -195,8 +195,9 @@ impl SinkVolume {
     /// Puts the device at `level` percent, `muted` or not.
     pub fn set(&self, _level: u8, _muted: bool) {}
 
-    /// A change of the device since the last call, if there was one.
-    pub fn changed(&self) -> Option<(u8, bool)> {
+    /// A change of the device since the last call, if there was one, and when it
+    /// happened.
+    pub fn changed(&self) -> Option<(u8, bool, std::time::Instant)> {
         None
     }
 }
