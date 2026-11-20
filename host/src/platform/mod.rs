@@ -323,6 +323,5 @@ pub trait OutputBackend {
     fn detach(&mut self);
 
     /// Starts feeding `encoder`, for inputs whose frames the platform pushes itself.
-    /// `dmabuf`: the encoder takes GPU buffers.
-    fn attach(&mut self, encoder: &Encoder, dmabuf: bool) -> Result<()>;
+    fn attach(&mut self, encoder: &Encoder) -> Result<()>;
 }

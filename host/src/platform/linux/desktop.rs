@@ -224,7 +224,7 @@ impl OutputBackend for Output {
         }
     }
 
-    fn attach(&mut self, encoder: &Encoder, dmabuf: bool) -> Result<()> {
+    fn attach(&mut self, encoder: &Encoder) -> Result<()> {
         // KWin feeds the encoder through PipeWire by itself.
         if let Kind::Hyprland(o) = &mut self.kind {
             let appsrc = encoder
@@ -234,7 +234,7 @@ impl OutputBackend for Output {
                 o.name.clone(),
                 appsrc,
                 encoder.paused(),
-                dmabuf,
+                encoder.takes_dmabuf(),
             )?);
         }
         Ok(())

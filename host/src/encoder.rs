@@ -148,6 +148,8 @@ pub struct Encoder {
     /// KWin): it is started over on resuming. A capture pushing its own frames
     /// (`appsrc`) repeats the last one by itself.
     restart_on_resume: bool,
+    /// It takes frames straight from GPU buffers (dmabuf), so a capture hands it those.
+    takes_dmabuf: bool,
     bus_thread: Option<JoinHandle<()>>,
 }
 
@@ -341,6 +343,7 @@ impl Encoder {
             stop,
             paused: Arc::new(AtomicBool::new(false)),
             restart_on_resume,
+            takes_dmabuf: cfg.backend.takes_dmabuf(),
             bus_thread: Some(bus_thread),
         };
         encoder
@@ -359,6 +362,15 @@ impl Encoder {
         self.pipeline
             .by_name("src")
             .and_then(|e| e.downcast::<gst_app::AppSrc>().ok())
+    }
+
+    /// Whether it takes frames straight from GPU buffers (dmabuf).
+    #[cfg_attr(
+        feature = "fake-desktop",
+        expect(dead_code, reason = "the fake desktop pushes no frames")
+    )]
+    pub fn takes_dmabuf(&self) -> bool {
+        self.takes_dmabuf
     }
 
     /// Set while the encoder is paused, so a capture can rest too.

@@ -931,7 +931,7 @@ impl Displays {
         self.router.add_stream(id, cfg.codec, name, physical);
         let router = self.router.clone();
         let encoder = Encoder::start(&output.input(), cfg, move |ev| router.on_event(id, ev))?;
-        output.attach(&encoder, cfg.backend.takes_dmabuf())?;
+        output.attach(&encoder)?;
         Ok(encoder)
     }
 

@@ -386,7 +386,7 @@ impl OutputBackend for FakeOutput {
     fn detach(&mut self) {}
 
     /// The encoder reads the picture itself.
-    fn attach(&mut self, _encoder: &Encoder, _dmabuf: bool) -> Result<()> {
+    fn attach(&mut self, _encoder: &Encoder) -> Result<()> {
         Ok(())
     }
 }
