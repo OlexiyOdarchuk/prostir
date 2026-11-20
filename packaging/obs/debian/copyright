@@ -1,0 +1,30 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: Prostir
+Upstream-Contact: https://github.com/OlexiyOdarchuk/prostir/issues
+Source: https://github.com/OlexiyOdarchuk/prostir
+
+Files: *
+Copyright: Prostir contributors
+License: GPL-3.0-or-later with Meta Platform SDK exception
+ This program is free software: you can redistribute it and/or modify it under
+ the terms of the GNU General Public License as published by the Free Software
+ Foundation, either version 3 of the License, or (at your option) any later
+ version.
+ .
+ This program is distributed in the hope that it will be useful, but WITHOUT
+ ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+ .
+ On Debian systems, the complete text of the GNU General Public License
+ version 3 can be found in /usr/share/common-licenses/GPL-3.
+ .
+ The additional permission under section 7 (linking with the Meta Platform SDK
+ for Android, used only by a Horizon Store build of the headset app) is in
+ /usr/share/doc/prostir/LICENSE-EXCEPTION.md.
+
+Files: vendor/*
+Copyright: The authors of each Rust crate
+License: various
+ The Rust crates in vendor/ are compiled into the program. Each keeps its own
+ license (mostly MIT, Apache-2.0 or both); the full texts, crate by crate, are in
+ /usr/share/doc/prostir/THIRD-PARTY-LICENSES.txt.

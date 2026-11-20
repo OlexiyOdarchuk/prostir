@@ -1,0 +1,47 @@
+Source: prostir
+Section: utils
+Priority: optional
+Maintainer: Prostir contributors <prostir-release@users.noreply.github.com>
+# make-sources.sh fills in the cargo line: "cargo (>= N)" for the newest rust-version
+# among the crates, or else one of Ubuntu's versioned toolchains (cargo-1.NN, from the
+# -updates pocket), newest first. On Debian 13 cargo-web provides cargo (= 1.96).
+Build-Depends: debhelper-compat (= 13),
+               @CARGO@,
+               pkgconf | pkg-config,
+               libgbm-dev,
+               libgstreamer1.0-dev (>= 1.24),
+               libgstreamer-plugins-base1.0-dev (>= 1.24)
+Standards-Version: 4.7.0
+Homepage: https://prostir.ishawyha.dev
+Vcs-Browser: https://github.com/OlexiyOdarchuk/prostir
+Vcs-Git: https://github.com/OlexiyOdarchuk/prostir.git
+Rules-Requires-Root: no
+
+Package: prostir
+Architecture: any
+# gstreamer1.0-plugins-bad: h264parse, h265parse and the VA-API encoders (va plugin).
+# On Ubuntu 26.04 and newer the va plugin moved to gstreamer1.0-plugins-extra, which
+# gstreamer1.0-plugins-bad depends on.
+Depends: ${shlibs:Depends},
+         ${misc:Depends},
+         curl,
+         gstreamer1.0-pipewire,
+         gstreamer1.0-plugins-bad,
+         gstreamer1.0-plugins-base,
+         gstreamer1.0-plugins-good,
+         pipewire-bin,
+         pipewire-pulse,
+         pulseaudio-utils
+# "x | hyprland": tools only KDE Plasma needs, so a Hyprland system does not pull them in.
+Recommends: mesa-va-drivers | intel-media-va-driver-non-free | intel-media-va-driver,
+            gstreamer1.0-plugins-ugly,
+            kdialog | zenity | fuzzel | wofi | rofi,
+            libnotify-bin,
+            libkscreen-bin | hyprland,
+            qdbus-qt6 | hyprland
+Suggests: adb, grim
+Description: Extra KDE Plasma 6 and Hyprland monitors in a Meta Quest 3 or 3S headset
+ Prostir puts extra monitors for a KDE Plasma 6 or Hyprland desktop into a Meta
+ Quest 3 or 3S headset. They are real outputs of the desktop, streamed to the
+ headset over the local network. This package is the PC part; the headset app
+ comes as an APK from the GitHub release.

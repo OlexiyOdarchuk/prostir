@@ -1,0 +1,103 @@
+name: OBS
+
+# Publishing a release (not just drafting it) refreshes the openSUSE Build Service
+# package home:iShawyha:prostir/prostir, which builds the rpm and deb repositories (see
+# packaging/obs/README.md). This job attaches the OBS sources to the release under
+# fixed names, then asks OBS to run the package's _service, which downloads them from
+# the newest release and rebuilds.
+#
+# Needs the repository secret OBS_TOKEN: an OBS token of type runservice bound to that
+# package. OBS has no token that can commit files, so the token only starts the
+# download. Without the secret the files are still attached and OBS is skipped.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish, e.g. v0.1.3 (must be the latest release)
+        required: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  obs:
+    runs-on: ubuntu-24.04
+    # A stuck mirror or runner fails the job instead of holding it for hours.
+    timeout-minutes: 20
+    permissions:
+      # Attaching the OBS sources to the release.
+      contents: write
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      # The packaging files come from this checkout: the release's own tag, or the
+      # branch the workflow was started from. The source comes from the tag.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch
+        with:
+          toolchain: stable
+      - name: OBS sources for this release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Tag '$TAG' is not vMAJOR.MINOR.PATCH"
+            exit 1
+          fi
+          # The OBS service downloads from releases/latest, so only the latest release
+          # can be published there.
+          latest="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)"
+          if [ "$latest" != "$TAG" ]; then
+            echo "::error::$TAG is not the latest release ($latest); OBS would get $latest"
+            exit 1
+          fi
+          git fetch --no-tags --depth=1 origin "+refs/tags/${TAG}:refs/tags/${TAG}"
+          # The release's THIRD-PARTY-LICENSES.txt, checked against its SHA256SUMS, as
+          # in aur.yml.
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+          mkdir -p "$RUNNER_TEMP/dl"
+          cd "$RUNNER_TEMP/dl"
+          curl -fL --retry 3 -o SHA256SUMS "$base/SHA256SUMS"
+          curl -fL --retry 3 -o THIRD-PARTY-LICENSES.txt "$base/THIRD-PARTY-LICENSES.txt"
+          awk '$2 == "THIRD-PARTY-LICENSES.txt"' SHA256SUMS | grep . | sha256sum -c -
+          cd "$GITHUB_WORKSPACE"
+          packaging/obs/make-sources.sh "$TAG" "$RUNNER_TEMP/dl/THIRD-PARTY-LICENSES.txt" "$RUNNER_TEMP/obs"
+          # The names packaging/obs/_service downloads.
+          cd "$RUNNER_TEMP/obs"
+          mv prostir.spec prostir-obs.spec
+          mv prostir.dsc prostir-obs.dsc
+          mv debian.tar.gz prostir-obs-debian.tar.gz
+          cat prostir-obs.spec prostir-obs.dsc
+          sha256sum ./*
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/obs"
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+            prostir-vendored.tar.gz prostir-obs.spec prostir-obs.dsc prostir-obs-debian.tar.gz
+      - name: Run the OBS service
+        env:
+          OBS_TOKEN: ${{ secrets.OBS_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$OBS_TOKEN" ]; then
+            echo "OBS_TOKEN is not set; skipping OBS."
+            exit 0
+          fi
+          # A token bound to the package ignores the project and package given here; a
+          # token without one needs them.
+          curl -fsS --retry 3 -X POST -H "Authorization: Token ${OBS_TOKEN}" \
+            "https://api.opensuse.org/trigger/runservice?project=home:iShawyha:prostir&package=prostir"
+          echo
+          echo "OBS is fetching the sources; builds: https://build.opensuse.org/package/show/home:iShawyha:prostir/prostir"
