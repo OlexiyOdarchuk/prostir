@@ -558,3 +558,31 @@ fn sessions_ending_together_switch_no_codec() {
     pc.wait_log(SOON, "keeping virtual monitors");
     assert_eq!(pc.count_log("every headset decodes"), 0);
 }
+
+/// While the picture moves, a second headset connecting, or put on again, gets its
+/// fresh picture as a keyframe: no stream starts over, so the first headset sees no
+/// hiccup.
+#[test]
+fn a_headset_coming_starts_no_stream_over_for_the_other() {
+    let options = Options {
+        fps: 15,
+        ..Options::default()
+    };
+    let (_dir, pc, mut a, mut b) = two_headsets("no-hiccup", options, "");
+    let mut first = showing(&pc, &mut a);
+    first.take_for(Duration::from_secs(1)).unwrap();
+    let before = pc.source_starts();
+    let mut second = showing(&pc, &mut b);
+    second.send(&worn(false)).unwrap();
+    second.take_for(Duration::from_secs(1)).unwrap();
+    second.reset_counts();
+    second.send(&worn(true)).unwrap();
+    second
+        .wait(SOON, "pictures after putting it on", |v| {
+            v.streams.len() == 2 && v.streams.values().all(|s| s.has_picture())
+        })
+        .unwrap();
+    first.take_for(Duration::from_millis(500)).unwrap();
+    assert_eq!(pc.source_starts(), before, "no stream started over");
+    assert!(first.view().broken.is_empty(), "{:?}", first.view().broken);
+}

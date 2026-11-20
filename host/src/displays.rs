@@ -75,6 +75,9 @@ impl Backoff {
     }
 }
 
+/// A headset that waited this long for a fresh picture of a stream that sent nothing
+/// meanwhile gets it from the stream starting over.
+const STARVED: Duration = Duration::from_secs(3);
 /// Between sessions, how often a layout waiting for the desktop to list new outputs
 /// looks again.
 const LISTING_LOOK: Duration = Duration::from_millis(500);
@@ -484,6 +487,15 @@ impl Displays {
         self.check_primary();
         self.check_window_panels();
         self.stop_too_big();
+        // A fresh picture asked of a stream that then stood still never came.
+        for id in self.router.starved(STARVED) {
+            if self.streaming
+                && let Some(e) = self.screens.get(&id).and_then(|s| s.stream.as_ref())
+            {
+                info!("{id}: no fresh picture came for a headset: starting its stream over");
+                e.set_paused(false);
+            }
+        }
         self.sync_physical(new_id);
     }
 
@@ -1477,10 +1489,12 @@ impl Displays {
         self.retry_too_big();
         self.retry_failed();
         // Paused ones (kept from before) start over as `set_streaming` resumes them;
-        // running ones (just made) are resumed here, which starts them over too.
+        // running ones (just made, or streaming to other headsets) get a fresh
+        // picture here.
         if self.streaming {
-            for (_, e) in self.encoders() {
-                e.set_paused(false);
+            let ids: Vec<ScreenId> = self.encoders().map(|(id, _)| id).collect();
+            for id in ids {
+                self.fresh_picture(id);
             }
         }
         self.set_streaming(true);
@@ -2194,10 +2208,21 @@ impl Displays {
 
     /// A fresh picture of screen `id` as a keyframe, though nothing on it moves: the
     /// headset missed what it sent before.
+    ///
+    /// A stream whose picture moves and that goes to another headset already sends a
+    /// keyframe with its next frame, so that headset sees no hiccup; any other starts
+    /// over to send its picture (and should a moving one stop, `tick` starts it over all the same, see
+    /// [`Router::starved`]).
     pub fn fresh_picture(&self, id: ScreenId) {
-        if self.streaming
-            && let Some(e) = self.screens.get(&id).and_then(|s| s.stream.as_ref())
-        {
+        if !self.streaming {
+            return;
+        }
+        let Some(e) = self.screens.get(&id).and_then(|s| s.stream.as_ref()) else {
+            return;
+        };
+        if self.router.live(id) {
+            e.force_keyframe();
+        } else {
             e.set_paused(false);
         }
     }

@@ -101,6 +101,21 @@ struct StreamSlot {
     keyframe_asked: Option<Instant>,
     /// When the encoder started, for the log of how long its first picture took.
     since: Instant,
+    /// When its last two frames came.
+    last_frames: [Option<Instant>; 2],
+}
+
+/// Two frames within this: the picture moves, so a keyframe asked for comes soon.
+const FLOWING: Duration = Duration::from_millis(500);
+
+impl StreamSlot {
+    /// Its picture moves: it sends frames now, and a keyframe asked of it comes with
+    /// the next.
+    fn flowing(&self, now: Instant) -> bool {
+        self.last_frames
+            .iter()
+            .all(|t| t.is_some_and(|t| now.duration_since(t) < FLOWING))
+    }
 }
 
 /// What one headset has of one stream.
@@ -129,6 +144,9 @@ struct Delivery {
     too_big: bool,
     /// When it asks for keyframes.
     key_asks: KeyAsks,
+    /// Since when this headset waits for a fresh picture (it just came, or was put on
+    /// again): until a keyframe is queued for it.
+    fresh_since: Option<Instant>,
 }
 
 impl Default for Delivery {
@@ -145,6 +163,7 @@ impl Default for Delivery {
             held: false,
             too_big: false,
             key_asks: KeyAsks::default(),
+            fresh_since: None,
         }
     }
 }
@@ -259,6 +278,7 @@ impl Router {
             published: BTreeSet::new(),
             streams: BTreeMap::new(),
         };
+        let now = Instant::now();
         for (id, s) in &inner.streams {
             let too_big = receiver.too_big(s);
             if let (true, Some((w, h))) = (too_big, s.size) {
@@ -269,6 +289,7 @@ impl Router {
             }
             let delivery = Delivery {
                 too_big,
+                fresh_since: Some(now),
                 ..Delivery::default()
             };
             receiver.streams.insert(*id, delivery);
@@ -301,11 +322,13 @@ impl Router {
         if !worn {
             return Vec::new();
         }
+        let now = Instant::now();
         r.streams
             .iter_mut()
             .filter(|(_, d)| !d.too_big)
             .filter_map(|(id, d)| {
                 d.need_keyframe = true;
+                d.fresh_since = Some(now);
                 std::mem::take(&mut d.held).then_some(*id)
             })
             .collect()
@@ -343,6 +366,58 @@ impl Router {
             .collect()
     }
 
+    /// Whether stream `id` goes to a headset on the head already and sends frames now
+    /// (its picture moves), so a keyframe asked of its encoder comes with the next
+    /// one: starting it over would only make that headset miss a moment.
+    pub fn live(&self, id: ScreenId) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner.streams.get(&id).is_some_and(|s| {
+            s.flowing(Instant::now())
+                && inner
+                    .receivers
+                    .values()
+                    .any(|r| r.worn && r.streams.get(&id).is_some_and(|d| d.announced))
+        })
+    }
+
+    /// Streams a headset on the head has waited `after` or longer for a fresh picture
+    /// of, while nothing at all came of them (a still picture: a keyframe asked for
+    /// never comes); each then waits again from now. Their encoder has to start over
+    /// to send its picture.
+    pub fn starved(&self, after: Duration) -> Vec<ScreenId> {
+        let mut inner = self.inner.lock().unwrap();
+        let RouterInner {
+            streams, receivers, ..
+        } = &mut *inner;
+        let now = Instant::now();
+        let mut starved = Vec::new();
+        for (id, slot) in streams.iter() {
+            // One that never sent a frame is starting: its first is a keyframe.
+            let Some(last) = slot.last_frames[0] else {
+                continue;
+            };
+            let mut waits = false;
+            for r in receivers.values_mut().filter(|r| r.worn) {
+                let Some(d) = r.streams.get_mut(id) else {
+                    continue;
+                };
+                if d.too_big || !r.published.contains(id) {
+                    continue;
+                }
+                if d.fresh_since
+                    .is_some_and(|t| last < t && now.duration_since(t) >= after)
+                {
+                    d.fresh_since = Some(now);
+                    waits = true;
+                }
+            }
+            if waits {
+                starved.push(*id);
+            }
+        }
+        starved
+    }
+
     /// Streams found larger than every headset decodes since the last call.
     pub fn take_too_big(&self) -> Vec<TooBig> {
         std::mem::take(&mut *self.too_big.lock().unwrap())
@@ -358,11 +433,16 @@ impl Router {
         };
         let new: Vec<ScreenId> = ids.difference(&r.published).copied().collect();
         r.published = ids.clone();
+        let now = Instant::now();
         new.into_iter()
             .filter(|id| {
-                r.streams
-                    .get_mut(id)
-                    .is_some_and(|d| std::mem::take(&mut d.held))
+                r.streams.get_mut(id).is_some_and(|d| {
+                    let held = std::mem::take(&mut d.held);
+                    if held {
+                        d.fresh_since = Some(now);
+                    }
+                    held
+                })
             })
             .collect()
     }
@@ -503,6 +583,7 @@ impl Router {
             codec,
             keyframe_asked: None,
             since: Instant::now(),
+            last_frames: [None; 2],
         };
         inner.streams.insert(id, slot);
         for r in inner.receivers.values_mut() {
@@ -675,6 +756,7 @@ impl Router {
         keyframe: bool,
         data: Vec<u8>,
     ) -> bool {
+        slot.last_frames = [Some(Instant::now()), slot.last_frames[0]];
         // Asked at once (a stream without its size yet), or at most every 300 ms for
         // the headsets that wait for one (`want_key`).
         let mut key_now = false;
@@ -774,6 +856,9 @@ impl Router {
             };
             if r.tx.video(id.wire(), keyframe, msg) {
                 d.need_keyframe = false;
+                if keyframe {
+                    d.fresh_since = None;
+                }
                 d.seq += 1;
                 if d.sent.len() > 256 {
                     d.sent.clear();
@@ -1222,5 +1307,37 @@ mod tests {
         let _ = sent(&b);
         assert!(frame(&router, s, false));
         assert!(!frame(&router, s, false), "not again at once");
+    }
+
+    /// A stream sending frames to a headset is live; a headset that waits for a fresh
+    /// picture of a stream that sent nothing since is starved after a while, once,
+    /// and no longer once a keyframe went to it.
+    #[test]
+    fn a_still_stream_starves_a_headset_that_waits_for_its_picture() {
+        let router = Router::new();
+        let s = id(8);
+        router.add_stream(s, Codec::H264, "test".into(), false);
+        keyframe(&router, s);
+        frame(&router, s, false);
+        assert!(!router.live(s), "it goes to nobody");
+        let a = attach(&router, 1, headset());
+        router.publish(1, &BTreeSet::from([s]));
+        assert!(
+            router.starved(Duration::from_secs(60)).is_empty(),
+            "not yet"
+        );
+        assert_eq!(router.starved(Duration::ZERO), [s]);
+        assert!(
+            router.starved(Duration::from_secs(60)).is_empty(),
+            "waits again"
+        );
+        // A keyframe went to it: nothing to wait for, and it is live for it.
+        keyframe(&router, s);
+        assert_eq!(frames(&sent(&a)).len(), 1);
+        assert!(router.starved(Duration::ZERO).is_empty());
+        frame(&router, s, false);
+        assert!(router.live(s));
+        router.set_worn(1, false);
+        assert!(!router.live(s), "not to a headset taken off");
     }
 }
