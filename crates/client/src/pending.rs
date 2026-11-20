@@ -38,7 +38,7 @@ pub struct Asks {
 }
 
 /// What an answer comes to.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Answered {
     /// The control that asked; `None` for a request nothing waits for (answered
     /// after it was given up on, or never asked).

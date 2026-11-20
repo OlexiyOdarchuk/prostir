@@ -62,7 +62,7 @@ impl View<'_, '_> {
     }
 }
 
-pub fn show(ui: &mut Ui, v: &mut View) {
+pub fn show(ui: &mut Ui, v: &mut View<'_, '_>) {
     let page = v.ui.page;
     if page == Page::Look {
         return look(ui, v);
@@ -97,7 +97,7 @@ pub fn show(ui: &mut Ui, v: &mut View) {
     }
 }
 
-fn header(ui: &mut Ui, v: &View, page: Page) {
+fn header(ui: &mut Ui, v: &View<'_, '_>, page: Page) {
     let (title, sub) = match page {
         Page::Overview => ("ov-title", None),
         Page::Monitors => ("mon-title", Some("mon-sub")),
@@ -112,7 +112,7 @@ fn header(ui: &mut Ui, v: &View, page: Page) {
 }
 
 /// A large title with a coloured dot for the state in front of it.
-fn hero(ui: &mut Ui, tk: &Tk, color: Option<Color32>, title: &str) {
+fn hero(ui: &mut Ui, tk: &Tk<'_>, color: Option<Color32>, title: &str) {
     ui.horizontal(|ui| {
         if let Some(c) = color {
             let (r, _) =
@@ -130,7 +130,7 @@ fn hero(ui: &mut Ui, tk: &Tk, color: Option<Color32>, title: &str) {
     });
 }
 
-fn not_running(ui: &mut Ui, v: &mut View, why: &ClientError, start: &Start) {
+fn not_running(ui: &mut Ui, v: &mut View<'_, '_>, why: &ClientError, start: &Start) {
     let tk = v.tk;
     let p = tk.p;
     w::card(ui, tk, |ui| {
@@ -221,16 +221,16 @@ pub fn silent(why: &ClientError) -> bool {
     )
 }
 
-fn percent(tk: &Tk, n: impl Into<Arg>) -> String {
+fn percent(tk: &Tk<'_>, n: impl Into<Arg>) -> String {
     tk.f("percent", &[("n", n.into())])
 }
 
-fn size(tk: &Tk, m: &crate::api::Mode) -> String {
+fn size(tk: &Tk<'_>, m: &Mode) -> String {
     tk.f("mon-size", &[("w", m.w.into()), ("h", m.h.into())])
 }
 
 /// How a display is named to a person.
-fn display_name(tk: &Tk, d: &Display) -> String {
+fn display_name(tk: &Tk<'_>, d: &Display) -> String {
     match (d.kind, d.builtin) {
         (DisplayKind::Physical, true) => tk.t("mon-laptop"),
         (DisplayKind::Physical, false) if d.name.is_empty() => tk.t("mon-pc-screen"),
@@ -238,7 +238,7 @@ fn display_name(tk: &Tk, d: &Display) -> String {
     }
 }
 
-fn ago(tk: &Tk, now: u64, then: u64) -> String {
+fn ago(tk: &Tk<'_>, now: u64, then: u64) -> String {
     let s = now.saturating_sub(then);
     match s {
         0..60 => tk.t("ago-now"),
@@ -250,7 +250,7 @@ fn ago(tk: &Tk, now: u64, then: u64) -> String {
 
 // ------------------------------------------------------------------------- overview
 
-fn overview(ui: &mut Ui, v: &mut View, s: &State) {
+fn overview(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
     let tk = v.tk;
     let p = tk.p;
     header(ui, v, Page::Overview);
@@ -487,7 +487,7 @@ fn overview(ui: &mut Ui, v: &mut View, s: &State) {
 
 // ------------------------------------------------------------------------- monitors
 
-fn tiles(tk: &Tk, s: &State, pending: Option<(u32, i32, i32, Option<u32>)>) -> Vec<Tile> {
+fn tiles(tk: &Tk<'_>, s: &State, pending: Option<(u32, i32, i32, Option<u32>)>) -> Vec<Tile> {
     s.displays
         .iter()
         .filter_map(|d| {
@@ -520,7 +520,7 @@ fn tiles(tk: &Tk, s: &State, pending: Option<(u32, i32, i32, Option<u32>)>) -> V
         .collect()
 }
 
-fn monitors(ui: &mut Ui, v: &mut View, s: &State, _revision: u32) {
+fn monitors(ui: &mut Ui, v: &mut View<'_, '_>, s: &State, _revision: u32) {
     let tk = v.tk;
     let p = tk.p;
     header(ui, v, Page::Monitors);
@@ -617,7 +617,7 @@ fn monitors(ui: &mut Ui, v: &mut View, s: &State, _revision: u32) {
     });
 }
 
-fn selected_monitor(ui: &mut Ui, v: &mut View, s: &State) {
+fn selected_monitor(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
     let tk = v.tk;
     let p = tk.p;
     let Some(d) = v.ui.selected.and_then(|id| s.display(id)) else {
@@ -716,7 +716,7 @@ fn countdown(left: f64) -> String {
 
 /// The pairing window's content: the code to type here or there, or what to do first.
 /// Shared by the Headsets page and the first run.
-fn pair_body(ui: &mut Ui, v: &mut View, pr: &Pairing, revision: u32) {
+fn pair_body(ui: &mut Ui, v: &mut View<'_, '_>, pr: &Pairing, revision: u32) {
     let tk = v.tk;
     let p = tk.p;
     if let Some(code) = &pr.pc_code {
@@ -775,7 +775,7 @@ fn pair_body(ui: &mut Ui, v: &mut View, pr: &Pairing, revision: u32) {
     }
 }
 
-fn pairing_card(ui: &mut Ui, v: &mut View, pr: &Pairing, revision: u32) {
+fn pairing_card(ui: &mut Ui, v: &mut View<'_, '_>, pr: &Pairing, revision: u32) {
     let tk = v.tk;
     let p = tk.p;
     let left = (v.ui.pair.ends - v.now).max(0.0);
@@ -820,7 +820,7 @@ fn pairing_card(ui: &mut Ui, v: &mut View, pr: &Pairing, revision: u32) {
 
 /// "Pair a new headset", or where this Prostir does not open pairing from the window
 /// (before step 6.8), what to do instead.
-fn pair_new(ui: &mut Ui, v: &mut View) {
+fn pair_new(ui: &mut Ui, v: &mut View<'_, '_>) {
     let tk = v.tk;
     if v.ui.unsupported.contains("pair_new_headset") {
         w::status(ui, tk, tk.p.text_muted, &tk.t("hs-pair-hint"));
@@ -830,7 +830,7 @@ fn pair_new(ui: &mut Ui, v: &mut View) {
 }
 
 /// Monitors kept for the next headset: not on the desktop, so not on the map.
-fn kept_monitors(ui: &mut Ui, v: &mut View, s: &State) {
+fn kept_monitors(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
     let tk = v.tk;
     let p = tk.p;
     let kept: Vec<&Display> = s
@@ -868,7 +868,7 @@ fn kept_monitors(ui: &mut Ui, v: &mut View, s: &State) {
     });
 }
 
-fn outcome_card(ui: &mut Ui, v: &mut View, o: &Outcome) {
+fn outcome_card(ui: &mut Ui, v: &mut View<'_, '_>, o: &Outcome) {
     let tk = v.tk;
     let p = tk.p;
     w::card(ui, tk, |ui| {
@@ -894,7 +894,7 @@ fn outcome_card(ui: &mut Ui, v: &mut View, o: &Outcome) {
     });
 }
 
-fn headsets(ui: &mut Ui, v: &mut View, s: &State) {
+fn headsets(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
     let tk = v.tk;
     let p = tk.p;
     header(ui, v, Page::Headsets);
@@ -1000,7 +1000,7 @@ fn headsets(ui: &mut Ui, v: &mut View, s: &State) {
 
 // ------------------------------------------------------------------------- sound
 
-fn sound(ui: &mut Ui, v: &mut View, s: &State) {
+fn sound(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
     let tk = v.tk;
     let p = tk.p;
     header(ui, v, Page::Sound);
@@ -1034,7 +1034,10 @@ fn sound(ui: &mut Ui, v: &mut View, s: &State) {
         };
         let label = tk.t("snd-volume");
         w::row(ui, tk, &label, Some(&desc), |ui| {
-            let level = v.ui.volume_drag.or(vol.map(|v| v.level)).unwrap_or(0);
+            let level =
+                v.ui.volume_drag
+                    .or_else(|| vol.map(|v| v.level))
+                    .unwrap_or(0);
             ui.allocate_ui_with_layout(
                 vec2(56.0, tk.th.shape.control_height),
                 Layout::right_to_left(Align::Center),
@@ -1071,7 +1074,7 @@ fn sound(ui: &mut Ui, v: &mut View, s: &State) {
         match connected {
             None if on => w::status(ui, tk, p.text_muted, &tk.t("snd-mic-waiting")),
             Some((_, session)) if on && session.mic_allowed == Some(false) => {
-                w::status(ui, tk, p.warning, &tk.t("snd-mic-not-allowed"))
+                w::status(ui, tk, p.warning, &tk.t("snd-mic-not-allowed"));
             }
             _ => match (on, s.sound.mic) {
                 (false, _) => w::status(ui, tk, p.text_muted, &tk.t("snd-mic-off")),
@@ -1082,7 +1085,7 @@ fn sound(ui: &mut Ui, v: &mut View, s: &State) {
                         tk,
                         p.danger,
                         &tk.f("snd-mic-failed", &[("reason", why.into())]),
-                    )
+                    );
                 }
                 (true, MicState::Ready) => w::status(ui, tk, p.ok, &tk.t("snd-mic-ready")),
                 (true, _) => w::status(ui, tk, p.text_muted, &tk.t("snd-mic-waiting")),
@@ -1096,12 +1099,12 @@ fn sound(ui: &mut Ui, v: &mut View, s: &State) {
 /// Bitrates offered, Mbit/s per monitor.
 const BITRATES: [u32; 5] = [10, 20, 30, 50, 80];
 
-fn quality(ui: &mut Ui, v: &mut View, s: &State) {
+fn quality(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
     let tk = v.tk;
     let p = tk.p;
     header(ui, v, Page::Quality);
     let e = &s.encoding;
-    let can = |v: &View, kind: &str| !v.ui.unsupported.contains(kind);
+    let can = |v: &View<'_, '_>, kind: &str| !v.ui.unsupported.contains(kind);
     w::card(ui, tk, |ui| {
         let labels: Vec<String> = BITRATES
             .iter()
@@ -1187,7 +1190,7 @@ fn quality(ui: &mut Ui, v: &mut View, s: &State) {
 
 // ------------------------------------------------------------------------- look
 
-fn look(ui: &mut Ui, v: &mut View) {
+fn look(ui: &mut Ui, v: &mut View<'_, '_>) {
     let tk = v.tk;
     let p = tk.p;
     header(ui, v, Page::Look);
@@ -1341,11 +1344,11 @@ fn look(ui: &mut Ui, v: &mut View) {
 }
 
 /// A number written with a point, with the language's decimal separator.
-fn decimal(tk: &Tk, n: &str) -> String {
+fn decimal(tk: &Tk<'_>, n: &str) -> String {
     n.replace('.', &tk.t("decimal-separator"))
 }
 
-fn indented(ui: &mut Ui, tk: &Tk, line: String) {
+fn indented(ui: &mut Ui, tk: &Tk<'_>, line: String) {
     ui.horizontal(|ui| {
         ui.add_space(tk.th.shape.padding);
         text(ui, line, tk.small(), tk.p.text);
@@ -1356,7 +1359,7 @@ fn indented(ui: &mut Ui, tk: &Tk, line: String) {
 
 const STEPS: usize = 4;
 
-fn first_run(ui: &mut Ui, v: &mut View, s: &State) {
+fn first_run(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
     let tk = v.tk;
     let p = tk.p;
     header(ui, v, Page::FirstRun);
@@ -1417,10 +1420,10 @@ fn first_run(ui: &mut Ui, v: &mut View, s: &State) {
                 let found = s
                     .nearby
                     .first()
-                    .or(s.pairing.as_ref().and_then(|p| p.code_for.as_ref()));
+                    .or_else(|| s.pairing.as_ref().and_then(|p| p.code_for.as_ref()));
                 match found {
                     Some(name) => {
-                        w::status(ui, tk, p.ok, &tk.f("fr-2-found", &[("name", name.into())]))
+                        w::status(ui, tk, p.ok, &tk.f("fr-2-found", &[("name", name.into())]));
                     }
                     None if v.ui.unsupported.contains("pair_new_headset") => {
                         w::status(ui, tk, p.text_muted, &tk.t("fr-2-asks"));

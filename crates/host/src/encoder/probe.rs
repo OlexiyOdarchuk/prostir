@@ -17,6 +17,7 @@
 //! 621): see [`Catalog::did_not_open`].
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
@@ -421,36 +422,40 @@ impl Catalog {
                 .iter()
                 .map(|c| format!("{} {}x{}", codec_name(c.codec), c.max_w, c.max_h))
                 .collect();
-            out.push_str(&format!(
-                "encoder {} {} {}\n",
+            let _ = writeln!(
+                out,
+                "encoder {} {} {}",
                 e.backend.name(),
                 adapter_text(e.adapter),
                 codecs.join(" ")
-            ));
+            );
             if let Some(n) = e.sessions {
-                out.push_str(&format!(
-                    "sessions {} {} {n}\n",
+                let _ = writeln!(
+                    out,
+                    "sessions {} {} {n}",
                     e.backend.name(),
                     adapter_text(e.adapter)
-                ));
+                );
             }
         }
         for (backend, codec, why) in &self.missing {
-            out.push_str(&format!(
-                "missing {} {} {}\n",
+            let _ = writeln!(
+                out,
+                "missing {} {} {}",
                 backend.name(),
                 codec_name(*codec),
                 line(why)
-            ));
+            );
         }
         for (backend, adapter, codec, why) in &self.retry {
-            out.push_str(&format!(
-                "retry {} {} {} {}\n",
+            let _ = writeln!(
+                out,
+                "retry {} {} {} {}",
                 backend.name(),
                 adapter_text(*adapter),
                 codec_name(*codec),
                 line(why)
-            ));
+            );
         }
         out
     }

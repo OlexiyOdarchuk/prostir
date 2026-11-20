@@ -181,7 +181,7 @@ fn filter_usb_devices(socket: &OwnedFd) -> std::io::Result<()> {
             libc::SOL_SOCKET,
             libc::SO_ATTACH_FILTER,
             (&raw const prog).cast(),
-            std::mem::size_of::<libc::sock_fprog>() as libc::socklen_t,
+            size_of::<libc::sock_fprog>() as libc::socklen_t,
         ) != 0
     };
     if failed {
@@ -219,7 +219,7 @@ fn follow_usb(notes: Sender<Note>) -> std::io::Result<()> {
         libc::bind(
             socket.as_raw_fd(),
             (&raw const addr).cast(),
-            std::mem::size_of::<libc::sockaddr_nl>() as libc::socklen_t,
+            size_of::<libc::sockaddr_nl>() as libc::socklen_t,
         )
     };
     if bound != 0 {
@@ -607,7 +607,7 @@ mod tests {
         );
         // A cut-off list ends the reading.
         let mut n = 0;
-        read_lists("0010R3Q".as_bytes(), |_| {
+        read_lists(&b"0010R3Q"[..], |_| {
             n += 1;
             true
         });

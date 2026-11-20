@@ -662,7 +662,7 @@ fn accept_within(
 
 /// The code for this attempt: typed on the PC (the headset shows it), or generated
 /// here and shown in the tray and a notification (the headset asks for it).
-fn obtain_code(headset_shows: bool, name: &str, tray: &TrayCode) -> Result<String, NoCode> {
+fn obtain_code(headset_shows: bool, name: &str, tray: &TrayCode<'_>) -> Result<String, NoCode> {
     if headset_shows {
         if !WINDOW_TYPES.load(Ordering::Acquire) {
             return ask_code();
@@ -802,13 +802,12 @@ fn incompatible(link: &mut Link, update: Update, headset_app: &str) -> Result<bo
     handshake::send_from_pc(&mut *link.sender, &error)?;
     let answer = HostMsg::Incompatible {
         protocol: PROTOCOL_VERSION,
-        app: ours.clone(),
+        app: ours,
     };
     handshake::send_from_pc(&mut *link.sender, &answer)?;
     // Once per headset version, and at most once in ten minutes whatever versions a
     // peer claims: not on every reconnection attempt.
-    static TOLD: std::sync::Mutex<(Vec<String>, Option<Instant>)> =
-        std::sync::Mutex::new((Vec::new(), None));
+    static TOLD: Mutex<(Vec<String>, Option<Instant>)> = Mutex::new((Vec::new(), None));
     let mut told = TOLD.lock().unwrap();
     let quiet = told
         .1
@@ -1056,7 +1055,7 @@ mod tests {
 
     /// Runs `headset` against a PC that accepts one connection; what each side got.
     fn connect<T: Send + 'static>(
-        pc: &mut TestPc,
+        pc: &TestPc,
         headset: impl FnOnce(&mut Headset) -> T + Send + 'static,
     ) -> (Result<()>, T) {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1103,8 +1102,8 @@ mod tests {
     /// A headset from another protocol version learns which side to update.
     #[test]
     fn other_protocol_is_told_to_update() {
-        let mut pc = TestPc::new("ver");
-        let (refused, answer) = connect(&mut pc, |h| h.hello(PROTOCOL_VERSION + 1));
+        let pc = TestPc::new("ver");
+        let (refused, answer) = connect(&pc, |h| h.hello(PROTOCOL_VERSION + 1));
         assert!(refused.is_err(), "the session must not start");
         assert_eq!(
             answer,
@@ -1114,7 +1113,7 @@ mod tests {
             }
         );
         // Older headsets show the text before it; it names the side to update.
-        let (_, msgs) = connect(&mut pc, |h| {
+        let (_, msgs) = connect(&pc, |h| {
             h.write_as_v1(&{
                 let mut hello = Vec::new();
                 ClientMsg::Hello {
@@ -1141,8 +1140,8 @@ mod tests {
         let Some(ours) = prostir_proto::PROTO_REVISION else {
             return;
         };
-        let mut pc = TestPc::new("rev");
-        let (refused, answer) = connect(&mut pc, move |h| {
+        let pc = TestPc::new("rev");
+        let (refused, answer) = connect(&pc, move |h| {
             let hello = ClientMsg::Hello {
                 version: PROTOCOL_VERSION,
                 min: PROTOCOL_VERSION,
@@ -1168,8 +1167,8 @@ mod tests {
     /// A 0.1 headset says hello in protocol 1 and is told to update, in bytes it reads.
     #[test]
     fn a_protocol_1_hello_is_told_to_update() {
-        let mut pc = TestPc::new("v1");
-        let (refused, msgs) = connect(&mut pc, |h| {
+        let pc = TestPc::new("v1");
+        let (refused, msgs) = connect(&pc, |h| {
             // Hello as 0.1.1 sends it: tag 101, length, version 1, min 1, its version.
             let mut hello = vec![101, 13, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0];
             hello.extend_from_slice(b"0.1.1");
@@ -1184,8 +1183,8 @@ mod tests {
     /// it is told to update instead of pairing in a protocol it does not speak.
     #[test]
     fn a_protocol_1_pairing_request_is_told_to_update() {
-        let mut pc = TestPc::new("v1pair");
-        let (refused, msgs) = connect(&mut pc, |h| {
+        let pc = TestPc::new("v1pair");
+        let (refused, msgs) = connect(&pc, |h| {
             // PairBegin as 0.1.1 sends it: the headset shows the code, then its name;
             // right after it, its 33-byte SPAKE2 message, which the PC never reads.
             let mut begin = vec![109, 11, 0, 0, 0, 1];
@@ -1208,7 +1207,9 @@ mod tests {
     /// trusted headset connecting does not hide the code another is pairing with.
     #[test]
     fn only_the_connection_that_showed_the_code_hides_it() {
-        let _tray = TRAY_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let _tray = TRAY_TESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let pairing = TrayCode::new(None);
         pairing.show("123 456".into());
         drop(TrayCode::new(None));
@@ -1293,7 +1294,7 @@ mod tests {
     /// `Open` ends the connection, and nothing starts.
     #[test]
     fn nothing_before_open() {
-        let mut pc = TestPc::new("early");
+        let pc = TestPc::new("early");
         // The headset's key, made before it connects, so the PC can trust it.
         let name = pc
             .dir
@@ -1310,7 +1311,7 @@ mod tests {
             .unwrap()
             .add(key, "test headset")
             .unwrap();
-        let (refused, after) = connect(&mut pc, |h| {
+        let (refused, after) = connect(&pc, |h| {
             assert!(matches!(h.hello(PROTOCOL_VERSION), Answer::Welcome { .. }));
             h.send(ClientMsg::request(
                 prostir_proto::state::ReqId(1),
@@ -1322,7 +1323,7 @@ mod tests {
         assert!(err.contains("before the session"), "{err}");
         assert_eq!(
             after,
-            Err(std::io::ErrorKind::UnexpectedEof),
+            Err(io::ErrorKind::UnexpectedEof),
             "closed, no snapshot"
         );
     }
@@ -1331,9 +1332,11 @@ mod tests {
     /// user types it in the headset, and the headset is trusted afterwards.
     #[test]
     fn code_shown_on_the_pc_pairs() {
-        let _tray = TRAY_TESTS.lock().unwrap_or_else(|e| e.into_inner());
-        let mut pc = TestPc::new("pcc");
-        let (accepted, (ok, opened)) = connect(&mut pc, |h| {
+        let _tray = TRAY_TESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let pc = TestPc::new("pcc");
+        let (accepted, (ok, opened)) = connect(&pc, |h| {
             assert!(matches!(h.hello(PROTOCOL_VERSION), Answer::Welcome { .. }));
             h.send(ClientMsg::Open { parts: Vec::new() });
             assert_eq!(h.recv().unwrap(), HostMsg::PairingRequired);

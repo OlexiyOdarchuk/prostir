@@ -79,7 +79,7 @@ pub fn handle(
     request: Request,
     displays: &mut Displays,
     store: &mut Store,
-    asker: &Asker,
+    asker: &Asker<'_>,
 ) -> Answer {
     handle_checked(request, displays, store, asker)
         .unwrap_or_else(|e| Answer::Now(errors::outcome(&e)))
@@ -91,7 +91,7 @@ pub fn handle_checked(
     request: Request,
     displays: &mut Displays,
     store: &mut Store,
-    asker: &Asker,
+    asker: &Asker<'_>,
 ) -> Result<Answer> {
     if !asker.access.may(needs(&request)) {
         info!("the headset has no right to {request:?}");
@@ -104,7 +104,7 @@ fn carry_out(
     request: Request,
     displays: &mut Displays,
     store: &mut Store,
-    asker: &Asker,
+    asker: &Asker<'_>,
 ) -> Result<Answer> {
     let limits = asker.limits;
     Ok(Answer::Now(match request {
@@ -330,7 +330,11 @@ mod tests {
     use prostir_proto::state::ErrorCode;
 
     fn limits() -> Limits {
-        crate::publish::limits(&Default::default(), &HeadsetCaps::default(), Codec::H264)
+        crate::publish::limits(
+            prostir_proto::state::Prefs::default(),
+            &HeadsetCaps::default(),
+            Codec::H264,
+        )
     }
 
     /// Only sizes within the PC's limits and only its scales.

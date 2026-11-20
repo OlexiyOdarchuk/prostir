@@ -226,7 +226,7 @@ impl Codec {
 wire_enum! {
     message
     /// From the PC to the headset.
-    #[derive(Debug, Clone, PartialEq)]
+    #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum HostMsg {
         /// The versions fit: the answer to [`ClientMsg::Hello`]. Frozen (see the crate
         /// root).
@@ -358,7 +358,7 @@ wire_enum! {
 wire_enum! {
     message
     /// From the headset to the PC.
-    #[derive(Debug, Clone, PartialEq)]
+    #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum ClientMsg {
         /// The first message of every connection. Frozen (see the crate root).
         101 => Hello {
@@ -494,7 +494,7 @@ fn host_head(tag: u8) -> usize {
 
 /// [`ClientMsg::Up`] keeps its stream's number apart from its data.
 fn client_head(tag: u8) -> usize {
-    if tag == tag::UP { 1 } else { 0 }
+    usize::from(tag == tag::UP)
 }
 
 /// A message this side cannot send: a field over its limit, or too large as a whole.

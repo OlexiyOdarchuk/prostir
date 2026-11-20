@@ -263,10 +263,10 @@ impl MicIn {
 
     /// Plays a slice of the headset's microphone into the PC microphone, if an app
     /// records; dropped otherwise.
-    pub fn push(&self, pcm: Vec<u8>) {
+    pub fn push(&self, pcm: &[u8]) {
         let mut feed = self.feed.lock().unwrap();
         if let Some(f) = feed.as_mut()
-            && !f.write(&pcm)
+            && !f.write(pcm)
         {
             warn!("headset microphone: pacat stopped");
             *feed = None;
@@ -532,7 +532,7 @@ mod mic_harness {
     /// An app recording from `device` (`parecord`, 10 ms fragments): what arrives
     /// and when.
     struct Reader {
-        child: std::process::Child,
+        child: Child,
         got: Arc<Mutex<Recorded>>,
     }
 
@@ -549,7 +549,7 @@ mod mic_harness {
                     "--channels=1",
                     "--latency-msec=10",
                 ])
-                .stdout(std::process::Stdio::piped())
+                .stdout(Stdio::piped())
                 .spawn()
                 .unwrap();
             let mut out = child.stdout.take().unwrap();
@@ -600,7 +600,7 @@ mod mic_harness {
                     std::thread::sleep(wait);
                 }
                 self.pushed.push(Instant::now());
-                mic.push(block(self.next));
+                mic.push(&block(self.next));
                 self.next += 1;
             }
         }
@@ -705,7 +705,7 @@ mod mic_harness {
     /// system's event would come (see `sound_harness` for those). Run by hand:
     /// `cargo test -p prostir-host -- --ignored mic_harness --nocapture`.
     #[test]
-    #[ignore]
+    #[ignore = "by hand: records through the real sound system"]
     fn mic_harness() {
         let _ = env_logger::try_init();
         // Fixed names, as in `sound_harness`.
@@ -809,7 +809,7 @@ mod mic_harness {
         let burst = hs.next;
         for _ in 0..100 {
             hs.pushed.push(Instant::now() - Duration::from_secs(1));
-            mic.push(block(hs.next));
+            mic.push(&block(hs.next));
             hs.next += 1;
         }
         let from = hs.next;
@@ -937,7 +937,7 @@ mod sound_harness {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "by hand: plays through the real sound system"]
     fn sound_harness() {
         let _ = env_logger::try_init();
         // Fixed names: WirePlumber keeps the volume of the microphone programs record

@@ -911,7 +911,7 @@ fn place_piece<K: Copy + Ord, V: View<K>>(
     }
 
     let a0 = adjacent.iter().map(|s| s.x).min().unwrap_or(0);
-    let a1 = adjacent.iter().map(|s| s.right()).max().unwrap_or(0);
+    let a1 = adjacent.iter().map(Spot::right).max().unwrap_or(0);
     let k = REACH.min(width).min(a1 - a0).max(1);
     let (lo, hi) = (a0 + k - width, (a1 - k).max(a0 + k - width));
     let seen_x = mean(&votes);
@@ -1147,7 +1147,7 @@ fn place_piece<K: Copy + Ord, V: View<K>>(
                                 }
                             }
                             Dir::Down => {
-                                if let Some(bottom) = under.map(|p| p.bottom()).max() {
+                                if let Some(bottom) = under.map(Spot::bottom).max() {
                                     s.y = s.y.max(bottom);
                                 }
                             }
@@ -1218,7 +1218,7 @@ fn settle<K: Copy>(
             let under = placed.iter().filter(|p| l < p.right() && p.x < r);
             match dir {
                 Dir::Up => under.map(|p| p.y).min().map(|top| top - piece[i].size.h),
-                Dir::Down => under.map(|p| p.bottom()).max(),
+                Dir::Down => under.map(Spot::bottom).max(),
             }
         })
         .collect();

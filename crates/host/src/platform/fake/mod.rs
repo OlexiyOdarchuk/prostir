@@ -332,7 +332,7 @@ pub mod audio {
             tv_nsec: 0,
         };
         // SAFETY: clock_gettime writes into the timespec it is given.
-        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &raw mut ts) };
         ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
     }
 
@@ -394,7 +394,9 @@ pub mod audio {
     });
 
     fn system() -> std::sync::MutexGuard<'static, System> {
-        SYSTEM.lock().unwrap_or_else(|e| e.into_inner())
+        SYSTEM
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     impl System {
@@ -414,11 +416,14 @@ pub mod audio {
         /// sound system's lines for one change do. Without that, a busy machine could
         /// wake the PC between them, and it would look twice at one change.
         fn say_together(&mut self, changes: &[(&str, &str, u32)]) {
+            use std::fmt::Write as _;
             use std::io::Write;
-            let text: String = changes
+            let text = changes
                 .iter()
-                .map(|(what, on, index)| format!("Event '{what}' on {on} #{index}\n"))
-                .collect();
+                .fold(String::new(), |mut text, (what, on, index)| {
+                    let _ = writeln!(text, "Event '{what}' on {on} #{index}");
+                    text
+                });
             if let Some((_, lines)) = self.events.as_mut()
                 && let Err(e) = lines.write_all(text.as_bytes())
                 && e.kind() != std::io::ErrorKind::WouldBlock
@@ -479,7 +484,7 @@ pub mod audio {
             })
         }
 
-        pub fn push(&self, pcm: Vec<u8>) {
+        pub fn push(&self, pcm: &[u8]) {
             let before = self.got.fetch_add(pcm.len(), Ordering::Relaxed);
             // About once a second of mono sound.
             if before / 96_000 != (before + pcm.len()) / 96_000 {
@@ -756,6 +761,10 @@ pub mod tray {
     }
 
     /// What the tray would show, in the log for the tests.
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "the same signature as the real tray's, which keeps the status"
+    )]
     pub fn set_status(_handle: Option<&Handle>, status: TrayStatus) {
         log::info!(
             "fake tray: {} other headset(s), microphone denied: {}, encoding: {}, desktop: {}",

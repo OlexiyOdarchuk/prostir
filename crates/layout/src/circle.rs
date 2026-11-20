@@ -299,7 +299,7 @@ pub fn arrange<K: Copy + Ord>(
             let lay = |items: &[Item<K>],
                        row_y: &dyn Fn(usize) -> f32,
                        out: &mut BTreeMap<K, Placement>| {
-                arc_row(items, row_y, radius, limits.gap, out)
+                arc_row(items, row_y, radius, limits.gap, out);
             };
             stack_rows(&sorted, &rows, primary, y, lay, &mut out);
             radius
@@ -309,7 +309,7 @@ pub fn arrange<K: Copy + Ord>(
             let lay = |items: &[Item<K>],
                        row_y: &dyn Fn(usize) -> f32,
                        out: &mut BTreeMap<K, Placement>| {
-                wall_row(items, row_y, distance, out)
+                wall_row(items, row_y, distance, out);
             };
             stack_rows(&sorted, &rows, primary, -EYE_DROP, lay, &mut out);
             distance
@@ -445,7 +445,7 @@ fn stack_rows<K: Copy + Ord>(
     }
     let main = primary
         .and_then(|p| sorted.iter().position(|m| m.0 == p))
-        .unwrap_or(sorted.len().saturating_sub(1) / 2);
+        .unwrap_or_else(|| sorted.len().saturating_sub(1) / 2);
     let main_row = rows.iter().position(|r| r.contains(&main)).unwrap_or(0);
     // The main row: tops lined up with the primary's (the tallest's without one in it).
     let items = &sorted[rows[main_row].clone()];

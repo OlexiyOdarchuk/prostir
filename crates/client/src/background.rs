@@ -97,7 +97,7 @@ fn direction(u: f32, elev: f32) -> [f32; 3] {
 fn render(shade: impl Fn(f32, f32) -> [f32; 3] + Sync) -> Vec<u8> {
     let (w, h) = (WIDTH as usize, HEIGHT as usize);
     let mut out = vec![0u8; w * h * 4];
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let threads = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
     let rows_per = h.div_ceil(threads);
     std::thread::scope(|scope| {
         for (chunk_index, chunk) in out.chunks_mut(rows_per * w * 4).enumerate() {

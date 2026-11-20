@@ -42,3 +42,6 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 
 [dev-dependencies]
 tiny-skia = { version = "0.12", features = ["png-format"] }
+
+[lints]
+workspace = true

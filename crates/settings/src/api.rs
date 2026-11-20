@@ -13,7 +13,7 @@ pub use prostir_api::{
 
 /// A state and its number: a newer state has a larger revision (counted from 1 each
 /// time the service starts).
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Snapshot {
     pub revision: u32,
     pub state: Box<State>,
@@ -104,7 +104,7 @@ impl std::fmt::Display for ClientError {
 }
 
 /// A change the service tells about without being asked.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Change {
     /// A new state (`StateChanged`).
     State(Snapshot),

@@ -10,7 +10,7 @@ use crate::settings::Preset;
 use crate::ui::Action;
 
 /// What a command comes to.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Does {
     /// What the menu does for it; answered once done.
     Act(Action),

@@ -4,7 +4,7 @@
 
 use prostir::i18n::Lang;
 use prostir::settings::Settings;
-use prostir::ui::{MonitorEntry, OfferWhy, PairingView, Panel, Section, Tab, UiState};
+use prostir::ui::{MonitorEntry, OfferWhy, PairingView, Panel, Place, Section, Tab, UiState};
 
 fn questmon_pairing(mode: &str) -> PairingView {
     PairingView {
@@ -46,7 +46,7 @@ fn main() {
                 label: "5".into(),
                 width: 1200,
                 height: 800,
-                place: Default::default(),
+                place: Place::default(),
                 seen: None,
             }]
         } else {
@@ -111,7 +111,7 @@ fn main() {
                 label: "1".into(),
                 width: 2560,
                 height: 1440,
-                place: Default::default(),
+                place: Place::default(),
                 seen: Some([-1.0, 0.0, 0.5, 0.28]),
             },
             MonitorEntry {
@@ -119,7 +119,7 @@ fn main() {
                 label: "2".into(),
                 width: 2560,
                 height: 1440,
-                place: Default::default(),
+                place: Place::default(),
                 seen: Some([0.0, 0.0, 0.5, 0.28]),
             },
             MonitorEntry {
@@ -127,7 +127,7 @@ fn main() {
                 label: "3".into(),
                 width: 1440,
                 height: 2560,
-                place: Default::default(),
+                place: Place::default(),
                 seen: Some([0.78, 0.12, 0.28, 0.5]),
             },
         ],

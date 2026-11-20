@@ -311,7 +311,7 @@ impl Encoder {
         // Nothing encoded yet: an error of the encoder now means it did not open.
         let encoded = Arc::new(AtomicBool::new(false));
         let resumed = Arc::new(AtomicBool::new(false));
-        let last_size = std::sync::Mutex::new((0u32, 0u32));
+        let last_size = Mutex::new((0u32, 0u32));
         let probe = Arc::new(Mutex::new(Probe::default()));
         // Frames enter the encoder in order and (no B-frames) leave in order, so a FIFO
         // of arrival times pairs them up despite the encoder rewriting timestamps.
@@ -356,7 +356,7 @@ impl Encoder {
                         let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
                         let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
                         let keyframe = !buffer.flags().contains(gst::BufferFlags::DELTA_UNIT);
-                        let pts_us = buffer.pts().map(|t| t.useconds()).unwrap_or(0);
+                        let pts_us = buffer.pts().map_or(0, gst::ClockTime::useconds);
                         probe.lock().unwrap().left(&node);
                         if on_event(EncoderEvent::Frame {
                             pts_us,
@@ -377,7 +377,6 @@ impl Encoder {
             .ok_or_else(|| anyhow!("pipeline without bus"))?;
         let bus_thread = {
             let stop = stop.clone();
-            let on_event = on_event.clone();
             let encoded = encoded.clone();
             let resumed = resumed.clone();
             std::thread::Builder::new()
@@ -414,7 +413,7 @@ impl Encoder {
                                 break;
                             }
                             gst::MessageView::Warning(w) => {
-                                warn!("encoder for {node}: {}", w.error())
+                                warn!("encoder for {node}: {}", w.error());
                             }
                             gst::MessageView::Eos(_) => {
                                 on_event(EncoderEvent::Failed("stream ended".into()));
@@ -739,7 +738,7 @@ mod live {
     /// A keyframe from the graphics card's encoder becomes a PNG (run by hand:
     /// `cargo test -- --ignored keyframe`; needs the VA plugin and a GPU).
     #[test]
-    #[ignore]
+    #[ignore = "by hand: needs the VA plugin and a graphics card"]
     fn keyframe_becomes_png() {
         use gstreamer as gst;
         use gstreamer::prelude::*;
@@ -779,7 +778,7 @@ mod live {
     /// through the same pipeline a stream uses. The time is from the frame entering the
     /// converter to its access unit leaving the parser.
     #[test]
-    #[ignore]
+    #[ignore = "by hand: a measurement on a graphics card"]
     fn va_display_sharing() {
         use std::collections::VecDeque;
         use std::sync::{Arc, Mutex};
@@ -878,7 +877,7 @@ mod live {
                                 use std::os::fd::FromRawFd;
                                 let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
                                 if src.caps().is_none() {
-                                    src.set_caps(sample.caps().map(|c| c.to_owned()).as_ref());
+                                    src.set_caps(sample.caps().map(ToOwned::to_owned).as_ref());
                                 }
                                 let buffer = sample.buffer().unwrap();
                                 let memory = buffer.peek_memory(0);
@@ -941,7 +940,8 @@ mod live {
                         gst_app::AppSinkCallbacks::builder()
                             .new_sample(move |sink| {
                                 let _ = sink.pull_sample();
-                                if let Some(t0) = inside.lock().unwrap().pop_front() {
+                                let t0 = inside.lock().unwrap().pop_front();
+                                if let Some(t0) = t0 {
                                     times.lock().unwrap().push(t0.elapsed().as_secs_f64() * 1e3);
                                 }
                                 Ok(gst::FlowSuccess::Ok)

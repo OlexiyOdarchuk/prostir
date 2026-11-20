@@ -158,7 +158,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
         state: &mut Self,
         _: &ZwlrScreencopyFrameV1,
         event: zwlr_screencopy_frame_v1::Event,
-        _: &(),
+        (): &(),
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
@@ -192,7 +192,7 @@ impl Dispatch<ZwpLinuxBufferParamsV1, ()> for State {
         _: &mut Self,
         _: &ZwpLinuxBufferParamsV1,
         event: zwp_linux_buffer_params_v1::Event,
-        _: &(),
+        (): &(),
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
@@ -224,7 +224,7 @@ fn wait(
             revents: 0,
         };
         // SAFETY: one valid pollfd for the duration of the call.
-        let n = unsafe { libc::poll(&mut pfd, 1, timeout.as_millis() as i32) };
+        let n = unsafe { libc::poll(&raw mut pfd, 1, timeout.as_millis() as i32) };
         if n > 0 {
             match guard.read() {
                 Ok(_) => {}
@@ -335,7 +335,7 @@ fn render_node() -> Result<File> {
         Ok(p) => p,
         Err(_) => {
             let mut nodes: Vec<_> = std::fs::read_dir("/dev/dri")?
-                .filter_map(|e| e.ok())
+                .filter_map(std::result::Result::ok)
                 .map(|e| e.path())
                 .filter(|p| {
                     p.file_name()
@@ -407,11 +407,13 @@ impl Drop for Pool {
                 slots,
                 map,
                 len,
-                _pool,
+                _pool: pool,
                 ..
             } => {
-                slots.iter().for_each(|s| s.buffer.destroy());
-                _pool.destroy();
+                for s in slots {
+                    s.buffer.destroy();
+                }
+                pool.destroy();
                 // SAFETY: `map` came from mmap with this length and is not used after.
                 unsafe { libc::munmap(map.cast(), *len) };
             }
@@ -427,7 +429,7 @@ struct Wayland<'a> {
 
 impl Pool {
     fn dmabuf(
-        wl: &Wayland,
+        wl: &Wayland<'_>,
         gpu: &gbm::Device<File>,
         va: &[(String, u64)],
         format: u32,
@@ -519,7 +521,7 @@ impl Pool {
     }
 
     fn shm(
-        wl: &Wayland,
+        wl: &Wayland<'_>,
         format: wl_shm::Format,
         width: u32,
         height: u32,
@@ -731,7 +733,7 @@ fn run(
                 (Some(gpu), Some((format, w, h))) if !dmabuf_broken => {
                     Pool::dmabuf(&wl, gpu, &va, format, w, h)
                         .inspect_err(|e| {
-                            warn!("{name}: GPU buffers unusable, using shared memory: {e:#}")
+                            warn!("{name}: GPU buffers unusable, using shared memory: {e:#}");
                         })
                         .ok()
                 }

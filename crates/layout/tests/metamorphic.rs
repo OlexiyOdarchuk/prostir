@@ -338,7 +338,7 @@ fn a_quarter_up_moves_only_that_monitor() {
                 .filter(|t| !rows.iter().any(|r| r.contains(&t.a) && r.contains(&t.b)))
                 .map(|t| (t.a.min(t.b), t.a.max(t.b)))
                 .collect();
-            t.sort();
+            t.sort_unstable();
             t
         };
         if across(&moved) != across(&scene) {
@@ -458,7 +458,7 @@ fn lining_up_counts(jitter: Option<(f32, u64)>) -> usize {
             for m in &mut scene.monitors {
                 let mut v = || r.float(-by, by);
                 m.placement.position += Vec3::new(v(), v(), v());
-                let turn = glam::Quat::from_euler(glam::EulerRot::YXZ, v(), v(), v());
+                let turn = Quat::from_euler(glam::EulerRot::YXZ, v(), v(), v());
                 m.placement.rotation = (turn * m.placement.rotation).normalize();
             }
         }

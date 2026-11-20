@@ -27,13 +27,7 @@ fn two_headsets(name: &str, options: Options, settings: &str) -> (TestDir, Pc, K
     let first = dir.pair();
     let second = dir.pair_headset("second-headset");
     dir.pair_headset("third-headset");
-    let hex = |keys: &Keys| -> String {
-        keys.identity
-            .public
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
-    };
+    let hex = |keys: &Keys| prostir_proto::secure::to_hex(&keys.identity.public);
     let settings = settings
         .replace("{first}", &hex(&first))
         .replace("{second}", &hex(&second));
@@ -147,7 +141,7 @@ fn one_headset_taken_off_does_not_pause_the_other() {
     first.send(&worn(true)).unwrap();
     first
         .wait(SOON, "pictures after putting it on", |v| {
-            v.streams.len() == 2 && v.streams.values().all(|s| s.has_picture())
+            v.streams.len() == 2 && v.streams.values().all(prostir_testkit::Stream::has_picture)
         })
         .unwrap();
     // Both off: now the PC pauses.
@@ -159,7 +153,7 @@ fn one_headset_taken_off_does_not_pause_the_other() {
     second.reset_counts();
     second
         .wait(SOON, "pictures after putting it on", |v| {
-            v.streams.len() == 2 && v.streams.values().all(|s| s.has_picture())
+            v.streams.len() == 2 && v.streams.values().all(prostir_testkit::Stream::has_picture)
         })
         .unwrap();
     // The first one off for good: its session ends, the other's goes on.
@@ -316,7 +310,9 @@ fn a_headset_that_decodes_less_fails_only_for_itself() {
     let narrow = second.view().order()[1];
     second
         .wait(SOON, "the narrow monitor showing", |v| {
-            v.streams.get(&narrow).is_some_and(|s| s.has_picture())
+            v.streams
+                .get(&narrow)
+                .is_some_and(prostir_testkit::Stream::has_picture)
         })
         .unwrap();
     assert!(too_big(second.view()), "{:?}", second.view().displays());
@@ -382,7 +378,9 @@ fn a_headset_that_takes_fewer_streams_fails_only_for_itself() {
     };
     second
         .wait(SOON, "the first monitor showing", |v| {
-            v.streams.get(&one).is_some_and(|s| s.has_picture())
+            v.streams
+                .get(&one)
+                .is_some_and(prostir_testkit::Stream::has_picture)
         })
         .unwrap();
     assert!(limited(second.view()), "{:?}", second.view().displays());
@@ -397,7 +395,10 @@ fn a_headset_that_takes_fewer_streams_fails_only_for_itself() {
     );
     second
         .wait(SOON, "the second monitor showing", |v| {
-            !limited(v) && v.streams.get(&two).is_some_and(|s| s.has_picture())
+            !limited(v)
+                && v.streams
+                    .get(&two)
+                    .is_some_and(prostir_testkit::Stream::has_picture)
         })
         .unwrap();
     assert!(
@@ -595,7 +596,7 @@ fn a_headset_coming_starts_no_stream_over_for_the_other() {
     second.send(&worn(true)).unwrap();
     second
         .wait(SOON, "pictures after putting it on", |v| {
-            v.streams.len() == 2 && v.streams.values().all(|s| s.has_picture())
+            v.streams.len() == 2 && v.streams.values().all(prostir_testkit::Stream::has_picture)
         })
         .unwrap();
     first.take_for(Duration::from_millis(500)).unwrap();
@@ -676,7 +677,9 @@ fn a_monitor_too_big_for_a_headset_is_never_running_for_it() {
     );
     first
         .wait(SOON, "the new monitor showing", |v| {
-            v.streams.get(&id).is_some_and(|s| s.has_picture())
+            v.streams
+                .get(&id)
+                .is_some_and(prostir_testkit::Stream::has_picture)
         })
         .unwrap();
 }

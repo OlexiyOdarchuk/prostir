@@ -166,8 +166,8 @@ fn the_six_monitors_make_two_rows_and_a_whole_desktop() {
     let c = continuity(&scene, &plan, desk::TOUCH_GAP, 0.25);
     assert!(c.lost.is_empty(), "{:?}", c.lost);
     assert!(c.side_ratio <= 1.0);
-    let width = plan.iter().map(|s| s.right()).max().unwrap();
-    let height = plan.iter().map(|s| s.bottom()).max().unwrap();
+    let width = plan.iter().map(desk::Spot::right).max().unwrap();
+    let height = plan.iter().map(desk::Spot::bottom).max().unwrap();
     assert!(width <= 3440 * 2 + 2560 + 3440, "{width}");
     assert!(height <= 2560 + 1440 + 1080, "{height}");
 }
@@ -220,8 +220,8 @@ fn the_saved_six_rows_make_a_whole_desktop() {
     rows_in_order(&plan, &desk_in.rows).unwrap();
     let pieces = desk::pieces_of(&desk_in, size, &boxes);
     rows_side_by_side(&plan, &pieces).unwrap();
-    let width = plan.iter().map(|s| s.right()).max().unwrap();
-    let height = plan.iter().map(|s| s.bottom()).max().unwrap();
+    let width = plan.iter().map(desk::Spot::right).max().unwrap();
+    let height = plan.iter().map(desk::Spot::bottom).max().unwrap();
     assert!(width <= 10_000 + 3440, "{width}: {}", describe_plan(&plan));
     assert!(
         height <= 1440 + 2560 + 1440 + 1080,
@@ -283,7 +283,7 @@ fn the_staircase_of_22_04_becomes_rows() {
     let (s4, s5) = (spot(&plan, 4).unwrap(), spot(&plan, 5).unwrap());
     assert_eq!(
         s4.crossing(&s5),
-        Some(prostir_layout::space::Side::Right),
+        Some(Side::Right),
         "{}",
         describe_plan(&plan)
     );
@@ -322,7 +322,7 @@ fn a_row_left_a_little_crooked_by_hand_is_one_line() {
     let mut scene = Scene {
         monitors: monitors
             .iter()
-            .chain([lid].iter())
+            .chain(std::iter::once(&lid))
             .map(|&(id, px)| Monitor {
                 id,
                 px,

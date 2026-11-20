@@ -23,6 +23,8 @@
 //! wider than its H.264 takes (4096) down, as it always did, which is better than x264
 //! at that size.
 
+use std::fmt::Write as _;
+
 use prostir_proto::Codec;
 
 use crate::i18n::t;
@@ -356,19 +358,21 @@ pub fn note(
     }
     let mut text = chosen.to_string();
     if cpu {
-        text.push_str(&format!(
+        let _ = write!(
+            text,
             ", {}",
             t("кодування процесором", "encoding on the CPU")
-        ));
+        );
     }
     if copies {
-        text.push_str(&format!(
+        let _ = write!(
+            text,
             ", {}",
             t("кадри йдуть через процесор", "frames go through the CPU")
-        ));
+        );
     }
     if !why.is_empty() {
-        text.push_str(&format!(" ({})", why.join("; ")));
+        let _ = write!(text, " ({})", why.join("; "));
     }
     Some(text)
 }

@@ -38,7 +38,7 @@ pub fn send_from_pc(tx: &mut dyn RecordSender, msg: &HostMsg) -> io::Result<()> 
 
 /// The message written whole, then sent: a message under a record's size is one record.
 fn send_frozen(
-    w: &mut StreamWriter,
+    w: &mut StreamWriter<'_>,
     write: impl FnOnce(&mut Vec<u8>) -> io::Result<()>,
 ) -> io::Result<()> {
     let mut bytes = Vec::new();

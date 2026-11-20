@@ -66,7 +66,7 @@ struct StreamQueue {
 }
 
 /// Frames of one stream the outbox did not send, by reason.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Drops {
     /// Waited longer than [`MAX_AGE`].
     pub late: u32,

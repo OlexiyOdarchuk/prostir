@@ -121,7 +121,7 @@ impl Stream {
         // SAFETY: plain AAudio calls; the builder is deleted on every path.
         unsafe {
             let mut builder = std::ptr::null_mut();
-            check(ffi::AAudio_createStreamBuilder(&mut builder))?;
+            check(ffi::AAudio_createStreamBuilder(&raw mut builder))?;
             ffi::AAudioStreamBuilder_setDirection(builder, ffi::AAUDIO_DIRECTION_OUTPUT as i32);
             ffi::AAudioStreamBuilder_setFormat(builder, ffi::AAUDIO_FORMAT_PCM_I16);
             ffi::AAudioStreamBuilder_setChannelCount(builder, AUDIO_CHANNELS as i32);
@@ -135,7 +135,7 @@ impl Stream {
                 ffi::AAUDIO_SHARING_MODE_SHARED as i32,
             );
             let mut stream = std::ptr::null_mut();
-            let opened = ffi::AAudioStreamBuilder_openStream(builder, &mut stream);
+            let opened = ffi::AAudioStreamBuilder_openStream(builder, &raw mut stream);
             ffi::AAudioStreamBuilder_delete(builder);
             check(opened)?;
             // A few bursts of headroom absorb network jitter without much delay.

@@ -91,7 +91,7 @@ impl Place {
 
 /// Pairing with a new PC: either show `code` (the PC asks for it) or let the user
 /// type the PC's code into `typed`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PairingView {
     pub host: String,
     pub code: Option<String>,
@@ -263,7 +263,7 @@ impl Failure {
 }
 
 /// How a request of the menu stands.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AskState {
     Waiting,
     /// Why, and the PC's detail (technical, in the PC's language).
@@ -273,7 +273,7 @@ pub enum AskState {
     },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AskView {
     pub what: Asked,
     pub state: AskState,
@@ -352,7 +352,7 @@ impl Tab {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Add {
         width: u32,
@@ -1142,7 +1142,7 @@ impl Panel {
 
     /// PCs found on the network and a keypad for typing an address.
     fn build_connection(
-        &mut self,
+        &self,
         s: &UiState,
         items: &mut Vec<Item>,
         lx: f32,
@@ -1533,11 +1533,11 @@ impl Panel {
             if self.text_width(&message[..at], size, true) > room {
                 break;
             }
-            first = message[..at].to_owned();
+            message[..at].clone_into(&mut first);
             rest = message[at + 1..].trim_start();
         }
         if first.is_empty() {
-            first = message.to_owned();
+            message.clone_into(&mut first);
             rest = "";
         }
         let mut second = rest.to_owned();
@@ -2589,7 +2589,7 @@ fn tile(
     state: &str,
     on: bool,
     action: Option<Action>,
-    note: Option<(String, bool)>,
+    note: Option<&(String, bool)>,
 ) {
     let style = match (&action, on) {
         (None, _) => Style::Disabled,
@@ -2604,7 +2604,7 @@ fn tile(
     };
     items.push(text(r.left() + 26.0, r.top() + 62.0, 27.0, true, fg, title));
     // What it asked the PC for and how that stands, in place of its state.
-    let (state, color) = match &note {
+    let (state, color) = match note {
         Some((note, true)) => (note.as_str(), DANGER),
         Some((note, false)) => (note.as_str(), sub),
         None => (state, sub),
@@ -2762,7 +2762,7 @@ fn build_quick(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
             th,
         );
         let note = asked[i].and_then(|what| s.ask_note(what));
-        tile(items, r, title, &state, on, action, note);
+        tile(items, r, title, &state, on, action, note.as_ref());
     }
 }
 

@@ -92,13 +92,13 @@ impl Publisher {
             no_limits,
             ..self.prefs()
         };
-        let mut limits = limits(&prefs, self.caps(), displays.codec());
+        let mut limits = limits(prefs, self.caps(), displays.codec());
         keep_scales_of_every_size(&mut limits, |w, h| displays.scales_for(w, h));
         limits
     }
 
     /// The PC's state now, as this headset is told it.
-    pub fn state(&self, src: &Sources) -> PcState {
+    pub fn state(&self, src: &Sources<'_>) -> PcState {
         let headset = self.caps();
         let prefs = self.prefs();
         let displays = src.displays.displays_part(headset);
@@ -140,7 +140,7 @@ impl Publisher {
     }
 
     /// The `Snapshot` that opens the session: everything there is.
-    pub fn snapshot(&mut self, src: &Sources) -> Result<HostMsg, WireError> {
+    pub fn snapshot(&mut self, src: &Sources<'_>) -> Result<HostMsg, WireError> {
         let state = self.state(src);
         let msg = state.snapshot()?;
         self.sent = state;
@@ -148,7 +148,7 @@ impl Publisher {
     }
 
     /// The parts that changed since they were last sent, `Displays` first.
-    pub fn changed(&mut self, src: &Sources) -> Vec<HostMsg> {
+    pub fn changed(&mut self, src: &Sources<'_>) -> Vec<HostMsg> {
         let state = self.state(src);
         let changed = state.changed(&self.sent);
         self.sent = state;
@@ -170,7 +170,7 @@ impl Publisher {
 
 /// What the PC allows this headset: its own hard limits, more with "No limits", and
 /// sizes only as large as the headset decodes in the codec the PC sends.
-pub fn limits(prefs: &Prefs, headset: &HeadsetCaps, codec: Codec) -> Limits {
+pub fn limits(prefs: Prefs, headset: &HeadsetCaps, codec: Codec) -> Limits {
     let decoder = headset.decoder(codec);
     let fits = |(w, h): (u32, u32)| decoder.is_none_or(|d| w <= d.max_w && h <= d.max_h);
     let max = decoder.map_or(MAX_SIZE, |d| {
@@ -261,7 +261,7 @@ mod tests {
     /// takes are offered.
     #[test]
     fn scales_offered_fit_every_size() {
-        let mut l = limits(&Prefs::default(), &HeadsetCaps::default(), Codec::H264);
+        let mut l = limits(Prefs::default(), &HeadsetCaps::default(), Codec::H264);
         assert_eq!(l.scales, [100, 125, 150]);
         keep_scales_of_every_size(&mut l, |_, _| Scales::Any { min: 50, max: 400 });
         assert_eq!(l.scales, [100, 125, 150]);
@@ -297,7 +297,7 @@ mod tests {
             max_h: 4320,
         };
         let caps = headset(vec![h264, h265]);
-        let safe = limits(&Prefs::default(), &caps, Codec::H264);
+        let safe = limits(Prefs::default(), &caps, Codec::H264);
         assert_eq!((safe.virtual_max, safe.physical_max), (6, 1));
         assert_eq!(safe.streams_max, 12);
         assert_eq!(safe.max, (4096, 4096));
@@ -309,7 +309,7 @@ mod tests {
             no_limits: true,
             ..Prefs::default()
         };
-        let wide = limits(&free, &caps, Codec::H265);
+        let wide = limits(free, &caps, Codec::H265);
         assert_eq!((wide.virtual_max, wide.physical_max), (10, 4));
         assert!(wide.sizes.contains(&Mode::new(5120, 1440)));
         assert_eq!(wide.max, (7680, 4320));

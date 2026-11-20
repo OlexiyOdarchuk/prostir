@@ -22,12 +22,12 @@ pub fn lid_open() -> bool {
 
 /// A directory only this user can use: `$XDG_RUNTIME_DIR`, or `~/.cache/prostir`
 /// without it (never the shared `/tmp`, where another user could plant files).
-pub fn runtime_dir() -> std::path::PathBuf {
+pub fn runtime_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) {
         return dir.into();
     }
     let dir = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
+        .map(PathBuf::from)
         .unwrap_or_default()
         .join(".cache/prostir");
     let _ = std::fs::create_dir_all(&dir);
@@ -213,8 +213,7 @@ fn graphics_cards() -> Vec<String> {
 /// The PC's name, for the headset's list of PCs.
 pub fn hostname() -> String {
     std::fs::read_to_string("/proc/sys/kernel/hostname")
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|_| "linux".into())
+        .map_or_else(|_| "linux".into(), |s| s.trim().to_string())
 }
 
 /// IPv4 broadcast addresses of all interfaces that are up.
@@ -223,7 +222,7 @@ pub fn broadcast_addresses() -> Vec<Ipv4Addr> {
     let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
     // SAFETY: getifaddrs fills `list`, which is walked read-only and freed once.
     unsafe {
-        if libc::getifaddrs(&mut list) != 0 {
+        if libc::getifaddrs(&raw mut list) != 0 {
             return out;
         }
         let mut cur = list;

@@ -90,12 +90,15 @@ impl Keys {
     /// Keeps `secret` as the find secret of the PC whose key is `pc`.
     pub fn learn_find_secret(&mut self, pc: [u8; 32], secret: FindSecret) -> Result<()> {
         use prostir_proto::secure::{to_hex, write_atomic};
+        use std::fmt::Write as _;
         self.find_secrets.insert(pc, secret);
-        let text: String = self
+        let text = self
             .find_secrets
             .iter()
-            .map(|(k, s)| format!("{} {}\n", to_hex(k), to_hex(s)))
-            .collect();
+            .fold(String::new(), |mut text, (k, s)| {
+                let _ = writeln!(text, "{} {}", to_hex(k), to_hex(s));
+                text
+            });
         write_atomic(&self.dir.join("find_secrets"), text.as_bytes())?;
         Ok(())
     }
@@ -539,8 +542,8 @@ impl SocketOptions for SmallReceiveBuffer {
                 stream.as_raw_fd(),
                 libc::SOL_SOCKET,
                 libc::SO_RCVBUF,
-                (&size as *const libc::c_int).cast(),
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                (&raw const size).cast(),
+                size_of::<libc::c_int>() as libc::socklen_t,
             );
         }
     }
@@ -555,7 +558,7 @@ fn monotonic_ns() -> u64 {
         tv_nsec: 0,
     };
     // SAFETY: clock_gettime writes into the timespec it is given.
-    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &raw mut ts) };
     ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
 }
 
@@ -618,15 +621,14 @@ impl FakeHeadset {
             presence: Some(Presence { worn: true }),
             battery: None,
             volume: Some(HeadsetVolume::new(FIRST_VOLUME, false).now()),
-            up: [(
+            up: std::iter::once((
                 UpKind::Mic,
                 UpState {
                     kind: UpKind::Mic,
                     switch: true,
                     permission: permission::GRANTED,
                 },
-            )]
-            .into_iter()
+            ))
             .collect(),
         }
     }
@@ -714,7 +716,11 @@ impl FakeHeadset {
             read_rate,
         )?;
         spawn_pinger(writer.clone(), shared.clone())?;
-        let listed = pc.displays.iter().flat_map(|d| d.ids()).collect();
+        let listed = pc
+            .displays
+            .iter()
+            .flat_map(prostir_proto::state::Displays::ids)
+            .collect();
         Ok(Self {
             closer,
             writer,
@@ -985,7 +991,7 @@ impl Ends<'_> {
 /// Says hello, pairs if asked to and possible, and opens the session with `state`: the
 /// PC's protocol version, language and state (its snapshot, which must come first).
 fn open(
-    ends: &mut Ends,
+    ends: &mut Ends<'_>,
     keys: &mut Keys,
     peer: &PeerInfo,
     addr: SocketAddr,
@@ -1219,7 +1225,7 @@ fn spawn_pinger(
 /// Pairs with the code this headset shows (the person at the PC types it), waiting
 /// for the PC's answers as long as a person may take.
 fn pair(
-    ends: &mut Ends,
+    ends: &mut Ends<'_>,
     identity: &Identity,
     peer: &PeerInfo,
     code: &str,
@@ -1231,7 +1237,7 @@ fn pair(
 }
 
 fn exchange_codes(
-    ends: &mut Ends,
+    ends: &mut Ends<'_>,
     identity: &Identity,
     peer: &PeerInfo,
     code: &str,

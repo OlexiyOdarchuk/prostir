@@ -77,7 +77,7 @@ impl Closer {
     }
 
     pub fn close(&self) {
-        (self.0)()
+        (self.0)();
     }
 }
 

@@ -84,7 +84,7 @@ impl Brain {
     /// opens (the worker is started for it if there is none); while the desktop does not
     /// respond, it is turned away at once.
     pub(crate) fn wait_for_desk(&mut self, accepted: Accepted) {
-        if self.displays.as_ref().is_some_and(|d| d.desk_stuck()) {
+        if self.displays.as_ref().is_some_and(Displays::desk_stuck) {
             warn!("the desktop does not respond: turning the headset away");
             return turn_away(accepted.conn, desktop_not_responding());
         }
@@ -109,7 +109,7 @@ impl Brain {
             let step = r.step();
             match r.dog.look(step, now) {
                 Change::Stuck(what) => {
-                    warn!("the desktop does not respond: {what}, after the monitors were let go")
+                    warn!("the desktop does not respond: {what}, after the monitors were let go");
                 }
                 Change::GiveUp(what) => {
                     error!(
@@ -133,7 +133,7 @@ impl Brain {
                     "the desktop does not respond: {what} has taken more than {} s",
                     stuck_after.as_secs()
                 );
-                displays.router.send_all(HostMsg::Problem {
+                displays.router.send_all(&HostMsg::Problem {
                     error: ErrorCode::DESKTOP,
                     detail: clip(&desktop_not_responding(), MAX_DETAIL),
                     display: None,

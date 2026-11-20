@@ -80,7 +80,7 @@ pub enum Primary {
 }
 
 /// How the desktop is to be laid out (see `prostir_layout::desk`).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Layout {
     /// The headset's rows, every monitor once, displays of the PC where it put them.
     pub rows: Vec<Vec<desk::Entry<ScreenId>>>,
@@ -363,7 +363,6 @@ impl Desk {
         let inbox: Arc<Inbox<Wanted, Job>> = Arc::default();
         let steps = Arc::new(Steps::default());
         let gone: Gone = Arc::default();
-        let gone_here = gone.clone();
         let before = LAST.lock().unwrap().replace(gone.clone());
         static GENERATION: AtomicU64 = AtomicU64::new(0);
         let generation = GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
@@ -377,7 +376,7 @@ impl Desk {
             },
             start,
             before,
-            gone,
+            &gone,
         );
         let mut dog = Watchdog::default();
         // Connecting is work handed over.
@@ -385,7 +384,7 @@ impl Desk {
         Self {
             inbox,
             steps,
-            gone: gone_here,
+            gone,
             dog,
             sent: None,
             last_job: 0,

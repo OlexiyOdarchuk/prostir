@@ -64,6 +64,10 @@ fn wire_error(e: &io::Error) -> Option<&WireError> {
 
 /// Reading failed with exactly `expected`.
 #[track_caller]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "called with a fresh error each time"
+)]
 fn assert_wire<T: std::fmt::Debug>(read: io::Result<T>, expected: WireError) {
     let err = read.unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::InvalidData);
@@ -158,11 +162,10 @@ pub(crate) fn pc_state() -> PcState {
                 detail: "pw-loopback".into(),
             },
         }),
-        up_wanted: [state::UpWanted {
-            kind: state::UpKind::Mic,
+        up_wanted: std::iter::once(UpWanted {
+            kind: UpKind::Mic,
             on: true,
-        }]
-        .into_iter()
+        })
         .map(|u| (u.kind, u))
         .collect(),
         focus: Some(Focus {
@@ -198,20 +201,20 @@ pub(crate) fn headset_state() -> HeadsetState {
             percent: 72,
             charging: true,
         }),
-        volume: Some(state::Volume {
+        volume: Some(Volume {
             level: 40,
             muted: false,
             seq: 3,
             ask: 0,
         }),
         up: [
-            state::UpState {
-                kind: state::UpKind::Mic,
+            UpState {
+                kind: UpKind::Mic,
                 switch: true,
                 permission: state::permission::DENIED,
             },
-            state::UpState {
-                kind: state::UpKind::Camera,
+            UpState {
+                kind: UpKind::Camera,
                 switch: false,
                 permission: state::permission::UNKNOWN,
             },
@@ -271,7 +274,7 @@ pub(crate) fn host_samples() -> Vec<HostMsg> {
             pcm: vec![0, 1, 2, 3],
         },
         HostMsg::VolumeAsk {
-            asked: state::VolumeAsk {
+            asked: VolumeAsk {
                 level: 55,
                 muted: true,
                 seen: 3,
@@ -282,10 +285,10 @@ pub(crate) fn host_samples() -> Vec<HostMsg> {
             protocol: 10,
             app: "0.3.0".into(),
         },
-        HostMsg::command(ReqId(5), crate::request::Command::Recenter),
+        HostMsg::command(ReqId(5), Command::Recenter),
         HostMsg::command(
             ReqId(6),
-            crate::request::Command::Profile {
+            Command::Profile {
                 name: "Робота".into(),
             },
         ),
@@ -343,8 +346,8 @@ pub(crate) fn client_samples() -> Vec<ClientMsg> {
         },
         ClientMsg::UpStart {
             up: 0,
-            kind: state::UpKind::Mic,
-            format: state::UpFormat::Pcm16 {
+            kind: UpKind::Mic,
+            format: UpFormat::Pcm16 {
                 rate: 48_000,
                 channels: 1,
             },
@@ -631,7 +634,7 @@ fn a_request_of_an_unknown_kind_keeps_its_number() {
 
 #[test]
 fn lists_cannot_hold_more_than_there_can_be() {
-    let max = state::MAX_DISPLAYS;
+    let max = MAX_DISPLAYS;
     // One display more than a list may hold.
     let many = Displays {
         displays: (0..=max as u32)
@@ -683,7 +686,7 @@ fn lists_cannot_hold_more_than_there_can_be() {
 fn a_message_over_its_limits_is_not_sent() {
     let too_many = HostMsg::Displays {
         part: Displays {
-            displays: (0..=state::MAX_DISPLAYS as u32)
+            displays: (0..=MAX_DISPLAYS as u32)
                 .map(|i| display(i, DisplayKind::Virtual))
                 .collect(),
             primary: None,
@@ -695,8 +698,8 @@ fn a_message_over_its_limits_is_not_sent() {
     assert_eq!(
         wire_error(&err),
         Some(&WireError::TooLong {
-            len: state::MAX_DISPLAYS + 1,
-            max: state::MAX_DISPLAYS
+            len: MAX_DISPLAYS + 1,
+            max: MAX_DISPLAYS
         })
     );
     assert!(out.is_empty(), "nothing half written");
@@ -920,7 +923,7 @@ fn open_is_the_headsets_parts_together() {
     assert_eq!(HeadsetState::from_open(&parts).unwrap(), state);
     let no_caps = HeadsetState {
         caps: None,
-        ..state.clone()
+        ..state
     };
     let ClientMsg::Open { parts } = no_caps.open().unwrap() else {
         panic!("not Open")
@@ -953,7 +956,7 @@ fn values_breaking_the_rules_are_refused() {
     assert!(PcState::from_snapshot(&parts).is_err());
     // A volume over 100 %, a microphone the PC does not take.
     let loud = ClientMsg::Volume {
-        part: state::Volume {
+        part: Volume {
             level: 101,
             muted: false,
             seq: 0,
@@ -963,8 +966,8 @@ fn values_breaking_the_rules_are_refused() {
     assert!(read_client(&client_bytes(&loud)).is_err());
     let odd = ClientMsg::UpStart {
         up: 0,
-        kind: state::UpKind::Mic,
-        format: state::UpFormat::Pcm16 {
+        kind: UpKind::Mic,
+        format: UpFormat::Pcm16 {
             rate: 44_100,
             channels: 1,
         },
@@ -989,12 +992,12 @@ fn the_largest_snapshot_is_small() {
         name: "n".repeat(state::MAX_DISPLAY_NAME),
         state: DisplayState::Failed {
             error: ErrorCode::OTHER,
-            detail: "d".repeat(state::MAX_DETAIL),
+            detail: "d".repeat(MAX_DETAIL),
         },
         ..display(0, DisplayKind::Virtual)
     };
     state.displays = Some(Displays {
-        displays: (0..state::MAX_DISPLAYS as u32)
+        displays: (0..MAX_DISPLAYS as u32)
             .map(|i| Display {
                 id: DisplayId(i),
                 ..window.clone()

@@ -21,6 +21,7 @@
 //!   one out twice.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
@@ -46,7 +47,7 @@ const FIRST_ID: u32 = 101;
 const CLOSE_WAIT: Duration = Duration::from_secs(2);
 
 /// The PC's settings, as the person chose them.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     /// Mbit/s per monitor.
     pub bitrate: u32,
@@ -82,7 +83,7 @@ impl Settings {
 
 /// A key as `access` lines name it.
 fn hex(key: &[u8; 32]) -> String {
-    key.iter().map(|b| format!("{b:02x}")).collect()
+    prostir_proto::secure::to_hex(key)
 }
 
 /// The words of rights in `access` lines.
@@ -136,7 +137,7 @@ fn parse_access(value: &str) -> Option<(String, Access, bool)> {
     Some((key, Access { role, perms }, false))
 }
 
-fn access_text(key: &str, a: &Access) -> String {
+fn access_text(key: &str, a: Access) -> String {
     let role = if a.is_main() { "main" } else { "guest" };
     let mut text = format!("access {key} {role}");
     for (name, bit) in PERMS {
@@ -369,7 +370,7 @@ fn parse_settings(text: &str) -> (Settings, Kept) {
             .map(|theme| s.window.theme = theme)
             .is_some(),
             ("window-palette", _) if is_word(value) => {
-                s.window.palette = value.to_owned();
+                value.clone_into(&mut s.window.palette);
                 true
             }
             ("window-language", _) if is_word(value) => {
@@ -423,17 +424,17 @@ fn settings_text(s: &Settings, kept: &Kept) -> String {
         on_off(s.count),
     );
     if let Some(on) = s.autostart {
-        text.push_str(&format!("autostart {}\n", on_off(on)));
+        let _ = writeln!(text, "autostart {}", on_off(on));
     }
     let window = prostir_api::WindowLook::default();
     if s.window.theme != window.theme {
-        text.push_str(&format!("window-theme {}\n", s.window.theme.name()));
+        let _ = writeln!(text, "window-theme {}", s.window.theme.name());
     }
     if s.window.palette != window.palette {
-        text.push_str(&format!("window-palette {}\n", s.window.palette));
+        let _ = writeln!(text, "window-palette {}", s.window.palette);
     }
     if let Some(language) = &s.window.language {
-        text.push_str(&format!("window-language {language}\n"));
+        let _ = writeln!(text, "window-language {language}");
     }
     for (key, a) in &s.access {
         // A headset with a mistyped line keeps its other line as it was.
@@ -443,7 +444,7 @@ fn settings_text(s: &Settings, kept: &Kept) -> String {
             Some(a)
         };
         if let Some(a) = a {
-            text.push_str(&access_text(key, a));
+            text.push_str(&access_text(key, *a));
             text.push('\n');
         }
     }
@@ -461,7 +462,9 @@ fn seen_text(e: &Entry<ScreenId>) -> String {
     if e.center.is_none() && e.middle.is_none() {
         return String::new();
     }
-    let center = e.center.map_or("next".to_owned(), |c| c.to_string());
+    let center = e
+        .center
+        .map_or_else(|| "next".to_owned(), |c| c.to_string());
     match e.middle {
         Some(m) => format!(" at {center} {m}"),
         None => format!(" at {center}"),
@@ -511,9 +514,9 @@ fn parse_physical(rest: &str) -> Option<(ScreenId, Physical)> {
 fn physical_text(id: ScreenId, p: &Physical) -> String {
     let mut text = format!("physical {}", id.number());
     if let Some(edid) = &p.key.edid {
-        text.push_str(&format!(" edid \"{}\"", edid.replace('"', "'")));
+        let _ = write!(text, " edid \"{}\"", edid.replace('"', "'"));
     }
-    text.push_str(&format!(" connector {}", p.key.connector));
+    let _ = write!(text, " connector {}", p.key.connector);
     if p.builtin {
         text.push_str(" builtin");
     }
@@ -521,7 +524,7 @@ fn physical_text(id: ScreenId, p: &Physical) -> String {
         text.push_str(" shown");
     }
     if p.seen > 0 {
-        text.push_str(&format!(" seen {}", p.seen));
+        let _ = write!(text, " seen {}", p.seen);
     }
     text.push('\n');
     text
@@ -624,7 +627,7 @@ fn parse_screens(text: &str) -> (SavedScreens, Kept, Option<u32>) {
 
 fn screens_text(set: &SavedScreens, kept: &Kept, next: u32) -> String {
     let mut text = kept.head();
-    text.push_str(&format!("next {next}\n"));
+    let _ = writeln!(text, "next {next}");
     for (id, p) in &set.physical {
         text.push_str(&physical_text(*id, p));
     }
@@ -637,16 +640,17 @@ fn screens_text(set: &SavedScreens, kept: &Kept, next: u32) -> String {
                 ""
             };
             match set.specs.get(&e.id) {
-                Some(spec) => text.push_str(&format!(
-                    "screen {} {spec}{}{primary}\n",
-                    e.id.number(),
-                    seen_text(e)
-                )),
-                None => text.push_str(&format!(
-                    "place {}{}{primary}\n",
-                    e.id.number(),
-                    seen_text(e)
-                )),
+                Some(spec) => {
+                    let _ = writeln!(
+                        text,
+                        "screen {} {spec}{}{primary}",
+                        e.id.number(),
+                        seen_text(e)
+                    );
+                }
+                None => {
+                    let _ = writeln!(text, "place {}{}{primary}", e.id.number(), seen_text(e));
+                }
             }
         }
     }
@@ -715,7 +719,7 @@ enum Job {
 /// Writes `text` to `path` so that it survives a crash or a power cut: a whole new
 /// file or the old one, never half of either.
 fn write_durably(path: &Path, text: &str) -> std::io::Result<()> {
-    let dir = path.parent().unwrap_or(Path::new("."));
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(dir)?;
     prostir_proto::secure::write_atomic(path, text.as_bytes())?;
     // The rename itself is kept only once the directory is on disk.
@@ -1338,7 +1342,7 @@ mod tests {
         assert_eq!(store.wanted().bitrate, 15);
         // A layout change to a set from the command line stays in this run.
         store.run.screens = Some(set.clone());
-        let mut moved = set.clone();
+        let mut moved = set;
         moved.rows[0][0].center = Some(100);
         store.set_screens(moved, false);
         store.close();

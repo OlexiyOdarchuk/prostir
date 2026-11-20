@@ -7,6 +7,7 @@
 //! a line for `watch`). Exit codes: [`DONE`], [`FAILED`], [`NOT_RUNNING`],
 //! [`TIMED_OUT`], [`USAGE`].
 
+use std::fmt::Write as _;
 use std::time::Duration;
 
 use crate::api::{
@@ -29,7 +30,7 @@ pub const USAGE: i32 = 64;
 pub const WAIT: Duration = Duration::from_secs(CALL_SECONDS);
 
 /// What a client sees while it watches.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Watched {
     State(u32, String),
     Event(api::Event),
@@ -40,7 +41,7 @@ pub enum Watched {
 }
 
 /// Why a client got no answer.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientError {
     /// No bus (or pipe) to talk on.
     NoBus(String),
@@ -77,7 +78,7 @@ pub trait CtlClient {
 }
 
 /// What `ctl` was asked.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ctl {
     Ask(Request),
     Status,
@@ -330,7 +331,11 @@ pub struct Output<'a> {
 }
 
 /// Runs `ctl` with `args` against `client`: the exit code.
-pub fn run(args: &[String], client: Result<&dyn CtlClient, ClientError>, io: &mut Output) -> i32 {
+pub fn run(
+    args: &[String],
+    client: Result<&dyn CtlClient, ClientError>,
+    io: &mut Output<'_>,
+) -> i32 {
     let (ctl, json) = match parse(args) {
         Ok(parsed) => parsed,
         Err(e) => {
@@ -405,7 +410,7 @@ pub fn run(args: &[String], client: Result<&dyn CtlClient, ClientError>, io: &mu
 }
 
 /// The exit code for `e`, saying why.
-fn failed(e: &ClientError, json: bool, io: &mut Output, for_headset: bool) -> i32 {
+fn failed(e: &ClientError, json: bool, io: &mut Output<'_>, for_headset: bool) -> i32 {
     let (code, name, text) = what_failed(e, for_headset);
     if json {
         let _ = writeln!(io.out, "{}", error_json(name, &text, None));
@@ -466,7 +471,7 @@ fn done_line(answer: &Answer) -> String {
     }
 }
 
-fn show_state(ctl: &Ctl, revision: u32, text: &str, json: bool, io: &mut Output) -> i32 {
+fn show_state(ctl: &Ctl, revision: u32, text: &str, json: bool, io: &mut Output<'_>) -> i32 {
     let state = match State::from_json(text) {
         Ok(s) => s,
         Err(e) => {
@@ -580,7 +585,7 @@ fn display_line(d: &api::Display, primary: Option<u32>) -> String {
         line.push_str(t(", головний", ", primary"));
     }
     if let Some(f) = &d.failure {
-        line.push_str(&format!(": {}", f.text));
+        let _ = write!(line, ": {}", f.text);
     }
     line
 }
@@ -600,9 +605,9 @@ fn headset_line(h: &api::Headset) -> String {
 
 /// `watch`: a line for each event and each change of what `status` says, until
 /// stopped; while Prostir is not running it says so and waits for it.
-fn watch(client: &dyn CtlClient, json: bool, io: &mut Output) -> i32 {
+fn watch(client: &dyn CtlClient, json: bool, io: &mut Output<'_>) -> i32 {
     let mut said = String::new();
-    let say = |io: &mut Output, line: String| {
+    let say = |io: &mut Output<'_>, line: String| {
         let _ = writeln!(io.out, "{line}");
         let _ = io.out.flush();
     };
@@ -659,7 +664,7 @@ fn state_line(revision: u32, text: &str, json: bool, said: &mut String) -> Optio
     if line == *said {
         return None;
     }
-    *said = line.clone();
+    said.clone_from(&line);
     Some(line)
 }
 

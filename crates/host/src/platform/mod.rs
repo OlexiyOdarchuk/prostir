@@ -238,7 +238,7 @@ pub enum TrayCommand {
 }
 
 /// What the tray shows.
-#[derive(Clone, Default, PartialEq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct TrayStatus {
     /// "Wi-Fi" or "USB" while a headset is connected (the main one, else the first).
     pub connected: Option<&'static str>,

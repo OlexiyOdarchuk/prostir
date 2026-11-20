@@ -174,7 +174,7 @@ const RESTORE_WINDOW: Duration = Duration::from_secs(60);
 const RESTORE_WAIT: Duration = Duration::from_secs(2);
 
 /// What to do about a monitor's size (see [`SizeGuard::check`]).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SizeAction {
     /// The size is right, or the last step still has time to work.
     Wait,

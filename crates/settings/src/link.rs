@@ -15,7 +15,7 @@ use std::time::Duration;
 use crate::api::{Answer, Change, Client, ClientError, Request, Sink, Snapshot};
 
 /// What the window learns.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Update {
     /// A state newer than any before.
     State(Snapshot),

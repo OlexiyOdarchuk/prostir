@@ -100,11 +100,11 @@ fn any_desk_holds_the_hard_invariants() {
             .filter(|s| !desk.column.contains(&s.id))
             .collect();
         let r = complete(&plan, &wanted)
-            .and_then(|_| no_overlap(&plan))
-            .and_then(|_| at_origin(&plan))
-            .and_then(|_| rows_in_order(&plan, &desk.rows))
-            .and_then(|_| connected(&plan))
-            .and_then(|_| connected(&laid));
+            .and_then(|()| no_overlap(&plan))
+            .and_then(|()| at_origin(&plan))
+            .and_then(|()| rows_in_order(&plan, &desk.rows))
+            .and_then(|()| connected(&plan))
+            .and_then(|()| connected(&laid));
         if let Err(e) = r {
             panic!(
                 "case {i}: {e}\n{desk:?}\n{boxes:?}\n{sizes:?}\n{}",
@@ -365,7 +365,7 @@ fn the_circle_rows_are_the_rows_seen() {
             .iter()
             .map(|r| {
                 let mut r = r.clone();
-                r.sort();
+                r.sort_unstable();
                 r
             })
             .collect();
@@ -472,7 +472,7 @@ fn a_single_row_is_reproduced_exactly() {
 /// along every seam.
 #[test]
 fn rows_of_one_size_keep_their_side_seams() {
-    let px = prostir_layout::space::PixelSize::new(2560, 1440);
+    let px = PixelSize::new(2560, 1440);
     let (c, _) = measure("rows of 2560", 0x1a7e_0103, 2000, |r| {
         let k = 1 + r.below(3);
         rows_scene_of(r, k, Some(px), true, 0.0, false)
@@ -490,7 +490,7 @@ fn rows_of_one_size_keep_their_side_seams() {
 #[test]
 fn rows_in_columns_are_reproduced_exactly() {
     for px in [(2560, 1440), (3440, 1440), (1920, 1080), (1440, 2560)] {
-        let px = prostir_layout::space::PixelSize::new(px.0, px.1);
+        let px = PixelSize::new(px.0, px.1);
         let (c, lost) = measure(
             &format!("columns of {}x{}", px.w, px.h),
             0x1a7e_0104,

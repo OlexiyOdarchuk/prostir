@@ -294,10 +294,9 @@ impl Door {
     /// At `now`: the pairing window and the notice at their time, the headsets nearby
     /// that asked long ago forgotten. Whether anything changed.
     pub fn expire(&mut self, now: Instant) -> bool {
-        let mut changed = false;
-        if self.pairing.is_some_and(|(until, _)| now >= until) {
+        let changed = self.pairing.is_some_and(|(until, _)| now >= until);
+        if changed {
             self.stop_pairing();
-            changed = true;
         }
         if self.notice.is_some_and(|until| now >= until) {
             self.notice = None;

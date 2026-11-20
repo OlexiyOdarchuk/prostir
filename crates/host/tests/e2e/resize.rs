@@ -62,7 +62,7 @@ fn a_monitor_resized_by_another_program_gets_its_size_back() {
         })
         .unwrap();
 
-    let mut once_more = starts.clone();
+    let mut once_more = starts;
     *once_more.get_mut(SECOND).unwrap() += 1;
     assert_eq!(
         pc.source_starts(),

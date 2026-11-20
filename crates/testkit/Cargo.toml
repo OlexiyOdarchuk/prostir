@@ -21,3 +21,6 @@ prostir-proto.workspace = true
 anyhow.workspace = true
 # CLOCK_MONOTONIC, which the fake desktop stamps its sound with.
 libc.workspace = true
+
+[lints]
+workspace = true

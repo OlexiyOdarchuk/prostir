@@ -136,7 +136,7 @@ fn record(input: &Input, up: u8, feedback: &Feedback, stop: &AtomicBool) -> bool
     info!("headset microphone on");
     while !stop.load(Ordering::Relaxed) {
         match input.read(&mut buf) {
-            Ok(0) => continue,
+            Ok(0) => {}
             Ok(frames) => {
                 let pcm: Vec<u8> = buf[..(frames * MIC_CHANNELS as usize).min(buf.len())]
                     .iter()
@@ -185,7 +185,7 @@ fn ensure_permission(stop: &AtomicBool) -> bool {
 }
 
 pub(crate) fn with_activity<T>(
-    f: impl FnOnce(&mut jni::JNIEnv, &JObject) -> jni::errors::Result<T>,
+    f: impl FnOnce(&mut jni::JNIEnv<'_>, &JObject<'_>) -> jni::errors::Result<T>,
 ) -> Option<T> {
     let ctx = ndk_context::android_context();
     // SAFETY: the VM and activity come from the running NativeActivity.
@@ -242,7 +242,7 @@ impl Input {
         // SAFETY: plain AAudio calls; the builder is deleted on every path.
         unsafe {
             let mut builder = std::ptr::null_mut();
-            check(ffi::AAudio_createStreamBuilder(&mut builder))?;
+            check(ffi::AAudio_createStreamBuilder(&raw mut builder))?;
             ffi::AAudioStreamBuilder_setDirection(builder, ffi::AAUDIO_DIRECTION_INPUT as i32);
             ffi::AAudioStreamBuilder_setFormat(builder, ffi::AAUDIO_FORMAT_PCM_I16);
             ffi::AAudioStreamBuilder_setChannelCount(builder, MIC_CHANNELS as i32);
@@ -256,7 +256,7 @@ impl Input {
                 ffi::AAUDIO_INPUT_PRESET_VOICE_COMMUNICATION as i32,
             );
             let mut stream = std::ptr::null_mut();
-            let opened = ffi::AAudioStreamBuilder_openStream(builder, &mut stream);
+            let opened = ffi::AAudioStreamBuilder_openStream(builder, &raw mut stream);
             ffi::AAudioStreamBuilder_delete(builder);
             check(opened)?;
             let input = Self(stream);

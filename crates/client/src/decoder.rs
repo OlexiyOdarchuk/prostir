@@ -229,7 +229,7 @@ fn drain(decoder: &MediaCodec, timing: &mut Timing) -> Result<()> {
         match decoder.dequeue_output_buffer(Duration::ZERO)? {
             DequeuedOutputBufferInfoResult::Buffer(buffer) => {
                 timing.decoded(buffer.info().presentation_time_us() as u64);
-                decoder.release_output_buffer(buffer, true)?
+                decoder.release_output_buffer(buffer, true)?;
             }
             DequeuedOutputBufferInfoResult::TryAgainLater => return Ok(()),
             DequeuedOutputBufferInfoResult::OutputFormatChanged

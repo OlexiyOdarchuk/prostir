@@ -232,7 +232,7 @@ impl Scripts {
                 .map(|b| b.allow_name_replacements(true).replace_existing_names(true))
                 .and_then(|b| b.name(BUS))
                 .and_then(|b| b.serve_at(PATH, Host(tx)))
-                .and_then(|b| b.build());
+                .and_then(zbus::blocking::connection::Builder::build);
             match offered {
                 Ok(bus) => {
                     *service = Some(Arc::new(Service {

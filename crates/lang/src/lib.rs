@@ -80,6 +80,7 @@ impl From<&String> for Arg {
 macro_rules! number_arg {
     ($($t:ty),*) => {$(
         impl From<$t> for Arg {
+            #[allow(trivial_numeric_casts, reason = "one macro for every number type, f64 too")]
             fn from(n: $t) -> Self {
                 Arg::Number(n as f64)
             }
@@ -284,7 +285,7 @@ impl Strings {
 fn format(
     bundle: &FluentBundle<FluentResource>,
     id: &str,
-    args: Option<&FluentArgs>,
+    args: Option<&FluentArgs<'_>>,
 ) -> Option<String> {
     let pattern = bundle.get_message(id)?.value()?;
     let mut errors = Vec::new();

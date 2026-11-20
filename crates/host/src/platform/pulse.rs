@@ -289,7 +289,8 @@ struct Subscribed(Mutex<Option<Child>>);
 
 impl End for Subscribed {
     fn end(&self) {
-        if let Some(mut child) = self.0.lock().unwrap().take() {
+        let mut child = self.0.lock().unwrap();
+        if let Some(mut child) = child.take() {
             let _ = child.kill();
             let _ = child.wait();
         }

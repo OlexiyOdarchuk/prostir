@@ -141,7 +141,9 @@ fn a_profile_gets_its_numbers_in_order() {
     let (_dir, _pc, _keys, mut headset) = session("profile", &options);
     headset
         .wait(SOON, "the laptop's panel listed", |v| {
-            v.displays().iter().any(|d| d.is_physical())
+            v.displays()
+                .iter()
+                .any(prostir_proto::state::Display::is_physical)
         })
         .unwrap();
     let laptop = headset
@@ -177,7 +179,10 @@ fn a_profile_gets_its_numbers_in_order() {
     assert!(view.display(laptop).unwrap().is_shown_physical());
     headset
         .wait(SOON, "every monitor and the laptop's panel showing", |v| {
-            v.all_monitors_show() && v.streams.get(&laptop).is_some_and(|s| s.has_picture())
+            v.all_monitors_show()
+                && v.streams
+                    .get(&laptop)
+                    .is_some_and(prostir_testkit::Stream::has_picture)
         })
         .unwrap();
 
@@ -249,12 +254,7 @@ fn only_the_main_headset_changes_the_limits() {
     let dir = TestDir::new("guest");
     dir.save_screens("next 200\nrow\nscreen 0 640x360\n");
     let mut keys = dir.pair();
-    let key: String = keys
-        .identity
-        .public
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    let key = prostir_proto::secure::to_hex(&keys.identity.public);
     dir.save_settings(&format!("access {key} guest input\n"));
     let pc = Pc::start(&dir, &Options::default());
     let mut guest = connect(&pc, &mut keys);
@@ -321,12 +321,7 @@ fn a_guest_is_not_asked_for_the_volume() {
     let dir = TestDir::new("guest-volume");
     dir.save_monitors(crate::TWO_MONITORS);
     let mut keys = dir.pair();
-    let key: String = keys
-        .identity
-        .public
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    let key = prostir_proto::secure::to_hex(&keys.identity.public);
     dir.save_settings(&format!("access {key} guest input\n"));
     let pc = Pc::start(&dir, &Options::default());
     let mut guest = connect(&pc, &mut keys);
@@ -351,7 +346,9 @@ fn a_display_of_the_pc_shown_starts_at_once() {
     let (_dir, _pc, _keys, mut headset) = session("show-physical", &options);
     headset
         .wait(SOON, "the display of the PC listed", |v| {
-            v.displays().iter().any(|d| d.is_physical())
+            v.displays()
+                .iter()
+                .any(prostir_proto::state::Display::is_physical)
         })
         .unwrap();
     let id = headset
@@ -372,7 +369,9 @@ fn a_display_of_the_pc_shown_starts_at_once() {
     );
     headset
         .wait(SOON, "the display of the PC streams", |v| {
-            v.streams.get(&id).is_some_and(|s| s.has_picture())
+            v.streams
+                .get(&id)
+                .is_some_and(prostir_testkit::Stream::has_picture)
         })
         .unwrap();
     let hidden = headset

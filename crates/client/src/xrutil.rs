@@ -19,10 +19,10 @@ const GL_RGBA8: u32 = 0x8058;
 const GL_SRGB8_ALPHA8: u32 = 0x8C43;
 
 /// Views a raw `XrCompositionLayer*` struct as the base type `FrameStream::end` takes.
-pub fn as_layer<'a, T>(layer: &'a T) -> &'a xr::CompositionLayerBase<'a, Gfx> {
+pub fn as_layer<T>(layer: &T) -> &xr::CompositionLayerBase<'_, Gfx> {
     // SAFETY: only called with XrCompositionLayer* structs, which all begin with the
     // common layer header; CompositionLayerBase is a transparent wrapper over it.
-    unsafe { &*(layer as *const T).cast() }
+    unsafe { &*ptr::from_ref::<T>(layer).cast() }
 }
 
 pub fn vec3(v: xr::Vector3f) -> Vec3 {
@@ -112,7 +112,12 @@ pub fn create_surface_swapchain(
     let mut surface = ptr::null_mut();
     // SAFETY: valid session and create info; out-pointers live on the stack.
     let result = unsafe {
-        (ext.create_swapchain_android_surface)(session.as_raw(), &info, &mut handle, &mut surface)
+        (ext.create_swapchain_android_surface)(
+            session.as_raw(),
+            &raw const info,
+            &raw mut handle,
+            &raw mut surface,
+        )
     };
     if result != xr::sys::Result::SUCCESS {
         bail!("xrCreateSwapchainAndroidSurfaceKHR failed: {result:?}");
@@ -353,7 +358,7 @@ pub fn hand_menu_gesture(
     let mut joints = [xr::sys::HandJointLocationEXT::default(); 26];
     let mut locations = xr::sys::HandJointLocationsEXT {
         ty: xr::sys::HandJointLocationsEXT::TYPE,
-        next: (&mut aim as *mut xr::sys::HandTrackingAimStateFB).cast(),
+        next: (&raw mut aim).cast(),
         is_active: xr::sys::FALSE,
         joint_count: joints.len() as u32,
         joint_locations: joints.as_mut_ptr(),
@@ -366,7 +371,8 @@ pub fn hand_menu_gesture(
     };
     // SAFETY: live tracker and space; `locations` points at 26 joints and chains a
     // properly typed aim state, all of which outlive the call.
-    let result = unsafe { (ext.locate_hand_joints)(tracker.as_raw(), &info, &mut locations) };
+    let result =
+        unsafe { (ext.locate_hand_joints)(tracker.as_raw(), &raw const info, &raw mut locations) };
     result.into_raw() >= 0
         && locations.is_active == xr::sys::TRUE
         && aim

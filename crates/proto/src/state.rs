@@ -862,7 +862,7 @@ impl Wire for Part {
 /// what it sent this session (so a part goes out only when it changed), and what the
 /// headset keeps from `Snapshot` and the parts after it. One type for both, so the two
 /// cannot drift apart.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PcState {
     pub displays: Option<Displays>,
     pub info: Option<PcInfo>,
@@ -953,7 +953,7 @@ impl PcState {
             }
             M::Focus { part } if known(part.display, &self.displays) => self.focus = Some(part),
             M::SoundFrom { part } if known(part.display, &self.displays) => {
-                self.sound_from = Some(part)
+                self.sound_from = Some(part);
             }
             M::Focus { .. } | M::SoundFrom { .. } => {
                 return Err(WireError::Invalid("a display that is not listed"));
@@ -986,7 +986,7 @@ impl PcState {
 
 /// The headset's state in parts: what it says in `Open` and changes after, as the PC
 /// keeps it for the session.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HeadsetState {
     pub caps: Option<HeadsetCaps>,
     pub prefs: Option<Prefs>,
@@ -1157,7 +1157,7 @@ mod tests {
         let bytes = encode(&all).unwrap();
         assert!(bytes.len() < MAX_GROWING, "{} bytes", bytes.len());
         assert_eq!(decode::<Displays>(&bytes).unwrap(), all);
-        let mut over = all.clone();
+        let mut over = all;
         over.displays.push(display(99));
         assert!(encode(&over).is_err(), "over the frozen limit");
     }

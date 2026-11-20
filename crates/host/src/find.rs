@@ -84,8 +84,7 @@ impl Responder {
     ) -> Option<(Asker, Option<Vec<u8>>)> {
         let query = Query::decode(datagram)?;
         let ours = query.looks_for(&open.secret);
-        let mut answer = None;
-        if (ours || open.answers_all()) && self.may_send(now) {
+        let answer = if (ours || open.answers_all()) && self.may_send(now) {
             let mut bits = 0;
             if open.pairing {
                 bits |= flags::PAIRING;
@@ -95,8 +94,10 @@ impl Responder {
             }
             let bytes = Answer::to(&query, &open.secret, self.port, bits, &self.name).encode();
             debug_assert!(bytes.len() < datagram.len());
-            answer = Some(bytes);
-        }
+            Some(bytes)
+        } else {
+            None
+        };
         let asker = Asker {
             from,
             ours,

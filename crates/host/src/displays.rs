@@ -7,6 +7,7 @@
 
 use crate::i18n::t;
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -713,7 +714,7 @@ impl Displays {
         let first = noted.first()?;
         let mut line = format!("{}: {}", first.name, first.note.as_deref().unwrap_or(""));
         if noted.len() > 1 {
-            line.push_str(&format!(" (+{} {})", noted.len() - 1, t("ще", "more")));
+            let _ = write!(line, " (+{} {})", noted.len() - 1, t("ще", "more"));
         }
         Some(state::clip(&line, 120))
     }
@@ -760,7 +761,7 @@ impl Displays {
             warn!("{why}");
             if s.is_window() {
                 self.close_window_panel(id);
-                self.router.send_all(HostMsg::Problem {
+                self.router.send_all(&HostMsg::Problem {
                     error: state::ErrorCode::BAD_SIZE,
                     detail: state::clip(&why, state::MAX_DETAIL),
                     display: None,
@@ -1127,7 +1128,7 @@ impl Displays {
                     self.mic = Some(mic);
                     self.mic_failed = None;
                 } else {
-                    crate::worker::sound::let_go_of_mic(mic);
+                    worker::sound::let_go_of_mic(mic);
                 }
             }
             SoundDone::MicFailed(why) => {
@@ -1564,7 +1565,7 @@ impl Displays {
         // (`pactl`, `pw-loopback`) happens there; on a thread of its own all the same,
         // should the sound thread have let its share go first.
         if !mic && let Some(share) = self.mic.take() {
-            crate::worker::sound::let_go_of_mic(share);
+            worker::sound::let_go_of_mic(share);
         }
         if self.mic.is_none() {
             self.recording = false;
@@ -1589,7 +1590,7 @@ impl Displays {
         }
     }
 
-    pub fn push_mic(&self, pcm: Vec<u8>) {
+    pub fn push_mic(&self, pcm: &[u8]) {
         if let Some(m) = &self.mic {
             m.push(pcm);
         }
@@ -1987,7 +1988,7 @@ impl Displays {
         };
         let wanted = MonitorSpec {
             scale: f64::from(percent) / 100.0,
-            ..spec.clone()
+            ..spec
         };
         let allowed = self.scales_for(spec.width, spec.height).allows(percent);
         if !allowed || wanted.validate().is_err() {

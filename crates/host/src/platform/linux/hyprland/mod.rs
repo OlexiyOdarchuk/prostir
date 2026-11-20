@@ -542,13 +542,13 @@ impl Rules {
                 })
             })
             .collect();
-        self.apply_without_overlaps(&current, rules)
+        self.apply_without_overlaps(&current, &rules)
     }
 
     /// Applies the rules; if doing so one by one would overlap outputs for a moment
     /// (Hyprland warns about that), first moves the outputs involved out of the way.
-    fn apply_without_overlaps(&self, current: &[Monitor], rules: Vec<Rule>) -> bool {
-        if overlaps_on_the_way(current, &rules) {
+    fn apply_without_overlaps(&self, current: &[Monitor], rules: &[Rule]) -> bool {
+        if overlaps_on_the_way(current, rules) {
             let aside: Vec<Rule> = rules
                 .iter()
                 .enumerate()
@@ -560,7 +560,7 @@ impl Rules {
                 .collect();
             let _ = self.send(&aside);
         }
-        self.apply(&rules)
+        self.apply(rules)
     }
 }
 

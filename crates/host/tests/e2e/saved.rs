@@ -79,7 +79,7 @@ fn a_monitor_that_cannot_start_stays_in_the_set() {
     let mut headset = connect(&pc, &mut keys);
     headset
         .wait(START, "one monitor showing, the other failed", |v| {
-            v.streams.values().any(|s| s.has_picture())
+            v.streams.values().any(prostir_testkit::Stream::has_picture)
                 && v.displays().iter().any(|d| {
                     matches!(&d.state, prostir_proto::state::DisplayState::Failed { detail, .. } if detail.contains("broken"))
                 })
@@ -271,7 +271,10 @@ fn a_display_of_the_pc_comes_back_with_its_number() {
             p.len() == 2
                 && p.iter().all(|d| d.desk.is_some())
                 && p.iter().any(|d| {
-                    d.is_shown_physical() && v.streams.get(&d.id).is_some_and(|s| s.has_picture())
+                    d.is_shown_physical()
+                        && v.streams
+                            .get(&d.id)
+                            .is_some_and(prostir_testkit::Stream::has_picture)
                 })
         })
         .unwrap();
@@ -309,7 +312,9 @@ fn a_display_of_the_pc_comes_back_with_its_number() {
         .wait(SOON, "the same display back, streaming", |v| {
             v.display(hdmi)
                 .is_some_and(|d| d.state == DisplayState::Running)
-                && v.streams.get(&hdmi).is_some_and(|s| s.has_picture())
+                && v.streams
+                    .get(&hdmi)
+                    .is_some_and(prostir_testkit::Stream::has_picture)
         })
         .unwrap();
     // Kept with its numbers, and when each was seen, for the next run.

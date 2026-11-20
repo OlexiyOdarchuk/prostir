@@ -104,10 +104,11 @@ impl Service {
 /// pauses of 1 s growing to a minute between tries.
 pub fn serve(events: EventSink, outlet: Outlet, notes: Receiver<Note>) -> Option<Service> {
     // The first state, there before the name is: `GetState` always has one.
-    let mut first = (0, String::new());
-    if let Ok(Note::State(revision, state)) = notes.try_recv() {
-        first = (revision, state.to_json());
-    }
+    let first = if let Ok(Note::State(revision, state)) = notes.try_recv() {
+        (revision, state.to_json())
+    } else {
+        (0, String::new())
+    };
     let shared = Arc::new(Shared {
         events,
         outlet,
@@ -218,7 +219,7 @@ fn keep_on_the_bus(shared: &Arc<Shared>, mut socket: UnixStream) {
             revents: 0,
         };
         // SAFETY: one valid pollfd, for a socket this thread owns.
-        let woke = unsafe { libc::poll(&mut fd, 1, -1) };
+        let woke = unsafe { libc::poll(&raw mut fd, 1, -1) };
         if woke < 0 {
             if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
                 continue;
@@ -373,7 +374,7 @@ fn headset_signal(bus: &Shared, event: &api::Event) {
             &(headset.as_str(), reason.name()),
         ),
         api::Event::HeadsetWorn { headset, worn } => {
-            signal(bus, "HeadsetWorn", &(headset.as_str(), *worn))
+            signal(bus, "HeadsetWorn", &(headset.as_str(), *worn));
         }
         // Only for reading what a newer Prostir sends; never sent.
         api::Event::Other => {}
@@ -665,7 +666,7 @@ impl Client {
     pub fn connect(timeout: Duration) -> Result<Self, ClientError> {
         session()
             .map(|(b, _)| b.method_timeout(timeout))
-            .and_then(|b| b.build())
+            .and_then(zbus::blocking::connection::Builder::build)
             .map(|bus| Self { bus })
             .map_err(|e| ClientError::NoBus(e.to_string()))
     }
@@ -781,8 +782,8 @@ impl CtlClient for Client {
             if header.message_type() != Type::Signal {
                 continue;
             }
-            let member = header.member().map(|m| m.to_string()).unwrap_or_default();
-            let sender = header.sender().map(|s| s.to_string());
+            let member = header.member().map(ToString::to_string).unwrap_or_default();
+            let sender = header.sender().map(ToString::to_string);
             let body = msg.body();
             if member == "NameOwnerChanged" {
                 let Ok((name, _, new)) = body.deserialize::<(String, String, String)>() else {

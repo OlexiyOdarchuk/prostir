@@ -484,7 +484,7 @@ fn waiting(reader: &BufReader<std::fs::File>, fd: std::os::fd::RawFd) -> bool {
         revents: 0,
     };
     // SAFETY: one pollfd, no waiting.
-    unsafe { libc::poll(&mut pfd, 1, 0) > 0 }
+    unsafe { libc::poll(&raw mut pfd, 1, 0) > 0 }
 }
 
 /// A pipe: its read end and its write end (closed on exec).

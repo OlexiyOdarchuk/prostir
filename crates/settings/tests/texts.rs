@@ -116,7 +116,7 @@ fn placeholders_are_the_same_in_every_language() {
         for line in file.lines() {
             match line.split_once(" = ").or_else(|| line.split_once(" =")) {
                 Some((id, rest)) if !line.starts_with([' ', '#']) => {
-                    out.push((id.trim().to_owned(), rest.to_owned()))
+                    out.push((id.trim().to_owned(), rest.to_owned()));
                 }
                 _ => {
                     if let Some(last) = out.last_mut() {

@@ -81,8 +81,8 @@ pub fn install(signals: &[libc::c_int]) -> std::io::Result<OwnedFd> {
             if signal == libc::SIGCHLD {
                 action.sa_flags |= libc::SA_NOCLDSTOP;
             }
-            libc::sigemptyset(&mut action.sa_mask);
-            libc::sigaction(signal, &action, std::ptr::null_mut()) != 0
+            libc::sigemptyset(&raw mut action.sa_mask);
+            libc::sigaction(signal, &raw const action, std::ptr::null_mut()) != 0
         };
         if failed {
             return Err(std::io::Error::last_os_error());
@@ -94,9 +94,9 @@ pub fn install(signals: &[libc::c_int]) -> std::io::Result<OwnedFd> {
         // SAFETY: an empty set with one signal added, read by the call.
         unsafe {
             let mut set: libc::sigset_t = std::mem::zeroed();
-            libc::sigemptyset(&mut set);
-            libc::sigaddset(&mut set, libc::SIGUSR1);
-            libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+            libc::sigemptyset(&raw mut set);
+            libc::sigaddset(&raw mut set, libc::SIGUSR1);
+            libc::pthread_sigmask(libc::SIG_UNBLOCK, &raw const set, std::ptr::null_mut());
         }
     }
     Ok(read)
@@ -142,7 +142,6 @@ pub fn quit_on_signals(
                     Some(libc::SIGUSR1) => {
                         info!("SIGUSR1 received: the settings window");
                         on_window();
-                        continue;
                     }
                     Some(signal) => break name(signal),
                     None => {

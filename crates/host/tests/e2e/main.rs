@@ -345,7 +345,11 @@ fn the_session_opens_with_a_snapshot() {
     assert_eq!(displays[0].id, DisplayId(0));
     assert_eq!((displays[0].mode.w, displays[0].mode.h), (640, 360));
     assert_eq!((displays[1].mode.w, displays[1].mode.h), (480, 272));
-    assert!(displays.iter().all(|d| d.is_virtual()));
+    assert!(
+        displays
+            .iter()
+            .all(prostir_proto::state::Display::is_virtual)
+    );
     assert!(view.primary().is_some());
     let encoding = view.encoding().unwrap();
     assert!(encoding.choices.contains(&(Codec::H264, false)));
@@ -411,7 +415,11 @@ fn a_headset_hears_only_what_it_can_show() {
         .wait(START, "every monitor showing", View::all_monitors_show)
         .unwrap();
     let view = headset.view();
-    assert!(view.displays().iter().all(|d| d.is_virtual()));
+    assert!(
+        view.displays()
+            .iter()
+            .all(prostir_proto::state::Display::is_virtual)
+    );
     let encoding = view.encoding().unwrap();
     assert_eq!(
         encoding.wanted.codec, None,
@@ -444,7 +452,7 @@ fn taking_the_headset_off_pauses_and_then_ends_the_session() {
     headset.send(&worn(true)).unwrap();
     headset
         .wait(SOON, "pictures after putting it on", |v| {
-            v.streams.len() == 2 && v.streams.values().all(|s| s.has_picture())
+            v.streams.len() == 2 && v.streams.values().all(prostir_testkit::Stream::has_picture)
         })
         .unwrap();
     // The numbers each stream reports every 10 s.
@@ -496,7 +504,7 @@ fn a_still_screen_shows_again_after_putting_the_headset_on() {
     headset.send(&worn(true)).unwrap();
     headset
         .wait(SOON, "pictures after putting it on", |v| {
-            v.streams.len() == 2 && v.streams.values().all(|s| s.has_picture())
+            v.streams.len() == 2 && v.streams.values().all(prostir_testkit::Stream::has_picture)
         })
         .unwrap();
     headset.take_for(Duration::from_secs(1)).unwrap();
@@ -551,7 +559,9 @@ fn a_codec_the_headset_cannot_show_a_monitor_in_is_refused() {
     };
     headset
         .wait(SOON, "the wide monitor streams", |v| {
-            v.streams.get(&id).is_some_and(|s| s.has_picture())
+            v.streams
+                .get(&id)
+                .is_some_and(prostir_testkit::Stream::has_picture)
         })
         .unwrap();
     let refused = headset.ask(set(Codec::H264)).unwrap();

@@ -490,12 +490,7 @@ fn a_guest_takes_no_commands_from_the_pc() {
     let dir = TestDir::new("api-guest");
     dir.save_monitors(TWO_MONITORS);
     let mut keys = dir.pair();
-    let key: String = keys
-        .identity
-        .public
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    let key = prostir_proto::secure::to_hex(&keys.identity.public);
     dir.save_settings(&format!("access {key} guest input\n"));
     let pc = Pc::start(&dir, &Options::default());
     let mut headset = connect(&pc, &mut keys);

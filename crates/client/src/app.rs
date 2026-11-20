@@ -115,6 +115,10 @@ const TOUCH_RING: Duration = Duration::from_millis(350);
 const AFTER_TOUCH: Duration = Duration::from_millis(600);
 
 #[unsafe(no_mangle)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "the signature android-activity calls"
+)]
 pub fn android_main(app: AndroidApp) {
     android_logger::init_once(
         android_logger::Config::default()
@@ -148,9 +152,9 @@ fn set_refresh_rate(session: &xr::Session<Gfx>, saver: bool) {
 fn local_time() -> Option<libc::tm> {
     // SAFETY: plain libc time calls on a zeroed `tm`.
     unsafe {
-        let now = libc::time(std::ptr::null_mut());
+        let now = libc::time(ptr::null_mut());
         let mut tm: libc::tm = std::mem::zeroed();
-        (!libc::localtime_r(&now, &mut tm).is_null()).then_some(tm)
+        (!libc::localtime_r(&raw const now, &raw mut tm).is_null()).then_some(tm)
     }
 }
 
@@ -220,11 +224,11 @@ static MENU_SCALE: std::sync::atomic::AtomicU32 =
 
 fn set_menu_scale(large: bool) {
     let scale: f32 = if large { 1.3 } else { 1.0 };
-    MENU_SCALE.store(scale.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    MENU_SCALE.store(scale.to_bits(), Ordering::Relaxed);
 }
 
 fn panel_width() -> f32 {
-    PANEL_WIDTH * f32::from_bits(MENU_SCALE.load(std::sync::atomic::Ordering::Relaxed))
+    PANEL_WIDTH * f32::from_bits(MENU_SCALE.load(Ordering::Relaxed))
 }
 
 fn panel_height() -> f32 {
@@ -398,7 +402,7 @@ struct Scene {
     mic_permission: u8,
     /// An unknown PC waiting for "Pair" or "Not now" (survives the disconnect that
     /// follows the question).
-    pair_offer: Option<(String, crate::ui::OfferWhy)>,
+    pair_offer: Option<(String, ui::OfferWhy)>,
     steering: net::Steering,
     /// When the connection was lost (or the app started without one).
     offline_since: Option<Instant>,
@@ -1330,7 +1334,7 @@ impl Scene {
             .copied()
             .filter(|id| self.is_window(*id))
             .collect();
-        for (id, p) in self.placements.iter_mut() {
+        for (id, p) in &mut self.placements {
             if !windows.contains(id) {
                 p.position = center + (p.position - center) * k;
             }
@@ -1412,7 +1416,7 @@ impl Scene {
                 scale = scale.clamp(0.2 / p.width.max(1e-3), 8.0 / p.width.max(1e-3));
             }
         }
-        for (other, p) in self.placements.iter_mut() {
+        for (other, p) in &mut self.placements {
             if *other == id || windows.contains(other) {
                 continue;
             }
@@ -1753,13 +1757,13 @@ impl Scene {
                 let what = self
                     .lang()
                     .t("Не вдалося надіслати на ПК", "Could not send to the PC");
-                self.show_error(format!("{what}: {e}"))
+                self.show_error(format!("{what}: {e}"));
             }
             None => {
                 let what = self
                     .lang()
                     .t("Немає з'єднання з ПК", "Not connected to a PC");
-                self.show_error(what.into())
+                self.show_error(what.into());
             }
         }
     }
@@ -1921,9 +1925,9 @@ fn custom_panorama_path(dir: Option<&Path>) -> Option<PathBuf> {
 type Panorama = (u32, u32, Vec<u8>);
 
 /// Pixels for a panorama background: generated sky or the user's picture.
-fn load_panorama(choice: Background, dir: Option<PathBuf>) -> Panorama {
+fn load_panorama(choice: Background, dir: Option<&Path>) -> Panorama {
     if choice == Background::Custom
-        && let Some(path) = custom_panorama_path(dir.as_deref())
+        && let Some(path) = custom_panorama_path(dir)
     {
         match image::open(&path) {
             Ok(img) => {
@@ -2203,7 +2207,7 @@ fn run(app: &AndroidApp) -> Result<()> {
     let mut hold_since: [Option<Instant>; 2] = [None, None];
     // A hand's pinch on a menu button: clicked when let go, unless it was held long
     // enough to drag the menu instead (as on the Quest's own windows).
-    let mut pending_click: [Option<(ui::Action, Vec3)>; 2] = [None, None];
+    let mut pending_click: [Option<(Action, Vec3)>; 2] = [None, None];
     // Grabs started on a monitor's bar (they end when the press ends).
 
     let mut pokes = [Poke::default(); 2];
@@ -2329,7 +2333,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         while let Ok(event) = net_rx.try_recv() {
             match event {
                 NetEvent::Command { req, asked } => {
-                    take_command(&mut scene, req, asked, &mut passthrough, &mut controls)
+                    take_command(&mut scene, req, &asked, &mut passthrough, &mut controls);
                 }
                 event => handle_net_event(&mut scene, &session, &vm, event),
             }
@@ -2346,7 +2350,7 @@ fn run(app: &AndroidApp) -> Result<()> {
             let dir = external_dir.clone();
             pano_job = Some((
                 wanted,
-                std::thread::spawn(move || load_panorama(wanted, dir)),
+                std::thread::spawn(move || load_panorama(wanted, dir.as_deref())),
             ));
         }
         if pano_job.as_ref().is_some_and(|(_, j)| j.is_finished()) {
@@ -2544,7 +2548,9 @@ fn run(app: &AndroidApp) -> Result<()> {
         if scene.wrist.is_some() {
             let ui_state = scene.ui_state(
                 passthrough.is_some(),
-                passthrough.as_ref().is_some_and(|p| p.window_supported()),
+                passthrough
+                    .as_ref()
+                    .is_some_and(passthrough::Passthrough::window_supported),
                 exts.khr_composition_layer_equirect2,
                 custom_pano,
             );
@@ -2624,7 +2630,7 @@ fn run(app: &AndroidApp) -> Result<()> {
                 panel.hover(Some(px));
                 match panel.hovered_action() {
                     Some(action) => {
-                        handle_action(&mut scene, action, &mut passthrough, &mut controls)
+                        handle_action(&mut scene, action, &mut passthrough, &mut controls);
                     }
                     None => poke.drag = Some(at),
                 }
@@ -2921,7 +2927,9 @@ fn run(app: &AndroidApp) -> Result<()> {
         if scene.panel_open {
             let ui_state = scene.ui_state(
                 passthrough.is_some(),
-                passthrough.as_ref().is_some_and(|p| p.window_supported()),
+                passthrough
+                    .as_ref()
+                    .is_some_and(passthrough::Passthrough::window_supported),
                 exts.khr_composition_layer_equirect2,
                 custom_pano,
             );
@@ -3074,7 +3082,7 @@ fn run(app: &AndroidApp) -> Result<()> {
                 | xr::sys::CompositionLayerSettingsFlagsFB::QUALITY_SHARPENING,
         };
         let quality_next: *const std::ffi::c_void = if exts.fb_composition_layer_settings {
-            (&quality as *const xr::sys::CompositionLayerSettingsFB).cast()
+            (&raw const quality).cast()
         } else {
             ptr::null()
         };
@@ -3086,7 +3094,7 @@ fn run(app: &AndroidApp) -> Result<()> {
             flags: xr::sys::CompositionLayerImageLayoutFlagsFB::VERTICAL_FLIP,
         };
         let video_next = if exts.fb_composition_layer_image_layout {
-            (&flip as *const xr::sys::CompositionLayerImageLayoutFB).cast()
+            (&raw const flip).cast()
         } else {
             quality_next
         };
@@ -3120,10 +3128,16 @@ fn run(app: &AndroidApp) -> Result<()> {
                 layer_handle,
             })
         };
-        let keyboard_layer =
-            passthrough_layer(passthrough.as_ref().and_then(|pt| pt.window_layer()));
-        let passthrough_layer =
-            passthrough_layer(passthrough.as_ref().and_then(|pt| pt.room_layer()));
+        let keyboard_layer = passthrough_layer(
+            passthrough
+                .as_ref()
+                .and_then(passthrough::Passthrough::window_layer),
+        );
+        let passthrough_layer = passthrough_layer(
+            passthrough
+                .as_ref()
+                .and_then(passthrough::Passthrough::room_layer),
+        );
         let pano = pano_layer
             .as_ref()
             .filter(|(b, _)| *b == scene.settings.background)
@@ -3222,7 +3236,7 @@ fn run(app: &AndroidApp) -> Result<()> {
                 xr::CompositionLayerFlags::EMPTY
             };
             let next = if exts.khr_composition_layer_color_scale_bias && scale.r < 1.0 {
-                (&dims[i] as *const xr::sys::CompositionLayerColorScaleBiasKHR).cast()
+                (&raw const dims[i]).cast()
             } else {
                 video_next
             };
@@ -3312,7 +3326,7 @@ fn run(app: &AndroidApp) -> Result<()> {
             ));
         }
 
-        let mut layers: Vec<&xr::CompositionLayerBase<Gfx>> = Vec::with_capacity(16);
+        let mut layers: Vec<&xr::CompositionLayerBase<'_, Gfx>> = Vec::with_capacity(16);
         if let Some(l) = &passthrough_layer {
             layers.push(as_layer(l));
         } else if let Some(l) = &pano {
@@ -3605,7 +3619,7 @@ fn stream_shown(scene: &mut Scene, id: ScreenId) {
 /// The PC listed its displays anew: the one source of which there are. Within a
 /// session, a display that left the list is gone, and its place goes with it (a
 /// display of the PC itself keeps its place: it comes back where it was).
-fn displays_changed(scene: &mut Scene, before: Option<state::Displays>) {
+fn displays_changed(scene: &mut Scene, before: Option<&state::Displays>) {
     let Some(displays) = scene.pc.displays.clone() else {
         return;
     };
@@ -3623,7 +3637,10 @@ fn displays_changed(scene: &mut Scene, before: Option<state::Displays>) {
         .map(|d| d.id.0)
         .collect();
     let primary = displays.primary.map(|p| p.0);
-    scene.mirror_wanted = displays.displays.iter().any(|d| d.is_shown_physical());
+    scene.mirror_wanted = displays
+        .displays
+        .iter()
+        .any(state::Display::is_shown_physical);
     for id in &gone {
         scene.placements.remove(id);
         scene.monitors.remove(id);
@@ -3686,7 +3703,7 @@ fn part_came(scene: &mut Scene, part: prostir_proto::HostMsg) {
         warn!("a part of the PC's state: {e}");
     }
     if follow.is_some() {
-        displays_changed(scene, before);
+        displays_changed(scene, before.as_ref());
     }
 }
 
@@ -3714,7 +3731,7 @@ fn headset_state(settings: &Settings, worn: bool, battery: Option<(u8, bool)>) -
         battery: battery.map(|(percent, charging)| Battery { percent, charging }),
         // The Quest's own volume follows the PC's slider from 0.2.0 step 7.
         volume: None,
-        up: [(mic.kind, mic)].into_iter().collect(),
+        up: std::iter::once((mic.kind, mic)).collect(),
     }
 }
 
@@ -3759,14 +3776,14 @@ fn headset_caps() -> HeadsetCaps {
 fn take_command(
     scene: &mut Scene,
     req: ReqId,
-    asked: Asked<Command>,
+    asked: &Asked<Command>,
     passthrough: &mut Option<passthrough::Passthrough>,
     controls: &mut Controls,
 ) {
     use crate::commands::Does;
     use prostir_proto::state::ErrorCode;
     info!("the PC asks: {asked:?}");
-    let outcome = match crate::commands::what_to_do(&asked) {
+    let outcome = match crate::commands::what_to_do(asked) {
         Does::Act(action) => {
             handle_action(scene, action, passthrough, controls);
             Outcome::Done
@@ -4259,7 +4276,7 @@ fn handle_action(
                 }
                 None => {
                     let what = scene.lang().t("не IP-адреса", "is not an IP address");
-                    scene.show_error(format!("«{typed}»: {what}"))
+                    scene.show_error(format!("«{typed}»: {what}"));
                 }
             }
         }

@@ -116,7 +116,7 @@ fn read(conn: &Connection) -> Option<Scheme> {
 }
 
 /// 1 dark, 2 light, 0 (or anything else) no preference.
-fn scheme(v: &Value) -> Option<Scheme> {
+fn scheme(v: &Value<'_>) -> Option<Scheme> {
     match v {
         Value::U32(1) => Some(Scheme::Dark),
         Value::U32(2) => Some(Scheme::Light),

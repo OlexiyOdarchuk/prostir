@@ -238,7 +238,7 @@ pub fn enabled() -> bool {
 
 /// Turns starting with the session on or off.
 pub fn set(on: bool) {
-    Places::here().set(on)
+    Places::here().set(on);
 }
 
 /// The first start of Prostir for this user (no choice kept yet): starting with the

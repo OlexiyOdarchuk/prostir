@@ -350,6 +350,10 @@ fn pause_after(fails: u32) -> Duration {
 /// The sockets' watcher: holds `sockets` and starts the full program with `start`
 /// when a headset comes, until asked to quit. `window`: start it at once for the
 /// settings window (`prostir open` when nothing ran). Its exit code.
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "the watcher owns the sockets and how to start until it returns"
+)]
 pub fn watch(sockets: Sockets, start: Start, window: bool) -> Result<i32> {
     let pipe = signals::install(
         &[
@@ -404,7 +408,7 @@ pub fn watch(sockets: Sockets, start: Start, window: bool) -> Result<i32> {
         if let Some(c) = &child {
             let mut status = 0;
             // SAFETY: waits without blocking for this process's own child.
-            let pid = unsafe { libc::waitpid(c.pid, &mut status, libc::WNOHANG) };
+            let pid = unsafe { libc::waitpid(c.pid, &raw mut status, libc::WNOHANG) };
             if pid == c.pid {
                 let ran = c.started.elapsed();
                 child = None;
@@ -512,11 +516,11 @@ fn stop(pid: libc::pid_t) {
         libc::kill(pid, libc::SIGTERM);
         let until = Instant::now() + QUIT_WAIT;
         let mut status = 0;
-        while libc::waitpid(pid, &mut status, libc::WNOHANG) == 0 {
+        while libc::waitpid(pid, &raw mut status, libc::WNOHANG) == 0 {
             if Instant::now() >= until {
                 warn!("Prostir did not quit in time: ending it");
                 libc::kill(pid, libc::SIGKILL);
-                libc::waitpid(pid, &mut status, 0);
+                libc::waitpid(pid, &raw mut status, 0);
                 return;
             }
             std::thread::sleep(Duration::from_millis(50));

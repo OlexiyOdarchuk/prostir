@@ -54,3 +54,103 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# Lints for every crate (each takes them with `[lints] workspace = true`); CI denies
+# warnings. A deliberate pick, not whole groups: each catches a real mistake or a
+# needless cost, and the code was made to pass them without changing what it does.
+#
+# Left out on purpose (noise here, or a fix that would change results):
+# - cast_* (pedantic): pixels, samples and clocks convert between integer and float
+#   widths everywhere, each on purpose; a lint per cast would hide the rare wrong one.
+# - suboptimal_flops, imprecise_flops (nursery) and manual_midpoint: mul_add, hypot
+#   and midpoint round differently, so layouts and pictures would move.
+# - must_use_candidate, missing_errors_doc, missing_panics_doc, doc_markdown,
+#   too_long_first_doc_paragraph, too_many_lines, missing_const_for_fn, use_self,
+#   similar_names, many_single_char_names, struct_excessive_bools, module and field
+#   naming: style with hundreds of findings and no bug among them.
+# - option_if_let_else, single_match_else, if_not_else, match_same_arms,
+#   items_after_statements, significant_drop_tightening, redundant_pub_crate: they
+#   would make code read worse, or are wrong too often.
+# - unused_self, unnecessary_wraps: the fake desktop mirrors the real platform's
+#   methods, and some functions keep the shape of their siblings.
+# - float_cmp, range_plus_one, option_option, implicit_hasher, cast_ptr_alignment,
+#   unchecked_time_subtraction, duration_suboptimal_units, assert_is_empty: exact
+#   comparisons in tests, deliberate types, or changes to what happens at the edges.
+# - rust: unreachable_pub (pub is how a binary's modules share), let_underscore_drop
+#   (`let _ = tx.send(..)` is meant), missing_debug_implementations and
+#   missing_copy_implementations (handles of GStreamer, threads and sockets; Copy is a
+#   promise, not a speed-up).
+[workspace.lints.rust]
+# Each unsafe operation in its own block, also inside an unsafe fn (2024's default,
+# kept explicit).
+unsafe_op_in_unsafe_fn = "warn"
+# `Formatter<'_>`, not `Formatter`: a borrow shows where it is.
+elided_lifetimes_in_paths = "warn"
+# Casts and paths that say nothing.
+trivial_casts = "warn"
+trivial_numeric_casts = "warn"
+unused_qualifications = "warn"
+unused_lifetimes = "warn"
+redundant_lifetimes = "warn"
+unit_bindings = "warn"
+
+[workspace.lints.clippy]
+# Ownership and allocations: a value taken but only read, a clone or a collect that
+# is not needed, building strings through temporary ones, work done when not needed.
+needless_pass_by_value = "warn"
+needless_pass_by_ref_mut = "warn"
+trivially_copy_pass_by_ref = "warn"
+ref_option = "warn"
+redundant_clone = "warn"
+implicit_clone = "warn"
+cloned_instead_of_copied = "warn"
+assigning_clones = "warn"
+format_collect = "warn"
+format_push_string = "warn"
+inefficient_to_string = "warn"
+or_fun_call = "warn"
+unnecessary_join = "warn"
+stable_sort_primitive = "warn"
+large_types_passed_by_value = "warn"
+# A lock held longer than it looks (through a whole `if let` or `for`).
+significant_drop_in_scrutinee = "warn"
+# Raw pointers made the explicit way in unsafe code (the headset's FFI).
+borrow_as_ptr = "warn"
+ref_as_ptr = "warn"
+ptr_as_ptr = "warn"
+ptr_cast_constness = "warn"
+# Clearer forms of the same thing.
+redundant_closure_for_method_calls = "warn"
+semicolon_if_nothing_returned = "warn"
+manual_let_else = "warn"
+manual_assert = "warn"
+manual_string_new = "warn"
+map_unwrap_or = "warn"
+unnested_or_patterns = "warn"
+ignored_unit_patterns = "warn"
+needless_continue = "warn"
+needless_for_each = "warn"
+needless_raw_string_hashes = "warn"
+explicit_iter_loop = "warn"
+explicit_into_iter_loop = "warn"
+default_trait_access = "warn"
+inconsistent_struct_constructor = "warn"
+used_underscore_binding = "warn"
+bool_to_int_with_if = "warn"
+uninlined_format_args = "warn"
+elidable_lifetime_names = "warn"
+useless_let_if_seq = "warn"
+iter_on_single_items = "warn"
+string_lit_as_bytes = "warn"
+derive_partial_eq_without_eq = "warn"
+# Probable mistakes.
+collection_is_never_read = "warn"
+debug_assert_with_mut_call = "warn"
+path_buf_push_overwrite = "warn"
+read_zero_byte_vec = "warn"
+unused_peekable = "warn"
+set_contains_or_insert = "warn"
+trait_duplication_in_bounds = "warn"
+type_repetition_in_bounds = "warn"
+# An ignored test says why.
+ignore_without_reason = "warn"

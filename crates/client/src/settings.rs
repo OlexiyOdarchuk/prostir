@@ -220,7 +220,7 @@ impl Settings {
                 }
                 Some(("menu-button", v)) => s.menu_button = v != "off",
                 Some(("brightness", v)) => {
-                    s.brightness = v.trim().parse::<u8>().unwrap_or(100).clamp(40, 100)
+                    s.brightness = v.trim().parse::<u8>().unwrap_or(100).clamp(40, 100);
                 }
                 Some(("gaze-mouse", v)) => s.gaze_mouse = v == "on",
                 Some(("large-menu", v)) => s.large_menu = v == "on",

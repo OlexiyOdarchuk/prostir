@@ -102,7 +102,7 @@ pub fn text(ui: &mut Ui, s: impl Into<String>, font: FontId, color: Color32) -> 
     ui.add(egui::Label::new(egui::RichText::new(s).font(font).color(color)).selectable(false))
 }
 
-pub fn page_header(ui: &mut Ui, tk: &Tk, title: &str, sub: Option<&str>) {
+pub fn page_header(ui: &mut Ui, tk: &Tk<'_>, title: &str, sub: Option<&str>) {
     text(ui, title, tk.font(tk.th.type_.size_title, true), tk.p.text);
     if let Some(sub) = sub {
         ui.add_space(tk.th.shape.spacing * 0.5);
@@ -111,13 +111,13 @@ pub fn page_header(ui: &mut Ui, tk: &Tk, title: &str, sub: Option<&str>) {
     ui.add_space(tk.th.shape.section_gap);
 }
 
-pub fn section_title(ui: &mut Ui, tk: &Tk, title: &str) {
+pub fn section_title(ui: &mut Ui, tk: &Tk<'_>, title: &str) {
     text(ui, title, tk.heading(), tk.p.text);
     ui.add_space(tk.th.shape.spacing * 1.25);
 }
 
 /// A group of settings that belong together.
-pub fn card<R>(ui: &mut Ui, tk: &Tk, add: impl FnOnce(&mut Ui) -> R) -> R {
+pub fn card<R>(ui: &mut Ui, tk: &Tk<'_>, add: impl FnOnce(&mut Ui) -> R) -> R {
     let pad = tk.th.shape.padding.round().clamp(0.0, 127.0) as i8;
     egui::Frame::new()
         .fill(tk.p.surface)
@@ -131,7 +131,7 @@ pub fn card<R>(ui: &mut Ui, tk: &Tk, add: impl FnOnce(&mut Ui) -> R) -> R {
         .inner
 }
 
-pub fn divider(ui: &mut Ui, tk: &Tk) {
+pub fn divider(ui: &mut Ui, tk: &Tk<'_>) {
     let gap = tk.th.shape.padding * 0.6;
     ui.add_space(gap);
     let (rect, _) = ui.allocate_exact_size(
@@ -145,12 +145,18 @@ pub fn divider(ui: &mut Ui, tk: &Tk) {
 /// A title and a description on the left, a control on the right, the two centred on
 /// each other. The control's size comes from the frame before, so a short switch next
 /// to two lines of text sits in the middle too.
-pub fn row(ui: &mut Ui, tk: &Tk, title: &str, desc: Option<&str>, control: impl FnOnce(&mut Ui)) {
+pub fn row(
+    ui: &mut Ui,
+    tk: &Tk<'_>,
+    title: &str,
+    desc: Option<&str>,
+    control: impl FnOnce(&mut Ui),
+) {
     let w = ui.available_width();
     let id = ui.next_auto_id().with("row");
     let prev = ui
         .data(|d| d.get_temp::<Vec2>(id))
-        .unwrap_or(vec2(w * 0.4, tk.th.shape.control_height));
+        .unwrap_or_else(|| vec2(w * 0.4, tk.th.shape.control_height));
     let lw = (w - prev.x - tk.th.shape.padding).max(w * 0.3);
     let title_h = ui
         .painter()
@@ -200,14 +206,14 @@ pub enum Kind {
 }
 
 /// How wide [`button`] makes a button with `label`.
-pub fn button_width(ui: &Ui, tk: &Tk, label: &str) -> f32 {
+pub fn button_width(ui: &Ui, tk: &Tk<'_>, label: &str) -> f32 {
     let galley = ui
         .painter()
         .layout_no_wrap(label.to_owned(), tk.body_m(), Color32::PLACEHOLDER);
     galley.size().x + tk.th.shape.padding * 2.0
 }
 
-pub fn button(ui: &mut Ui, tk: &Tk, label: &str, kind: Kind, enabled: bool) -> Response {
+pub fn button(ui: &mut Ui, tk: &Tk<'_>, label: &str, kind: Kind, enabled: bool) -> Response {
     button_named(ui, tk, label, label, kind, enabled)
 }
 
@@ -215,7 +221,7 @@ pub fn button(ui: &mut Ui, tk: &Tk, label: &str, kind: Kind, enabled: bool) -> R
 /// "Forget" in a list of headsets).
 pub fn button_named(
     ui: &mut Ui,
-    tk: &Tk,
+    tk: &Tk<'_>,
     label: &str,
     name: &str,
     kind: Kind,
@@ -257,7 +263,7 @@ pub fn button_named(
 /// main control, so both read the same. Returns the newly chosen index.
 pub fn segmented(
     ui: &mut Ui,
-    tk: &Tk,
+    tk: &Tk<'_>,
     options: &[&str],
     selected: usize,
     enabled: bool,
@@ -324,7 +330,7 @@ pub fn segmented(
 }
 
 /// On and off. Returns the new value when it was flipped.
-pub fn switch(ui: &mut Ui, tk: &Tk, label: &str, on: bool, enabled: bool) -> Option<bool> {
+pub fn switch(ui: &mut Ui, tk: &Tk<'_>, label: &str, on: bool, enabled: bool) -> Option<bool> {
     let hgt = tk.th.shape.control_height * 0.6;
     let size = vec2(hgt * 1.8, hgt);
     let sense = if enabled {
@@ -372,7 +378,7 @@ pub fn switch(ui: &mut Ui, tk: &Tk, label: &str, on: bool, enabled: bool) -> Opt
 /// being moved and whether the move is over (released, or a key press).
 pub fn slider(
     ui: &mut Ui,
-    tk: &Tk,
+    tk: &Tk<'_>,
     label: &str,
     value: u8,
     width: f32,
@@ -390,16 +396,17 @@ pub fn slider(
         pos2(rect.left() + knob, rect.center().y - 3.0),
         pos2(rect.right() - knob, rect.center().y + 3.0),
     );
-    let mut out = None;
-    if let Some(pos) = resp.interact_pointer_pos()
+    let mut out = if let Some(pos) = resp.interact_pointer_pos()
         && (resp.dragged() || resp.clicked() || resp.drag_stopped())
     {
         let v = ((pos.x - track.left()) / track.width()).clamp(0.0, 1.0);
-        out = Some((
+        Some((
             (v * 100.0).round() as u8,
             resp.clicked() || resp.drag_stopped(),
-        ));
-    }
+        ))
+    } else {
+        None
+    };
     if resp.has_focus() {
         ui.memory_mut(|m| {
             m.set_focus_lock_filter(
@@ -408,7 +415,7 @@ pub fn slider(
                     horizontal_arrows: true,
                     ..Default::default()
                 },
-            )
+            );
         });
         let step = ui.input(|i| {
             i.num_presses(Key::ArrowRight) as i32 - i.num_presses(Key::ArrowLeft) as i32
@@ -443,14 +450,14 @@ pub fn slider(
     out
 }
 
-pub fn dot(ui: &Ui, tk: &Tk, center: Pos2, color: Color32) {
+pub fn dot(ui: &Ui, tk: &Tk<'_>, center: Pos2, color: Color32) {
     ui.painter()
         .circle_filled(center, tk.th.type_.size_body * 0.3, color);
 }
 
 /// A dot for the state and the text in the normal text colour: the colour carries the
 /// state, the words stay readable in both themes.
-pub fn status(ui: &mut Ui, tk: &Tk, color: Color32, s: &str) {
+pub fn status(ui: &mut Ui, tk: &Tk<'_>, color: Color32, s: &str) {
     ui.horizontal(|ui| {
         let (r, _) =
             ui.allocate_exact_size(vec2(12.0, tk.th.type_.size_body * 1.3), Sense::hover());
@@ -464,7 +471,7 @@ pub fn status(ui: &mut Ui, tk: &Tk, color: Color32, s: &str) {
 }
 
 /// A turning part of a ring, only while something is going on.
-pub fn spinner(ui: &mut Ui, tk: &Tk, size: f32) {
+pub fn spinner(ui: &mut Ui, tk: &Tk<'_>, size: f32) {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
     let t = ui.input(|i| i.time) as f32;
     let c = rect.center();
@@ -486,7 +493,7 @@ pub fn spinner(ui: &mut Ui, tk: &Tk, size: f32) {
         .request_repaint_after(std::time::Duration::from_millis(60));
 }
 
-pub fn battery(ui: &mut Ui, tk: &Tk, level: f32, charging: bool) {
+pub fn battery(ui: &mut Ui, tk: &Tk<'_>, level: f32, charging: bool) {
     let h = tk.th.type_.size_title * 0.8;
     let (rect, _) = ui.allocate_exact_size(vec2(h * 2.1, h), Sense::hover());
     let body = Rect::from_min_max(rect.min, pos2(rect.right() - h * 0.18, rect.bottom()));
@@ -516,7 +523,7 @@ pub fn battery(ui: &mut Ui, tk: &Tk, level: f32, charging: bool) {
 }
 
 /// The app icon (packaging/prostir.svg): three screens on an arc around you.
-pub fn brand_mark(ui: &mut Ui, tk: &Tk, size: f32) {
+pub fn brand_mark(ui: &mut Ui, tk: &Tk<'_>, size: f32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
     let s = rect.width() / 64.0;
     let at = |x: f32, y: f32| rect.min + vec2(x, y) * s;
@@ -555,7 +562,7 @@ pub fn brand_mark(ui: &mut Ui, tk: &Tk, size: f32) {
     );
 }
 
-fn code_cells(ui: &mut Ui, tk: &Tk, sense: Sense) -> (Rect, Response, Vec<Rect>) {
+fn code_cells(ui: &mut Ui, tk: &Tk<'_>, sense: Sense) -> (Rect, Response, Vec<Rect>) {
     let cell = tk.th.shape.control_height * 1.15;
     let gap = tk.th.shape.spacing;
     let size = vec2(cell * 6.0 + gap * 5.0 + gap * 1.5, cell * 1.2);
@@ -572,7 +579,7 @@ fn code_cells(ui: &mut Ui, tk: &Tk, sense: Sense) -> (Rect, Response, Vec<Rect>)
 
 /// Six digits typed into one field drawn as six cells. Returns true when Enter was
 /// pressed with all six there.
-pub fn code_field(ui: &mut Ui, tk: &Tk, label: &str, code: &mut String, enabled: bool) -> bool {
+pub fn code_field(ui: &mut Ui, tk: &Tk<'_>, label: &str, code: &mut String, enabled: bool) -> bool {
     let sense = if enabled {
         Sense::click()
     } else {
@@ -591,7 +598,7 @@ pub fn code_field(ui: &mut Ui, tk: &Tk, label: &str, code: &mut String, enabled:
                     tab: false,
                     ..Default::default()
                 },
-            )
+            );
         });
         for e in ui.input(|i| i.events.clone()) {
             match e {
@@ -656,7 +663,7 @@ pub fn code_field(ui: &mut Ui, tk: &Tk, label: &str, code: &mut String, enabled:
 }
 
 /// A code made on the PC, shown big to be typed in the headset.
-pub fn code_display(ui: &mut Ui, tk: &Tk, code: &str) {
+pub fn code_display(ui: &mut Ui, tk: &Tk<'_>, code: &str) {
     let (_, resp, cells) = code_cells(ui, tk, Sense::hover());
     let p = tk.p;
     for (i, r) in cells.iter().enumerate() {

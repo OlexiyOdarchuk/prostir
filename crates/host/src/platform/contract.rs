@@ -511,7 +511,7 @@ impl std::fmt::Display for VirtualSpec {
 }
 
 /// Where outputs go on the desktop.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DeskPlan {
     /// Each output's top-left corner, in logical pixels.
     pub positions: Vec<(OutputKey, i32, i32)>,
@@ -524,7 +524,7 @@ pub type Outputs = HashMap<OutputKey, Geometry>;
 
 /// Where an output is on the desktop: position and size in logical pixels, and its
 /// priority (1 = primary; only KDE has priorities).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Geometry {
     pub x: i32,
     pub y: i32,
@@ -538,7 +538,7 @@ pub struct Geometry {
 }
 
 /// A display of the PC itself, connected now.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PhysicalDisplay {
     /// Its key, to tell it from the others and to save; nothing to show to people.
     /// On Linux its connector (`eDP-1`, `HDMI-A-1`).

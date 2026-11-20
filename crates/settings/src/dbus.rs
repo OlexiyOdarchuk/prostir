@@ -34,12 +34,13 @@ impl DbusClient {
             .and_then(|b| b.path(OBJECT_PATH))
             .and_then(|b| b.interface(INTERFACE))
             .map(|b| b.cache_properties(CacheProperties::No))
-            .and_then(|b| b.build())
+            .and_then(zbus::blocking::proxy::Builder::build)
             .map_err(broken)?;
         Ok(Self { conn, proxy })
     }
 }
 
+#[allow(clippy::needless_pass_by_value, reason = "made for map_err(broken)")]
 fn broken(e: zbus::Error) -> ClientError {
     ClientError::Broken(e.to_string())
 }
@@ -235,6 +236,7 @@ pub(crate) mod tests {
             (self.revision, r#"{"v":1,"pc":{"name":"desk"}}"#.into())
         }
 
+        #[allow(clippy::needless_pass_by_value, reason = "a D-Bus method's argument")]
         fn call(&mut self, request: String) -> Result<String, ServiceError> {
             if request.contains("remove_monitor") {
                 return Err(ServiceError::LastDisplay("Keep one monitor.".into()));

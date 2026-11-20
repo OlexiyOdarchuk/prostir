@@ -139,7 +139,8 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
                 state.shared.bind_output(registry, name, version, qh);
             }
             wl_registry::Event::GlobalRemove { name } => {
-                if let Some((output, _)) = state.shared.outputs.lock().unwrap().remove(&name) {
+                let mut outputs = state.shared.outputs.lock().unwrap();
+                if let Some((output, _)) = outputs.remove(&name) {
                     output.release();
                 }
             }
@@ -168,7 +169,7 @@ impl Dispatch<ZkdeScreencastUnstableV1, ()> for State {
         _: &mut Self,
         _: &ZkdeScreencastUnstableV1,
         _: <ZkdeScreencastUnstableV1 as Proxy>::Event,
-        _: &(),
+        (): &(),
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
@@ -251,7 +252,7 @@ impl Screencast {
                             revents: 0,
                         };
                         // SAFETY: a single valid pollfd.
-                        let n = unsafe { libc::poll(&mut pfd, 1, 100) };
+                        let n = unsafe { libc::poll(&raw mut pfd, 1, 100) };
                         if n > 0 && guard.read().is_err() {
                             break;
                         }

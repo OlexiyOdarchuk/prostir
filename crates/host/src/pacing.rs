@@ -132,7 +132,7 @@ impl WindowMin {
         }
         match self.seconds.back_mut() {
             Some((at, min)) if now.saturating_duration_since(*at) < Duration::from_secs(1) => {
-                *min = (*min).min(v)
+                *min = (*min).min(v);
             }
             _ => self.seconds.push_back((now, v)),
         }
@@ -166,7 +166,7 @@ impl Demand {
         }
         match self.slices.back_mut() {
             Some((at, b)) if now.saturating_duration_since(*at) < DEMAND_WINDOW / 4 => {
-                *b += bytes as u64
+                *b += bytes as u64;
             }
             _ => self.slices.push_back((now, bytes as u64)),
         }
@@ -198,7 +198,7 @@ pub struct Look {
 }
 
 /// What the pacer did since its stats were last taken.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PacerStats {
     /// Times the round trip rose and the pace backed off.
     pub backoffs: u32,

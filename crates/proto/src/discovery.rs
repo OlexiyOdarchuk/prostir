@@ -174,7 +174,9 @@ impl Query {
         out.push(VERSION);
         out.extend_from_slice(&self.nonce);
         out.push(tags.len() as u8);
-        tags.iter().for_each(|t| out.extend_from_slice(t));
+        for t in tags {
+            out.extend_from_slice(t);
+        }
         out.push(name.len() as u8);
         out.extend_from_slice(name.as_bytes());
         if out.len() < MIN_QUERY {
@@ -418,7 +420,7 @@ mod tests {
         assert!(!q.tags.contains(&back.tag));
         assert!(Answer::decode(&bytes[..bytes.len() - 1]).is_none());
         assert!(Answer::decode(&q.encode()).is_none());
-        let mut more = bytes.clone();
+        let mut more = bytes;
         more.extend_from_slice(b"later");
         assert_eq!(Answer::decode(&more).unwrap(), a);
     }

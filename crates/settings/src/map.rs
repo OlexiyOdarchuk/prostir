@@ -13,7 +13,7 @@ use crate::theme::mix;
 use crate::widgets::{Tk, faded};
 
 /// One display as the map draws it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tile {
     pub id: u32,
     pub name: String,
@@ -74,7 +74,7 @@ fn bounds(tiles: &[Tile]) -> Rect {
     })
 }
 
-fn label(ui: &Ui, tk: &Tk, r: Rect, t: &Tile, color: Color32) {
+fn label(ui: &Ui, tk: &Tk<'_>, r: Rect, t: &Tile, color: Color32) {
     let c = r.center();
     // The name: smaller on a narrow monitor, and shortened with an ellipsis where
     // even that does not fit.
@@ -114,7 +114,7 @@ fn label(ui: &Ui, tk: &Tk, r: Rect, t: &Tile, color: Color32) {
     }
 }
 
-fn colors(tk: &Tk, t: &Tile, selected: bool, hover: f32) -> (Color32, Color32) {
+fn colors(tk: &Tk<'_>, t: &Tile, selected: bool, hover: f32) -> (Color32, Color32) {
     let p = tk.p;
     if selected {
         (p.accent, p.accent_text)
@@ -128,7 +128,7 @@ fn colors(tk: &Tk, t: &Tile, selected: bool, hover: f32) -> (Color32, Color32) {
 /// The flat map.
 pub fn flat(
     ui: &mut Ui,
-    tk: &Tk,
+    tk: &Tk<'_>,
     st: &mut MapState,
     tiles: &[Tile],
     selected: Option<u32>,
@@ -180,15 +180,16 @@ pub fn flat(
     };
 
     // Where the dragged tile is under the pointer, and where it would land.
-    let mut ghost: Option<Ghost> = None;
-    if let Some(d) = &st.drag
+    let ghost: Option<Ghost> = if let Some(d) = &st.drag
         && let Some(t) = tiles.iter().find(|t| t.id == d.id)
     {
         let want = ((d.at - origin) / scale - d.grab).round();
         let want = (want.x as i32, want.y as i32);
         let land = snap::snap(&others(t.id), (t.rect.w, t.rect.h), want, magnet);
-        ghost = Some((t.id, want, land));
-    }
+        Some((t.id, want, land))
+    } else {
+        None
+    };
 
     let mut order: Vec<&Tile> = tiles.iter().collect();
     if let Some((id, ..)) = ghost {
@@ -257,7 +258,7 @@ pub fn flat(
                         vertical_arrows: true,
                         ..Default::default()
                     },
-                )
+                );
             });
             let dir = ui.input(|i| {
                 [
@@ -360,7 +361,7 @@ fn inside(pts: &[Pos2], at: Pos2) -> bool {
 /// The displays on an arc around the viewer, seen from behind and above.
 pub fn arc(
     ui: &mut Ui,
-    tk: &Tk,
+    tk: &Tk<'_>,
     st: &mut MapState,
     tiles: &[Tile],
     selected: Option<u32>,
@@ -380,7 +381,7 @@ pub fn arc(
     if resp.double_clicked() {
         *st = MapState::default();
     }
-    let Some(centre) = tiles.iter().find(|t| t.main).or(tiles.first()) else {
+    let Some(centre) = tiles.iter().find(|t| t.main).or_else(|| tiles.first()) else {
         return events;
     };
 

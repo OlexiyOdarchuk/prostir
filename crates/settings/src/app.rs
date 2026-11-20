@@ -90,7 +90,7 @@ pub enum Conn {
 }
 
 /// How a pairing window ended, while the window shows it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
     Paired(String),
     Expired,
@@ -168,7 +168,7 @@ impl App {
         };
         let languages = catalog.languages();
         let look = WindowLook::default();
-        let code = pick_language(&o.language, &look, &languages);
+        let code = pick_language(o.language.as_deref(), &look, &languages);
         let strings = catalog.load(&code);
         let file = ThemeFile::new(o.theme_file);
         let palette = PaletteName::Ink;
@@ -274,7 +274,7 @@ impl App {
             } => {
                 if e.unsupported() {
                     // Not done by this Prostir (yet): the control says so itself.
-                    self.ui.unsupported.insert(crate::api::kind(&request));
+                    self.ui.unsupported.insert(kind(&request));
                     self.ui.volume_drag = None;
                 } else if !(matches!(request, Request::WindowLook { .. })
                     && matches!(e, ClientError::NotRunning | ClientError::TooOld))
@@ -452,7 +452,11 @@ impl App {
 
     /// The language now: chosen in the window, or the desktop's.
     fn language(&self) -> String {
-        pick_language(&self.desktop_language, &self.look, &self.languages)
+        pick_language(
+            self.desktop_language.as_deref(),
+            &self.look,
+            &self.languages,
+        )
     }
 
     fn scheme_now(&self, ctx: &Context) -> Scheme {
@@ -584,7 +588,7 @@ impl App {
                         .inner_margin(egui::Margin::symmetric(16, 20)),
                 )
                 .show(ui, |ui| {
-                    sidebar(ui, &tk, &self.conn, &self.ui, first_run_shown, &mut actions)
+                    sidebar(ui, &tk, &self.conn, &self.ui, first_run_shown, &mut actions);
                 });
 
             let pad = |v: f32| v.round().clamp(0.0, 127.0) as i8;
@@ -641,13 +645,13 @@ impl eframe::App for App {
 }
 
 /// The language chosen in the window, else the desktop's, among those there are.
-fn pick_language(desktop: &Option<String>, look: &WindowLook, langs: &[Language]) -> String {
+fn pick_language(desktop: Option<&str>, look: &WindowLook, langs: &[Language]) -> String {
     let codes: Vec<&str> = langs.iter().map(|l| l.code.as_str()).collect();
     let known = |c: &String| codes.contains(&c.as_str());
     look.language
         .clone()
         .filter(known)
-        .or_else(|| desktop.clone().filter(known))
+        .or_else(|| desktop.map(str::to_owned).filter(known))
         .unwrap_or_else(|| prostir_lang::system_language(&codes))
 }
 
@@ -725,7 +729,7 @@ fn apply_style(ctx: &Context, p: &Palette, th: &Theme, scheme: Scheme) {
 }
 
 /// The status line at the bottom of the sidebar: one dot, one sentence.
-fn status_line(tk: &Tk, conn: &Conn) -> (egui::Color32, String) {
+fn status_line(tk: &Tk<'_>, conn: &Conn) -> (egui::Color32, String) {
     let p = tk.p;
     match conn {
         Conn::Loading => (p.text_muted, tk.t("side-loading")),
@@ -733,7 +737,7 @@ fn status_line(tk: &Tk, conn: &Conn) -> (egui::Color32, String) {
             why: ClientError::TooOld,
             ..
         } => (p.warning, tk.t("side-old")),
-        Conn::Absent { why, .. } if crate::pages::silent(why) => (p.warning, tk.t("side-silent")),
+        Conn::Absent { why, .. } if pages::silent(why) => (p.warning, tk.t("side-silent")),
         Conn::Absent { .. } => (p.warning, tk.t("side-not-running")),
         Conn::Live { snap, .. } => {
             let s = &snap.state;
@@ -764,7 +768,7 @@ fn status_line(tk: &Tk, conn: &Conn) -> (egui::Color32, String) {
 
 fn sidebar(
     ui: &mut Ui,
-    tk: &Tk,
+    tk: &Tk<'_>,
     conn: &Conn,
     st: &UiState,
     first_run: bool,
@@ -814,7 +818,7 @@ fn sidebar(
     });
 }
 
-fn nav_item(ui: &mut Ui, tk: &Tk, current: Page, page: Page, id: &str, out: &mut Vec<Action>) {
+fn nav_item(ui: &mut Ui, tk: &Tk<'_>, current: Page, page: Page, id: &str, out: &mut Vec<Action>) {
     let p = tk.p;
     let (rect, resp) = ui.allocate_exact_size(
         vec2(ui.available_width(), tk.th.shape.control_height),
@@ -855,7 +859,7 @@ fn nav_item(ui: &mut Ui, tk: &Tk, current: Page, page: Page, id: &str, out: &mut
 }
 
 /// A message after an action, above the page, until closed.
-fn notice(ui: &mut Ui, tk: &Tk, s: &str, out: &mut Vec<Action>) {
+fn notice(ui: &mut Ui, tk: &Tk<'_>, s: &str, out: &mut Vec<Action>) {
     egui::Frame::new()
         .fill(tk.p.surface)
         .stroke(Stroke::new(tk.th.shape.stroke, tk.p.danger))

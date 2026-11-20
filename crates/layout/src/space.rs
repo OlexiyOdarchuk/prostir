@@ -454,8 +454,8 @@ pub fn covers(a: &[Vec3; 4], b: &[Vec3; 4], slack: f64) -> bool {
                 .map(|p| unwrap(azimuth(p.as_dvec3()), azimuth(d)))
                 .collect();
             let el: Vec<f64> = c.iter().map(|p| elevation(p.as_dvec3())).collect();
-            let mut az2 = az.clone();
-            let mut el2 = el.clone();
+            let mut az2 = az;
+            let mut el2 = el;
             az2.sort_by(f64::total_cmp);
             el2.sort_by(f64::total_cmp);
             Seen {

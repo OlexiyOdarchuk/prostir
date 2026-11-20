@@ -50,7 +50,9 @@ fn a_hung_desktop_holds_nothing_up() {
     // It streams already: only laying the desktop out hangs.
     headset
         .wait(SOON, "the new monitor shows", |v| {
-            v.streams.get(&id).is_some_and(|s| s.has_picture())
+            v.streams
+                .get(&id)
+                .is_some_and(prostir_testkit::Stream::has_picture)
         })
         .unwrap();
     // Meanwhile requests are answered at once, the tray answers, the pings go on.
@@ -135,7 +137,9 @@ fn an_encoder_that_does_not_stop_is_left_behind() {
     };
     headset
         .wait(SOON, "the new monitor shows", |v| {
-            v.streams.get(&id).is_some_and(|s| s.has_picture())
+            v.streams
+                .get(&id)
+                .is_some_and(prostir_testkit::Stream::has_picture)
         })
         .unwrap();
     assert_eq!(pc.count_log("does not respond"), 0);
@@ -261,8 +265,11 @@ fn an_encoder_that_keeps_hanging_is_not_used_any_more() {
     }
     headset
         .wait(SOON, "four monitors showing", |v| {
-            ids.iter()
-                .all(|id| v.streams.get(id).is_some_and(|s| s.has_picture()))
+            ids.iter().all(|id| {
+                v.streams
+                    .get(id)
+                    .is_some_and(prostir_testkit::Stream::has_picture)
+            })
         })
         .unwrap();
     pc.desktop("hang encoder-stop 30\nhang encoder-stop 30\nhang encoder-stop 30");

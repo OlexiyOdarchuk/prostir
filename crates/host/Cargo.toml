@@ -160,3 +160,6 @@ libXi = "*"
 libXrandr = "*"
 libXrender = "*"
 libxkbcommon-x11 = "*"
+
+[lints]
+workspace = true

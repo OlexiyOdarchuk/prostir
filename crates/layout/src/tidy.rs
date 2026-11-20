@@ -356,7 +356,7 @@ fn line_up_rows<K: Copy + Ord>(
         })
         .collect();
     let all_axis = if own_axes.is_empty() {
-        fit_axis(&everyone, all_up).or((everyone.len() >= 3).then_some(all_up))
+        fit_axis(&everyone, all_up).or_else(|| (everyone.len() >= 3).then_some(all_up))
     } else {
         Some(median_direction(&own_axes))
     };
@@ -473,15 +473,16 @@ fn line_up_rows<K: Copy + Ord>(
             }
             Some(hi + CLEAR)
         };
-        let mut shift = 0.0f32;
-        if !ok(0.0) {
-            shift = match (least(1.0), least(-1.0)) {
+        let shift: f32 = if ok(0.0) {
+            0.0
+        } else {
+            match (least(1.0), least(-1.0)) {
                 (Some(out), Some(back)) if back < out => -back,
                 (Some(out), _) => out,
                 (None, Some(back)) => -back,
                 (None, None) => 0.0,
-            };
-        }
+            }
+        };
         if shift != 0.0 {
             for &k in &rows[r] {
                 if let Some(p) = out.get_mut(&k) {

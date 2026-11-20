@@ -34,3 +34,6 @@ env_logger.workspace = true
 # Pictures of every page without a screen: kittest renders with wgpu (lavapipe or the
 # graphics card), only in tests.
 egui_kittest = { version = "0.37", features = ["wgpu", "snapshot", "eframe"] }
+
+[lints]
+workspace = true

@@ -59,7 +59,8 @@ impl Passthrough {
         };
         let mut feature = xr::sys::PassthroughFB::NULL;
         // SAFETY: valid session, create info and out-pointer.
-        let created = unsafe { (fp.create_passthrough)(session.as_raw(), &info, &mut feature) };
+        let created =
+            unsafe { (fp.create_passthrough)(session.as_raw(), &raw const info, &raw mut feature) };
         check(created, "xrCreatePassthroughFB")?;
         let mut this = Self {
             fp,
@@ -90,8 +91,9 @@ impl Passthrough {
         };
         let mut layer = xr::sys::PassthroughLayerFB::NULL;
         // SAFETY: `feature` belongs to this session.
-        let created =
-            unsafe { (self.fp.create_passthrough_layer)(self.session, &info, &mut layer) };
+        let created = unsafe {
+            (self.fp.create_passthrough_layer)(self.session, &raw const info, &raw mut layer)
+        };
         check(created, "xrCreatePassthroughLayerFB")?;
         Ok(layer)
     }
@@ -153,7 +155,7 @@ impl Passthrough {
         };
         // SAFETY: the layer is alive for the lifetime of `self`.
         check(
-            unsafe { (self.fp.passthrough_layer_set_style)(self.room, &style) },
+            unsafe { (self.fp.passthrough_layer_set_style)(self.room, &raw const style) },
             "xrPassthroughLayerSetStyleFB",
         )
     }
@@ -201,7 +203,7 @@ impl Passthrough {
         };
         // SAFETY: the instance is alive; the transform outlives the call.
         check(
-            unsafe { (self.fp.geometry_instance_set_transform)(w.instance, &transform) },
+            unsafe { (self.fp.geometry_instance_set_transform)(w.instance, &raw const transform) },
             "xrGeometryInstanceSetTransformFB",
         )
     }
@@ -257,7 +259,7 @@ impl Passthrough {
         let mut mesh = xr::sys::TriangleMeshFB::NULL;
         // SAFETY: the buffers outlive the call; the runtime copies them.
         let made = check(
-            unsafe { (mesh_fp.create_triangle_mesh)(self.session, &info, &mut mesh) },
+            unsafe { (mesh_fp.create_triangle_mesh)(self.session, &raw const info, &raw mut mesh) },
             "xrCreateTriangleMeshFB",
         );
         if let Err(e) = made {
@@ -277,7 +279,9 @@ impl Passthrough {
         let mut instance = xr::sys::GeometryInstanceFB::NULL;
         // SAFETY: layer, mesh and space are alive.
         let made = check(
-            unsafe { (self.fp.create_geometry_instance)(self.session, &info, &mut instance) },
+            unsafe {
+                (self.fp.create_geometry_instance)(self.session, &raw const info, &raw mut instance)
+            },
             "xrCreateGeometryInstanceFB",
         );
         if let Err(e) = made {

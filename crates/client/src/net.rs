@@ -37,7 +37,7 @@ const SILENCE: Duration = Duration::from_secs(5);
 
 pub struct Frame {
     /// When the frame arrived from the network.
-    pub received: std::time::Instant,
+    pub received: Instant,
     /// Its number in its generation.
     pub seq: u32,
     pub pts_us: u64,
@@ -132,7 +132,7 @@ impl Feedback {
 }
 
 /// A PC announcing itself on the local network.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FoundHost {
     pub name: String,
     pub addr: SocketAddr,
@@ -544,7 +544,7 @@ pub fn spawn(events: Sender<NetEvent>, discovery: Discovery, steering: Steering)
                     };
                     match outcome {
                         Ok(()) if ended.goodbye.is_some() => {
-                            info!("host {peer:?} ended the session: {why:?}")
+                            info!("host {peer:?} ended the session: {why:?}");
                         }
                         Ok(()) => info!("host {peer:?} closed the connection"),
                         Err(e) => warn!("connection to {peer:?} lost: {e}"),
@@ -659,7 +659,7 @@ impl Finder {
             .collect();
         hosts.sort_by(|a, b| a.name.cmp(&b.name).then(a.addr.cmp(&b.addr)));
         if hosts != self.reported {
-            self.reported = hosts.clone();
+            self.reported.clone_from(&hosts);
             let _ = events.send(NetEvent::Hosts(hosts));
         }
     }
@@ -748,7 +748,7 @@ fn local_ipv4() -> Option<Ipv4Addr> {
 fn scan_subnet() -> Option<TcpStream> {
     let me = local_ipv4()?;
     let [a, b, c, own] = me.octets();
-    let found = std::sync::Mutex::new(None);
+    let found = Mutex::new(None);
     std::thread::scope(|scope| {
         for d in (1..=254u8).filter(|&d| d != own) {
             let found = &found;
@@ -999,7 +999,7 @@ fn run_session(
         }
     };
     // From here on, packets.
-    let feedback = Feedback::start(sender, closer.clone())?;
+    let feedback = Feedback::start(sender, closer)?;
     // Nor does its writer outlive it.
     struct StopOnExit(Feedback);
     impl Drop for StopOnExit {

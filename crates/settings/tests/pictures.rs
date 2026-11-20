@@ -191,7 +191,7 @@ fn each_state_of_the_other_pages() {
     let (mut h, _) = window(
         dark(Mock::connected()),
         Setup {
-            theme_file: path.clone(),
+            theme_file: path,
             ..shot()
         },
     );

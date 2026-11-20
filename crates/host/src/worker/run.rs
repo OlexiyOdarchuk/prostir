@@ -66,7 +66,7 @@ pub struct Shared {
 
 /// Starts the worker's thread: once the worker `before` is gone, it connects and works
 /// until asked to end; then `gone` is set.
-pub fn spawn(shared: Shared, start: Start, before: Option<Gone>, gone: Gone) {
+pub fn spawn(shared: Shared, start: Start, before: Option<Gone>, gone: &Gone) {
     let mark_gone = {
         let gone = gone.clone();
         move || {
@@ -96,7 +96,7 @@ pub fn spawn(shared: Shared, start: Start, before: Option<Gone>, gone: Gone) {
         });
     if let Err(e) = spawned {
         error!("no thread for the desktop: {e}");
-        let (lock, ring) = &*gone;
+        let (lock, ring) = &**gone;
         *lock.lock().unwrap() = true;
         ring.notify_all();
     }
@@ -700,7 +700,7 @@ impl Worker {
 
     /// Starts screen `id`'s encoder on its output with the wanted settings, else with
     /// `fallback`. Says what came of it.
-    fn start(&mut self, id: ScreenId, fallback: Option<EncoderConfig>) {
+    fn start(&mut self, id: ScreenId, fallback: Option<&EncoderConfig>) {
         let Some(wanted) = self.wanted.clone() else {
             return;
         };
@@ -715,7 +715,7 @@ impl Worker {
         let mut used = asked;
         let mut result =
             self.start_encoder(id, &w.name, physical, output.as_mut(), &wanted.encoding);
-        if let (Err(e), Some(cfg)) = (&result, &fallback) {
+        if let (Err(e), Some(cfg)) = (&result, fallback) {
             warn!(
                 "{}: cannot encode with {:?} {:?}: {e:#}; back to {:?} {:?}",
                 w.name, wanted.encoding.backend, wanted.encoding.codec, cfg.backend, cfg.codec
@@ -785,8 +785,8 @@ impl Worker {
             .started_for
             .zip(self.wanted.as_ref())
             .map(|((backend, codec), w)| EncoderConfig {
-                backend,
                 codec,
+                backend,
                 ..w.encoding.clone()
             });
         if let Some(output) = slot.output.as_mut() {
@@ -795,7 +795,7 @@ impl Worker {
         let encoder = slot.encoder.take();
         slot.started_for = None;
         stop_encoder(encoder, &slot.name, &self.shared.steps, &self.behind);
-        self.start(id, before);
+        self.start(id, before.as_ref());
     }
 
     fn set_paused(&mut self, id: ScreenId, paused: bool) {
@@ -1006,7 +1006,10 @@ impl Worker {
         match job {
             Job::Tick => self.upkeep(),
             Job::Focus => {
-                let key = self.desktop.windows().and_then(|w| w.active_output());
+                let key = self
+                    .desktop
+                    .windows()
+                    .and_then(crate::platform::Windows::active_output);
                 self.done(Done::Focus(key));
             }
             Job::LookPhysical => {
@@ -1393,7 +1396,11 @@ impl Worker {
 
     /// Where the mouse is: the output and the point across its image (0..=65535).
     fn find_mouse(&mut self) -> Result<JobOk> {
-        let Some((x, y)) = self.desktop.pointer().and_then(|p| p.position()) else {
+        let Some((x, y)) = self
+            .desktop
+            .pointer()
+            .and_then(crate::platform::Pointer::position)
+        else {
             bail!(UserError::NotOnDisplays);
         };
         let frac = |v: i32, start: i32, len: i32| {
@@ -1492,7 +1499,11 @@ impl Worker {
     /// Puts the PC's active window on a panel of its own, screen `id`, output
     /// `number`: an output its size, which the headset shows as a floating panel.
     fn detach(&mut self, id: ScreenId, number: u32) -> Result<JobOk> {
-        let Some(window) = self.desktop.windows().and_then(|w| w.active()) else {
+        let Some(window) = self
+            .desktop
+            .windows()
+            .and_then(crate::platform::Windows::active)
+        else {
             bail!(UserError::NoWindow);
         };
         let Some(wanted) = self.wanted.clone() else {
@@ -1587,7 +1598,7 @@ impl Worker {
                 // Once for each time it starts failing: the headset's map is not the
                 // desktop's meanwhile.
                 if failures == 1 {
-                    self.shared.router.send_all(HostMsg::Problem {
+                    self.shared.router.send_all(&HostMsg::Problem {
                         error: ErrorCode::DESKTOP,
                         detail: state::clip(&format!("{e:#}"), state::MAX_DETAIL),
                         display: None,

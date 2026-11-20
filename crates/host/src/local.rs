@@ -83,7 +83,7 @@ fn pc_caps() -> HeadsetCaps {
 
 /// What the PC allows any headset, for a request without one.
 fn pc_limits(codec: Codec) -> Limits {
-    publish::limits(&wire::Prefs::default(), &pc_caps(), codec)
+    publish::limits(wire::Prefs::default(), &pc_caps(), codec)
 }
 
 fn done() -> CtlReply {
@@ -101,7 +101,7 @@ fn failed(e: &anyhow::Error) -> CtlReply {
     warn!("local API: {e:#}");
     let text = e.downcast_ref::<errors::UserError>().map_or_else(
         || t("Не вдалося", "It did not work").to_owned(),
-        |u| u.to_string(),
+        ToString::to_string,
     );
     CtlReply::failed(api::of_code(errors::code_of(e)), text)
 }
@@ -142,7 +142,7 @@ impl Brain {
             return;
         }
         if let Request::PairingCode { code } = request {
-            return self.code_typed(code, reply);
+            return self.code_typed(&code, reply);
         }
         let result = self.carry_out(request);
         if let Some(d) = self.displays.as_mut() {
@@ -164,7 +164,7 @@ impl Brain {
         self.store.change(|s| s.autostart = Some(on));
     }
 
-    fn code_typed(&mut self, code: String, reply: Reply) {
+    fn code_typed(&mut self, code: &str, reply: Reply) {
         let digits = code
             .chars()
             .filter(char::is_ascii_digit)
@@ -208,13 +208,12 @@ impl Brain {
                 let mut pressed = false;
                 while let Some(left) = until.checked_duration_since(std::time::Instant::now()) {
                     match platform::sockets::readable(&[notice.fd()], Some(left)) {
-                        Ok(ready) if ready[0] => match notice.check() {
-                            Some(p) => {
+                        Ok(ready) if ready[0] => {
+                            if let Some(p) = notice.check() {
                                 pressed = p;
                                 break;
                             }
-                            None => continue,
-                        },
+                        }
                         _ => break,
                     }
                 }
@@ -230,7 +229,7 @@ impl Brain {
         }
     }
 
-    fn answer(&mut self, reply: Reply, result: CtlReply) {
+    fn answer(&self, reply: Reply, result: CtlReply) {
         if let CtlReply::Failed(f) = &result {
             info!("local API: {f}");
         }

@@ -180,11 +180,11 @@ fn main() -> Result<()> {
             HostMsg::Reply { req, outcome } => println!("reply {}: {outcome:?}", req.0),
             HostMsg::Error { text } => println!("host error: {text}"),
             HostMsg::Problem { error, detail, .. } => {
-                println!("problem {}: {detail}", error.code())
+                println!("problem {}: {detail}", error.code());
             }
             HostMsg::VolumeAsk { asked } => println!("PC asks for volume (answered): {asked:?}"),
             HostMsg::Command { req, asked } => {
-                println!("command {} (answered done): {asked:?}", req.0)
+                println!("command {} (answered done): {asked:?}", req.0);
             }
             HostMsg::Notice { text } => println!("PC says: {text}"),
             HostMsg::Ping { .. } | HostMsg::Pong { .. } => {}
@@ -192,7 +192,7 @@ fn main() -> Result<()> {
                 println!(
                     "PC ends the session: {:?}",
                     prostir_proto::PcGoodbye::from_code(reason)
-                )
+                );
             }
             // A part of the PC's state.
             part => println!("PC: {part:?}"),

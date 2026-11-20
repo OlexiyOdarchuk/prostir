@@ -985,7 +985,7 @@ impl Desk {
             eye.x, eye.y, eye.z
         );
         let mut ids: Vec<_> = placements.keys().copied().collect();
-        ids.sort();
+        ids.sort_unstable();
         for id in ids {
             text += &placement_line(id, &placements[&id], sizes.get(&id).copied());
         }
@@ -1005,7 +1005,7 @@ pub fn load(path: &Path) -> HashMap<ScreenId, Placement> {
 
 pub fn save(path: &Path, placements: &HashMap<ScreenId, Placement>) {
     let mut ids: Vec<_> = placements.keys().copied().collect();
-    ids.sort();
+    ids.sort_unstable();
     let text: String = ids
         .iter()
         .map(|id| placement_line(*id, &placements[id], None))
@@ -1494,7 +1494,7 @@ mod tests {
         let p = moved(Vec3::new(0.03, 0.01, 0.0));
         let s = stick(&p, &two, Vec3::ZERO, 1).expect("sticks");
         assert!(s.across && s.side > 0.0);
-        let mut after = p.clone();
+        let mut after = p;
         after.insert(1, s.placement);
         assert!(seam(&after[&0], &after[&1]) < 1e-3);
         // A clear gap left on purpose (40 cm): no magnet.

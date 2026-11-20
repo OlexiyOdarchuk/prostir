@@ -113,6 +113,7 @@ impl Profile {
     }
 
     fn to_text(&self) -> String {
+        use std::fmt::Write as _;
         let monitors: Vec<String> = self
             .sizes
             .iter()
@@ -122,18 +123,19 @@ impl Profile {
                 format!("{star}{w}x{h}")
             })
             .collect();
-        let places: String = self
+        let places = self
             .places
             .iter()
             .enumerate()
-            .map(|(i, p)| {
+            .fold(String::new(), |mut places, (i, p)| {
                 let (a, q) = (p.position, p.rotation);
-                format!(
-                    "place {i} {} {} {} {} {} {} {} {}\n",
+                let _ = writeln!(
+                    places,
+                    "place {i} {} {} {} {} {} {} {} {}",
                     a.x, a.y, a.z, q.x, q.y, q.z, q.w, p.width
-                )
-            })
-            .collect();
+                );
+                places
+            });
         format!(
             "monitors {}\nmirror {}\n{places}{}",
             monitors.join(" "),

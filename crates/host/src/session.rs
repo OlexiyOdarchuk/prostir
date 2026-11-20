@@ -401,11 +401,11 @@ impl Session {
     pub fn start(
         id: SessionId,
         conn: pairing::Connection,
-        open: Vec<Part>,
+        open: &[Part],
         standing: Standing,
         others: &[state::HeadsetCaps],
         displays: &mut Displays,
-        store: &mut Store,
+        store: &Store,
         events: &EventSink,
     ) -> Result<Self> {
         let pairing::Connection {
@@ -420,7 +420,7 @@ impl Session {
         } = conn;
         let via = via_name(peer.via);
         // What the headset said about itself; without it there is no session.
-        let headset = HeadsetState::from_open(&open).context("the headset's Open")?;
+        let headset = HeadsetState::from_open(open).context("the headset's Open")?;
         let configured = store.wanted().access_of(&peer.key);
         let main = standing.main && configured.is_main();
         let standing = Standing {
@@ -685,11 +685,7 @@ impl Session {
     /// Ends the session. With `goodbye` the headset is told why and gets a moment to
     /// read it (the [`Closing`] returned); without, the connection closes now. The
     /// other sessions go on: only this one's headset leaves the router.
-    pub fn finish(
-        mut self,
-        goodbye: Option<PcGoodbye>,
-        displays: &mut Displays,
-    ) -> Option<Closing> {
+    pub fn finish(mut self, goodbye: Option<PcGoodbye>, displays: &Displays) -> Option<Closing> {
         self.end();
         displays.router.detach(self.id);
         let closing = Closing {
@@ -789,7 +785,7 @@ impl Session {
     /// device. The device's own changes come first: they come through the same channel
     /// of events (see [`Session::device_volume`]), so one that came before this level
     /// makes it an old one, which must not be written while the slider moves.
-    fn volume_from_headset(&mut self, v: prostir_proto::state::Volume) {
+    fn volume_from_headset(&mut self, v: state::Volume) {
         if !self.standing.main {
             return;
         }
@@ -935,7 +931,7 @@ impl Session {
     /// to it only while worn; the control loop pauses the desktop once no headset is),
     /// its battery, and the watchers its preferences ask for (notifications only for a
     /// headset with the right to private things).
-    fn headset_changed(&mut self, displays: &mut Displays) {
+    fn headset_changed(&mut self, displays: &Displays) {
         let access = self.publisher.access;
         let headset = &self.publisher.headset;
         let worn = worn(headset);
@@ -994,15 +990,12 @@ impl Session {
             ClientMsg::Volume { part } => Some(*part),
             _ => None,
         };
-        let msg = match self.publisher.headset.apply(msg) {
-            None => {
-                if let Some(v) = volume {
-                    self.volume_from_headset(v);
-                }
-                self.headset_changed(displays);
-                return true;
+        let Some(msg) = self.publisher.headset.apply(msg) else {
+            if let Some(v) = volume {
+                self.volume_from_headset(v);
             }
-            Some(msg) => msg,
+            self.headset_changed(displays);
+            return true;
         };
         match msg {
             // The microphone, from a headset with the right to it.
@@ -1025,7 +1018,9 @@ impl Session {
                         self.ups.insert(up, (kind, channels));
                     }
                     _ => {
-                        warn!("the headset's microphone in {format:?}, which this PC does not take")
+                        warn!(
+                            "the headset's microphone in {format:?}, which this PC does not take"
+                        );
                     }
                 }
             }
@@ -1036,8 +1031,8 @@ impl Session {
             ClientMsg::Up { up, data } => match self.ups.get(&up) {
                 _ if !self.standing.mic => {}
                 // The PC's end of the microphone is mono.
-                Some((UpKind::Mic, 2)) => displays.push_mic(to_mono(&data)),
-                Some((UpKind::Mic, _)) => displays.push_mic(data),
+                Some((UpKind::Mic, 2)) => displays.push_mic(&to_mono(&data)),
+                Some((UpKind::Mic, _)) => displays.push_mic(&data),
                 _ => {}
             },
             ClientMsg::UpEnd { up } => {

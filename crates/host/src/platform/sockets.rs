@@ -65,13 +65,13 @@ pub fn take() -> Result<Option<Sockets>> {
         let kind = unsafe {
             libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
             let mut kind: libc::c_int = 0;
-            let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+            let mut len = size_of::<libc::c_int>() as libc::socklen_t;
             let ok = libc::getsockopt(
                 fd,
                 libc::SOL_SOCKET,
                 libc::SO_TYPE,
                 (&raw mut kind).cast(),
-                &mut len,
+                &raw mut len,
             ) == 0;
             ok.then_some(kind)
         };
@@ -174,7 +174,7 @@ pub fn filter_queries(socket: &UdpSocket) -> io::Result<()> {
             libc::SOL_SOCKET,
             libc::SO_ATTACH_FILTER,
             (&raw const prog).cast(),
-            std::mem::size_of::<libc::sock_fprog>() as libc::socklen_t,
+            size_of::<libc::sock_fprog>() as libc::socklen_t,
         ) != 0
     };
     if failed {
@@ -301,9 +301,9 @@ pub fn start_with(
         // SIGUSR1 (the settings window, passed on by the watcher) waits blocked until
         // the program has its handler: before that it would end it.
         let mut held: libc::sigset_t = std::mem::zeroed();
-        libc::sigemptyset(&mut held);
-        libc::sigaddset(&mut held, libc::SIGUSR1);
-        libc::sigprocmask(libc::SIG_BLOCK, &held, std::ptr::null_mut());
+        libc::sigemptyset(&raw mut held);
+        libc::sigaddset(&raw mut held, libc::SIGUSR1);
+        libc::sigprocmask(libc::SIG_BLOCK, &raw const held, std::ptr::null_mut());
         libc::execve(path.as_ptr(), argv_ptrs.as_ptr(), env_ptrs.as_ptr());
         libc::_exit(127);
     }

@@ -13,3 +13,6 @@ description = "Where Prostir's monitors go: pure layout rules shared by the PC a
 # and the headset share it and everything here is tested on the PC.
 [dependencies]
 glam.workspace = true
+
+[lints]
+workspace = true

@@ -27,7 +27,7 @@ wire_enum! {
 wire_enum! {
     message
     /// What the headset asks the PC to change, from its menu.
-    #[derive(Debug, Clone, PartialEq)]
+    #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum Request {
         /// A new monitor: [`Outcome::Added`].
         1 => AddDisplay { mode: Mode },
@@ -70,7 +70,7 @@ wire_enum! {
     message
     /// What the PC (its tray, and later `prostir ctl` and hotkeys) asks the headset to
     /// do: actions of the headset's menu that make sense from outside.
-    #[derive(Debug, Clone, PartialEq)]
+    #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum Command {
         /// Bring everything in front.
         1 => Recenter,
@@ -148,7 +148,7 @@ pub const RETIRED_COMMAND_KINDS: &[u8] = &[9];
 
 /// A request or command as read: a kind this build knows, or another one, whose
 /// fields were skipped. It runs to the end of its message.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Asked<T> {
     Known(T),
     Unknown { kind: u8 },
@@ -228,7 +228,7 @@ mod tests {
             Asked::Unknown { kind: 200 }
         );
         // A known kind stays strict.
-        let mut longer = bytes.clone();
+        let mut longer = bytes;
         longer.push(0);
         assert!(decode::<Asked<Request>>(&longer).is_err());
     }

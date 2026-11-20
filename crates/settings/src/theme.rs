@@ -134,6 +134,7 @@ macro_rules! tokens {
     ($(#[$doc:meta])* $name:ident { $($k:ident : $ty:ty = $parse:expr),* $(,)? }) => {
         $(#[$doc])*
         #[derive(Clone, Debug, Default, PartialEq)]
+        #[allow(clippy::derive_partial_eq_without_eq, reason = "most token tables hold numbers")]
         pub struct $name { $(pub $k: $ty,)* }
 
         impl $name {
@@ -404,7 +405,7 @@ impl Theme {
         for (key, value) in &doc {
             match (key.as_str(), value) {
                 ("format", _) => {}
-                ("name", toml::Value::String(s)) => self.name = s.clone(),
+                ("name", toml::Value::String(s)) => self.name.clone_from(s),
                 ("light", toml::Value::Table(t)) => self.light.apply(t, "light", issues),
                 ("dark", toml::Value::Table(t)) => self.dark.apply(t, "dark", issues),
                 ("brand", toml::Value::Table(t)) => self.brand.apply(t, "brand", issues),
@@ -467,7 +468,7 @@ impl Theme {
                                 at: format!("[type] {name}"),
                                 kind: IssueKind::Font(why),
                             });
-                            *field = builtin.clone();
+                            field.clone_from(builtin);
                         }
                     }
                 }

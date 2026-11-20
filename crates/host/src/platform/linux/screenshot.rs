@@ -37,7 +37,7 @@ pub fn screenshot_path() -> Result<PathBuf> {
 fn pictures_dir() -> PathBuf {
     let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
     run(
-        std::process::Command::new("xdg-user-dir").arg("PICTURES"),
+        Command::new("xdg-user-dir").arg("PICTURES"),
         Duration::from_secs(2),
     )
     .ok()
@@ -53,7 +53,7 @@ fn timestamp() -> String {
     unsafe {
         let now = libc::time(std::ptr::null_mut());
         let mut tm: libc::tm = std::mem::zeroed();
-        libc::localtime_r(&now, &mut tm);
+        libc::localtime_r(&raw const now, &raw mut tm);
         format!(
             "{:04}-{:02}-{:02} {:02}-{:02}-{:02}",
             tm.tm_year + 1900,

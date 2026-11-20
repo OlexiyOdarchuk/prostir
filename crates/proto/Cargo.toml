@@ -15,3 +15,6 @@ hmac = "0.12"
 sha2 = "0.10"
 snow = "0.10"
 spake2 = "0.4"
+
+[lints]
+workspace = true

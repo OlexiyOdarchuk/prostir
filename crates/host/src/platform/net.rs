@@ -22,8 +22,8 @@ fn set(stream: &TcpStream, level: libc::c_int, name: libc::c_int, value: u32) ->
             stream.as_raw_fd(),
             level,
             name,
-            (&value as *const u32).cast(),
-            std::mem::size_of::<u32>() as libc::socklen_t,
+            (&raw const value).cast(),
+            size_of::<u32>() as libc::socklen_t,
         ) == 0
     }
 }
@@ -72,7 +72,7 @@ impl SocketOptions for TcpOptions {
     fn link_info(&self, stream: &TcpStream) -> Option<LinkInfo> {
         use std::os::fd::AsRawFd;
         let mut info = TcpInfo::default();
-        let mut len = std::mem::size_of::<TcpInfo>() as libc::socklen_t;
+        let mut len = size_of::<TcpInfo>() as libc::socklen_t;
         // SAFETY: a valid socket, and a buffer of `len` bytes the kernel fills (at
         // most that many; `len` says how many).
         let ok = unsafe {
@@ -80,13 +80,13 @@ impl SocketOptions for TcpOptions {
                 stream.as_raw_fd(),
                 libc::IPPROTO_TCP,
                 libc::TCP_INFO,
-                (&mut info as *mut TcpInfo).cast(),
-                &mut len,
+                (&raw mut info).cast(),
+                &raw mut len,
             ) == 0
         };
         // An older kernel fills less: nothing to tell then.
         let us = |v: u32| Duration::from_micros(u64::from(v));
-        (ok && len as usize >= std::mem::size_of::<TcpInfo>()).then(|| LinkInfo {
+        (ok && len as usize >= size_of::<TcpInfo>()).then(|| LinkInfo {
             delivery_rate: info.delivery_rate,
             rtt: us(info.rtt),
             rtt_var: us(info.rtt_var),

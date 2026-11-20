@@ -412,12 +412,10 @@ fn random_packets_come_back_or_fail_never_panic() {
         }
         // Interleaved: each step takes the next record of a random lane.
         let mut records = Vec::new();
-        let mut last_lane = Vec::new();
         while queues.iter().any(|q| !q.is_empty()) {
             let open: Vec<usize> = (0..lanes).filter(|&l| !queues[l].is_empty()).collect();
             let l = open[rng.below(open.len())];
             records.push(queues[l].pop().unwrap());
-            last_lane.push(l);
         }
         // Damage some rounds: a record changed, dropped, repeated or two swapped.
         let damaged = round % 2 == 1;

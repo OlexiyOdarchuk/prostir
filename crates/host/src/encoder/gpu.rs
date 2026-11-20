@@ -213,7 +213,8 @@ impl Drop for Lease {
             return;
         };
         let mut devices = devices.lock().unwrap();
-        for key in std::mem::take(&mut *self.held.lock().unwrap()) {
+        let mut held = self.held.lock().unwrap();
+        for key in std::mem::take(&mut *held) {
             if let Some((_, users)) = devices.get_mut(&key) {
                 *users -= 1;
                 if *users == 0 {
@@ -255,7 +256,7 @@ mod tests {
         let gpu = GpuDevices::default();
         let element = gst::ElementFactory::make("identity").build().unwrap();
         let context = gst::Context::new("gst.cuda.context", true);
-        let have = gst::message::HaveContext::builder(context.clone())
+        let have = gst::message::HaveContext::builder(context)
             .src(&element)
             .build();
         let first = gpu.lease();

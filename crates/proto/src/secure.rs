@@ -8,6 +8,7 @@
 //!   connection's handshake hash proves both sides used the same code over the same
 //!   channel, which defeats a man in the middle.
 
+use std::fmt::Write as _;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -76,7 +77,7 @@ fn write_private(path: &Path, text: &str) -> io::Result<()> {
 pub fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
-    let tmp = std::path::PathBuf::from(tmp);
+    let tmp = PathBuf::from(tmp);
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -92,7 +93,12 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
 }
 
 pub fn to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    bytes
+        .iter()
+        .fold(String::with_capacity(2 * bytes.len()), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
 }
 
 fn from_hex<const N: usize>(s: &str) -> Option<[u8; N]> {
@@ -198,11 +204,10 @@ impl TrustStore {
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let text: String = self
-            .entries
-            .iter()
-            .map(|(k, l)| format!("{} {l}\n", to_hex(k)))
-            .collect();
+        let text = self.entries.iter().fold(String::new(), |mut s, (k, l)| {
+            let _ = writeln!(s, "{} {l}", to_hex(k));
+            s
+        });
         write_atomic(&self.path, text.as_bytes())
     }
 }

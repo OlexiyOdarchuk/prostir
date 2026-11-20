@@ -209,9 +209,10 @@ impl Activate {
             .stdout(Stdio::null())
             .status()
         {
-            if std::env::var_os("CI").is_some() {
-                panic!("no systemd-socket-activate ({e}), which CI must have");
-            }
+            assert!(
+                !std::env::var_os("CI").is_some(),
+                "no systemd-socket-activate ({e}), which CI must have"
+            );
             eprintln!(
                 "\n*** no systemd-socket-activate ({e}): the socket activation test is SKIPPED ***\n"
             );

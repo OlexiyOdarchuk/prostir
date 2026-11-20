@@ -69,7 +69,7 @@ fn another_development_build_gets_no_session() {
 #[test]
 fn commands_reach_the_headset_and_come_back() {
     use prostir_proto::request::{Asked, Command};
-    let (_dir, mut pc, _keys, mut headset) = crate::session("commands", &Options::default());
+    let (_dir, mut pc, _keys, mut headset) = session("commands", &Options::default());
     let Some(done) = pc.ctl(&["recenter"]) else {
         return;
     };

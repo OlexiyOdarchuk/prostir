@@ -121,7 +121,7 @@ pub fn ray_spheres(origin: Vec3, dir: Vec3, length: f32, out: &mut Vec<Sphere>) 
     }
 }
 
-const VERTEX: &str = r#"#version 300 es
+const VERTEX: &str = r"#version 300 es
 layout(location = 0) in vec2 corner;
 layout(location = 1) in vec4 sphere;
 layout(location = 2) in vec4 color;
@@ -139,9 +139,9 @@ void main() {
     v_color = color;
     v_kind = kind;
 }
-"#;
+";
 
-const FRAGMENT: &str = r#"#version 300 es
+const FRAGMENT: &str = r"#version 300 es
 precision mediump float;
 in vec2 v_uv;
 in vec4 v_color;
@@ -172,7 +172,7 @@ void main() {
     float a = v_color.a * edge;
     o = vec4(v_color.rgb * light * a, a);
 }
-"#;
+";
 
 struct Eye {
     swapchain: xr::Swapchain<Gfx>,
@@ -440,7 +440,7 @@ fn projection(fov: xr::Fovf) -> Mat4 {
 
 fn bytes(v: &[f32]) -> &[u8] {
     // SAFETY: f32 has no padding and any bit pattern is a valid u8.
-    unsafe { std::slice::from_raw_parts(v.as_ptr().cast(), std::mem::size_of_val(v)) }
+    unsafe { std::slice::from_raw_parts(v.as_ptr().cast(), size_of_val(v)) }
 }
 
 /// Joint positions and radii of a tracked hand, if the runtime has them.

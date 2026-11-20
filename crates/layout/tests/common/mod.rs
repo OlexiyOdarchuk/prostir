@@ -479,7 +479,7 @@ pub fn hand_scene(rng: &mut Rng) -> Scene {
                     rng.float(-0.03, 0.03),
                     rng.float(-0.03, 0.03),
                     rng.float(-0.03, 0.03),
-                )
+                );
             }
             1 => p.position.y += h * rng.pick(&[0.25, -0.25, 0.33, -0.33]),
             2 => p.rotation = Quat::from_axis_angle(p.normal(), rng.float(-0.1, 0.1)) * p.rotation,
@@ -694,7 +694,7 @@ pub fn idempotent(
 ) -> Result<(), String> {
     let again = desk::plan(desk, size, &desk::as_boxes(plan));
     let mut a = plan.to_vec();
-    let mut b = again.clone();
+    let mut b = again;
     a.sort_by_key(|s| s.id);
     b.sort_by_key(|s| s.id);
     if a == b {
@@ -1478,7 +1478,7 @@ pub fn row_line_before(scene: &Scene, after: &Scene, row: &[u8], which: usize, a
 
 /// Every invariant of "Line up" (`plans/layout-math.md`, L1 to L9) measured for `line`
 /// over `cases` scenes of each kind, from `seed`.
-pub fn measure_line_up(line: LineUp, cases: usize, seed: u64) -> Vec<Check> {
+pub fn measure_line_up(line: LineUp<'_>, cases: usize, seed: u64) -> Vec<Check> {
     let mut rng = Rng::new(seed);
     let mut checks: Vec<Check> = Vec::new();
     let degrees = |d: f32| d.to_radians();
@@ -1610,7 +1610,7 @@ pub fn measure_line_up(line: LineUp, cases: usize, seed: u64) -> Vec<Check> {
                             .unplace(m.placement)
                             .corners(m.height())
                             .map(|p| p.y);
-                        format!("{k}: {:.4?}", c)
+                        format!("{k}: {c:.4?}")
                     })
                     .collect();
                 format!("main row {main_row:?} not on one line: {spans:?}")

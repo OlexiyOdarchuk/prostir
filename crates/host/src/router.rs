@@ -448,7 +448,7 @@ impl Router {
             return Vec::new();
         };
         let new: Vec<ScreenId> = ids.difference(&r.published).copied().collect();
-        r.published = ids.clone();
+        r.published.clone_from(ids);
         let now = Instant::now();
         new.into_iter()
             .filter(|id| {
@@ -550,7 +550,7 @@ impl Router {
     }
 
     /// Sends a control message to every headset with a session. Never blocks.
-    pub fn send_all(&self, msg: HostMsg) {
+    pub fn send_all(&self, msg: &HostMsg) {
         let mut inner = self.inner.lock().unwrap();
         let mut over = Vec::new();
         for (session, r) in &inner.receivers {
@@ -1334,7 +1334,7 @@ mod tests {
             detail: "test".into(),
             display: None,
         };
-        router.send_all(problem.clone());
+        router.send_all(&problem);
         assert_eq!(sent(&a), std::slice::from_ref(&problem));
         assert_eq!(sent(&b), [problem]);
         assert_eq!(router.headsets().len(), 2);

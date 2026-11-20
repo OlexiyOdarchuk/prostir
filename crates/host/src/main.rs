@@ -604,11 +604,11 @@ impl Brain {
         match Session::start(
             self.last_id,
             conn,
-            open,
+            &open,
             standing,
             &others,
             displays,
-            &mut self.store,
+            &self.store,
             &self.events,
         ) {
             Ok(mut session) => {
@@ -1000,7 +1000,7 @@ impl Brain {
                 .why_none_started()
                 .unwrap_or_else(|| "a virtual monitor or encoder stopped on the PC".into());
             warn!("{why}");
-            displays.router.send_all(HostMsg::Problem {
+            displays.router.send_all(&HostMsg::Problem {
                 error: ErrorCode::ENCODER,
                 detail: prostir_proto::state::clip(&why, prostir_proto::state::MAX_DETAIL),
                 display: None,
@@ -1097,12 +1097,12 @@ fn main() -> Result<()> {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     };
     let code = match cli.command {
-        None => serve(cli.serve)?,
-        Some(Sub::Serve(args)) => serve(args)?,
+        None => serve(&cli.serve)?,
+        Some(Sub::Serve(args)) => serve(&args)?,
         Some(Sub::Ctl { args }) => {
             quiet();
             let client = platform::local_api::Client::connect(ctl::WAIT);
-            let client = client.as_ref().map(|c| c as &dyn ctl::CtlClient);
+            let client = client.as_ref().map(|c| -> &dyn ctl::CtlClient { c });
             let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
             let mut io = ctl::Output {
                 out: &mut out,
@@ -1138,7 +1138,7 @@ enum Origin {
 }
 
 /// `prostir serve`: waits for the headset and serves it. Its exit code.
-fn serve(args: Args) -> Result<i32> {
+fn serve(args: &Args) -> Result<i32> {
     // Before any thread starts: it clears the variables that passed them.
     let passed = platform::sockets::take()?;
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -1166,12 +1166,12 @@ fn serve(args: Args) -> Result<i32> {
         }
         None if args.stay => {
             let instance = platform::single_instance("serve")?;
-            let sockets = open_sockets(&args, discovery)?;
+            let sockets = open_sockets(args, discovery)?;
             full_with(args, sockets, Origin::Own, None, Some(instance))
         }
         None => {
             let _instance = platform::single_instance("watcher")?;
-            let sockets = open_sockets(&args, discovery)?;
+            let sockets = open_sockets(args, discovery)?;
             if !args.no_adb {
                 platform::keep_adb_reverse(sockets.port());
             }
@@ -1213,7 +1213,7 @@ fn open_sockets(args: &Args, discovery: Option<u16>) -> Result<platform::sockets
 
 /// The full program, with sockets from outside.
 fn full(
-    args: Args,
+    args: &Args,
     sockets: platform::sockets::Sockets,
     origin: Origin,
     why: Option<wake::Wake>,
@@ -1229,7 +1229,7 @@ fn full(
 /// The full program: waits for the headset and serves it until asked to quit, or
 /// (with sockets from outside) until nothing needs it. Its exit code.
 fn full_with(
-    args: Args,
+    args: &Args,
     sockets: platform::sockets::Sockets,
     origin: Origin,
     why: Option<wake::Wake>,
