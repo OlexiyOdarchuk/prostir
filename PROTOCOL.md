@@ -1059,7 +1059,9 @@ accept any length. It flows while the headset is worn and `Sound.to_headset` is 
 What goes from the headset to the PC as a stream (the microphone now; the camera and
 poses later) is an **up stream**: `UpStart{up, kind, format}`, then `Up{up, data}`
 pieces, then `UpEnd{up}`, all in lane 1 so that none overtakes another. `up` is the
-headset's number for the stream (the current client uses `0` for the microphone). The
+headset's number for the stream: the current client gives each recording a new one
+(counting up, round after 255), and the host takes a new `UpStart` of a kind as the
+one stream of that kind, so the `UpEnd` of a recording before it ends nothing. The
 microphone is `Pcm16` at 48000 Hz with 1 channel (`MIC_CHANNELS`) or 2, interleaved
 signed 16-bit little-endian, 10 ms in a piece in the current client.
 

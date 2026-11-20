@@ -16,8 +16,10 @@ use crate::net::Feedback;
 const PERMISSION: &str = "android.permission.RECORD_AUDIO";
 /// 10 ms per slice.
 const FRAMES: usize = AUDIO_RATE as usize / 100;
-/// The number of the microphone's up stream.
-const UP: u8 = 0;
+/// The number of the next recording's up stream: each one gets its own, so the end of
+/// an old one, still on its way when the microphone is switched off and on quickly,
+/// cannot end the new one on the PC.
+static NEXT_UP: AtomicU8 = AtomicU8::new(0);
 
 /// Whether the system lets the app record, as last found (see
 /// `prostir_proto::state::permission`): the PC shows when it does not.
@@ -80,6 +82,7 @@ impl Recorder {
     pub fn start(feedback: Feedback) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
+        let up = NEXT_UP.fetch_add(1, Ordering::Relaxed);
         let _ = std::thread::Builder::new()
             .name("mic".into())
             .spawn(move || {
@@ -87,7 +90,7 @@ impl Recorder {
                     return;
                 }
                 let start = ClientMsg::UpStart {
-                    up: UP,
+                    up,
                     kind: UpKind::Mic,
                     format: UpFormat::Pcm16 {
                         rate: AUDIO_RATE,
@@ -102,7 +105,7 @@ impl Recorder {
                 while failures < 5 && !flag.load(Ordering::Relaxed) {
                     match Input::open() {
                         Ok(input) => {
-                            if record(&input, &feedback, &flag) {
+                            if record(&input, up, &feedback, &flag) {
                                 break;
                             }
                             failures = 0;
@@ -114,7 +117,7 @@ impl Recorder {
                     }
                     std::thread::sleep(Duration::from_millis(300));
                 }
-                let _ = feedback.send(ClientMsg::UpEnd { up: UP });
+                let _ = feedback.send(ClientMsg::UpEnd { up });
             })
             .inspect_err(|e| warn!("no microphone: {e}"));
         Self { stop }
@@ -128,7 +131,7 @@ impl Drop for Recorder {
 }
 
 /// Records until stopped (`true`) or the stream breaks (`false`).
-fn record(input: &Input, feedback: &Feedback, stop: &AtomicBool) -> bool {
+fn record(input: &Input, up: u8, feedback: &Feedback, stop: &AtomicBool) -> bool {
     let mut buf = vec![0i16; FRAMES * MIC_CHANNELS as usize];
     info!("headset microphone on");
     while !stop.load(Ordering::Relaxed) {
@@ -139,7 +142,7 @@ fn record(input: &Input, feedback: &Feedback, stop: &AtomicBool) -> bool {
                     .iter()
                     .flat_map(|s| s.to_le_bytes())
                     .collect();
-                if feedback.send(ClientMsg::Up { up: UP, data: pcm }).is_err() {
+                if feedback.send(ClientMsg::Up { up, data: pcm }).is_err() {
                     break;
                 }
             }

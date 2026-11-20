@@ -831,7 +831,10 @@ impl Session {
             // The microphone, from a headset with the right to it.
             ClientMsg::UpStart { up, kind, format } => {
                 if kind == UpKind::Mic && self.publisher.access.may(perms::MIC) {
-                    info!("the headset's microphone streams ({format:?})");
+                    info!("the headset's microphone streams ({format:?}, up stream {up})");
+                    // A new recording replaces the one before, whose end may still
+                    // be on its way: that end then ends nothing.
+                    self.ups.retain(|_, k| *k != UpKind::Mic);
                     self.ups.insert(up, kind);
                 } else {
                     info!("an up stream of {kind:?} this PC does not take");
@@ -844,7 +847,7 @@ impl Session {
             }
             ClientMsg::UpEnd { up } => {
                 if self.ups.remove(&up).is_some() {
-                    info!("the headset's microphone stopped");
+                    info!("the headset's microphone stopped (up stream {up})");
                 }
             }
             ClientMsg::RequestKeyframe { id, generation } => {

@@ -154,3 +154,45 @@ fn a_request_is_answered_at_once_while_the_microphone_streams() {
     let took = asked.elapsed();
     assert!(took < Duration::from_secs(1), "answered after {took:?}");
 }
+
+/// The microphone switched off and on again quickly: the end of the first recording
+/// comes after the start of the second, under its own number, and ends nothing of the
+/// second, which goes on reaching the PC.
+#[test]
+fn a_quick_off_and_on_keeps_the_new_recording() {
+    use prostir_proto::state::UpFormat;
+    let (_dir, mut pc, _keys, mut headset) = session("mic-again", &Options::default());
+    pc.desktop("record on");
+    headset
+        .wait(SOON, "the microphone wanted", |v| {
+            v.pc.up_wanted.get(&UpKind::Mic).is_some_and(|u| u.on)
+        })
+        .unwrap();
+    let start = |up| ClientMsg::UpStart {
+        up,
+        kind: UpKind::Mic,
+        format: UpFormat::Pcm16 {
+            rate: prostir_proto::AUDIO_RATE,
+            channels: 1,
+        },
+    };
+    let piece = |up| ClientMsg::Up {
+        up,
+        data: vec![0; 960],
+    };
+    headset.send(&start(0)).unwrap();
+    headset.send(&piece(0)).unwrap();
+    headset.send(&start(1)).unwrap();
+    headset.send(&ClientMsg::UpEnd { up: 0 }).unwrap();
+    // A second of sound in the new recording.
+    for _ in 0..100 {
+        headset.send(&piece(1)).unwrap();
+    }
+    pc.wait_log(SOON, "fake desktop: the microphone got");
+    assert!(
+        pc.lines("the headset's microphone stopped").is_empty(),
+        "the old end ended the new recording"
+    );
+    headset.send(&ClientMsg::UpEnd { up: 1 }).unwrap();
+    pc.wait_log(SOON, "the headset's microphone stopped (up stream 1)");
+}
