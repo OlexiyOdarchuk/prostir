@@ -4,6 +4,10 @@
 
 export DH_VERBOSE = 1
 export CARGO_HOME = $(CURDIR)/debian/cargo-home
+# dh_strip strips and makes the dbgsym package itself: from line tables, not from a
+# program the release profile already stripped.
+export CARGO_PROFILE_RELEASE_DEBUG = 1
+export CARGO_PROFILE_RELEASE_STRIP = false
 # Ubuntu's versioned toolchains (cargo-1.NN, when the default cargo is too old) live in
 # /usr/lib/rust-1.NN/bin: the newest one installed goes first on PATH.
 RUST_BIN := $(shell ls -d /usr/lib/rust-1.*/bin 2>/dev/null | sort -V | tail -n 1)

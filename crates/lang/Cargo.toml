@@ -14,4 +14,4 @@ publish = false
 fluent-bundle = "0.16"
 fluent-syntax = "0.12"
 unic-langid = "0.9"
-log = "0.4"
+log.workspace = true

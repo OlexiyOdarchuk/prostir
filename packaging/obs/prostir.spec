@@ -110,6 +110,9 @@ GitHub release.
 # The crates come from vendor/ in the source archive; --frozen fails instead of
 # reaching the network.
 export CARGO_HOME="$PWD/.cargo-home"
+# The distribution strips and makes the debuginfo package itself: from line tables,
+# not from a program the release profile already stripped.
+export CARGO_PROFILE_RELEASE_DEBUG=1 CARGO_PROFILE_RELEASE_STRIP=false
 cargo build --frozen --release \
     --config 'source.crates-io.replace-with="vendored-sources"' \
     --config 'source.vendored-sources.directory="vendor"' \
@@ -130,6 +133,9 @@ install -Dm644 packaging/udev/70-prostir-quest.rules %{buildroot}%{_prefix}/lib/
 
 %check
 export CARGO_HOME="$PWD/.cargo-home"
+# The distribution strips and makes the debuginfo package itself: from line tables,
+# not from a program the release profile already stripped.
+export CARGO_PROFILE_RELEASE_DEBUG=1 CARGO_PROFILE_RELEASE_STRIP=false
 # One test at a time: tests that start programs in parallel can hand each other's
 # pipes to a child process, which made a_stopped_player_is_noticed fail now and then.
 cargo test --frozen --release \

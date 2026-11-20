@@ -12,4 +12,4 @@ description = "Where Prostir's monitors go: pure layout rules shared by the PC a
 # Only vector math: no input or output, nothing tied to an operating system, so the PC
 # and the headset share it and everything here is tested on the PC.
 [dependencies]
-glam = "0.30"
+glam.workspace = true

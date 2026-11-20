@@ -66,13 +66,13 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo fmt -p prostir-host -p prostir-proto -p prostir-layout -p prostir-api -p prostir-testkit -p prostir-lang -p prostir-settings --check
-      - run: cargo clippy -p prostir-host -p prostir-proto -p prostir-layout -p prostir-api -p prostir-testkit -p prostir-lang -p prostir-settings --all-targets -- -D warnings
-      - run: cargo test -p prostir-host -p prostir-proto -p prostir-layout -p prostir-api -p prostir-testkit -p prostir-lang
+      - run: cargo clippy -p prostir-host -p prostir-proto -p prostir-layout -p prostir-api -p prostir-testkit -p prostir-lang -p prostir-settings --all-targets --locked -- -D warnings
+      - run: cargo test -p prostir-host -p prostir-proto -p prostir-layout -p prostir-api -p prostir-testkit -p prostir-lang --locked
       # The settings window, driven without drawing; its pictures need a graphics card
       # (or lavapipe), which the runner does not have.
-      - run: cargo test -p prostir-settings --lib --test texts --test window
+      - run: cargo test -p prostir-settings --locked --lib --test texts --test window
       # The PC app with the fake desktop, driven by a fake headset (crates/host/tests/e2e).
       - name: Clippy with the fake desktop
-        run: cargo clippy -p prostir-host --features fake-desktop --all-targets -- -D warnings
+        run: cargo clippy -p prostir-host --features fake-desktop --all-targets --locked -- -D warnings
       - name: End-to-end tests
-        run: cargo e2e
+        run: cargo e2e --locked

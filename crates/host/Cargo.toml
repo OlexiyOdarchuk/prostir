@@ -26,19 +26,19 @@ path = "tests/e2e/main.rs"
 required-features = ["fake-desktop"]
 
 [dependencies]
-prostir-proto = { path = "../proto" }
-prostir-layout = { path = "../layout" }
+prostir-proto.workspace = true
+prostir-layout.workspace = true
 # The local API's types (JSON), shared with its clients.
-prostir-api = { path = "../api" }
-anyhow = "1"
+prostir-api.workspace = true
+anyhow.workspace = true
 # A reply for a D-Bus method that waits for the control loop (the local API).
 async-channel = "2"
 # For the local API only: the headset protocol stays on `Wire`.
-serde = "1"
+serde.workspace = true
 clap = { version = "4", features = ["derive"] }
-log = "0.4"
-env_logger = "0.11"
-libc = "0.2"
+log.workspace = true
+env_logger.workspace = true
+libc.workspace = true
 gstreamer = "0.25"
 gstreamer-app = "0.25"
 # The fake desktop's picture source (a GStreamer element of its own).
@@ -47,23 +47,23 @@ gstreamer-video = { version = "0.25", features = ["v1_24"] }
 wayland-client = "0.31"
 wayland-protocols-plasma = { version = "0.3", features = ["client"] }
 ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
-zbus = { version = "5", default-features = false, features = ["blocking-api", "async-io"] }
+zbus.workspace = true
 wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
 gbm = { version = "0.18.0", default-features = false }
 gstreamer-allocators = "0.25"
 drm-fourcc = "2.2.0"
-serde_json = "1.0.154"
+serde_json.workspace = true
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 
 [dev-dependencies]
-prostir-testkit = { path = "../testkit" }
+prostir-testkit.workspace = true
 # The settings window's D-Bus client, driven against the service (tests/e2e/window.rs).
-prostir-settings = { path = "../settings" }
+prostir-settings.workspace = true
 
 # Packages built in the release workflow: `cargo deb -p prostir-host` and
 # `cargo generate-rpm -p crates/host`, after scripts/package-release.sh (which writes
-# build/THIRD-PARTY-LICENSES.txt and builds prostir-settings too) and
-# `strip --strip-debug target/release/prostir target/release/prostir-settings`.
+# build/THIRD-PARTY-LICENSES.txt and builds prostir-settings too; the release profile
+# strips the programs).
 # Same files as scripts/install.sh puts in ~/.local.
 #
 # Runtime needs: GStreamer with the VA plugin (hardware encoding), x264enc for the CPU

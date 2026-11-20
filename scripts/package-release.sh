@@ -5,7 +5,7 @@
 #   THIRD-PARTY-LICENSES.txt                licenses of everything bundled in both
 # Signing of the APK: see scripts/build-apk.sh (KEYSTORE…), debug key otherwise.
 # The .deb and .rpm are made afterwards from target/release/prostir and
-# target/release/prostir-settings (release workflow).
+# target/release/prostir-settings (release workflow). The release profile strips them.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -25,7 +25,6 @@ cargo build --release --locked -p prostir-host --bin prostir -p prostir-settings
 # Where cargo builds: its own CARGO_TARGET_DIR when set, else target/ here.
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 cp "$TARGET_DIR/release/prostir" "$TARGET_DIR/release/prostir-settings" "$DIST/$NAME/"
-strip --strip-debug "$DIST/$NAME/prostir" "$DIST/$NAME/prostir-settings"
 mkdir -p "$DIST/$NAME/packaging"
 cp packaging/prostir.svg packaging/prostir.desktop packaging/io.github.OlexiyOdarchuk.Prostir.Settings.desktop "$DIST/$NAME/packaging/"
 cp -r packaging/systemd packaging/udev "$DIST/$NAME/packaging/"

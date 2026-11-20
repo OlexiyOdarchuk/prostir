@@ -19,15 +19,15 @@ name = "prostir"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-prostir-proto = { path = "../proto" }
-prostir-layout = { path = "../layout" }
-glam = "0.30"
-log = "0.4"
+prostir-proto.workspace = true
+prostir-layout.workspace = true
+glam.workspace = true
+log.workspace = true
 tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
 fontdue = "0.9"
 
 [target.'cfg(target_os = "android")'.dependencies]
-libc = "0.2"
+libc.workspace = true
 openxr = { version = "0.22", features = ["loaded"] }
 android-activity = { version = "0.6", features = ["native-activity"] }
 ndk = { version = "0.9", features = ["media", "api-level-29"] }
@@ -35,7 +35,7 @@ ndk-context = "0.1"
 ndk-sys = { version = "0.6", features = ["audio"] }
 jni = "0.21"
 khronos-egl = { version = "6", features = ["static", "no-pkg-config"] }
-anyhow = "1"
+anyhow.workspace = true
 android_logger = "0.15"
 glow = "0.18"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }

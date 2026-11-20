@@ -57,12 +57,16 @@ jobs:
           trap 'rm -f "$KEYSTORE"' EXIT
           (umask 077 && printf '%s' "$KEYSTORE_B64" | base64 -d > "$KEYSTORE")
           unset KEYSTORE_B64
+          # No paths of the build machine in the programs (the panics of dependencies
+          # name their files): the later matching prefix wins. Added to the flags of
+          # .cargo/config.toml, not instead of them.
+          remap="--remap-path-prefix=$HOME=~ --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo --remap-path-prefix=$GITHUB_WORKSPACE=/prostir"
+          export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="$remap"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="$remap"
           ./scripts/package-release.sh
       - name: Debian and RPM packages
         run: |
           cargo install --locked cargo-deb@3.8.0 cargo-generate-rpm@0.21.1
-          # The development profile keeps debug info; the packages do not need it.
-          strip --strip-debug target/release/prostir target/release/prostir-settings
           cargo deb -p prostir-host --no-build -o dist/
           cargo generate-rpm -p crates/host -o dist/
           (cd dist && sha256sum ./*.tar.gz ./*.apk ./*.deb ./*.rpm THIRD-PARTY-LICENSES.txt | sed 's| \./| |' > SHA256SUMS)

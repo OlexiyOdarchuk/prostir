@@ -47,8 +47,8 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo fmt -p prostir-client --check
-      - run: cargo clippy -p prostir-client --all-targets -- -D warnings
-      - run: cargo test -p prostir-client
+      - run: cargo clippy -p prostir-client --all-targets --locked -- -D warnings
+      - run: cargo test -p prostir-client --locked
 
   android:
     runs-on: ubuntu-24.04
@@ -69,4 +69,4 @@ jobs:
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TC/aarch64-linux-android32-clang"
           export CC_aarch64_linux_android="$TC/aarch64-linux-android32-clang"
           export AR_aarch64_linux_android="$TC/llvm-ar"
-          cargo clippy -p prostir-client --target aarch64-linux-android -- -D warnings
+          cargo clippy -p prostir-client --target aarch64-linux-android --locked -- -D warnings

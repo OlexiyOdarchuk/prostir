@@ -17,7 +17,7 @@ name = "prostir-probe"
 path = "src/bin/probe.rs"
 
 [dependencies]
-prostir-proto = { path = "../proto" }
-anyhow = "1"
+prostir-proto.workspace = true
+anyhow.workspace = true
 # CLOCK_MONOTONIC, which the fake desktop stamps its sound with.
-libc = "0.2"
+libc.workspace = true
