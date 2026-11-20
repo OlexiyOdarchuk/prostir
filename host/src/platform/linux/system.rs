@@ -80,6 +80,92 @@ pub fn give_memory_back() {
     unsafe { libc::malloc_trim(0) };
 }
 
+/// Where per-user caches go: `$XDG_CACHE_HOME`, else `~/.cache`.
+pub fn cache_home() -> Option<PathBuf> {
+    std::env::var_os("XDG_CACHE_HOME")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+}
+
+/// What decides what the video encoders do, besides GStreamer: the graphics cards
+/// (each render node's vendor, device and kernel driver), the kernel, the NVIDIA
+/// driver's version, the VA-API drivers (each file's size and time), and the variables
+/// that pick a VA driver. A probe of the encoders is kept until one of these changes.
+pub fn encoder_drivers() -> Vec<String> {
+    let mut parts = vec![
+        std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default(),
+        std::fs::read_to_string("/sys/module/nvidia/version").unwrap_or_default(),
+    ];
+    parts.extend(graphics_cards());
+    for var in [
+        "LIBVA_DRIVER_NAME",
+        "LIBVA_DRIVERS_PATH",
+        "GST_VA_ALL_DRIVERS",
+    ] {
+        parts.push(format!("{var}={}", std::env::var(var).unwrap_or_default()));
+    }
+    let dirs: Vec<PathBuf> = match std::env::var_os("LIBVA_DRIVERS_PATH") {
+        Some(p) => std::env::split_paths(&p).collect(),
+        None => [
+            "/usr/lib/dri",
+            "/usr/lib64/dri",
+            "/usr/lib/x86_64-linux-gnu/dri",
+            "/usr/lib/aarch64-linux-gnu/dri",
+            "/run/opengl-driver/lib/dri",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect(),
+    };
+    let mut drivers: Vec<String> = dirs
+        .iter()
+        .filter_map(|d| std::fs::read_dir(d).ok())
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with("_drv_video.so"))
+        })
+        .map(|p| crate::encoder::file_identity(&p))
+        .collect();
+    drivers.sort();
+    parts.extend(drivers);
+    parts
+}
+
+/// Each render node with the card behind it: `renderD128 0x8086 0x56a0 xe`.
+fn graphics_cards() -> Vec<String> {
+    let read = |path: PathBuf| {
+        std::fs::read_to_string(path)
+            .map(|s| s.trim().to_owned())
+            .unwrap_or_default()
+    };
+    let mut cards: Vec<String> = std::fs::read_dir("/sys/class/drm")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("renderD"))
+        .map(|e| {
+            let device = e.path().join("device");
+            let driver = std::fs::read_link(device.join("driver"))
+                .ok()
+                .and_then(|d| d.file_name().map(|n| n.to_string_lossy().into_owned()))
+                .unwrap_or_default();
+            format!(
+                "{} {} {} {driver}",
+                e.file_name().to_string_lossy(),
+                read(device.join("vendor")),
+                read(device.join("device")),
+            )
+        })
+        .collect();
+    cards.sort();
+    cards
+}
+
 /// The PC's name, for the headset's list of PCs.
 pub fn hostname() -> String {
     std::fs::read_to_string("/proc/sys/kernel/hostname")

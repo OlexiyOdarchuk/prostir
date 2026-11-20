@@ -13,7 +13,9 @@ use prostir_layout::desk;
 use prostir_proto::state;
 use prostir_proto::{Codec, HostMsg};
 
-use crate::encoder::{Encoder, EncoderConfig};
+use crate::encoder::{
+    Backend, Choice, Encoder, EncoderConfig, GpuDevices, Kind, Next, NotOpened, Wanted,
+};
 use crate::errors::{Counted, UserError, code_of};
 use crate::events::EventSink;
 use crate::layout::panel_size;
@@ -52,6 +54,23 @@ fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
+}
+
+/// How one screen encodes (see [`Displays::encoding_report`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputEncoding {
+    pub id: ScreenId,
+    /// Its name, for people (`Prostir-2`).
+    pub name: String,
+    /// The encoder, for people (`VA-API`, `x264`).
+    pub encoder: &'static str,
+    pub codec: Codec,
+    /// On the graphics card.
+    pub hardware: bool,
+    /// Its frames go through the CPU on their way to the encoder.
+    pub copies: bool,
+    /// Why it is not the best this PC has for it, when it is not.
+    pub note: Option<String>,
 }
 
 /// Retry timing after failures: 2 s, then doubling up to 2 min.
@@ -148,6 +167,8 @@ pub struct Displays {
     /// When KDE's primary output was last compared with ours.
     primary_checked: Instant,
     desktop: Box<dyn Desktop>,
+    /// One graphics device per card for every encoder (and capture) of the desktop.
+    gpu: GpuDevices,
     pub router: Arc<Router>,
     cfg: EncoderConfig,
     primary: Option<ScreenId>,
@@ -175,8 +196,9 @@ impl Displays {
         manage_primary: bool,
         new_id: &mut dyn FnMut() -> ScreenId,
     ) -> Result<Self> {
-        // One device per graphics card for every capture and encoder (step 6.5).
-        let desktop = crate::platform::connect(&crate::platform::GpuDevices::default())?;
+        // One device per graphics card for every capture and encoder.
+        let gpu = GpuDevices::default();
+        let desktop = crate::platform::connect(&gpu)?;
         // Only some desktops (KDE) have a primary output.
         let manage_primary = manage_primary && desktop.caps().has_primary;
         let mut displays = Self {
@@ -208,6 +230,7 @@ impl Displays {
             fitted_down: false,
             primary_checked: Instant::now(),
             desktop,
+            gpu,
             router: Arc::new(Router::new()),
             cfg,
             primary: None,
@@ -378,10 +401,6 @@ impl Displays {
         };
         let result = match started {
             Ok((output, encoder)) => {
-                // Made while the headset is off: paused like the others.
-                if !self.streaming {
-                    encoder.set_paused(true);
-                }
                 screen.output = Some(output);
                 screen.stream = Some(encoder);
                 screen.state = ScreenState::Running;
@@ -464,8 +483,11 @@ impl Displays {
             .inspect_err(|_| self.router.remove_stream(id))
     }
 
-    /// A new encoder with `cfg` for stream `id`, fed by `output`. The stream's slot
-    /// starts over with it, and stays when this fails.
+    /// A new encoder for stream `id`, fed by `output`: the best this PC has for where
+    /// the output's frames are, in `cfg`'s codec (only x264 when `cfg` encodes on the
+    /// CPU), else the next one, in H.264 if need be (see `encoder/choice.rs`). The
+    /// stream's slot starts over with it, and stays when this fails. Made while the
+    /// headset is off, it starts paused like the others.
     fn start_encoder(
         &self,
         id: ScreenId,
@@ -476,13 +498,183 @@ impl Displays {
             .screens
             .get(&id)
             .map_or((id.to_string(), false), |s| (s.name(), s.is_physical()));
-        self.router.add_stream(id, cfg.codec, name, physical);
-        let router = self.router.clone();
-        let encoder = Encoder::start(&output.source().input, cfg, move |ev| {
-            router.on_event(id, ev)
-        })?;
-        output.attach(&encoder)?;
-        Ok(encoder)
+        let source = output.source();
+        let wanted = Wanted {
+            codec: cfg.codec,
+            software: cfg.backend == Backend::X264,
+        };
+        let running = self.running_encoders(&[id]);
+        let held = |kind: Kind| running.get(&kind).copied().unwrap_or(0);
+        let mut tried: Vec<(Choice, String)> = Vec::new();
+        let mut again = false;
+        let ranked = loop {
+            // Ranked anew after each failure: it may have taught a limit.
+            let ranked = crate::encoder::catalog().rank(source.memory, wanted, id, &held);
+            let Some(choice) = ranked
+                .choices
+                .iter()
+                .find(|c| !tried.iter().any(|(t, _)| t == *c))
+                .copied()
+            else {
+                break ranked;
+            };
+            let cfg = EncoderConfig {
+                backend: choice.backend,
+                codec: choice.codec,
+                ..cfg.clone()
+            };
+            self.router
+                .add_stream(id, choice.codec, name.clone(), physical);
+            let router = self.router.clone();
+            let started =
+                Encoder::start(&source.input, &cfg, choice.adapter, &self.gpu, move |ev| {
+                    router.on_event(id, ev)
+                });
+            let mut encoder = match started {
+                Ok(encoder) => encoder,
+                // As one that did not open after it started.
+                Err(e) => {
+                    let text = format!("{e:#}");
+                    warn!("{name}: {choice} did not start: {text}");
+                    let failure = NotOpened {
+                        short: crate::encoder::short_of_sessions(None, &text),
+                        why: text.clone(),
+                        resumed: false,
+                    };
+                    let next = crate::encoder::catalog().did_not_open(
+                        (choice.backend, choice.adapter),
+                        choice.codec,
+                        id,
+                        &failure,
+                        held((choice.backend, choice.adapter)),
+                    );
+                    if next == Next::Again && !again {
+                        again = true;
+                    } else {
+                        tried.push((choice, text));
+                    }
+                    continue;
+                }
+            };
+            output.attach(&encoder)?;
+            let note = crate::encoder::note(&choice, wanted, &ranked.skipped, &tried);
+            match &note {
+                Some(note) => warn!("{name}: encoding with {note}"),
+                None => info!("{name}: encoding with {choice}"),
+            }
+            encoder.set_choice(&choice, note);
+            if !self.streaming {
+                encoder.set_paused(true);
+            }
+            return Ok(encoder);
+        };
+        let mut why: Vec<String> = ranked
+            .skipped
+            .iter()
+            .map(|((b, _), skip)| format!("{}: {}", b.label(), skip.text()))
+            .chain(tried.iter().map(|(c, e)| format!("{c}: {e}")))
+            .collect();
+        if why.is_empty() {
+            why.push(
+                crate::encoder::pick(cfg.codec, wanted.software)
+                    .err()
+                    .map_or_else(
+                        || {
+                            t(
+                                "немає кодувальника для цього виходу",
+                                "no encoder for this output",
+                            )
+                            .to_owned()
+                        },
+                        |e| e.to_string(),
+                    ),
+            );
+        }
+        bail!("{}", why.join("; "))
+    }
+
+    /// Sessions each encoder holds now, those of the screens `except` left out: every
+    /// stream that opened, or is opening (it runs, and has not said it did not open).
+    fn running_encoders(&self, except: &[ScreenId]) -> BTreeMap<Kind, u32> {
+        let mut running = BTreeMap::new();
+        for s in self.screens.values().filter(|s| !except.contains(&s.id)) {
+            if let Some(e) = s.stream.as_ref().filter(|e| e.opened() || !e.is_paused()) {
+                *running.entry(e.kind()).or_insert(0) += 1;
+            }
+        }
+        running
+    }
+
+    /// Streams whose encoder did not open go on with the next encoder for them, or try
+    /// the same once more when it was short of sessions the first time (see
+    /// `Catalog::did_not_open`, which learns limits from these). Streams that did not
+    /// open together are left out of each other's count of sessions held.
+    fn retry_unopened(&mut self) {
+        let unopened = self.router.take_unopened();
+        let ids: Vec<ScreenId> = unopened.iter().map(|(id, _)| *id).collect();
+        for (id, failure) in unopened {
+            let Some(encoder) = self.screens.get(&id).and_then(|s| s.stream.as_ref()) else {
+                continue;
+            };
+            let (kind, codec) = (encoder.kind(), encoder.codec());
+            let open = self.running_encoders(&ids).get(&kind).copied().unwrap_or(0);
+            crate::encoder::catalog().did_not_open(kind, codec, id, &failure, open);
+            if self.is_physical(id) {
+                self.stop_physical(id);
+                self.physical_due = Instant::now();
+            } else if let Err(e) = self.restart_monitor(id, None) {
+                error!("{id}: {e:#}");
+            }
+        }
+        // Encoders seen holding more sessions than a limit says: it rises.
+        let mut opened: BTreeMap<Kind, u32> = BTreeMap::new();
+        for e in self.screens.values().filter_map(|s| s.stream.as_ref()) {
+            if e.opened() {
+                *opened.entry(e.kind()).or_insert(0) += 1;
+            }
+        }
+        if opened.values().any(|n| *n > 1) {
+            let mut catalog = crate::encoder::catalog();
+            for (kind, n) in opened {
+                catalog.seen_open(kind, n);
+            }
+        }
+    }
+
+    /// How each screen that streams encodes, and what to say of it when it is not the
+    /// best this PC has for it (see `encoder::note`): for the tray and the local API.
+    pub fn encoding_report(&self) -> Vec<OutputEncoding> {
+        self.screens
+            .values()
+            .filter_map(|s| {
+                let e = s.stream.as_ref()?;
+                Some(OutputEncoding {
+                    id: s.id,
+                    name: s.name(),
+                    encoder: e.kind().0.label(),
+                    codec: e.codec(),
+                    hardware: e.kind().0.hardware(),
+                    copies: e.copies(),
+                    note: e.note().map(str::to_owned),
+                })
+            })
+            .collect()
+    }
+
+    /// The tray's line about encoding, when a display is not on the best encoder for it
+    /// or encodes on the CPU: the first such, and how many more.
+    pub fn encoding_line(&self) -> Option<String> {
+        let noted: Vec<OutputEncoding> = self
+            .encoding_report()
+            .into_iter()
+            .filter(|o| o.note.is_some())
+            .collect();
+        let first = noted.first()?;
+        let mut line = format!("{}: {}", first.name, first.note.as_deref().unwrap_or(""));
+        if noted.len() > 1 {
+            line.push_str(&format!(" (+{} {})", noted.len() - 1, t("ще", "more")));
+        }
+        Some(state::clip(&line, 120))
     }
 
     /// Housekeeping, about twice a second: logs what the streams sent now and then,
@@ -502,6 +694,7 @@ impl Displays {
         self.check_primary();
         self.check_window_panels();
         self.stop_too_big();
+        self.retry_unopened();
         // A fresh picture asked of a stream that then stood still never came.
         for id in self.router.starved(STARVED) {
             if self.streaming
@@ -884,9 +1077,6 @@ impl Displays {
         };
         match started {
             Ok((output, encoder)) => {
-                if !self.streaming {
-                    encoder.set_paused(true);
-                }
                 encoder.force_keyframe();
                 s.output = Some(output);
                 s.stream = Some(encoder);
@@ -1088,10 +1278,7 @@ impl Displays {
 
     /// What the encoders make now: the codec, and whether on the CPU.
     pub fn encoding_now(&self) -> (Codec, bool) {
-        (
-            self.cfg.codec,
-            self.cfg.backend == crate::encoder::Backend::X264,
-        )
+        (self.cfg.codec, self.cfg.backend == Backend::X264)
     }
 
     /// The streams go in a codec every headset with a session (`headsets`) decodes:
@@ -1393,6 +1580,11 @@ impl Displays {
             return Ok(());
         }
         let (backend, codec) = crate::encoder::pick(codec, software).context(UserError::Encoder)?;
+        // The same encoder in the same codec (VA-API without H.265 asked for H.265
+        // while it makes H.264): nothing starts over.
+        if (backend, codec) == (self.cfg.backend, self.cfg.codec) {
+            return Ok(());
+        }
         info!("encoding with {backend:?} {codec:?} (from the headset menu)");
         self.switch_encoding(backend, codec)
             .context(UserError::Encoder)
@@ -1400,7 +1592,7 @@ impl Displays {
 
     /// Encodes with `backend` and `codec` from now on: every monitor's stream starts
     /// over with them. When one cannot, all go back to how they encoded before.
-    fn switch_encoding(&mut self, backend: crate::encoder::Backend, codec: Codec) -> Result<()> {
+    fn switch_encoding(&mut self, backend: Backend, codec: Codec) -> Result<()> {
         let before = self.cfg.clone();
         self.cfg.backend = backend;
         self.cfg.codec = codec;

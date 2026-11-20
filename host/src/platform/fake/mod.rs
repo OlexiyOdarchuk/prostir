@@ -94,6 +94,26 @@ pub fn clean_up_after_crash() {}
 
 pub fn give_memory_back() {}
 
+/// Where caches go: `$XDG_CACHE_HOME` and nowhere else, and only when the fake desktop
+/// was asked for (as [`config_home`]).
+pub fn cache_home() -> Option<PathBuf> {
+    if !asked_for() {
+        return None;
+    }
+    std::env::var_os("XDG_CACHE_HOME")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+}
+
+/// What the fake hardware encoder is told to do (`PROSTIR_FAKE_ENCODER`): another
+/// setting is another PC, probed anew.
+pub fn encoder_drivers() -> Vec<String> {
+    vec![format!(
+        "fake encoder {}",
+        std::env::var("PROSTIR_FAKE_ENCODER").unwrap_or_default()
+    )]
+}
+
 pub fn hostname() -> String {
     "fake-pc".into()
 }
@@ -653,9 +673,10 @@ pub mod tray {
     /// What the tray would show, in the log for the tests.
     pub fn set_status(_handle: Option<&Handle>, status: TrayStatus) {
         log::info!(
-            "fake tray: {} other headset(s), microphone denied: {}",
+            "fake tray: {} other headset(s), microphone denied: {}, encoding: {}",
             status.others,
-            status.mic_denied
+            status.mic_denied,
+            status.encoding.as_deref().unwrap_or("as it should")
         );
     }
 

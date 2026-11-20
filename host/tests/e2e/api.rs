@@ -139,6 +139,41 @@ fn calls_in_order(bus: &Connection, requests: &[String]) -> Vec<Seen> {
     answers.into_iter().map(Option::unwrap).collect()
 }
 
+/// How each display encodes is in the state (`encoding.outputs`), with why one is
+/// not on the best encoder for it, and the tray says so too: here a hardware encoder
+/// that opens one session, so the second monitor goes on with another.
+#[test]
+fn the_state_says_how_each_display_encodes() {
+    let options = Options {
+        software: false,
+        encoder: Some("sessions=1"),
+        ..Options::default()
+    };
+    let (_dir, mut pc, _keys, _headset) = session("api-encoders", &options);
+    pc.wait_log(START, "fake hardware opens at most 1 sessions at once");
+    pc.wait_log(START, "encoding: Prostir-2: ");
+    let Some(bus) = &pc.bus else {
+        return;
+    };
+    let bus = bus.connect();
+    let until = Instant::now() + SOON;
+    loop {
+        let (_, state) = get_state(&bus);
+        let outputs = &state.encoding.outputs;
+        if outputs.len() == 2 && outputs[1].note.is_some() {
+            assert_eq!(outputs[0].encoder, "fake hardware", "{outputs:?}");
+            assert!(outputs[0].hardware && outputs[0].note.is_none());
+            assert_eq!(outputs[0].display, state.displays[0].id);
+            assert_ne!(outputs[1].encoder, "fake hardware");
+            let note = outputs[1].note.as_deref().unwrap();
+            assert!(note.contains("fake hardware"), "{note}");
+            return;
+        }
+        assert!(Instant::now() < until, "{outputs:?}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// An answer goes out after the state with its change, for a request the PC carries
 /// out and for a command the headset answers (whose change, its "No limits", comes
 /// from the headset just before its answer).

@@ -234,6 +234,16 @@ impl ksni::Tray for Tray {
                 .into(),
             );
         }
+        if let Some(encoding) = &self.status.encoding {
+            items.push(
+                StandardItem {
+                    label: encoding.clone(),
+                    enabled: false,
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
         if self.status.mic_denied {
             items.push(
                 StandardItem {
