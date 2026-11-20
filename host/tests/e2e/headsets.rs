@@ -521,3 +521,40 @@ fn a_codec_one_headset_cannot_decode_waits_for_it_to_leave() {
         })
         .unwrap();
 }
+
+/// Every session ending at once (the tray forgets the headsets) starts no stream over
+/// on the way for the headsets still to end: the codec waits in H.264 for the one
+/// that does not decode H.265 and is not switched back for the others meanwhile.
+/// Only where the PC encodes H.265 on its graphics card.
+#[test]
+fn sessions_ending_together_switch_no_codec() {
+    let options = Options {
+        software: false,
+        ..Options::default()
+    };
+    let (_dir, mut pc, mut a, mut b) =
+        two_headsets("end-together", options, "codec h265\nsoftware off\n");
+    let mut first = showing(&pc, &mut a);
+    let can = first.view().encoding().unwrap().choices.clone();
+    if !can.contains(&(Codec::H265, true)) {
+        eprintln!("no H.265 on the graphics card here ({can:?}): nothing to try");
+        return;
+    }
+    let mut h264 = FakeHeadset::state();
+    h264.caps
+        .as_mut()
+        .unwrap()
+        .decoders
+        .retain(|d| d.codec == 0);
+    let mut second = FakeHeadset::connect_saying(pc.addr, &mut b, &h264)
+        .unwrap_or_else(|e| panic!("connecting: {e}"));
+    second
+        .wait(START, "every monitor showing", View::all_monitors_show)
+        .unwrap();
+    pc.wait_log(SOON, "a headset does not decode H265");
+    pc.tray("forget");
+    first.wait_closed(SOON).unwrap();
+    second.wait_closed(SOON).unwrap();
+    pc.wait_log(SOON, "keeping virtual monitors");
+    assert_eq!(pc.count_log("every headset decodes"), 0);
+}

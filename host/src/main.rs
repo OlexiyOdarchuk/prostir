@@ -388,11 +388,9 @@ impl Brain {
             Err(e) => {
                 warn!("session ended: {e:#}");
                 self.arrivals.left(key);
-                if self.sessions.is_empty() {
-                    self.after_the_last_session(false);
-                } else {
-                    self.headsets_changed();
-                }
+                // The codec it was fitted to, the encoders and the sound it started:
+                // as the sessions left (if any) need them.
+                self.sessions_ended(false);
             }
         }
     }
@@ -489,9 +487,40 @@ impl Brain {
     /// Ends the session of headset `key`: with `goodbye`, saying why. The other
     /// sessions go on.
     fn end_session(&mut self, key: [u8; 32], goodbye: Option<PcGoodbye>, result: Result<()>) {
+        if let Some(taken_off) = self.close_session(key, goodbye, result) {
+            self.sessions_ended(taken_off);
+        }
+    }
+
+    /// Ends the sessions of `keys` at once, each with `goodbye` (and why, from
+    /// `result`): what the others need is looked at once, after the last.
+    fn end_sessions(
+        &mut self,
+        keys: Vec<[u8; 32]>,
+        goodbye: PcGoodbye,
+        result: impl Fn() -> Result<()>,
+    ) {
+        let mut ended = None;
+        for key in keys {
+            ended = self.close_session(key, Some(goodbye), result()).or(ended);
+        }
+        if let Some(taken_off) = ended {
+            self.sessions_ended(taken_off);
+        }
+    }
+
+    /// Closes the session of headset `key` (see [`Session::finish`]), with nothing
+    /// else changed for the others yet: whether its headset was taken off, if it had
+    /// a session.
+    fn close_session(
+        &mut self,
+        key: [u8; 32],
+        goodbye: Option<PcGoodbye>,
+        result: Result<()>,
+    ) -> Option<bool> {
         let (Some(session), Some(displays)) = (self.sessions.remove(&key), self.displays.as_mut())
         else {
-            return;
+            return None;
         };
         self.arrivals.left(key);
         let taken_off = session.taken_off_for().is_some();
@@ -502,15 +531,24 @@ impl Brain {
             Ok(()) => info!("headset disconnected"),
             Err(e) => warn!("session ended: {e:#}"),
         }
-        if self.sessions.is_empty() {
-            self.headsets_changed();
-            self.after_the_last_session(taken_off);
-            return;
+        Some(taken_off)
+    }
+
+    /// Sessions ended (the last of them taken off with `taken_off`): the encoders and
+    /// sound as the sessions left need them, in a codec they all decode; without any,
+    /// what becomes of the monitors.
+    fn sessions_ended(&mut self, taken_off: bool) {
+        if !self.sessions.is_empty()
+            && let Some(displays) = self.displays.as_mut()
+        {
+            // The headsets left may all decode the codec chosen again.
+            let headsets = displays.router.headsets();
+            displays.fit_codec(&headsets);
         }
-        // The headsets left may all decode the codec chosen again.
-        let headsets = displays.router.headsets();
-        displays.fit_codec(&headsets);
         self.headsets_changed();
+        if self.sessions.is_empty() {
+            self.after_the_last_session(taken_off);
+        }
     }
 
     /// No session is left: the monitors stay for a while, or go now when the last
@@ -574,9 +612,7 @@ impl Brain {
                 }
                 drop(trusted);
                 let keys: Vec<[u8; 32]> = self.sessions.keys().copied().collect();
-                for key in keys {
-                    self.end_session(key, Some(PcGoodbye::Forgotten), Ok(()));
-                }
+                self.end_sessions(keys, PcGoodbye::Forgotten, || Ok(()));
             }
             TrayCommand::Quit => self.quit = true,
         }
@@ -669,9 +705,9 @@ impl Brain {
             .filter(|(_, s)| s.taken_off_for() >= Some(TAKEN_OFF_GRACE))
             .map(|(key, _)| *key)
             .collect();
-        for key in taken_off {
+        if !taken_off.is_empty() {
             info!("headset taken off");
-            self.end_session(key, Some(PcGoodbye::TakenOff), Ok(()));
+            self.end_sessions(taken_off, PcGoodbye::TakenOff, || Ok(()));
         }
         let Some(displays) = self.displays.as_mut() else {
             return;
@@ -685,10 +721,9 @@ impl Brain {
                 display: None,
             });
             let keys: Vec<[u8; 32]> = self.sessions.keys().copied().collect();
-            for key in keys {
-                let failed = anyhow::anyhow!("virtual monitor or encoder stopped");
-                self.end_session(key, Some(PcGoodbye::Failed), Err(failed));
-            }
+            self.end_sessions(keys, PcGoodbye::Failed, || {
+                Err(anyhow::anyhow!("virtual monitor or encoder stopped"))
+            });
         }
     }
 
@@ -696,9 +731,7 @@ impl Brain {
     /// moment to read; the monitors go, the files are written.
     fn shut_down(mut self, events: &Receiver<Event>) {
         let keys: Vec<[u8; 32]> = self.sessions.keys().copied().collect();
-        for key in keys {
-            self.end_session(key, Some(PcGoodbye::Quit), Ok(()));
-        }
+        self.end_sessions(keys, PcGoodbye::Quit, || Ok(()));
         info!("quitting");
         while let Some(until) = self.closing.iter().map(|c| c.until).max() {
             let left = until.saturating_duration_since(Instant::now());
