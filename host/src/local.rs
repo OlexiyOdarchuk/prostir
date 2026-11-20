@@ -338,7 +338,9 @@ impl Brain {
             access: wire::Access::MAIN,
         };
         match requests::handle_checked(request, displays, &mut self.store, &asker) {
-            Ok(outcome) => CtlReply::of_outcome(&outcome),
+            Ok(requests::Answer::Now(outcome)) => CtlReply::of_outcome(&outcome),
+            // None of the requests the PC makes waits for the desktop.
+            Ok(requests::Answer::Later(_)) => done(),
             Err(e) => failed(&e),
         }
     }
@@ -686,6 +688,16 @@ impl Brain {
         }
         if let Some(f) = &mic_failure {
             problems.push(f.clone());
+        }
+        if self
+            .displays
+            .as_ref()
+            .is_some_and(crate::displays::Displays::desk_stuck)
+        {
+            problems.push(api::Problem {
+                code: ApiError::Desktop,
+                text: crate::session::desktop_not_responding(),
+            });
         }
         let codec = |c: Codec| match c {
             Codec::H264 => api::Codec::H264,

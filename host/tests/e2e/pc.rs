@@ -119,6 +119,12 @@ pub struct Options {
     pub bitrate: u32,
     /// How long making each fake monitor takes.
     pub slow_monitors: Duration,
+    /// How long connecting to the fake desktop takes.
+    pub slow_connect: Duration,
+    /// How long a step of the desktop's worker takes before the desktop counts as not
+    /// responding, and before the PC app gives up and ends, in seconds (none: 15 s
+    /// and 2 min, as in a release).
+    pub desk_limits: Option<(u64, u64)>,
     /// `--linger`: seconds the monitors stay after the headset leaves.
     pub linger: u64,
     /// The pairing code the person at the PC types, if asked.
@@ -150,6 +156,8 @@ impl Default for Options {
             noise: false,
             bitrate: 8,
             slow_monitors: Duration::ZERO,
+            slow_connect: Duration::ZERO,
+            desk_limits: None,
             linger: 30,
             typed_code: None,
             typed_code_delay: Duration::ZERO,
@@ -289,6 +297,10 @@ impl Pc {
                 "PROSTIR_FAKE_SLOW_MONITORS_MS",
                 options.slow_monitors.as_millis().to_string(),
             )
+            .env(
+                "PROSTIR_FAKE_SLOW_CONNECT_MS",
+                options.slow_connect.as_millis().to_string(),
+            )
             .env("PROSTIR_FAKE_BROKEN_MONITORS", &options.broken_monitors)
             .env("PROSTIR_FAKE_PHYSICAL", &options.physical)
             .env(
@@ -324,6 +336,12 @@ impl Pc {
         match options.encoder {
             Some(mode) => cmd.env("PROSTIR_FAKE_ENCODER", mode),
             None => cmd.env_remove("PROSTIR_FAKE_ENCODER"),
+        };
+        match options.desk_limits {
+            Some((stuck, give_up)) => {
+                cmd.env("PROSTIR_TEST_DESK_LIMITS", format!("{stuck},{give_up}"))
+            }
+            None => cmd.env_remove("PROSTIR_TEST_DESK_LIMITS"),
         };
         match &options.typed_code {
             Some(code) => cmd.env("PROSTIR_FAKE_TYPED_CODE", code),

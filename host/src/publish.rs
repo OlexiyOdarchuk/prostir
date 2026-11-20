@@ -18,7 +18,7 @@ use crate::store::Settings;
 
 /// Monitor sizes the PC offers: the common ones, a 32:9 one where the headset decodes
 /// it, and a portrait one.
-const SIZES: [(u32, u32); 6] = [
+pub const SIZES: [(u32, u32); 6] = [
     (1920, 1080),
     (2560, 1440),
     (3840, 2160),

@@ -103,6 +103,8 @@ struct StreamSlot {
     since: Instant,
     /// When its last two frames came.
     last_frames: [Option<Instant>; 2],
+    /// Asks its encoder for a keyframe, once the encoder runs.
+    keyframer: Option<crate::encoder::Keyframer>,
 }
 
 /// Two frames within this: the picture moves, so a keyframe asked for comes soon.
@@ -595,6 +597,7 @@ impl Router {
             keyframe_asked: None,
             since: Instant::now(),
             last_frames: [None; 2],
+            keyframer: None,
         };
         inner.streams.insert(id, slot);
         for r in inner.receivers.values_mut() {
@@ -608,6 +611,44 @@ impl Router {
                 ..Delivery::default()
             };
             r.streams.insert(id, delivery);
+        }
+    }
+
+    /// The encoder of stream `id` runs: keyframes are asked of it through `keyframer`
+    /// (see [`Router::force_keyframe`]).
+    pub fn set_keyframer(&self, id: ScreenId, keyframer: crate::encoder::Keyframer) {
+        if let Some(slot) = self.inner.lock().unwrap().streams.get_mut(&id) {
+            slot.keyframer = Some(keyframer);
+        }
+    }
+
+    /// Asks the encoder of stream `id` for a keyframe now, if it runs: from the
+    /// control loop, without waiting for the desktop's worker that owns the encoder.
+    pub fn force_keyframe(&self, id: ScreenId) {
+        let keyframer = self
+            .inner
+            .lock()
+            .unwrap()
+            .streams
+            .get(&id)
+            .and_then(|s| s.keyframer.clone());
+        if let Some(k) = keyframer {
+            k.ask();
+        }
+    }
+
+    /// Asks every running encoder for a keyframe.
+    pub fn force_keyframes(&self) {
+        let keyframers: Vec<_> = self
+            .inner
+            .lock()
+            .unwrap()
+            .streams
+            .values()
+            .filter_map(|s| s.keyframer.clone())
+            .collect();
+        for k in keyframers {
+            k.ask();
         }
     }
 

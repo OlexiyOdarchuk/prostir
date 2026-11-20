@@ -1,5 +1,5 @@
 //! The door from the core to the operating system: the core (`main.rs`, `session.rs`,
-//! `listen.rs`, `displays.rs`, `layout.rs`, `encoder.rs`, `pairing.rs`, `outbox.rs`,
+//! `listen.rs`, `displays.rs`, `worker/`, `layout.rs`, `encoder.rs`, `pairing.rs`, `outbox.rs`,
 //! `usage.rs`, `i18n.rs`) reaches the desktop, the sound system and the user's files
 //! only through this module. What the platform's threads see (the tray's items, a
 //! signal to quit) goes to the control loop as events (`crate::events`).
@@ -232,6 +232,8 @@ pub struct TrayStatus {
     /// A display is not on the best encoder for it, or encodes on the CPU: which, and
     /// why (see `Displays::encoding_line`).
     pub encoding: Option<String>,
+    /// The desktop does not respond (a call into it has hung for a while).
+    pub desktop_stuck: bool,
 }
 
 /// Why there is no pairing code typed on the PC (see `dialogs::ask_code`).

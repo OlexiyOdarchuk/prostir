@@ -575,7 +575,11 @@ profile is in place (after the host's reply to the `SetDisplays` it sent for it)
 
 **Partial success.** A request that makes displays answers with all it made, also
 those that did not start: they stand in `Displays` as `Failed` and keep their place.
-It fails only when nothing was made (`LIMIT`, `BAD_SIZE`).
+It fails only when nothing was made (`LIMIT`, `BAD_SIZE`). The host may answer before
+its desktop made them (implementation-defined): they stand in `Displays` as `Starting`
+with the reply, and turn `Running` or `Failed` later. A request whose answer only the
+desktop has (`DetachWindow`, `WindowHere`, `Screenshot`, `FindMouse`) is answered once
+the desktop did it, or with `DESKTOP` when it does not within 20 s.
 
 A command the headset has not answered within 30 s is closed on the host as "the
 headset does not answer" (implementation-defined); a late reply is skipped.

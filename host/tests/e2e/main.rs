@@ -5,6 +5,7 @@
 
 mod api;
 mod control;
+mod desk;
 mod encoders;
 mod failures;
 mod goodbye;

@@ -234,6 +234,16 @@ impl ksni::Tray for Tray {
                 .into(),
             );
         }
+        if self.status.desktop_stuck {
+            items.push(
+                StandardItem {
+                    label: t("Стільниця не відповідає", "The desktop does not respond").into(),
+                    enabled: false,
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
         if let Some(encoding) = &self.status.encoding {
             items.push(
                 StandardItem {

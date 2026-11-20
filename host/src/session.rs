@@ -167,6 +167,9 @@ pub struct Session {
     mic_denied: bool,
     /// Replies to send once the parts they changed went out.
     replies: Vec<HostMsg>,
+    /// Requests whose answer waits for a job of the desktop's worker: the request,
+    /// the job, and until when it may take.
+    waiting: Vec<(ReqId, crate::worker::JobId, Instant)>,
     /// Commands sent to the headset without an answer yet: what each was, who waits
     /// for what came of it, and since when.
     commands: BTreeMap<ReqId, (String, Option<Reply>, Instant)>,
@@ -483,6 +486,7 @@ impl Session {
             battery_warned: false,
             mic_denied: false,
             replies: Vec::new(),
+            waiting: Vec::new(),
             commands: BTreeMap::new(),
             answers: Answers::default(),
             last_command: 0,
@@ -838,6 +842,45 @@ impl Session {
         }
     }
 
+    /// The answer to a request that waited for job `job` of the desktop's worker:
+    /// whether it was this session's.
+    pub fn job_done(&mut self, job: crate::worker::JobId, outcome: &Outcome) -> bool {
+        let Some(i) = self.waiting.iter().position(|(_, j, _)| *j == job) else {
+            return false;
+        };
+        let (req, _, _) = self.waiting.remove(i);
+        if let Outcome::Failed { detail, .. } = outcome {
+            warn!("request {}: {detail}", req.0);
+        }
+        info!("request {}: answered", req.0);
+        self.replies.push(HostMsg::Reply {
+            req,
+            outcome: outcome.clone(),
+        });
+        true
+    }
+
+    /// When a request waiting for the desktop has waited long enough.
+    pub fn waiting_until(&self) -> Option<Instant> {
+        self.waiting.iter().map(|(_, _, until)| *until).min()
+    }
+
+    /// Requests that waited for the desktop until `now` (all of them with `all`, the
+    /// desktop not responding) fail with `DESKTOP`.
+    pub fn give_up_waiting(&mut self, now: Instant, all: bool) {
+        let (over, still): (Vec<_>, Vec<_>) = std::mem::take(&mut self.waiting)
+            .into_iter()
+            .partition(|(_, _, until)| all || *until <= now);
+        self.waiting = still;
+        for (req, _, _) in over {
+            warn!("request {}: the desktop does not respond", req.0);
+            self.replies.push(HostMsg::Reply {
+                req,
+                outcome: Outcome::failed(ErrorCode::DESKTOP, &desktop_not_responding()),
+            });
+        }
+    }
+
     /// Tells the headset what changed, then the replies.
     pub fn publish(&mut self, displays: &mut Displays, store: &Store, focus: Option<ScreenId>) {
         let sources = publish::Sources {
@@ -990,7 +1033,7 @@ impl Session {
             ClientMsg::Request { req, asked } => {
                 let started = Instant::now();
                 let what = format!("{asked:?}");
-                let outcome = match asked {
+                let answer = match asked {
                     Asked::Known(request) => {
                         let limits = self.publisher.limits(displays, self.standing.no_limits);
                         let asker = requests::Asker {
@@ -1002,7 +1045,19 @@ impl Session {
                     }
                     Asked::Unknown { kind } => {
                         info!("the headset asked for something unknown (kind {kind})");
-                        Outcome::failed(ErrorCode::UNSUPPORTED, "")
+                        requests::Answer::Now(Outcome::failed(ErrorCode::UNSUPPORTED, ""))
+                    }
+                };
+                let outcome = match answer {
+                    requests::Answer::Now(outcome) => outcome,
+                    requests::Answer::Later(job) => {
+                        info!(
+                            "request {} ({what}): waited {} ms, answered once the desktop did it",
+                            req.0,
+                            (started - came).as_millis(),
+                        );
+                        self.waiting.push((req, job, Instant::now() + DESK_ANSWER));
+                        return false;
                     }
                 };
                 if let Outcome::Failed { detail, .. } = &outcome {
@@ -1042,6 +1097,15 @@ impl Session {
         }
         false
     }
+}
+
+/// How long a request waits for the desktop's worker to answer it.
+pub const DESK_ANSWER: Duration = Duration::from_secs(20);
+
+/// What the headset and the person at the PC are told while the desktop does not
+/// respond.
+pub fn desktop_not_responding() -> String {
+    i18n::t("Стільниця не відповідає", "The desktop does not respond").into()
 }
 
 /// Whether the headset is on the head, as it last said (one that never said counts as

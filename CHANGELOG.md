@@ -78,6 +78,14 @@
   control that asked, in the headset's language (for example "The limit is reached" or
   "No active window on the PC"), with the PC's own detail under it. A request the PC
   does not answer within 30 s says so instead of waiting for ever.
+- A desktop that thinks or hangs (KScreen, KWin, a graphics driver starting or
+  stopping an encoder) no longer holds anything else up: the headset's requests are
+  answered at once, sound, the microphone, the menu and the tray go on, and the
+  monitors follow as soon as the desktop is ready. Switching the codec no longer
+  freezes the PC for seconds; a monitor that cannot encode with the new codec goes on
+  with the one it had. A desktop that does not respond for 15 s is said in the
+  headset, in the tray and by `prostir ctl status`; after 2 min Prostir quits with an
+  error instead of hanging, so that whatever started it can start it again.
 
 ### Settings
 

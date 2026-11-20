@@ -320,7 +320,7 @@ change older clients would misread.
 | `pairing` | while the PC is pairing: `pc_code` (the code to type in the headset, while the PC shows one), and from step 6.8 `seconds_left`, `seconds_total` (`0`: pairing has no time limit, as now, where a new headset pairs whenever it asks), `code_for` (a headset waiting for its code to be typed here), `last` (`{"paired": {"name": …}}`, `"wrong"`; anything else reads as other) |
 | `nearby` | headsets that asked for this PC recently, by name (from step 6.8) |
 | `counting` | this PC counts among users |
-| `problems` | what is wrong now: `code` (an error's name) and `text` in the PC's language |
+| `problems` | what is wrong now: `code` (an error's name) and `text` in the PC's language; `Desktop` while the desktop does not respond (a call into it has hung for 15 s) |
 
 The pairing code is on the bus because the tray shows it to the same user anyway; it
 is never written to the log.

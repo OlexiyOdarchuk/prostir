@@ -93,8 +93,9 @@ fn failures_say_why() {
     );
 }
 
-/// A monitor that cannot be made is still added: its number comes back, and it stands
-/// in the list as failed, with why.
+/// A monitor that cannot be made is still added: its number comes back at once, with
+/// the monitor starting in the list, and once the desktop's worker tried it stands
+/// there as failed, with why.
 #[test]
 fn a_monitor_that_cannot_start_is_added_failed() {
     let options = Options {
@@ -111,6 +112,14 @@ fn a_monitor_that_cannot_start_is_added_failed() {
     let Outcome::Added { id } = outcome else {
         panic!("added, not {outcome:?}")
     };
+    let d = headset.view().display(id).cloned().unwrap();
+    assert_eq!(d.state, DisplayState::Starting, "listed before it is made");
+    headset
+        .wait(SOON, "the monitor failed", |v| {
+            v.display(id)
+                .is_some_and(|d| matches!(d.state, DisplayState::Failed { .. }))
+        })
+        .unwrap();
     let d = headset.view().display(id).cloned().unwrap();
     let DisplayState::Failed { error, detail } = d.state else {
         panic!("failed, not {:?}", d.state)

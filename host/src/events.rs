@@ -43,6 +43,8 @@ pub enum Event {
     Ctl(Request, Reply),
     /// The PC began or stopped showing a pairing code.
     Pairing,
+    /// The desktop's worker did something (see `worker`): which worker, and what.
+    Desk(u64, crate::worker::Done),
     /// A signal asked the program to quit.
     Quit,
 }
