@@ -186,6 +186,7 @@ fn host_caps(displays: &Displays) -> HostCaps {
         caps::pc::SOUND_FROM,
         caps::pc::NO_LIMITS,
         caps::pc::SCALE,
+        caps::pc::COMMANDS,
     ];
     if windows::can_move_cursor() {
         features.push(caps::pc::MOVE_MOUSE);

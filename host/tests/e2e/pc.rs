@@ -147,6 +147,12 @@ impl Pc {
         for sub in ["config", "run", "home"] {
             std::fs::create_dir_all(root.join(sub)).unwrap();
         }
+        // Commands for the headset come through this pipe (see `Pc::command`).
+        let ctl = root.join("run").join("ctl");
+        let _ = std::fs::remove_file(&ctl);
+        let path = std::ffi::CString::new(ctl.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a valid path, for a pipe of our own.
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0, "mkfifo");
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_prostir"));
         cmd.args(["--port", "0", "--no-discovery", "--no-adb", "--software"])
             .args(["--bitrate", &options.bitrate.to_string()])
@@ -163,6 +169,7 @@ impl Pc {
             )
             .env("PROSTIR_FAKE_BROKEN_MONITORS", &options.broken_monitors)
             .env("PROSTIR_FAKE_PHYSICAL", &options.physical)
+            .env("PROSTIR_TEST_CTL", &ctl)
             .env(
                 "PROSTIR_FAKE_PICTURE",
                 if options.noise { "noise" } else { "bands" },
@@ -275,6 +282,36 @@ impl Pc {
             }
         }
         starts
+    }
+
+    /// Asks the headset to do `line` (see the PC app's `ctl_hook`), as `prostir ctl`
+    /// will: what came of it, waiting up to `timeout`.
+    pub fn command(&self, line: &str, timeout: Duration) -> String {
+        let ctl = self.run_dir.join("ctl");
+        let replies = self.run_dir.join("ctl.replies");
+        let before = std::fs::read_to_string(&replies)
+            .unwrap_or_default()
+            .lines()
+            .count();
+        {
+            use std::io::Write;
+            let mut pipe = std::fs::OpenOptions::new().write(true).open(&ctl).unwrap();
+            writeln!(pipe, "{line}").unwrap();
+        }
+        let until = Instant::now() + timeout;
+        loop {
+            let text = std::fs::read_to_string(&replies).unwrap_or_default();
+            if let Some(answer) = text.lines().nth(before) {
+                let (asked, result) = answer.split_once(" => ").unwrap();
+                assert_eq!(asked, line);
+                return result.to_owned();
+            }
+            assert!(
+                Instant::now() < until,
+                "no answer to {line:?} within {timeout:?}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     /// Clicks `item` in the PC app's tray (see the fake tray for the items).

@@ -247,7 +247,13 @@ pub(crate) fn host_samples() -> Vec<HostMsg> {
             protocol: 10,
             app: "0.3.0".into(),
         },
-        HostMsg::Recenter,
+        HostMsg::command(ReqId(5), crate::request::Command::Recenter),
+        HostMsg::command(
+            ReqId(6),
+            crate::request::Command::Profile {
+                name: "Робота".into(),
+            },
+        ),
         HostMsg::Notice {
             text: "Нове повідомлення".into(),
         },
@@ -327,6 +333,10 @@ pub(crate) fn client_samples() -> Vec<ClientMsg> {
                     ],
                 },
             ],
+        },
+        ClientMsg::Reply {
+            req: ReqId(5),
+            outcome: Outcome::failed(ErrorCode::NO_SUCH_PROFILE, ""),
         },
         ClientMsg::Gaze {
             display: Some(DisplayId(3)),

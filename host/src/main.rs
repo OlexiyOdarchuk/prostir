@@ -1,5 +1,6 @@
 // Every unsafe block says why it is sound.
 #![deny(clippy::undocumented_unsafe_blocks)]
+mod ctl_hook;
 mod displays;
 mod encoder;
 mod errors;
@@ -15,18 +16,19 @@ mod screen;
 mod store;
 mod usage;
 
+use std::collections::{BTreeMap, VecDeque};
 use std::io::ErrorKind;
 use std::net::{Ipv4Addr, TcpListener, UdpSocket};
 use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use log::{debug, error, info, warn};
 use prostir_proto::link::{Closer, Link, Via};
-use prostir_proto::request::{Asked, Outcome};
-use prostir_proto::state::{ErrorCode, HeadsetState, Part, clip, perms};
+use prostir_proto::request::{Asked, Command, Outcome};
+use prostir_proto::state::{ErrorCode, HeadsetState, Part, ReqId, caps, clip, perms};
 use prostir_proto::stats::Period;
 use prostir_proto::{ClientMsg, Codec, HeadsetGoodbye, HostMsg, PcGoodbye};
 
@@ -92,6 +94,13 @@ struct Control {
     shown: Option<TrayStatus>,
     /// The settings the tray shows: quality, the text preset, the counter.
     shown_settings: Option<(u32, bool, bool)>,
+    /// How the headset is connected, while one is.
+    via: Option<&'static str>,
+    /// The headset's "No limits", while one that takes commands is connected.
+    no_limits: Option<bool>,
+    /// Commands for the headset from the tray and the test hook, and who waits for
+    /// what came of each.
+    for_headset: VecDeque<(Asked<Command>, Option<Sender<String>>)>,
 }
 
 impl Control {
@@ -117,11 +126,7 @@ impl Control {
                     info!("counting this PC among users: {on}");
                     store.change(|s| s.count = on);
                 }
-                TrayCommand::Recenter => {
-                    if let Some(d) = displays.as_deref_mut() {
-                        d.router.send(HostMsg::Recenter);
-                    }
-                }
+                TrayCommand::Headset { asked, reply } => self.for_headset.push_back((asked, reply)),
                 TrayCommand::ForgetHeadsets => {
                     info!(
                         "forgetting {} paired headset(s)",
@@ -145,10 +150,21 @@ impl Control {
         }
     }
 
+    /// Commands for the headset with no headset to take them.
+    fn no_headset(&mut self) {
+        for (asked, reply) in self.for_headset.drain(..) {
+            info!("{asked:?}: no headset is connected");
+            if let Some(r) = reply {
+                let _ = r.send("no headset".into());
+            }
+        }
+    }
+
     /// Shows the current state and settings in the tray (only what changed).
-    fn show(&mut self, via: Option<&'static str>, displays: Option<&Displays>, store: &Store) {
+    fn show(&mut self, displays: Option<&Displays>, store: &Store) {
         let status = TrayStatus {
-            connected: via,
+            no_limits: self.no_limits,
+            connected: self.via,
             monitors: displays.map_or(0, Displays::monitor_count),
             mirror: displays.is_some_and(Displays::mirror_active),
             paused: displays.is_some_and(|d| !d.streaming()),
@@ -376,6 +392,7 @@ fn serve_client(
             })?;
     }
 
+    control.via = Some(via);
     displays.router.attach(outbox.clone());
     // The streams the snapshot listed may start (each starts over just below).
     let listed = publisher.listed().map(ScreenId::from_wire).collect();
@@ -387,6 +404,8 @@ fn serve_client(
         sound_source: None,
         battery_warned: false,
         replies: Vec::new(),
+        commands: BTreeMap::new(),
+        last_command: 0,
     };
     session.headset_changed(displays, control);
     session.publish(displays, store, None, None);
@@ -424,7 +443,8 @@ fn serve_client(
             if let Some(reason) = control.poll(store, Some(displays)) {
                 break (Ok(()), Some(reason));
             }
-            control.show(Some(via), Some(displays), store);
+            session.commands_due(displays, control);
+            control.show(Some(displays), store);
             displays.tick(&mut || store.new_id());
             // A display of the PC seen for the first time is kept.
             keep_screens(store, displays, false);
@@ -468,6 +488,7 @@ fn serve_client(
     };
     displays.set_streaming(false);
     tray::set_battery(control.tray.as_ref(), None);
+    session.end(control);
     displays.router.detach();
     match goodbye {
         Some(reason) => {
@@ -500,9 +521,77 @@ struct Session {
     battery_warned: bool,
     /// Replies to send once the parts they changed went out.
     replies: Vec<HostMsg>,
+    /// Commands sent to the headset without an answer yet: what each was, who waits
+    /// for what came of it, and since when.
+    commands: BTreeMap<ReqId, (String, Option<Sender<String>>, Instant)>,
+    last_command: u32,
+}
+
+/// A command the headset does not answer within this is given up (a late answer is
+/// let go).
+const COMMAND_ANSWER: Duration = Duration::from_secs(30);
+
+/// What came of a command, as the one who asked reads it.
+fn command_result(outcome: &Outcome) -> String {
+    match outcome {
+        Outcome::Failed { error, detail } => format!("failed {}: {detail}", error.code()),
+        _ => "done".into(),
+    }
 }
 
 impl Session {
+    /// Sends the commands waiting for the headset; gives up on those it did not answer
+    /// in time; shows its "No limits" in the tray.
+    fn commands_due(&mut self, displays: &Displays, control: &mut Control) {
+        let takes = self.publisher.caps().has(caps::headset::COMMANDS);
+        control.no_limits = takes.then(|| self.publisher.prefs().no_limits);
+        for (asked, reply) in control.for_headset.drain(..) {
+            let what = format!("{asked:?}");
+            if !takes {
+                info!("{what}: the headset takes no commands");
+                if let Some(r) = reply {
+                    let _ = r.send(format!(
+                        "failed {}: the headset cannot do this",
+                        ErrorCode::UNSUPPORTED.code()
+                    ));
+                }
+                continue;
+            }
+            self.last_command += 1;
+            let req = ReqId(self.last_command);
+            info!("command {} for the headset: {what}", req.0);
+            displays.router.send(HostMsg::Command { req, asked });
+            self.commands.insert(req, (what, reply, Instant::now()));
+        }
+        let late: Vec<ReqId> = self
+            .commands
+            .iter()
+            .filter(|(_, (_, _, at))| at.elapsed() >= COMMAND_ANSWER)
+            .map(|(req, _)| *req)
+            .collect();
+        for req in late {
+            if let Some((what, reply, _)) = self.commands.remove(&req) {
+                warn!("command {} ({what}): the headset does not answer", req.0);
+                if let Some(r) = reply {
+                    let _ = r.send("the headset does not answer".into());
+                }
+            }
+        }
+    }
+
+    /// The session is over: commands still waiting get no answer.
+    fn end(&mut self, control: &mut Control) {
+        control.via = None;
+        control.no_limits = None;
+        for (_, (what, reply, _)) in std::mem::take(&mut self.commands) {
+            info!("{what}: the headset left");
+            if let Some(r) = reply {
+                let _ = r.send("the headset disconnected".into());
+            }
+        }
+        control.no_headset();
+    }
+
     /// Tells the headset what changed, then the replies.
     fn publish(
         &mut self,
@@ -615,7 +704,7 @@ impl Session {
                     warn!("request {}: {detail}", req.0);
                 }
                 self.replies.push(HostMsg::Reply { req, outcome });
-                control.show(None, Some(displays), store);
+                control.show(Some(displays), store);
             }
             // Only the main headset's arrangement is the desktop's.
             ClientMsg::Arrange { rows } if self.publisher.access.is_main() => {
@@ -634,6 +723,16 @@ impl Session {
             ClientMsg::MouseTo { .. } => info!("the headset has no right to move the mouse"),
             // Used for priorities from step 10 on.
             ClientMsg::Gaze { .. } => {}
+            ClientMsg::Reply { req, outcome } => match self.commands.remove(&req) {
+                Some((what, reply, _)) => {
+                    let result = command_result(&outcome);
+                    info!("command {} ({what}): {result}", req.0);
+                    if let Some(r) = reply {
+                        let _ = r.send(result);
+                    }
+                }
+                None => info!("an answer to command {}, which nothing waits for", req.0),
+            },
             other => warn!("ignoring {other:?}"),
         }
     }
@@ -777,13 +876,17 @@ fn main() -> Result<()> {
     let (command_tx, commands) = mpsc::channel();
     let mut control = Control {
         security: pairing::Security::load()?,
-        tray: tray::spawn(command_tx),
+        tray: tray::spawn(command_tx.clone()),
         commands,
         quit: false,
         shown: None,
         shown_settings: None,
+        via: None,
+        no_limits: None,
+        for_headset: VecDeque::new(),
     };
-    control.show(None, None, &store);
+    ctl_hook::spawn(command_tx);
+    control.show(None, &store);
 
     let mut displays: Option<Displays> = None;
     let mut idle_since = Instant::now();
@@ -856,20 +959,21 @@ fn main() -> Result<()> {
                     displays = None;
                     platform::give_memory_back();
                 }
-                control.show(None, displays.as_ref(), &store);
+                control.show(displays.as_ref(), &store);
                 if args.linger > 0 && displays.as_ref().is_some_and(|d| d.healthy()) {
                     info!("keeping virtual monitors for {} s", args.linger);
                 }
             }
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
                 control.poll(&mut store, displays.as_mut());
-                control.show(None, displays.as_ref(), &store);
+                control.no_headset();
+                control.show(displays.as_ref(), &store);
                 if let Some(d) = displays.as_mut() {
                     d.place();
                 }
                 if displays.is_some() && idle_since.elapsed() >= Duration::from_secs(args.linger) {
                     displays = None;
-                    control.show(None, None, &store);
+                    control.show(None, &store);
                     platform::give_memory_back();
                 }
                 std::thread::sleep(Duration::from_millis(200));

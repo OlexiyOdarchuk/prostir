@@ -11,7 +11,7 @@ use prostir_proto::handshake::{self, Answer};
 use prostir_proto::link::tcp::{NoiseTcp, Plain, SocketOptions};
 use prostir_proto::link::{Closer, Link, PeerInfo, RecordReceiver, RecordSender};
 use prostir_proto::packet::{self, Assembler, FRAGMENT, lane};
-use prostir_proto::request::{Outcome, Request};
+use prostir_proto::request::{Asked, Command, Outcome, Request};
 use prostir_proto::secure::{Identity, Pairing, TrustStore, confirmation, tags_match};
 use prostir_proto::state::{
     Decoder, Display, DisplayId, Encoding, Gen, HeadsetCaps, HeadsetState, PcState, Prefs,
@@ -192,6 +192,9 @@ pub struct View {
     /// Broken rules: a stream started for a display not in `Displays`, a frame of a
     /// generation that never started, a frame number out of order.
     pub broken: Vec<String>,
+    /// Commands from the PC, in order (the reader answers them, see
+    /// [`FakeHeadset::stop_answering`]).
+    pub commands: Vec<Asked<Command>>,
     /// The displays of the last `Displays`.
     listed: Vec<DisplayId>,
 }
@@ -308,6 +311,7 @@ impl View {
                 self.replies.insert(req, outcome);
             }
             HostMsg::Problem { detail, .. } => self.errors.push(detail),
+            HostMsg::Command { asked, .. } => self.commands.push(asked),
             HostMsg::MicActive { active } => self.mic_active = Some(active),
             HostMsg::Audio { pcm } => {
                 self.audio_bytes += pcm.len() as u64;
@@ -397,7 +401,7 @@ fn other_name(msg: &HostMsg) -> &'static str {
         HostMsg::Focus { .. } => "Focus",
         HostMsg::SoundFrom { .. } => "SoundFrom",
         HostMsg::Snapshot { .. } => "Snapshot",
-        HostMsg::Recenter => "Recenter",
+        HostMsg::Command { .. } => "Command",
         HostMsg::Problem { .. } => "Problem",
         _ => "other",
     }
@@ -422,6 +426,8 @@ struct Shared {
     stalled_until: Mutex<Option<Instant>>,
     /// Hang up as soon as a message is half way in.
     cut_mid_message: AtomicBool,
+    /// Leave the PC's commands unanswered.
+    silent: AtomicBool,
     /// Why reading stopped.
     end: Mutex<Option<std::io::ErrorKind>>,
     pings: Mutex<Pings>,
@@ -495,7 +501,11 @@ impl FakeHeadset {
     pub fn state() -> HeadsetState {
         HeadsetState {
             caps: Some(HeadsetCaps {
-                features: vec![caps::headset::PHYSICAL, caps::headset::WINDOWS],
+                features: vec![
+                    caps::headset::PHYSICAL,
+                    caps::headset::WINDOWS,
+                    caps::headset::COMMANDS,
+                ],
                 decoders: vec![
                     Decoder {
                         codec: 0,
@@ -740,6 +750,11 @@ impl FakeHeadset {
         *self.shared.stalled_until.lock().unwrap() = Some(Instant::now() + time);
     }
 
+    /// Leaves the PC's commands unanswered from now on, as a headset that hangs would.
+    pub fn stop_answering(&self) {
+        self.shared.silent.store(true, Ordering::Relaxed);
+    }
+
     /// Hangs up as soon as the next message is half way in (a frame, mostly).
     pub fn cut_mid_message(&self) {
         self.shared.cut_mid_message.store(true, Ordering::Relaxed);
@@ -945,6 +960,18 @@ fn spawn_reader(
                     }
                     HostMsg::Pong { seq } => {
                         round_trip = shared.pings.lock().unwrap().pong(*seq, at);
+                    }
+                    // Done, as far as a fake headset does anything; a kind it does not
+                    // know is unsupported, as the Quest app answers it.
+                    HostMsg::Command { req, asked } if !shared.silent.load(Ordering::Relaxed) => {
+                        let outcome = match asked {
+                            Asked::Known(_) => Outcome::Done,
+                            Asked::Unknown { .. } => {
+                                Outcome::failed(prostir_proto::state::ErrorCode::UNSUPPORTED, "")
+                            }
+                        };
+                        let reply = ClientMsg::Reply { req: *req, outcome };
+                        let _ = send(&mut **writer.lock().unwrap(), reply);
                     }
                     _ => {}
                 }

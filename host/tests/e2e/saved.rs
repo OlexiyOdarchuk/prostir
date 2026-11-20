@@ -227,7 +227,10 @@ fn killed_mid_change_leaves_readable_files() {
     }
     pc.kill();
     let screens = dir.saved("screens.txt");
-    assert_eq!(saved_numbers(&dir), [0, 1], "{screens}");
+    // In the order of the rows the PC took last, whichever that was.
+    let mut numbers = saved_numbers(&dir);
+    numbers.sort_unstable();
+    assert_eq!(numbers, [0, 1], "{screens}");
 
     let mut pc = Pc::start(&dir, &Options::default());
     let mut headset = connect(&pc, &mut keys);

@@ -12,6 +12,15 @@ use log::warn;
 
 use crate::platform::linux::autostart;
 use crate::platform::{TrayCommand as Command, TrayStatus as Status};
+use prostir_proto::request::{Asked, Command as HeadsetCommand};
+
+/// Asks the headset to do `command`, from the tray.
+fn ask(tray: &Tray, command: HeadsetCommand) {
+    let _ = tray.commands.send(Command::Headset {
+        asked: Asked::Known(command),
+        reply: None,
+    });
+}
 
 /// Video quality presets offered in the menu, Mbit/s per monitor.
 const QUALITIES: [(u32, &str, &str); 3] = [
@@ -236,14 +245,29 @@ impl ksni::Tray for Tray {
             items.push(
                 StandardItem {
                     label: t("Монітори перед собою", "Bring the monitors in front").into(),
-                    activate: Box::new(|tray: &mut Self| {
-                        let _ = tray.commands.send(Command::Recenter);
-                    }),
+                    activate: Box::new(|tray: &mut Self| ask(tray, HeadsetCommand::Recenter)),
                     ..Default::default()
                 }
                 .into(),
             );
         }
+        // The headset owns "No limits": without one connected there is nothing to
+        // switch.
+        let no_limits = self.status.no_limits;
+        items.push(
+            CheckmarkItem {
+                label: with_state(t("Без обмежень", "No limits"), no_limits == Some(true)),
+                checked: no_limits == Some(true),
+                enabled: no_limits.is_some(),
+                activate: Box::new(|tray: &mut Self| {
+                    if let Some(on) = tray.status.no_limits {
+                        ask(tray, HeadsetCommand::NoLimits { on: !on });
+                    }
+                }),
+                ..Default::default()
+            }
+            .into(),
+        );
         items.extend([
             MenuItem::Separator,
             SubMenu {

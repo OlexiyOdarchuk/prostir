@@ -48,7 +48,7 @@ use std::io::{self, Read, Write};
 
 use link::RecordReceiver;
 use packet::{Assembler, Encoded, Limits, Message};
-use request::{Asked, Outcome, Request};
+use request::{Asked, Command, Outcome, Request};
 use state::{
     Access, Battery, DisplayId, Displays, Encoding, ErrorCode, Focus, Gen, HeadsetCaps, HostCaps,
     MAX_DETAIL, MAX_DISPLAYS, MAX_GROWING, Part, PcInfo, Prefs, Presence, ReqId, Row, Sound,
@@ -77,7 +77,7 @@ pub fn compatible(version: u32, min: u32) -> bool {
 /// PC turn a build of another revision away with a clear word instead of a session
 /// that fails to parse. `None` in released builds, where the protocol version alone
 /// decides.
-pub const PROTO_REVISION: Option<u32> = Some(2);
+pub const PROTO_REVISION: Option<u32> = Some(3);
 
 /// The app version this build says in the handshake: `base` (the crate version), with
 /// `-dev+pN` on a development branch (see [`PROTO_REVISION`]).
@@ -265,6 +265,10 @@ wire_enum! {
         23 => SoundFrom { part: SoundFrom },
         /// The answer to [`ClientMsg::Request`] `req`, after the parts it changed.
         29 => Reply { req: ReqId, outcome: Outcome },
+        /// Something the PC (its tray, later `prostir ctl` and hotkeys) asks the
+        /// headset to do, answered by one [`ClientMsg::Reply`]. Only to a headset that
+        /// names the capability.
+        30 => Command { req: ReqId, asked: Asked<Command> },
         /// Something went wrong that nobody asked for and that does not last (what
         /// lasts is in the state: a display `Failed`, the microphone `Failed`).
         38 => Problem {
@@ -321,8 +325,6 @@ wire_enum! {
             #[wire(rest)]
             app: String,
         },
-        /// Turn the monitors to face the user (asked for from the PC's tray).
-        19 => Recenter,
         /// A desktop notification of the PC, while the headset asks for them.
         20 => Notice {
             #[wire(max = MAX_TEXT)]
@@ -390,6 +392,8 @@ wire_enum! {
         },
         /// A change of the PC's state from the menu, answered by one [`HostMsg::Reply`].
         131 => Request { req: ReqId, asked: Asked<Request> },
+        /// The answer to [`HostMsg::Command`] `req`, after the parts it changed.
+        132 => Reply { req: ReqId, outcome: Outcome },
         /// Put the mouse on display `id`, at `u`/`v` across its image (0..=65535).
         124 => MouseTo { id: DisplayId, u: u16, v: u16 },
         /// The decoder lost frames of this generation: a keyframe, please.
@@ -427,7 +431,7 @@ wire_enum! {
 /// Tags no message of this build has any more, never to be used again: messages of
 /// earlier development builds of protocol 2 (never released), whose bytes another
 /// development build could still send.
-pub const RETIRED_HOST_TAGS: &[u8] = &[5, 7, 8, 13, 14, 18, 21, 22, 24];
+pub const RETIRED_HOST_TAGS: &[u8] = &[5, 7, 8, 13, 14, 18, 19, 21, 22, 24];
 pub const RETIRED_CLIENT_TAGS: &[u8] = &[
     104, 105, 106, 107, 108, 112, 116, 117, 118, 120, 121, 122, 123, 125, 126,
 ];
@@ -436,6 +440,16 @@ impl ClientMsg {
     /// Request `asked`, numbered `req`.
     pub fn request(req: ReqId, asked: Request) -> Self {
         Self::Request {
+            req,
+            asked: Asked::Known(asked),
+        }
+    }
+}
+
+impl HostMsg {
+    /// Command `asked`, numbered `req`.
+    pub fn command(req: ReqId, asked: Command) -> Self {
+        Self::Command {
             req,
             asked: Asked::Known(asked),
         }

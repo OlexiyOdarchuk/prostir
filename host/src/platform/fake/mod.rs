@@ -322,7 +322,12 @@ pub mod tray {
                     for item in text.lines() {
                         let command = match item.trim() {
                             "forget" => TrayCommand::ForgetHeadsets,
-                            "recenter" => TrayCommand::Recenter,
+                            "recenter" => TrayCommand::Headset {
+                                asked: prostir_proto::request::Asked::Known(
+                                    prostir_proto::request::Command::Recenter,
+                                ),
+                                reply: None,
+                            },
                             "quit" => TrayCommand::Quit,
                             "sharp on" => TrayCommand::SetSharp(true),
                             "sharp off" => TrayCommand::SetSharp(false),

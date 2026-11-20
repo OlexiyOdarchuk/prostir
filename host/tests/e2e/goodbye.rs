@@ -62,3 +62,37 @@ fn another_development_build_gets_no_session() {
     pc.wait_log(SOON, "reads other messages than this one");
     assert_eq!(pc.count_log("fake desktop: created"), 0, "no monitors made");
 }
+
+/// Commands for the headset (from the PC's tray, later `prostir ctl`) reach it and come
+/// back with what came of them: done, unsupported for a kind it does not know, and
+/// "does not answer" from a headset that hangs, after 30 s. Without a headset, none.
+#[test]
+fn commands_reach_the_headset_and_come_back() {
+    use prostir_proto::request::{Asked, Command};
+    let (_dir, pc, _keys, mut headset) = crate::session("commands", &Options::default());
+    assert_eq!(pc.command("recenter", SOON), "done");
+    headset
+        .wait(SOON, "the command", |v| {
+            v.commands.contains(&Asked::Known(Command::Recenter))
+        })
+        .unwrap();
+    assert_eq!(pc.command("raw 200", SOON), "failed 1: ");
+    // From the tray too.
+    pc.tray("recenter");
+    headset
+        .wait(SOON, "the tray's command", |v| v.commands.len() == 3)
+        .unwrap();
+    headset.stop_answering();
+    let answer = std::thread::scope(|s| {
+        let waiting = s.spawn(|| pc.command("lineup", std::time::Duration::from_secs(40)));
+        // The session goes on meanwhile.
+        headset
+            .take_for(std::time::Duration::from_secs(32))
+            .unwrap();
+        waiting.join().unwrap()
+    });
+    assert_eq!(answer, "the headset does not answer");
+    headset.disconnect();
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    assert_eq!(pc.command("recenter", SOON), "no headset");
+}

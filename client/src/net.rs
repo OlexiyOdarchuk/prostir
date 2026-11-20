@@ -13,7 +13,7 @@ use prostir_proto::handshake::{self, Answer};
 use prostir_proto::link::tcp::{NoiseTcp, Plain};
 use prostir_proto::link::{Closer, Link, PeerInfo, RecordReceiver, RecordSender};
 use prostir_proto::packet::Assembler;
-use prostir_proto::request::Outcome;
+use prostir_proto::request::{Asked, Command, Outcome};
 use prostir_proto::secure::{self, Identity, Pairing, TrustStore, confirmation, tags_match};
 use prostir_proto::state::{
     self, DisplayId, ErrorCode, Gen, HeadsetState, HostCaps, PcState, ReqId,
@@ -200,8 +200,11 @@ pub enum NetEvent {
     },
     /// The codes did not match; a new attempt follows.
     PairingFailed,
-    /// The PC's tray asks to bring the monitors in front.
-    Recenter,
+    /// The PC (its tray, later `prostir ctl`) asks for something: answered once.
+    Command {
+        req: ReqId,
+        asked: Asked<Command>,
+    },
     /// A desktop notification of the PC.
     Notice(String),
     /// A PC announces itself on the network but does not accept the connection
@@ -1227,8 +1230,8 @@ fn run_session(
                     .get_or_insert_with(crate::audio::Player::spawn)
                     .push(pcm);
             }
-            HostMsg::Recenter => {
-                let _ = events.send(NetEvent::Recenter);
+            HostMsg::Command { req, asked } => {
+                let _ = events.send(NetEvent::Command { req, asked });
             }
             HostMsg::Notice { text } => {
                 let _ = events.send(NetEvent::Notice(text));

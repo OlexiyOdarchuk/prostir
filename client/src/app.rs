@@ -20,7 +20,7 @@ use glam::{Vec2, Vec3};
 use log::{error, info, warn};
 use openxr as xr;
 use openxr::sys::Handle as _;
-use prostir_proto::request::{Outcome, Primary, Request};
+use prostir_proto::request::{Asked, Command, Outcome, Primary, Request};
 use prostir_proto::state::{
     self, Battery, DisplayId, DisplayKind, HeadsetCaps, HeadsetState, Mode, Prefs, Presence, ReqId,
     caps,
@@ -378,6 +378,9 @@ struct Scene {
     asks: std::collections::BTreeMap<ReqId, (ui::Asked, Instant)>,
     /// Requests that failed lately: the control, why, the PC's detail, and when.
     failed_asks: Vec<(ui::Asked, ui::Failure, String, Instant)>,
+    /// Commands of the PC answered once the PC answered a request of their own (a
+    /// profile is in place when the PC made its monitors): request → command.
+    command_after: std::collections::BTreeMap<ReqId, ReqId>,
     /// An unknown PC waiting for "Pair" or "Not now" (survives the disconnect that
     /// follows the question).
     pair_offer: Option<(String, crate::ui::OfferWhy)>,
@@ -1214,6 +1217,29 @@ impl Scene {
         self.send_layout();
     }
 
+    /// Brings the monitors closer (`steps` below 0) or further, a step at a time, as
+    /// they stand around the user: each keeps its size, the arrangement its shape.
+    fn closer(&mut self, steps: i8) {
+        const STEP: f32 = 1.15;
+        let (center, _) = self.center;
+        let wanted = self.radius * STEP.powi(i32::from(steps));
+        let k = wanted.clamp(0.5, 6.0) / self.radius.max(1e-3);
+        let windows: Vec<ScreenId> = self
+            .placements
+            .keys()
+            .copied()
+            .filter(|id| self.is_window(*id))
+            .collect();
+        for (id, p) in self.placements.iter_mut() {
+            if !windows.contains(id) {
+                p.position = center + (p.position - center) * k;
+            }
+        }
+        self.radius *= k;
+        self.save_layout();
+        self.send_layout();
+    }
+
     /// The A button: lines up what the user arranged by hand, row by row (see
     /// `layout::line_up`), instead of replacing it with the preset: every row keeps its
     /// place and the way it stands, tilted back or overhead too. Cinema rebuilds its
@@ -1524,6 +1550,17 @@ impl Scene {
     /// Request `req` was answered: which control asked it, `None` for one this side
     /// does not wait for (answered after it gave up on it).
     fn answered(&mut self, req: ReqId, outcome: &Outcome) -> Option<ui::Asked> {
+        // A command of the PC that waited for this answer gets it, with the same code.
+        if let Some(command) = self.command_after.remove(&req) {
+            let outcome = match outcome {
+                Outcome::Failed { .. } => outcome.clone(),
+                _ => Outcome::Done,
+            };
+            self.send(ClientMsg::Reply {
+                req: command,
+                outcome,
+            });
+        }
         let Some((what, _)) = self.asks.remove(&req) else {
             info!("an answer to request {}, which nothing waits for", req.0);
             return None;
@@ -1984,6 +2021,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         last_req: 0,
         asks: std::collections::BTreeMap::new(),
         failed_asks: Vec::new(),
+        command_after: std::collections::BTreeMap::new(),
         steering,
         offline_since: Some(Instant::now()),
         feedback: None,
@@ -2163,7 +2201,12 @@ fn run(app: &AndroidApp) -> Result<()> {
         }
 
         while let Ok(event) = net_rx.try_recv() {
-            handle_net_event(&mut scene, &session, &vm, event);
+            match event {
+                NetEvent::Command { req, asked } => {
+                    take_command(&mut scene, req, asked, &mut passthrough, &mut controls)
+                }
+                event => handle_net_event(&mut scene, &session, &vm, event),
+            }
         }
 
         // Panorama: generated or decoded off the main thread, uploaded once per choice.
@@ -3254,7 +3297,8 @@ fn handle_net_event(
             info!("the PC can: {:?}", pc.features);
             scene.can_move_mouse = pc.has(caps::pc::MOVE_MOUSE);
         }
-        NetEvent::Recenter => scene.recenter(),
+        // Taken in the frame loop, where the menu's actions are done (see `take_command`).
+        NetEvent::Command { .. } => {}
         NetEvent::Notice(text) => scene.show_toast(text),
         NetEvent::Reply { req, outcome } => match (scene.answered(req, &outcome), outcome) {
             (None, _) | (_, Outcome::Failed { .. }) => {}
@@ -3298,6 +3342,8 @@ fn handle_net_event(
             scene.update_needed = Some((pc_newer, pc_app));
         }
         NetEvent::Disconnected { why } => {
+            // Commands of that PC are over with it.
+            scene.command_after.clear();
             // What waited for an answer gets none.
             for (what, _) in std::mem::take(&mut scene.asks).into_values() {
                 scene.ask_failed(what, ui::Failure::Disconnected, String::new());
@@ -3469,7 +3515,7 @@ fn prefs_of(s: &Settings) -> Prefs {
         gaze_mouse_ms: s
             .gaze_mouse
             .then(|| u16::try_from(GAZE_DWELL.as_millis()).unwrap_or(u16::MAX)),
-        no_limits: false,
+        no_limits: s.no_limits,
     }
 }
 
@@ -3494,7 +3540,11 @@ fn headset_caps() -> HeadsetCaps {
         max_h,
     };
     HeadsetCaps {
-        features: vec![caps::headset::PHYSICAL, caps::headset::WINDOWS],
+        features: vec![
+            caps::headset::PHYSICAL,
+            caps::headset::WINDOWS,
+            caps::headset::COMMANDS,
+        ],
         decoders: vec![
             decoder(Codec::H264, 4096, 4096),
             decoder(Codec::H265, 8192, 4320),
@@ -3503,6 +3553,93 @@ fn headset_caps() -> HeadsetCaps {
         layers_max: 16,
         model: "Meta Quest".into(),
     }
+}
+
+/// Does what the PC asks (its tray, later `prostir ctl` and hotkeys), as the menu would,
+/// and answers it once: after the parts it changed (`Prefs`), and for a profile once the
+/// PC answered the profile's own request. A kind this app does not know is
+/// unsupported.
+fn take_command(
+    scene: &mut Scene,
+    req: ReqId,
+    asked: Asked<Command>,
+    passthrough: &mut Option<passthrough::Passthrough>,
+    controls: &mut Controls,
+) {
+    use prostir_proto::state::ErrorCode;
+    let fail = |code: ErrorCode, detail: &str| Outcome::failed(code, detail);
+    let Asked::Known(command) = asked else {
+        scene.send(ClientMsg::Reply {
+            req,
+            outcome: fail(ErrorCode::UNSUPPORTED, ""),
+        });
+        return;
+    };
+    info!("the PC asks: {command:?}");
+    let mut act = |scene: &mut Scene, action: Action| {
+        handle_action(scene, action, passthrough, controls);
+        Outcome::Done
+    };
+    let outcome = match command {
+        Command::Recenter => act(scene, Action::Recenter),
+        Command::Profile { name } => match profile_named(&name) {
+            Some(i) => {
+                let before = scene.last_req;
+                act(scene, Action::ApplyProfile(i));
+                if scene.last_req > before {
+                    // Answered with the PC's answer to the profile's monitors.
+                    scene.command_after.insert(ReqId(scene.last_req), req);
+                    return;
+                }
+                fail(ErrorCode::OTHER, "no connection")
+            }
+            None => fail(ErrorCode::NO_SUCH_PROFILE, &name),
+        },
+        Command::Cinema { on } => act(scene, Action::Cinema(on)),
+        Command::FocusMode { on } => act(scene, Action::Focus(on)),
+        Command::Distance { steps } => {
+            scene.closer(steps);
+            Outcome::Done
+        }
+        Command::Preset { preset } => match preset {
+            0 => act(scene, Action::Preset(crate::settings::Preset::Arc)),
+            1 => act(scene, Action::Preset(crate::settings::Preset::Wall)),
+            2 => act(scene, Action::Preset(crate::settings::Preset::Overhead)),
+            _ => fail(ErrorCode::BAD_ARGUMENT, &preset.to_string()),
+        },
+        Command::LineUp => act(scene, Action::Tidy),
+        Command::ShowMouse => act(scene, Action::FindMouse),
+        Command::SetMic { on } => act(scene, Action::SetMic(on)),
+        Command::Follow { on } => act(scene, Action::Follow(on)),
+        // Comes with the arrangement's own step.
+        Command::ResetArrangement => fail(ErrorCode::UNSUPPORTED, ""),
+        Command::NoLimits { on } => {
+            scene.settings.no_limits = on;
+            scene.settings.save(&scene.settings_path);
+            scene.prefs_changed();
+            Outcome::Done
+        }
+    };
+    scene.send(ClientMsg::Reply { req, outcome });
+}
+
+/// The profile a command names: by its name in either language, or its number from 1.
+fn profile_named(name: &str) -> Option<usize> {
+    let name = name.trim().to_lowercase();
+    let names = [
+        ("робота", "work"),
+        ("кіно", "cinema"),
+        ("лежачи", "lying down"),
+    ];
+    names
+        .iter()
+        .position(|(uk, en)| name == *uk || name == *en)
+        .or_else(|| {
+            name.parse::<usize>()
+                .ok()
+                .filter(|n| (1..=names.len()).contains(n))
+                .map(|n| n - 1)
+        })
 }
 
 /// Passthrough cameras on only for the "room" background.

@@ -127,6 +127,9 @@ pub struct Settings {
     pub battery_saver: bool,
     /// The PC's desktop notifications shown in the headset.
     pub notifications: bool,
+    /// "No limits": more monitors and displays than the safe budgets allow (the PC
+    /// reads it and puts its own hard limits on top).
+    pub no_limits: bool,
     /// Rest reminders: minutes of wearing between them (0: none).
     pub rest_every: u16,
     pub language: Language,
@@ -161,6 +164,7 @@ impl Default for Settings {
             left_handed: false,
             battery_saver: false,
             notifications: false,
+            no_limits: false,
             rest_every: 0,
             language: Language::LikePc,
             pc_language: None,
@@ -223,6 +227,7 @@ impl Settings {
                 Some(("left-handed", v)) => s.left_handed = v == "on",
                 Some(("battery-saver", v)) => s.battery_saver = v == "on",
                 Some(("notifications", v)) => s.notifications = v == "on",
+                Some(("no-limits", v)) => s.no_limits = v == "on",
                 Some(("rest-every", v)) => s.rest_every = v.trim().parse().unwrap_or(0),
                 Some(("language", v)) => {
                     s.language = match v {
@@ -293,7 +298,7 @@ impl Settings {
         format!(
             "preset {preset}\ncurve {curve}\nbackground {background}\nhands {hands}\n\
              focus {}\ncinema {}\ncinema-screen {}\nlanguage {}\npc-language {}\nintro {}\nkeyboard-window {}\nmic {}\ntab {}\nfollow {}\n\
-             gaze-mouse {}\nlarge-menu {}\nleft-handed {}\nbattery-saver {}\nnotifications {}\nrest-every {}\nmagnet {}\nmove-all {}\nsound-from-screen {}\nclock {}\ndate {}\nmenu-button {}\nbrightness {}\n",
+             gaze-mouse {}\nlarge-menu {}\nleft-handed {}\nbattery-saver {}\nnotifications {}\nrest-every {}\nmagnet {}\nmove-all {}\nsound-from-screen {}\nclock {}\ndate {}\nmenu-button {}\nbrightness {}\nno-limits {}\n",
             on(self.focus),
             on(self.cinema),
             self.cinema_screen
@@ -325,7 +330,8 @@ impl Settings {
                 DateStyle::Numbers => "numbers",
             },
             on(self.menu_button),
-            self.brightness
+            self.brightness,
+            on(self.no_limits)
         )
     }
 }
@@ -364,6 +370,7 @@ mod tests {
             left_handed: true,
             battery_saver: true,
             notifications: true,
+            no_limits: true,
             rest_every: 20,
             language: Language::Fixed(Lang::En),
             pc_language: Some(Lang::Uk),

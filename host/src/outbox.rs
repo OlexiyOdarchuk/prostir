@@ -701,7 +701,7 @@ pub(crate) mod tests {
         send(&o, &mut lanes, &mut out, 2);
         o.audio(HostMsg::Audio { pcm: vec![7; 1920] });
         send(&o, &mut lanes, &mut out, 2);
-        o.control(HostMsg::Recenter);
+        o.control(HostMsg::PairingRequired);
         send(&o, &mut lanes, &mut out, 100);
         // The first stream takes the first lane.
         let video = lane::VIDEO;
@@ -715,7 +715,7 @@ pub(crate) mod tests {
             msgs[..],
             [
                 HostMsg::Audio { .. },
-                HostMsg::Recenter,
+                HostMsg::PairingRequired,
                 HostMsg::Frame { .. }
             ]
         ));
@@ -919,14 +919,17 @@ pub(crate) mod tests {
         assert!(o.video(d(1), true, frame(1, true, 3 * FRAGMENT)));
         send(&o, &mut lanes, &mut out, 1);
         o.audio(HostMsg::Audio { pcm: vec![1] });
-        o.control(HostMsg::Recenter);
+        o.control(HostMsg::PairingRequired);
         o.say_goodbye(PcGoodbye::TakenOff);
-        assert!(!o.control(HostMsg::Recenter), "nothing after the goodbye");
+        assert!(
+            !o.control(HostMsg::PairingRequired),
+            "nothing after the goodbye"
+        );
         assert!(!o.video(d(1), true, frame(1, true, 1)));
         send(&o, &mut lanes, &mut out, 100);
         assert_eq!(
             out.messages(),
-            [HostMsg::Recenter, HostMsg::Goodbye { reason: 2 }]
+            [HostMsg::PairingRequired, HostMsg::Goodbye { reason: 2 }]
         );
         assert!(o.said_goodbye());
         assert_eq!(o.next(&mut lanes), None, "done, without waiting");

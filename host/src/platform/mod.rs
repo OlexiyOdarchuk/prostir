@@ -185,8 +185,12 @@ pub enum TrayCommand {
     SetCounting(bool),
     /// Drop all paired headsets: each must pair again.
     ForgetHeadsets,
-    /// Turn the monitors in the headset to face the user.
-    Recenter,
+    /// Ask the headset to do something (bring the monitors in front, say); what came
+    /// of it goes to `reply`, as a line, when there is one to tell.
+    Headset {
+        asked: prostir_proto::request::Asked<prostir_proto::request::Command>,
+        reply: Option<std::sync::mpsc::Sender<String>>,
+    },
     Quit,
 }
 
@@ -199,6 +203,8 @@ pub struct TrayStatus {
     pub mirror: bool,
     /// Connected, but the headset is not worn: streaming paused.
     pub paused: bool,
+    /// The headset's "No limits", while one is connected that takes commands.
+    pub no_limits: Option<bool>,
 }
 
 /// Why there is no pairing code typed on the PC (see `dialogs::ask_code`).

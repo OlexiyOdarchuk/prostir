@@ -183,7 +183,9 @@ fn main() -> Result<()> {
                 println!("problem {}: {detail}", error.code())
             }
             HostMsg::MicActive { active } => println!("PC is recording: {active}"),
-            HostMsg::Recenter => println!("PC asks to bring the monitors in front"),
+            HostMsg::Command { req, asked } => {
+                println!("command {} (answered done): {asked:?}", req.0)
+            }
             HostMsg::Notice { text } => println!("PC says: {text}"),
             HostMsg::Ping { .. } | HostMsg::Pong { .. } => {}
             HostMsg::Goodbye { reason } => {
