@@ -359,3 +359,29 @@ fn ctl_quit_ends_prostir() {
     );
     assert!(pc.wait_end(SOON).success());
 }
+
+/// A command whose arguments do not fit the protocol (a profile's name over 64 bytes)
+/// is refused, and the session goes on; one the headset does not know is refused by
+/// the headset.
+#[test]
+fn a_command_that_does_not_fit_is_refused() {
+    let (_dir, pc, _keys, mut headset) = session("api-long", &Options::default());
+    let long = "Робота".repeat(10);
+    let Some(refused) = pc.ctl(&["profile", &long, "--json"]) else {
+        return;
+    };
+    assert_eq!(refused.code, 1, "{refused:?}");
+    assert_eq!(refused.json()["error"], "BadArgument");
+    let bus = pc.bus.as_ref().unwrap().connect();
+    let typed = call(&bus, "Profile", &(long.as_str(),)).unwrap_err();
+    assert_eq!(error_name(&typed), "BadArgument");
+    headset.take_for(Duration::from_millis(300)).unwrap();
+    assert!(!headset.view().closed, "the session goes on");
+    assert!(headset.view().commands.is_empty());
+    let done = pc.ctl(&["profile", "Робота"]).unwrap();
+    assert_eq!(done.code, 0, "{done:?}");
+    headset.refuse_commands(prostir_proto::state::ErrorCode::UNSUPPORTED);
+    let unknown = pc.ctl(&["cinema", "on", "--json"]).unwrap();
+    assert_eq!(unknown.code, 1, "{unknown:?}");
+    assert_eq!(unknown.json()["error"], "Unsupported");
+}

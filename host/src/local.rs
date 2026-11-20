@@ -40,6 +40,39 @@ fn command_of(request: &Request) -> Option<Command> {
     })
 }
 
+/// Whether `command` can go to the headset as it is: its arguments within what the
+/// protocol carries (a profile's name of 64 bytes at most), else why not.
+pub fn fits_the_wire(command: &Command) -> Result<(), Failure> {
+    if let Command::Profile { name } = command
+        && name.len() > wire::MAX_DISPLAY_NAME
+    {
+        return Err(Failure::new(
+            ApiError::BadArgument,
+            format!(
+                "{} {}",
+                t(
+                    "Назва профілю задовга, байтів щонайбільше:",
+                    "A profile's name is too long, bytes at most:"
+                ),
+                wire::MAX_DISPLAY_NAME
+            ),
+        ));
+    }
+    let msg = prostir_proto::HostMsg::Command {
+        req: wire::ReqId(0),
+        asked: Asked::Known(command.clone()),
+    };
+    msg.encode().map(drop).map_err(|e| {
+        Failure::new(
+            ApiError::BadArgument,
+            format!(
+                "{}: {e}",
+                t("Команда не годиться", "The command does not fit")
+            ),
+        )
+    })
+}
+
 /// What the PC itself can show: its own displays and window panels, any codec.
 fn pc_caps() -> HeadsetCaps {
     HeadsetCaps {
@@ -85,6 +118,9 @@ impl Brain {
                     "Commands from the PC go to the main headset; a guest is connected",
                 );
                 return self.answer(reply, CtlReply::failed(ApiError::NotAllowed, text));
+            }
+            if let Err(why) = fits_the_wire(&command) {
+                return self.answer(reply, CtlReply::Failed(why));
             }
             // Answered by the headset (see `Session::commands_due`).
             self.control
@@ -816,4 +852,23 @@ pub fn start_detached() -> std::io::Result<()> {
         });
     }
     command.spawn().map(drop)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A command whose arguments the protocol does not carry is refused before it
+    /// goes; the longest that fits goes.
+    #[test]
+    fn commands_fit_the_wire() {
+        let profile = |n: usize| Command::Profile {
+            name: "я".repeat(n),
+        };
+        assert!(fits_the_wire(&profile(32)).is_ok(), "64 bytes");
+        let long = fits_the_wire(&profile(33)).unwrap_err();
+        assert_eq!(long.error, ApiError::BadArgument);
+        assert!(fits_the_wire(&Command::Recenter).is_ok());
+        assert!(fits_the_wire(&Command::Distance { steps: -128 }).is_ok());
+    }
 }

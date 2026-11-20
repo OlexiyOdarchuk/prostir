@@ -695,6 +695,16 @@ impl Session {
                 }
                 continue;
             }
+            // One that cannot go as it is gets an answer, and the session goes on.
+            if let Asked::Known(command) = &asked
+                && let Err(why) = crate::local::fits_the_wire(command)
+            {
+                warn!("{what}: {}", why.text);
+                if let Some(r) = reply {
+                    r.send(CtlReply::Failed(why));
+                }
+                continue;
+            }
             self.last_command += 1;
             let req = ReqId(self.last_command);
             info!("command {} for the headset: {what}", req.0);
