@@ -27,6 +27,31 @@ pub const FALLBACK: &str = "en";
 /// The message each file names its own language with, in that language.
 pub const NAME_ID: &str = "language-name";
 
+/// A translation file larger than this is not read: no language needs a megabyte.
+pub const FILE_MAX: u64 = 1 << 20;
+
+/// The bytes of `path` if it is a regular file of at most `max` bytes: a dropped
+/// file that is a device, a pipe or huge never stalls or fills a program.
+pub fn read_capped(path: &Path, max: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::{Error, ErrorKind, Read};
+    let file = std::fs::File::open(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(Error::new(ErrorKind::InvalidInput, "not a regular file"));
+    }
+    let too_big = || Error::new(ErrorKind::InvalidData, format!("larger than {max} bytes"));
+    if meta.len() > max {
+        return Err(too_big());
+    }
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    // The file may grow while it is read.
+    file.take(max + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max {
+        return Err(too_big());
+    }
+    Ok(bytes)
+}
+
 /// A value for a placeholder: text, or a number (a number also picks plural forms).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Arg {
@@ -118,8 +143,11 @@ impl Catalog {
         }
         for dir in self.dirs.iter().rev() {
             let path = dir.join(format!("{code}.ftl"));
-            if let Ok(text) = std::fs::read_to_string(&path) {
-                out.push((path.display().to_string(), Cow::Owned(text)));
+            match read_capped(&path, FILE_MAX).map(String::from_utf8) {
+                Ok(Ok(text)) => out.push((path.display().to_string(), Cow::Owned(text))),
+                Ok(Err(_)) => log::warn!("{}: not UTF-8 text, not used", path.display()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => log::warn!("{}: not used: {e}", path.display()),
             }
         }
         out
@@ -400,10 +428,11 @@ fn ids(text: &str) -> (BTreeMap<String, String>, Vec<String>) {
 
 /// A folder's path shown to a person: `~` for the home folder.
 pub fn short_path(path: &Path) -> String {
-    let s = path.display().to_string();
-    match std::env::var("HOME") {
-        Ok(home) if !home.is_empty() && s.starts_with(&home) => s.replacen(&home, "~", 1),
-        _ => s,
+    let home = std::env::var_os("HOME").filter(|h| !h.is_empty());
+    match home.as_deref().and_then(|h| path.strip_prefix(h).ok()) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
     }
 }
 
@@ -495,6 +524,38 @@ mod tests {
             pick_language(&[None, None, None, None], &["en", "uk"]),
             "en"
         );
+    }
+
+    #[test]
+    fn only_small_regular_files_are_read() {
+        let dir = std::env::temp_dir().join(format!("prostir-lang-cap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let small = dir.join("small.ftl");
+        std::fs::write(&small, "a = b\n").unwrap();
+        assert_eq!(read_capped(&small, 100).unwrap(), b"a = b\n");
+        assert!(read_capped(&small, 3).is_err());
+        assert!(read_capped(&dir, 100).is_err(), "a folder");
+        assert!(
+            read_capped(Path::new("/dev/zero"), 100).is_err(),
+            "a device"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn home_is_shown_as_a_tilde() {
+        let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) else {
+            return;
+        };
+        let home = PathBuf::from(home);
+        assert_eq!(
+            short_path(&home.join(".config/prostir")),
+            "~/.config/prostir"
+        );
+        assert_eq!(short_path(&home), "~");
+        // A folder that only starts with the same letters is someone else's.
+        let other = PathBuf::from(format!("{}x/y", home.display()));
+        assert_eq!(short_path(&other), other.display().to_string());
     }
 
     #[test]

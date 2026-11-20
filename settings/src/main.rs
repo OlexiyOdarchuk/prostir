@@ -56,7 +56,7 @@ fn main() -> eframe::Result {
             Box::new(m),
             Box::new(move || {
                 handle.set_running(true);
-                Ok(())
+                Ok(prostir_settings::launch::Started::Launched)
             }),
         )
     } else {

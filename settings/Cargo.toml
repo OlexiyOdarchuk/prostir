@@ -17,11 +17,14 @@ path = "src/main.rs"
 [dependencies]
 prostir-lang = { path = "../lang" }
 # glow: the window needs nothing wgpu adds, and starts faster without it.
-eframe = { version = "0.37", default-features = false, features = ["glow", "wayland", "x11", "accesskit"] }
+# links and clipboard: "Open the releases page" and pasting the pairing code.
+eframe = { version = "0.37", default-features = false, features = ["glow", "wayland", "x11", "accesskit", "links", "clipboard"] }
 zbus = { version = "5", default-features = false, features = ["blocking-api", "async-io"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1"
+# The font parser egui uses, to check a theme's font before egui gets it.
+skrifa = "0.44"
 log = "0.4"
 env_logger = "0.11"
 

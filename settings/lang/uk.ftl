@@ -84,6 +84,9 @@ nr-starting = Запускаю Prostir
 nr-failed-title = Prostir не запустився
 nr-failed-body = Запустіть prostir у терміналі, щоб побачити, що йому заважає.
 nr-no-program = Програми prostir не знайдено. Перевірте, чи встановлено Prostir.
+nr-old-title = Prostir уже працює
+nr-old-body = Ця версія Prostir ще не працює з вікном налаштувань. Оновіть Prostir і спробуйте ще раз.
+nr-retry = Спробувати ще раз
 nr-no-bus = Немає сеансової шини D-Bus, тож вікно не може зв'язатися з Prostir.
 
 ## Монітори
@@ -202,6 +205,7 @@ issue-format = format = { $value }: це новіший вигляд файлу,
 issue-bad = { $at } = { $value } тут не підходить
 issue-unknown = { $at }: такого ключа немає
 issue-font = { $at }: шрифт не читається ({ $why })
+issue-unreadable = Файл не читається: { $why }
 contrast-line = { $scheme }: { $fg } на { $bg } дає { $ratio }:1, треба { $need }:1
 scheme-light = Світла
 scheme-dark = Темна

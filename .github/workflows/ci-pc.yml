@@ -65,9 +65,9 @@ jobs:
       - run: cargo fmt -p prostir-host -p prostir-proto -p prostir-layout -p prostir-testkit -p prostir-lang -p prostir-settings --check
       - run: cargo clippy -p prostir-host -p prostir-proto -p prostir-layout -p prostir-testkit -p prostir-lang -p prostir-settings --all-targets -- -D warnings
       - run: cargo test -p prostir-host -p prostir-proto -p prostir-layout -p prostir-testkit -p prostir-lang
-      # The settings window without its pictures: those need a graphics card (or
-      # lavapipe), which the runner does not have.
-      - run: cargo test -p prostir-settings --lib --test texts
+      # The settings window, driven without drawing; its pictures need a graphics card
+      # (or lavapipe), which the runner does not have.
+      - run: cargo test -p prostir-settings --lib --test texts --test window
       # The PC app with the fake desktop, driven by a fake headset (host/tests/e2e).
       - name: Clippy with the fake desktop
         run: cargo clippy -p prostir-host --features fake-desktop --all-targets -- -D warnings

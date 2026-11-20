@@ -298,6 +298,12 @@ impl MockHandle {
         self.inner.lock().unwrap().refuse = Some(e);
     }
 
+    /// Starts or stops the service without the bus telling the window: what an old
+    /// Prostir, or a missed signal, looks like.
+    pub fn set_running_quietly(&self, on: bool) {
+        self.inner.lock().unwrap().running = on;
+    }
+
     /// Every request asked so far.
     pub fn calls(&self) -> Vec<Request> {
         self.inner.lock().unwrap().calls.clone()

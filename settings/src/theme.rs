@@ -8,6 +8,7 @@
 //! the value below it and is listed in [`Theme::issues`]; the window always opens.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use eframe::egui::Color32;
@@ -17,6 +18,12 @@ pub const GRAPHITE: &str = include_str!("../themes/graphite.toml");
 
 /// The only format there is so far.
 const FORMAT: i64 = 1;
+
+/// A theme file larger than this is not read.
+pub const FILE_MAX: u64 = 1 << 20;
+
+/// A font file larger than this is not read: big CJK fonts are about 20 MB.
+pub const FONT_MAX: u64 = 50 << 20;
 
 /// The built-in palettes, chosen on the Look page.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -268,8 +275,35 @@ pub enum IssueKind {
     BadValue(String),
     /// A key or section the window does not know.
     Unknown,
-    /// A font file that cannot be read; the reason.
+    /// A font file that cannot be read or is not a font; the reason.
     Font(String),
+    /// The theme file itself cannot be read (not a regular file, too large, not
+    /// UTF-8); the reason.
+    Unreadable(String),
+}
+
+/// A font file read and checked once. Compared by identity, so comparing two themes
+/// never compares megabytes.
+#[derive(Clone)]
+pub struct FontBytes(pub Arc<[u8]>);
+
+impl PartialEq for FontBytes {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl std::fmt::Debug for FontBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "FontBytes({} bytes)", self.0.len())
+    }
+}
+
+/// The files of the theme's fonts; none: the built-in one.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FontFiles {
+    pub regular: Option<FontBytes>,
+    pub medium: Option<FontBytes>,
 }
 
 /// A pair of colours that are too close to read one on the other.
@@ -291,6 +325,8 @@ pub struct Theme {
     pub shape: Shape,
     pub type_: Type,
     pub motion: Motion,
+    /// The font files `type_` names, read and checked.
+    pub font_files: FontFiles,
     /// What in the person's file was not used.
     pub issues: Vec<Issue>,
     /// Text that would be hard to read, after all the layers.
@@ -314,6 +350,7 @@ impl Theme {
             shape: Shape::default(),
             type_: Type::default(),
             motion: Motion::default(),
+            font_files: FontFiles::default(),
             issues: Vec::new(),
             contrast: Vec::new(),
         }
@@ -378,27 +415,46 @@ impl Theme {
 
     /// The built-in palette with the person's file on top, key by key.
     pub fn load(palette: PaletteName, user: Option<&str>) -> Self {
+        Self::load_file(palette, user.map(Ok))
+    }
+
+    /// The same for a file that could also not be read (`Err` with the reason).
+    pub fn load_file(palette: PaletteName, user: Option<Result<&str, &str>>) -> Self {
         let mut theme = Self::builtin(palette);
         let mut issues = Vec::new();
-        if let Some(src) = user {
-            let before = theme.type_.clone();
-            theme.apply(src, &mut issues);
-            for (field, name) in [
-                (&mut theme.type_.font, "font"),
-                (&mut theme.type_.font_medium, "font_medium"),
-            ] {
-                if let Err(why) = font_exists(field) {
-                    issues.push(Issue {
-                        at: format!("[type] {name}"),
-                        kind: IssueKind::Font(why),
-                    });
-                    *field = if name == "font" {
-                        before.font.clone()
-                    } else {
-                        before.font_medium.clone()
-                    };
+        match user {
+            Some(Ok(src)) => {
+                let before = theme.type_.clone();
+                theme.apply(src, &mut issues);
+                let fonts = [
+                    (&mut theme.type_.font, &before.font, "font"),
+                    (
+                        &mut theme.type_.font_medium,
+                        &before.font_medium,
+                        "font_medium",
+                    ),
+                ];
+                let mut files = [None, None];
+                for (i, (field, builtin, name)) in fonts.into_iter().enumerate() {
+                    match load_font(field) {
+                        Ok(bytes) => files[i] = bytes,
+                        Err(why) => {
+                            issues.push(Issue {
+                                at: format!("[type] {name}"),
+                                kind: IssueKind::Font(why),
+                            });
+                            *field = builtin.clone();
+                        }
+                    }
                 }
+                let [regular, medium] = files;
+                theme.font_files = FontFiles { regular, medium };
             }
+            Some(Err(why)) => issues.push(Issue {
+                at: String::new(),
+                kind: IssueKind::Unreadable(why.to_owned()),
+            }),
+            None => {}
         }
         for i in &issues {
             log::warn!("window theme: not used: {} {:?}", i.at, i.kind);
@@ -458,15 +514,22 @@ impl Theme {
     }
 }
 
-/// The built-in font names, or a file that can be read.
-fn font_exists(name: &str) -> Result<(), String> {
+/// A built-in font (none), or the file named, read once and checked to be a font
+/// the window can draw with: a file that is not would stop the window on its
+/// first frame.
+fn load_font(name: &str) -> Result<Option<FontBytes>, String> {
     if crate::fonts::is_builtin(name) {
-        return Ok(());
+        return Ok(None);
     }
-    let path = expand_home(name);
-    std::fs::File::open(&path)
-        .map(drop)
-        .map_err(|e| e.to_string())
+    let bytes =
+        prostir_lang::read_capped(&expand_home(name), FONT_MAX).map_err(|e| e.to_string())?;
+    // The same parser and the same checks egui uses when it installs a font.
+    let font = skrifa::FontRef::from_index(&bytes, 0).map_err(|e| e.to_string())?;
+    use skrifa::MetadataProvider;
+    if font.charmap().map('a').is_none() {
+        return Err("no Latin letters".into());
+    }
+    Ok(Some(FontBytes(bytes.into())))
 }
 
 /// `~/x` as the home folder's `x`.
@@ -511,7 +574,8 @@ pub struct ThemeFile {
     path: Option<PathBuf>,
     stamp: Option<(SystemTime, u64)>,
     last_look: f64,
-    text: Option<String>,
+    /// None: no file; `Err`: there, but not readable as text, and why.
+    text: Option<Result<String, String>>,
 }
 
 impl ThemeFile {
@@ -536,9 +600,16 @@ impl ThemeFile {
         self.text.is_some()
     }
 
-    /// Its text, if it is there.
+    /// Its text if it is there, or why it cannot be read.
+    pub fn content(&self) -> Option<Result<&str, &str>> {
+        self.text
+            .as_ref()
+            .map(|r| r.as_ref().map(String::as_str).map_err(String::as_str))
+    }
+
+    /// Its text, if it is there and readable.
     pub fn text(&self) -> Option<&str> {
-        self.text.as_deref()
+        self.content().and_then(Result::ok)
     }
 
     fn stamp(&self) -> Option<(SystemTime, u64)> {
@@ -551,7 +622,11 @@ impl ThemeFile {
         self.text = self
             .path
             .as_ref()
-            .and_then(|p| std::fs::read_to_string(p).ok());
+            .and_then(|p| match prostir_lang::read_capped(p, FILE_MAX) {
+                Ok(bytes) => Some(String::from_utf8(bytes).map_err(|_| "not UTF-8 text".into())),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => Some(Err(e.to_string())),
+            });
     }
 
     /// Whether the file changed since the last look; looks at most once a second
@@ -687,6 +762,56 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    #[test]
+    fn a_font_that_is_not_one_falls_back() {
+        let dir = std::env::temp_dir().join(format!("prostir-font-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let text = dir.join("not-a-font.ttf");
+        std::fs::write(&text, "hello, not a font").unwrap();
+        let src = format!(
+            "[type]\nfont = \"{}\"\nfont_medium = \"/dev/zero\"\n",
+            text.display()
+        );
+        let t = Theme::load(PaletteName::Ink, Some(&src));
+        let base = Theme::builtin(PaletteName::Ink);
+        assert_eq!(t.type_, base.type_);
+        assert_eq!(t.font_files, FontFiles::default());
+        let kinds: Vec<_> = t.issues.iter().map(|i| (i.at.as_str(), &i.kind)).collect();
+        assert!(
+            matches!(kinds[..], [("[type] font", IssueKind::Font(_)), ("[type] font_medium", IssueKind::Font(why))] if why.contains("regular")),
+            "{kinds:?}"
+        );
+        // A real font is read once and kept.
+        let noto = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../client/assets/NotoSans-Regular.ttf"
+        );
+        let t = Theme::load(
+            PaletteName::Ink,
+            Some(&format!("[type]\nfont = \"{noto}\"\n")),
+        );
+        assert!(t.issues.is_empty(), "{:?}", t.issues);
+        assert!(t.font_files.regular.is_some() && t.font_files.medium.is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_unreadable_file_gives_the_built_in_theme() {
+        let t = Theme::load_file(PaletteName::Ink, Some(Err("not a regular file")));
+        assert_eq!(t.light, Theme::builtin(PaletteName::Ink).light);
+        assert!(matches!(
+            t.issues[..],
+            [Issue {
+                kind: IssueKind::Unreadable(_),
+                ..
+            }]
+        ));
+        let mut f = ThemeFile::new(Some(PathBuf::from("/dev/zero")));
+        assert!(f.exists());
+        assert!(matches!(f.content(), Some(Err(_))));
+        assert!(!f.changed(0.0));
     }
 
     #[test]

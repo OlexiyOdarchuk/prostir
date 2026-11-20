@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use eframe::egui::{FontData, FontDefinitions, FontFamily, FontId};
 
-use crate::theme::{Type, expand_home};
+use crate::theme::{FontFiles, Type};
 
 static REGULAR: &[u8] = include_bytes!("../../client/assets/NotoSans-Regular.ttf");
 static MEDIUM: &[u8] = include_bytes!("../../client/assets/NotoSans-Medium.ttf");
@@ -33,24 +33,28 @@ pub fn is_builtin(name: &str) -> bool {
     name == REGULAR_NAME || name == MEDIUM_NAME
 }
 
-fn data(name: &str, fallback: &'static [u8]) -> FontData {
-    match name {
-        REGULAR_NAME => FontData::from_static(REGULAR),
-        MEDIUM_NAME => FontData::from_static(MEDIUM),
-        // The theme loader checked the file; if it went away since, the built-in one.
-        path => std::fs::read(expand_home(path))
-            .map(FontData::from_owned)
-            .unwrap_or_else(|_| FontData::from_static(fallback)),
+/// A file the theme read and checked, or a built-in font. Never a file read here:
+/// one that is not a font would stop the window.
+fn data(name: &str, file: Option<&crate::theme::FontBytes>, fallback: &'static [u8]) -> FontData {
+    match (file, name) {
+        (Some(bytes), _) => FontData::from_owned(bytes.0.to_vec()),
+        (None, MEDIUM_NAME) => FontData::from_static(MEDIUM),
+        (None, REGULAR_NAME) => FontData::from_static(REGULAR),
+        (None, _) => FontData::from_static(fallback),
     }
 }
 
-/// egui's fonts for the theme's `[type]`.
-pub fn definitions(t: &Type) -> FontDefinitions {
+/// egui's fonts for the theme's `[type]` and the files it read.
+pub fn definitions(t: &Type, files: &FontFiles) -> FontDefinitions {
     let mut d = FontDefinitions::empty();
-    d.font_data
-        .insert("regular".into(), Arc::new(data(&t.font, REGULAR)));
-    d.font_data
-        .insert("medium".into(), Arc::new(data(&t.font_medium, MEDIUM)));
+    d.font_data.insert(
+        "regular".into(),
+        Arc::new(data(&t.font, files.regular.as_ref(), REGULAR)),
+    );
+    d.font_data.insert(
+        "medium".into(),
+        Arc::new(data(&t.font_medium, files.medium.as_ref(), MEDIUM)),
+    );
     d.font_data
         .insert("noto".into(), Arc::new(FontData::from_static(REGULAR)));
     d.families.insert(

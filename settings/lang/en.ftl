@@ -87,6 +87,9 @@ nr-starting = Starting Prostir
 nr-failed-title = Prostir did not start
 nr-failed-body = Run prostir in a terminal to see what stops it.
 nr-no-program = The prostir program was not found. Check that Prostir is installed.
+nr-old-title = Prostir is running
+nr-old-body = This version of Prostir does not work with the settings window yet. Update Prostir, then try again.
+nr-retry = Try again
 nr-no-bus = There is no D-Bus session bus, so this window cannot reach Prostir.
 
 ## Monitors
@@ -210,6 +213,7 @@ issue-format = format = { $value } is a newer kind of file, so none of it is use
 issue-bad = { $at } = { $value } does not fit here
 issue-unknown = { $at } is not a known key
 issue-font = { $at }: the font cannot be read ({ $why })
+issue-unreadable = The file cannot be read: { $why }
 contrast-line = { $scheme }: { $fg } on { $bg } is { $ratio }:1, needs { $need }:1
 scheme-light = Light
 scheme-dark = Dark

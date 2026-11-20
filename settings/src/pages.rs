@@ -28,6 +28,8 @@ const SCALES: [u16; 3] = [100, 125, 150];
 
 pub enum Action {
     Send(Request),
+    /// Ask the service for its whole state again.
+    Refresh,
     Go(Page),
     Look(WindowLook),
     Start,
@@ -150,6 +152,15 @@ fn not_running(ui: &mut Ui, v: &mut View, why: &ClientError, start: &Start) {
                 });
                 ui.add_space(6.0);
                 text(ui, tk.t("nr-body"), tk.body(), p.text_muted);
+            }
+            Start::AlreadyRunning => {
+                hero(ui, tk, Some(p.warning), &tk.t("nr-old-title"));
+                ui.add_space(6.0);
+                text(ui, tk.t("nr-old-body"), tk.body(), p.text_muted);
+                ui.add_space(tk.th.shape.padding);
+                if w::button(ui, tk, &tk.t("nr-retry"), Kind::Secondary, true).clicked() {
+                    v.out.push(Action::Refresh);
+                }
             }
             Start::Idle | Start::NoProgram | Start::TimedOut => {
                 let failed = *start != Start::Idle;
@@ -1079,6 +1090,7 @@ fn look(ui: &mut Ui, v: &mut View) {
                     IssueKind::Font(why) => {
                         tk.f("issue-font", &[("at", (&i.at).into()), ("why", why.into())])
                     }
+                    IssueKind::Unreadable(why) => tk.f("issue-unreadable", &[("why", why.into())]),
                 };
                 indented(ui, tk, line);
             }

@@ -12,3 +12,6 @@ Terminal=false
 Categories=Settings;HardwareSettings;
 Keywords=VR;XR;Quest;monitor;display;virtual;settings;
 StartupWMClass=io.github.OlexiyOdarchuk.Prostir.Settings
+# Hidden from the menu until Prostir answers the window (its local API, step 6.7):
+# step 6.7 removes this line.
+NoDisplay=true

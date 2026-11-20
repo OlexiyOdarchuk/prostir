@@ -41,22 +41,7 @@ pub enum Page {
     FirstRun,
 }
 
-/// Starts the service ("Start Prostir"); an error means it could not even be run.
-pub type Starter = Box<dyn FnMut() -> std::io::Result<()>>;
-
-/// Runs `prostir` on its own, detached from the window.
-pub fn start_prostir() -> std::io::Result<()> {
-    use std::os::unix::process::CommandExt;
-    let mut child = std::process::Command::new("prostir")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .process_group(0)
-        .spawn()?;
-    // Reaped when it ends, so it never lingers as a zombie of the window.
-    std::thread::spawn(move || child.wait());
-    Ok(())
-}
+pub use crate::launch::{Started, Starter, start_prostir};
 
 pub struct Options {
     pub client: Box<dyn Client>,
@@ -78,9 +63,13 @@ pub struct Options {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Start {
     Idle,
-    Waiting { since: f64 },
+    Waiting {
+        since: f64,
+    },
     NoProgram,
     TimedOut,
+    /// Prostir runs, but does not answer this window (a version before the local API).
+    AlreadyRunning,
 }
 
 /// The line to the service.
@@ -151,7 +140,7 @@ pub struct App {
     fade: Option<(Palette, f64)>,
     scheme: Option<Scheme>,
     applied: Option<(Palette, Theme)>,
-    fonts: Option<(String, String)>,
+    fonts: Option<(String, String, crate::theme::FontFiles)>,
     system: SystemScheme,
     start: Starter,
     presented: Option<Presented>,
@@ -176,7 +165,7 @@ impl App {
         let strings = catalog.load(&code);
         let file = ThemeFile::new(o.theme_file);
         let palette = PaletteName::Ink;
-        let theme = Theme::load(palette, file.text());
+        let theme = Theme::load_file(palette, file.content());
         if let Some(p) = &o.presented {
             p.attach(ctx);
         }
@@ -372,7 +361,8 @@ impl App {
             }
             Action::Start => {
                 let start = match (self.start)() {
-                    Ok(()) => Start::Waiting { since: now },
+                    Ok(Started::Launched) => Start::Waiting { since: now },
+                    Ok(Started::AlreadyRunning) => Start::AlreadyRunning,
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => Start::NoProgram,
                     Err(e) => {
                         log::warn!("could not start prostir: {e}");
@@ -384,10 +374,13 @@ impl App {
                 }
                 self.link.refresh();
             }
+            Action::Refresh => self.link.refresh(),
             Action::OpenUrl(url) => ctx.open_url(egui::OpenUrl::new_tab(url)),
             Action::OpenFolder(dir) => {
                 let _ = std::fs::create_dir_all(&dir);
-                if let Err(e) = std::process::Command::new("xdg-open").arg(&dir).spawn() {
+                let opened =
+                    crate::launch::spawn_reaped(std::process::Command::new("xdg-open").arg(&dir));
+                if let Err(e) = opened {
                     log::warn!("could not open {}: {e}", dir.display());
                 }
             }
@@ -441,7 +434,7 @@ impl App {
         let palette = PaletteName::from_id(&self.look.palette).unwrap_or_default();
         if self.file.changed(now) || palette != self.palette {
             self.palette = palette;
-            self.theme = Theme::load(palette, self.file.text());
+            self.theme = Theme::load_file(palette, self.file.content());
             if let Some(shown) = &self.shown {
                 self.fade = Some((shown.clone(), now));
             }
@@ -471,9 +464,13 @@ impl App {
         let fonts = (
             self.theme.type_.font.clone(),
             self.theme.type_.font_medium.clone(),
+            self.theme.font_files.clone(),
         );
         if self.fonts.as_ref() != Some(&fonts) {
-            ctx.set_fonts(crate::fonts::definitions(&self.theme.type_));
+            ctx.set_fonts(crate::fonts::definitions(
+                &self.theme.type_,
+                &self.theme.font_files,
+            ));
             self.fonts = Some(fonts);
         }
         let shown = self.shown.clone().expect("set above");

@@ -1,319 +1,14 @@
-//! The window drawn without a screen (kittest with wgpu): a picture of every page in
-//! light and dark with both palettes, the states each page has, and the window driven
-//! by name and by keyboard the way a screen reader or a keyboard user would.
-//!
-//! Pictures live in tests/snapshots; `UPDATE_SNAPSHOTS=1 cargo test -p prostir-settings`
-//! writes them anew after a deliberate change. Before every picture kittest checks that
-//! each control has an accessible name.
+//! The window driven by name and by keyboard, the way a screen reader or a keyboard
+//! user would, on the mock service. Nothing is drawn, so no graphics card is needed.
 
+mod common;
+
+use common::{Setup, open, press, press_as, window};
 use eframe::egui::{self, Key, Role};
 use egui_kittest::kittest::Queryable;
-use egui_kittest::{Harness, SnapshotOptions, SnapshotResults};
-use prostir_settings::api::{ClientError, Pairing, Request, ThemeMode};
+use prostir_settings::api::{ClientError, Request, ThemeMode};
 use prostir_settings::app::{Conn, Page, Start};
-use prostir_settings::mock::{Mock, MockHandle};
-use prostir_settings::portal::SystemScheme;
-use prostir_settings::{App, Options};
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-
-/// The window's smallest size: everything has to fit in it.
-const SIZE: egui::Vec2 = egui::vec2(960.0, 640.0);
-
-/// A theme file path that does not exist, the same on every machine.
-fn no_file() -> PathBuf {
-    PathBuf::from("/nonexistent/.config/prostir/window-theme.toml")
-}
-
-struct Setup {
-    language: &'static str,
-    theme_file: PathBuf,
-    starts: Arc<Mutex<u32>>,
-}
-
-impl Default for Setup {
-    fn default() -> Self {
-        Self {
-            language: "uk",
-            theme_file: no_file(),
-            starts: Arc::default(),
-        }
-    }
-}
-
-fn window(mock: Mock, setup: Setup) -> (Harness<'static, App>, MockHandle) {
-    let handle = mock.handle();
-    let starts = setup.starts.clone();
-    let mut h = Harness::builder()
-        .with_size(SIZE)
-        .with_pixels_per_point(1.0)
-        .with_render_cursor(false)
-        .wgpu()
-        .build_eframe(move |cc| {
-            App::new(
-                &cc.egui_ctx,
-                Options {
-                    client: Box::new(mock),
-                    threaded: false,
-                    theme_file: Some(setup.theme_file),
-                    lang_dirs: Some(Vec::new()),
-                    language: Some(setup.language.into()),
-                    system: SystemScheme::default(),
-                    start: Box::new(move || {
-                        *starts.lock().unwrap() += 1;
-                        Ok(())
-                    }),
-                    presented: None,
-                },
-            )
-        });
-    h.run_steps(2);
-    (h, handle)
-}
-
-fn open(h: &mut Harness<'static, App>, page: Page) {
-    h.state_mut().ui.page = page;
-    // Rows centre on the size their controls had the frame before.
-    h.run_steps(4);
-}
-
-/// Clicks the control named `label`, scrolled into view first, as a person would.
-fn press(h: &mut Harness<'static, App>, label: &str) {
-    press_as(h, None, label);
-}
-
-/// The same for the control of `role` named `label`, where a text has the same name.
-fn press_as(h: &mut Harness<'static, App>, role: Option<Role>, label: &str) {
-    let find = |h: &Harness<'static, App>| match role {
-        Some(r) => h.get_by_role_and_label(r, label).rect(),
-        None => h.get_by_label(label).rect(),
-    };
-    match role {
-        Some(r) => h.get_by_role_and_label(r, label).scroll_to_me(),
-        None => h.get_by_label(label).scroll_to_me(),
-    }
-    h.run_steps(2);
-    // egui finds what is under the pointer from where it was the frame before.
-    let at = find(h).center();
-    h.hover_at(at);
-    h.run_steps(2);
-    let at = find(h).center();
-    h.event(egui::Event::PointerButton {
-        pos: at,
-        button: egui::PointerButton::Primary,
-        pressed: true,
-        modifiers: egui::Modifiers::NONE,
-    });
-    h.event(egui::Event::PointerButton {
-        pos: at,
-        button: egui::PointerButton::Primary,
-        pressed: false,
-        modifiers: egui::Modifiers::NONE,
-    });
-    h.run_steps(3);
-}
-
-/// Pictures of several windows in one test, checked together at its end.
-type Pictures = SnapshotResults;
-
-fn picture(h: &mut Harness<'static, App>, all: &mut Pictures, name: &str) {
-    // Text is drawn slightly differently by different GPUs and lavapipe: a few
-    // pixels may differ, a changed layout may not.
-    h.snapshot_options(
-        name,
-        &SnapshotOptions::new().threshold(1.5).max_failed_pixels(400),
-    );
-    all.extend_harness(h);
-}
-
-const PAGES: [(Page, &str); 6] = [
-    (Page::Overview, "overview"),
-    (Page::Monitors, "monitors"),
-    (Page::Headsets, "headsets"),
-    (Page::Sound, "sound"),
-    (Page::Look, "look"),
-    (Page::FirstRun, "first-run"),
-];
-
-#[test]
-fn every_page_in_both_themes_and_palettes() {
-    let mut all = Pictures::default();
-    for (page, name) in PAGES {
-        for (theme, t) in [(ThemeMode::Light, "light"), (ThemeMode::Dark, "dark")] {
-            for palette in ["ink", "graphite"] {
-                let mock = if page == Page::FirstRun {
-                    Mock::no_headsets()
-                } else {
-                    Mock::connected()
-                };
-                let (mut h, _) = window(mock.look(theme, palette), Setup::default());
-                if page == Page::Monitors {
-                    h.state_mut().ui.selected = Some(2);
-                }
-                open(&mut h, page);
-                picture(&mut h, &mut all, &format!("{name}-{t}-{palette}"));
-            }
-        }
-    }
-    all.unwrap();
-}
-
-#[test]
-fn each_state_of_the_overview() {
-    let mut all = Pictures::default();
-    let dark = |m: Mock| m.look(ThemeMode::Dark, "ink");
-    for (mock, name) in [
-        (dark(Mock::connecting()), "overview-connecting"),
-        (dark(Mock::waiting()), "overview-waiting"),
-        (dark(Mock::failed_monitor()), "overview-failed"),
-        (dark(Mock::not_running()), "overview-not-running"),
-        (
-            dark(Mock::connected().edit(|s| {
-                let session = s.headsets[0].session.as_mut().unwrap();
-                session.worn = false;
-                s.problems.push(prostir_settings::api::Problem {
-                    code: "Desktop".into(),
-                    text: "KWin не відповідає: нові монітори чекають на нього.".into(),
-                });
-            })),
-            "overview-taken-off",
-        ),
-    ] {
-        let (mut h, _) = window(mock, Setup::default());
-        open(&mut h, Page::Overview);
-        picture(&mut h, &mut all, name);
-    }
-    // No headset paired: the window opens on the first run.
-    let (mut h, _) = window(dark(Mock::no_headsets()), Setup::default());
-    h.run_steps(2);
-    assert_eq!(h.state().ui.page, Page::FirstRun);
-    open(&mut h, Page::Overview);
-    picture(&mut h, &mut all, "overview-no-headsets");
-    // In English.
-    let (mut h, _) = window(
-        Mock::connected().look(ThemeMode::Light, "ink"),
-        Setup {
-            language: "en",
-            ..Setup::default()
-        },
-    );
-    open(&mut h, Page::Overview);
-    picture(&mut h, &mut all, "overview-en");
-    all.unwrap();
-}
-
-#[test]
-fn each_state_of_the_other_pages() {
-    let mut all = Pictures::default();
-    let dark = |m: Mock| m.look(ThemeMode::Dark, "ink");
-    // Monitors around you, and with no headset (only the PC's screen).
-    let (mut h, _) = window(dark(Mock::connected()), Setup::default());
-    h.state_mut().ui.arc_view = true;
-    h.state_mut().ui.selected = Some(2);
-    open(&mut h, Page::Monitors);
-    picture(&mut h, &mut all, "monitors-arc");
-    let (mut h, _) = window(dark(Mock::waiting()), Setup::default());
-    open(&mut h, Page::Monitors);
-    picture(&mut h, &mut all, "monitors-offline");
-
-    // Pairing: a headset shows a code; then a wrong code; a code from the PC; waiting.
-    let (mut h, _) = window(dark(Mock::connected().pairing()), Setup::default());
-    open(&mut h, Page::Headsets);
-    picture(&mut h, &mut all, "headsets-pairing");
-    h.get_by_label("Код із шолома").focus();
-    h.run_steps(1);
-    h.get_by_label("Код із шолома")
-        .type_text(prostir_settings::mock::WRONG_CODE);
-    h.run_steps(2);
-    h.key_press(Key::Enter);
-    h.run_steps(4);
-    picture(&mut h, &mut all, "headsets-pairing-wrong");
-    let pc_code = |code: Option<&'static str>| {
-        move |s: &mut prostir_settings::api::State| {
-            s.pairing = Some(Pairing {
-                seconds_left: 95,
-                seconds_total: 180,
-                pc_code: code.map(Into::into),
-                ..Default::default()
-            });
-        }
-    };
-    let (mut h, _) = window(
-        dark(Mock::connected().edit(pc_code(Some("482913")))),
-        Setup::default(),
-    );
-    open(&mut h, Page::Headsets);
-    picture(&mut h, &mut all, "headsets-pc-code");
-    let (mut h, _) = window(
-        dark(Mock::connected().edit(pc_code(None))),
-        Setup::default(),
-    );
-    open(&mut h, Page::Headsets);
-    picture(&mut h, &mut all, "headsets-pairing-waiting");
-    let (mut h, _) = window(dark(Mock::no_headsets()), Setup::default());
-    open(&mut h, Page::Headsets);
-    picture(&mut h, &mut all, "headsets-empty");
-
-    // Sound with no headset.
-    let (mut h, _) = window(dark(Mock::waiting()), Setup::default());
-    open(&mut h, Page::Sound);
-    picture(&mut h, &mut all, "sound-offline");
-
-    // A theme file with mistakes: what was not used and what is hard to read.
-    let dir = std::env::temp_dir().join(format!("prostir-settings-test-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("window-theme.toml");
-    std::fs::write(
-        &path,
-        "format = 1\n[dark]\ntext = \"white\"\ntext_muted = \"#3A4560\"\nglow = \"#FFFFFF\"\n[shape]\nradius = 4\n",
-    )
-    .unwrap();
-    let (mut h, _) = window(
-        dark(Mock::connected()),
-        Setup {
-            theme_file: path.clone(),
-            ..Setup::default()
-        },
-    );
-    open(&mut h, Page::Look);
-    if let Some(last) = h.get_all_by_label_contains("text_muted").last() {
-        last.scroll_to_me();
-    }
-    h.run_steps(3);
-    let folder = prostir_lang::short_path(&dir);
-    let r = h.get_by_label(&folder).rect();
-    h.mask(r);
-    picture(&mut h, &mut all, "look-bad-theme");
-    std::fs::remove_dir_all(&dir).unwrap();
-
-    // The look chosen without the service holds for the window.
-    let (mut h, _) = window(dark(Mock::not_running()), Setup::default());
-    open(&mut h, Page::Look);
-    picture(&mut h, &mut all, "look-not-running");
-    all.unwrap();
-}
-
-#[test]
-fn first_run_steps() {
-    let mut all = Pictures::default();
-    let (mut h, handle) = window(
-        Mock::no_headsets().look(ThemeMode::Dark, "ink"),
-        Setup::default(),
-    );
-    assert_eq!(h.state().ui.page, Page::FirstRun);
-    press(&mut h, "Далі");
-    // Going on to "open Prostir in the headset" opens pairing, so the headset finds
-    // the PC.
-    assert_eq!(handle.calls(), [Request::PairNewHeadset]);
-    picture(&mut h, &mut all, "first-run-2");
-    h.state_mut().ui.fr_step = 2;
-    h.run_steps(3);
-    picture(&mut h, &mut all, "first-run-3");
-    h.state_mut().ui.fr_step = 3;
-    h.run_steps(3);
-    picture(&mut h, &mut all, "first-run-4");
-    all.unwrap();
-}
+use prostir_settings::mock::Mock;
 
 #[test]
 fn pairing_by_name_and_keyboard() {
@@ -467,12 +162,113 @@ fn starting_prostir_from_the_window() {
 }
 
 #[test]
-fn a_failed_request_says_why() {
-    let mut all = Pictures::default();
-    let (mut h, handle) = window(
-        Mock::connected().look(ThemeMode::Dark, "ink"),
-        Setup::default(),
+fn starting_gives_up_after_ten_seconds() {
+    let (mut h, _) = window(
+        Mock::not_running(),
+        Setup {
+            step: 0.5,
+            ..Setup::default()
+        },
     );
+    press(&mut h, "Запустити Prostir");
+    h.run_steps(18);
+    assert!(matches!(
+        h.state().conn,
+        Conn::Absent {
+            start: Start::Waiting { .. },
+            ..
+        }
+    ));
+    h.run_steps(4);
+    assert!(matches!(
+        h.state().conn,
+        Conn::Absent {
+            start: Start::TimedOut,
+            ..
+        }
+    ));
+    h.get_by_label("Prostir не запустився");
+}
+
+#[test]
+fn a_prostir_that_runs_already_is_not_started_again() {
+    let setup = Setup {
+        started: prostir_settings::app::Started::AlreadyRunning,
+        ..Setup::default()
+    };
+    let (mut h, handle) = window(Mock::not_running(), setup);
+    press(&mut h, "Запустити Prostir");
+    h.get_by_label("Prostir уже працює");
+    assert!(h.query_by_label("Запустити Prostir").is_none());
+    // Once it answers, "Try again" finds it.
+    handle.set_running_quietly(true);
+    press(&mut h, "Спробувати ще раз");
+    assert!(matches!(h.state().conn, Conn::Live { .. }));
+}
+
+#[test]
+fn the_code_can_be_pasted() {
+    let (mut h, handle) = window(Mock::connected().pairing(), Setup::default());
+    open(&mut h, Page::Headsets);
+    h.get_by_label("Код із шолома").focus();
+    h.run_steps(1);
+    h.event(egui::Event::Paste("482 913\n".into()));
+    h.run_steps(2);
+    assert_eq!(h.state().ui.code, "482913");
+    h.key_press(Key::Enter);
+    h.run_steps(3);
+    assert_eq!(
+        handle.calls(),
+        [Request::PairingCode {
+            code: "482913".into()
+        }]
+    );
+}
+
+#[test]
+fn a_theme_font_that_is_not_a_font_does_not_stop_the_window() {
+    let dir = std::env::temp_dir().join(format!("prostir-settings-font-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let text = dir.join("words.ttf");
+    std::fs::write(&text, "not a font at all").unwrap();
+    let path = dir.join("window-theme.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "[type]\nfont = \"{}\"\nfont_medium = \"/dev/zero\"\n",
+            text.display()
+        ),
+    )
+    .unwrap();
+    let (mut h, _) = window(
+        Mock::connected(),
+        Setup {
+            theme_file: path.clone(),
+            ..Setup::default()
+        },
+    );
+    open(&mut h, Page::Look);
+    assert_eq!(h.get_all_by_label_contains("шрифт не читається").count(), 2);
+    // The same when the file changes while the window is open.
+    std::fs::write(&path, "[type]\nfont = \"/dev/zero\"\n").unwrap();
+    h.state_mut().ui.page = Page::Overview;
+    h.run_steps(90);
+    open(&mut h, Page::Look);
+    assert_eq!(h.get_all_by_label_contains("шрифт не читається").count(), 1);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn going_on_in_the_first_run_opens_pairing() {
+    let (mut h, handle) = window(Mock::no_headsets(), Setup::default());
+    assert_eq!(h.state().ui.page, Page::FirstRun);
+    press(&mut h, "Далі");
+    assert_eq!(handle.calls(), [Request::PairNewHeadset]);
+}
+
+#[test]
+fn a_refused_request_says_why_until_closed() {
+    let (mut h, handle) = window(Mock::connected(), Setup::default());
     open(&mut h, Page::Monitors);
     handle.refuse_next(ClientError::Refused {
         code: "Desktop".into(),
@@ -480,9 +276,7 @@ fn a_failed_request_says_why() {
     });
     press(&mut h, "2560 × 1440");
     h.get_by_label("Не вдалося: KWin не відповів.");
-    picture(&mut h, &mut all, "monitors-refused");
     h.key_press(Key::Escape);
     h.run_steps(2);
     assert!(h.query_by_label("Не вдалося: KWin не відповів.").is_none());
-    all.unwrap();
 }

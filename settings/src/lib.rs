@@ -16,6 +16,7 @@ pub mod app;
 pub mod dbus;
 pub mod fonts;
 pub mod instance;
+pub mod launch;
 pub mod link;
 pub mod map;
 pub mod mock;
