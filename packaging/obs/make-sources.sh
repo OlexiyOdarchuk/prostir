@@ -55,7 +55,7 @@ rust_min="$(cd "$src" && cargo metadata --format-version 1 --frozen \
 import json, sys
 meta = json.load(sys.stdin)
 packages = {p["id"]: p for p in meta["packages"]}
-# Only what is built: dev-dependencies (the window's test renderer) do not count.
+# Only what is built: dev-dependencies (the test renderer of the window) do not count.
 deps = {n["id"]: [d["pkg"] for d in n["deps"]
                   if any(k["kind"] != "dev" for k in d["dep_kinds"])]
         for n in meta["resolve"]["nodes"]}
