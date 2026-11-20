@@ -58,9 +58,12 @@ pub enum ScreenKind {
         spec: MonitorSpec,
     },
     /// A display of the PC itself (`builtin`: the laptop's own panel), streamed as it
-    /// is while `shown`; `key` is how it is told from others.
+    /// is while `shown`; `key` is how it is told from others (and saved), `label` what
+    /// people see it called, as the desktop last said (the saved key's connector until
+    /// it is seen).
     Physical {
         key: crate::store::PhysicalKey,
+        label: String,
         builtin: bool,
         shown: bool,
     },
@@ -149,11 +152,11 @@ impl Screen {
         matches!(self.kind, ScreenKind::Physical { shown: true, .. })
     }
 
-    /// The name its output and stream go by: `Prostir-N`, or the connector of a
-    /// display of the PC.
+    /// The name its output and stream go by: `Prostir-N`, or the label of a display
+    /// of the PC.
     pub fn name(&self) -> String {
         match &self.kind {
-            ScreenKind::Physical { key, .. } => key.connector.clone(),
+            ScreenKind::Physical { label, .. } => label.clone(),
             _ => format!("Prostir-{}", self.number),
         }
     }

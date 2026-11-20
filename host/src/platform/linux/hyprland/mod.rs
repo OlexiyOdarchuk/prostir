@@ -199,6 +199,7 @@ fn physical_displays() -> Vec<PhysicalDisplay> {
                 .collect();
             PhysicalDisplay {
                 key: OutputKey::new(m.name.clone()),
+                label: m.name.clone(),
                 edid: (!said.is_empty()).then(|| said.join(" ")),
                 builtin: is_panel(&m.name),
                 size: u32::try_from(m.width)

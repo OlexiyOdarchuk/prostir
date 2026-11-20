@@ -294,6 +294,7 @@ impl Screencast {
                     .collect();
                 Some(PhysicalDisplay {
                     key: OutputKey::new(name.clone()),
+                    label: name.clone(),
                     edid: (!said.is_empty()).then(|| said.join(" ")),
                     builtin: is_panel(name),
                     size: info.mode,

@@ -52,6 +52,7 @@
 //! 6. Output names that change (`\\.\DISPLAYn`, `HMONITOR`, the adapter's LUID):
 //!    [`OutputKey`], which the desktop makes and keeps (the serial number our driver
 //!    writes from [`VirtualSpec::id`], the device path or EDID of a real display).
+//!    A display of the PC is shown to people by its [`PhysicalDisplay::label`].
 //!    Whether an output is virtual is the desktop's to tell, in
 //!    [`Geometry::is_virtual`], by the LUID of our driver's adapter or the hardware id
 //!    of another's (both drivers say HDMI); whether a display is a laptop's own panel,
@@ -519,8 +520,12 @@ pub struct Geometry {
 /// A display of the PC itself, connected now.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PhysicalDisplay {
-    /// Its key; on Linux its connector (`eDP-1`, `HDMI-A-1`), also shown to people.
+    /// Its key, to tell it from the others and to save; nothing to show to people.
+    /// On Linux its connector (`eDP-1`, `HDMI-A-1`).
     pub key: OutputKey,
+    /// What people see it called: on Linux its connector, on Windows the name the
+    /// system gives it.
+    pub label: String,
     /// Maker, model and serial number as the display says them (its EDID), as far as
     /// the desktop tells; none when it says nothing.
     pub edid: Option<String>,

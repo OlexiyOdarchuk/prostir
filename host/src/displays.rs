@@ -705,6 +705,7 @@ impl Displays {
         for (id, p) in &set.physical {
             let kind = ScreenKind::Physical {
                 key: p.key.clone(),
+                label: p.key.connector.clone(),
                 builtin: p.builtin,
                 shown: p.shown,
             };
@@ -1176,8 +1177,9 @@ impl Displays {
             };
             present.push(id);
             if let Some(s) = self.screens.get_mut(&id)
-                && let ScreenKind::Physical { key, .. } = &mut s.kind
+                && let ScreenKind::Physical { key, label, .. } = &mut s.kind
             {
+                label.clone_from(&display.label);
                 if key.connector != display.key.as_str() {
                     info!("{id} is on {} now", display.key);
                     key.connector = display.key.to_string();
@@ -1317,6 +1319,7 @@ impl Displays {
         );
         let kind = ScreenKind::Physical {
             key,
+            label: display.label.clone(),
             builtin: display.builtin,
             shown,
         };
@@ -1333,13 +1336,14 @@ impl Displays {
         };
         s.number = number;
         let name = s.name();
-        let started = self
-            .desktop
-            .show(&OutputKey::new(name.as_str()))
-            .and_then(|mut output| {
-                let encoder = self.start_stream(id, output.as_mut())?;
-                Ok((output, encoder))
-            });
+        let ScreenKind::Physical { key, .. } = &s.kind else {
+            return;
+        };
+        let key = OutputKey::new(key.connector.as_str());
+        let started = self.desktop.show(&key).and_then(|mut output| {
+            let encoder = self.start_stream(id, output.as_mut())?;
+            Ok((output, encoder))
+        });
         let Some(s) = self.screens.get_mut(&id) else {
             return;
         };
@@ -1561,12 +1565,13 @@ impl Displays {
                         title: String::new(),
                     },
                     ScreenKind::Physical {
-                        key,
+                        label,
                         builtin,
                         shown,
+                        ..
                     } => DisplayKind::Physical {
                         builtin: *builtin,
-                        connector: clip(&key.connector, state::MAX_CONNECTOR),
+                        connector: clip(label, state::MAX_CONNECTOR),
                         shown: *shown,
                     },
                 };
@@ -2664,6 +2669,7 @@ impl Displays {
                     key,
                     builtin,
                     shown,
+                    ..
                 } => Some((
                     s.id,
                     Physical {
@@ -3096,6 +3102,7 @@ mod tests {
         let id = ScreenId::saved;
         let display = |connector: &str, edid: Option<&str>| PhysicalDisplay {
             key: OutputKey::new(connector),
+            label: connector.into(),
             edid: edid.map(Into::into),
             builtin: false,
             size: None,
