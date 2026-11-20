@@ -1,0 +1,353 @@
+//! Several headsets at once, with the PC raised (for these tests only) above the one
+//! headset a release takes: each gets every monitor, one taken off or leaving takes
+//! nothing from the other, a guest does only what its rights let it, and a headset
+//! that decodes less fails only for itself.
+
+use std::time::Duration;
+
+use prostir_proto::request::{Outcome, Request};
+use prostir_proto::state::{
+    Decoder, DisplayState, ErrorCode, MicDevice, Mode, Placed, Row, UpKind, perms, role,
+};
+use prostir_proto::{ClientMsg, PcGoodbye};
+use prostir_testkit::{ConnectError, FakeHeadset, Keys, View};
+
+use crate::pc::{Options, Pc, TestDir};
+use crate::{SOON, START, connect, worn};
+
+/// Two headsets the PC trusts, `first` and `second`, and the PC with two small
+/// monitors, which takes two headsets at once; `settings` is more of its
+/// `settings.txt`, with `{second}` for the second one's key. A third headset is
+/// paired too.
+fn two_headsets(name: &str, options: Options, settings: &str) -> (TestDir, Pc, Keys, Keys) {
+    let dir = TestDir::new(name);
+    dir.save_screens(
+        "next 200
+row
+screen 0 640x360
+screen 1 480x272
+",
+    );
+    let first = dir.pair();
+    let second = dir.pair_headset("second-headset");
+    dir.pair_headset("third-headset");
+    let key: String = second
+        .identity
+        .public
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    dir.save_settings(&format!(
+        "mirror off
+{}",
+        settings.replace("{second}", &key)
+    ));
+    let options = Options {
+        headsets: 2,
+        ..options
+    };
+    let pc = Pc::start(&dir, &options);
+    (dir, pc, first, second)
+}
+
+/// Connects a headset with `keys` and waits for its monitors.
+fn showing(pc: &Pc, keys: &mut Keys) -> FakeHeadset {
+    let mut headset = connect(pc, keys);
+    headset
+        .wait(START, "every monitor showing", View::all_monitors_show)
+        .unwrap();
+    headset
+}
+
+/// Frames that came for every stream since the counts started.
+fn frames(headset: &FakeHeadset) -> u64 {
+    headset.view().streams.values().map(|s| s.frames).sum()
+}
+
+/// Both headsets get the same monitors, the one connected first is the main one and
+/// takes the commands, the other is told it is a guest though its line would make it
+/// main too; a third is turned away.
+#[test]
+fn two_headsets_get_the_same_monitors() {
+    let (dir, mut pc, mut a, mut b) = two_headsets("two", Options::default(), "");
+    let mut first = showing(&pc, &mut a);
+    let mut second = showing(&pc, &mut b);
+    assert_eq!(first.view().order(), second.view().order());
+    assert_eq!(first.view().order().len(), 2);
+    assert_eq!(pc.count_log("fake desktop: created"), 2, "none made anew");
+    let access = |h: &FakeHeadset| h.view().pc.access.unwrap();
+    assert!(access(&first).is_main());
+    assert_eq!(access(&second).role, role::GUEST);
+    assert!(
+        access(&second).may(perms::CHANGES),
+        "with the rights of its line"
+    );
+    assert_eq!(pc.command("recenter", SOON), "done");
+    first.take_for(Duration::from_millis(500)).unwrap();
+    second.take_for(Duration::from_millis(500)).unwrap();
+    assert_eq!(first.view().commands.len(), 1, "the main one takes it");
+    assert!(second.view().commands.is_empty());
+    let mut third = dir.keys_of("third-headset");
+    match FakeHeadset::connect(pc.addr, &mut third, None) {
+        Err(ConnectError::Refused(text)) => assert!(text.contains("Another headset"), "{text}"),
+        Err(e) => panic!("expected Refused, got {e}"),
+        Ok(_) => panic!("a third headset got a session"),
+    }
+    // A monitor one adds streams to both.
+    let added = first
+        .ask(Request::AddDisplay {
+            mode: Mode::new(320, 240),
+        })
+        .unwrap();
+    let Outcome::Added { id } = added else {
+        panic!("{added:?}")
+    };
+    for h in [&mut first, &mut second] {
+        h.wait(SOON, "the new monitor showing", |v| {
+            v.order().contains(&id) && v.all_monitors_show()
+        })
+        .unwrap();
+        assert!(h.view().broken.is_empty(), "{:?}", h.view().broken);
+    }
+    pc.wait_log(SOON, "fake desktop: created Fake-3");
+    assert_eq!(pc.count_log("panicked"), 0);
+}
+
+/// One headset taken off gets nothing while the other goes on streaming; the
+/// encoders pause only once both are off. Off for good, its session ends and the
+/// other's goes on, with the same monitors.
+#[test]
+fn one_headset_taken_off_does_not_pause_the_other() {
+    let options = Options {
+        fps: 15,
+        ..Options::default()
+    };
+    let (_dir, mut pc, mut a, mut b) = two_headsets("one-off", options, "");
+    let mut first = showing(&pc, &mut a);
+    let mut second = showing(&pc, &mut b);
+    first.send(&worn(false)).unwrap();
+    // Frames already on their way still arrive; after that, nothing for it.
+    first.take_for(Duration::from_secs(1)).unwrap();
+    second.take_for(Duration::from_millis(100)).unwrap();
+    first.reset_counts();
+    second.reset_counts();
+    first.take_for(Duration::from_secs(2)).unwrap();
+    second.take_for(Duration::from_secs(1)).unwrap();
+    assert_eq!(frames(&first), 0, "nothing for the headset taken off");
+    assert!(frames(&second) > 0, "the other one goes on");
+    assert_eq!(pc.count_log("paused: headset not worn or gone"), 0);
+    // Put on again: a fresh picture of every monitor.
+    first.send(&worn(true)).unwrap();
+    first
+        .wait(SOON, "pictures after putting it on", |v| {
+            v.streams.len() == 2 && v.streams.values().all(|s| s.has_picture())
+        })
+        .unwrap();
+    // Both off: now the PC pauses.
+    first.send(&worn(false)).unwrap();
+    second.send(&worn(false)).unwrap();
+    pc.wait_log(SOON, "paused: headset not worn or gone");
+    // The second one back on: it streams again, the first still off.
+    second.send(&worn(true)).unwrap();
+    second.reset_counts();
+    second
+        .wait(SOON, "pictures after putting it on", |v| {
+            v.streams.len() == 2 && v.streams.values().all(|s| s.has_picture())
+        })
+        .unwrap();
+    // The first one off for good: its session ends, the other's goes on.
+    first.wait_closed(Duration::from_secs(15)).unwrap();
+    assert_eq!(first.view().goodbye, Some(PcGoodbye::TakenOff.code()));
+    second.reset_counts();
+    second.take_for(Duration::from_secs(1)).unwrap();
+    assert!(!second.view().closed);
+    assert!(frames(&second) > 0, "the other one goes on");
+    assert_eq!(
+        pc.count_log("fake desktop: removed"),
+        0,
+        "the monitors stay"
+    );
+}
+
+/// One headset leaving cuts nothing of the other: it goes on streaming, becomes the
+/// main one and takes the commands; the monitors stay without waiting to linger.
+#[test]
+fn one_headset_leaving_does_not_cut_the_other() {
+    let options = Options {
+        fps: 15,
+        ..Options::default()
+    };
+    let (_dir, mut pc, mut a, mut b) = two_headsets("one-leaves", options, "");
+    let first = showing(&pc, &mut a);
+    let mut second = showing(&pc, &mut b);
+    assert_eq!(second.view().pc.access.unwrap().role, role::GUEST);
+    first.disconnect();
+    pc.wait_log(SOON, "headset disconnected");
+    second
+        .wait(SOON, "the main one now", |v| {
+            v.pc.access.is_some_and(|a| a.is_main())
+        })
+        .unwrap();
+    second.reset_counts();
+    second.take_for(Duration::from_secs(1)).unwrap();
+    assert!(!second.view().closed);
+    assert!(frames(&second) > 0, "it goes on streaming");
+    assert!(second.view().ended.is_empty(), "no stream of it ended");
+    assert_eq!(pc.count_log("keeping virtual monitors"), 0);
+    assert_eq!(pc.count_log("paused: headset not worn or gone"), 0);
+    assert_eq!(pc.command("recenter", SOON), "done");
+    second.take_for(Duration::from_millis(500)).unwrap();
+    assert_eq!(second.view().commands.len(), 1, "commands go to it now");
+    // The one that left comes back: a guest now, the same monitors.
+    let back = showing(&pc, &mut a);
+    assert_eq!(back.view().pc.access.unwrap().role, role::GUEST);
+    assert_eq!(back.view().order(), second.view().order());
+    assert_eq!(pc.count_log("fake desktop: created"), 2, "none made anew");
+}
+
+/// A guest without rights gets every monitor but changes nothing: its requests are
+/// not allowed, its arrangement leaves the desktop alone, it may not move the mouse,
+/// and its microphone does not reach the PC (it is not even asked for it), while the
+/// main headset does all of it.
+#[test]
+fn a_guest_cannot_do_what_it_has_no_right_to() {
+    let (_dir, mut pc, mut a, mut b) =
+        two_headsets("guest", Options::default(), "access {second} guest\n");
+    let mut first = showing(&pc, &mut a);
+    let mut guest = showing(&pc, &mut b);
+    let access = guest.view().pc.access.unwrap();
+    assert_eq!((access.role, access.perms), (role::GUEST, 0));
+    let refused = guest
+        .ask(Request::AddDisplay {
+            mode: Mode::new(320, 240),
+        })
+        .unwrap();
+    assert!(
+        matches!(&refused, Outcome::Failed { error, .. } if *error == ErrorCode::NOT_ALLOWED),
+        "{refused:?}"
+    );
+    let ids = guest.view().order();
+    let rows = |ids: &[_]| ClientMsg::Arrange {
+        rows: vec![Row {
+            entries: ids
+                .iter()
+                .rev()
+                .map(|id| Placed {
+                    id: *id,
+                    center: None,
+                    middle: None,
+                })
+                .collect(),
+        }],
+    };
+    guest.send(&rows(&ids)).unwrap();
+    pc.wait_log(SOON, "a guest's arrangement leaves the desktop as it is");
+    guest
+        .send(&ClientMsg::MouseTo {
+            id: ids[0],
+            u: 10,
+            v: 10,
+        })
+        .unwrap();
+    pc.wait_log(SOON, "the headset has no right to move the mouse");
+    // A program records: the main headset's microphone is wanted, not the guest's.
+    pc.desktop("record on");
+    first
+        .wait(SOON, "the microphone wanted", |v| {
+            v.pc.up_wanted.get(&UpKind::Mic).is_some_and(|u| u.on)
+        })
+        .unwrap();
+    guest.take_for(Duration::from_secs(1)).unwrap();
+    let pc_state = &guest.view().pc;
+    assert!(pc_state.up_wanted.get(&UpKind::Mic).is_none_or(|u| !u.on));
+    assert_eq!(
+        pc_state.sound.as_ref().map(|s| s.mic.clone()),
+        Some(MicDevice::Off)
+    );
+    // The main one may.
+    let added = first
+        .ask(Request::AddDisplay {
+            mode: Mode::new(320, 240),
+        })
+        .unwrap();
+    assert!(matches!(added, Outcome::Added { .. }), "{added:?}");
+    guest
+        .wait(SOON, "the new monitor showing", |v| {
+            v.order().len() == 3 && v.all_monitors_show()
+        })
+        .unwrap();
+    assert_eq!(
+        pc.count_log("the headset has no right to"),
+        2,
+        "the guest's only"
+    );
+}
+
+/// A headset that decodes H.264 only up to 600 pixels wide gets the 640x360 monitor
+/// failed (`BAD_SIZE`), never started, and the other monitor running; the other
+/// headset gets both. Once that one leaves, the monitor is failed for all.
+#[test]
+fn a_headset_that_decodes_less_fails_only_for_itself() {
+    let (_dir, mut pc, mut a, mut b) = two_headsets("decodes-less", Options::default(), "");
+    let mut first = showing(&pc, &mut a);
+    first.reset_counts();
+    let wide = first.view().order()[0];
+    assert_eq!(first.view().display(wide).unwrap().mode.w, 640);
+    let mut small = FakeHeadset::state();
+    small.caps.as_mut().unwrap().decoders = vec![Decoder {
+        codec: 0,
+        max_w: 600,
+        max_h: 4096,
+    }];
+    let mut second = FakeHeadset::connect_saying(pc.addr, &mut b, &small)
+        .unwrap_or_else(|e| panic!("connecting: {e}"));
+    let too_big = |v: &View| {
+        matches!(
+            v.display(wide).map(|d| &d.state),
+            Some(DisplayState::Failed { error, .. }) if *error == ErrorCode::BAD_SIZE
+        )
+    };
+    let narrow = second.view().order()[1];
+    second
+        .wait(SOON, "the narrow monitor showing", |v| {
+            v.streams.get(&narrow).is_some_and(|s| s.has_picture())
+        })
+        .unwrap();
+    assert!(too_big(second.view()), "{:?}", second.view().displays());
+    assert!(
+        second
+            .view()
+            .states
+            .iter()
+            .all(|(id, s)| *id != wide || matches!(s, DisplayState::Failed { .. })),
+        "failed from the snapshot on: {:?}",
+        second.view().states
+    );
+    // The first one still has both: each started over for the second one, so it got
+    // a fresh picture of each.
+    first
+        .wait(SOON, "a fresh picture of both", |v| {
+            v.all_monitors_show()
+                && v.order().iter().all(|id| {
+                    v.display(*id)
+                        .is_some_and(|d| d.state == DisplayState::Running)
+                })
+        })
+        .unwrap();
+    assert!(!too_big(first.view()));
+    second.take_for(Duration::from_secs(1)).unwrap();
+    assert!(!second.view().streams.contains_key(&wide), "never started");
+    assert!(
+        second.view().broken.is_empty(),
+        "{:?}",
+        second.view().broken
+    );
+    pc.wait_log(SOON, "is larger than one headset decodes");
+    // The one that decodes it leaves: failed for all now, the rest goes on.
+    first.disconnect();
+    pc.wait_log(SOON, "is larger than the headset decodes");
+    second.take_for(Duration::from_secs(1)).unwrap();
+    assert!(too_big(second.view()));
+    assert!(!second.view().closed);
+    assert!(second.view().streams.contains_key(&narrow));
+}

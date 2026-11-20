@@ -130,6 +130,9 @@ pub struct Options {
     /// `--software`: encode on the CPU whatever the settings say (the default, the same
     /// everywhere); without it, as `settings.txt` says.
     pub software: bool,
+    /// How many headsets may have a session at once (`PROSTIR_TEST_MAX_HEADSETS`, a
+    /// build for these tests only); 0: as a release allows.
+    pub headsets: usize,
 }
 
 impl Default for Options {
@@ -145,6 +148,7 @@ impl Default for Options {
             broken_monitors: String::new(),
             physical: String::new(),
             software: true,
+            headsets: 0,
         }
     }
 }
@@ -211,6 +215,10 @@ impl Pc {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
+        match options.headsets {
+            0 => cmd.env_remove("PROSTIR_TEST_MAX_HEADSETS"),
+            n => cmd.env("PROSTIR_TEST_MAX_HEADSETS", n.to_string()),
+        };
         match &options.typed_code {
             Some(code) => cmd.env("PROSTIR_FAKE_TYPED_CODE", code),
             None => cmd.env_remove("PROSTIR_FAKE_TYPED_CODE"),

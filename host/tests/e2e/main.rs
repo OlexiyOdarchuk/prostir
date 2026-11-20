@@ -6,6 +6,7 @@
 mod control;
 mod failures;
 mod goodbye;
+mod headsets;
 mod link;
 mod pc;
 mod requests;
