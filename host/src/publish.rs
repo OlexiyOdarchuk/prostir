@@ -82,14 +82,15 @@ impl Publisher {
 
     /// What the PC allows this headset now. "No limits" of a guest is for its own
     /// budgets: the PC's limits follow the main headset's. Only scales the desktop
-    /// gives an output are offered.
+    /// gives an output of every size offered are offered, so any pair the headset
+    /// picks can be made.
     pub fn limits(&self, displays: &Displays) -> Limits {
         let prefs = Prefs {
             no_limits: self.prefs().no_limits && self.access.is_main(),
             ..self.prefs()
         };
         let mut limits = limits(&prefs, self.caps(), displays.codec());
-        limits.scales.retain(|s| displays.scales().allows(*s));
+        keep_scales_of_every_size(&mut limits, |w, h| displays.scales_for(w, h));
         limits
     }
 
@@ -192,6 +193,17 @@ pub fn limits(prefs: &Prefs, headset: &HeadsetCaps, codec: Codec) -> Limits {
     }
 }
 
+/// Keeps in `limits` only the scales `scales_for` gives every size offered.
+fn keep_scales_of_every_size(
+    limits: &mut Limits,
+    scales_for: impl Fn(u32, u32) -> crate::platform::Scales,
+) {
+    let sizes = &limits.sizes;
+    limits
+        .scales
+        .retain(|s| sizes.iter().all(|m| scales_for(m.w, m.h).allows(*s)));
+}
+
 /// What this PC can do.
 fn host_caps(displays: &Displays, volume: bool) -> HostCaps {
     let mut features = vec![
@@ -234,7 +246,26 @@ fn pc_info(displays: &Displays) -> PcInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::Scales;
     use prostir_proto::state::Decoder;
+
+    /// Scales that depend on the size (Windows, GNOME): only those every size offered
+    /// takes are offered.
+    #[test]
+    fn scales_offered_fit_every_size() {
+        let mut l = limits(&Prefs::default(), &HeadsetCaps::default(), Codec::H264);
+        assert_eq!(l.scales, [100, 125, 150]);
+        keep_scales_of_every_size(&mut l, |_, _| Scales::Any { min: 50, max: 400 });
+        assert_eq!(l.scales, [100, 125, 150]);
+        keep_scales_of_every_size(&mut l, |w, _| {
+            Scales::Steps(if w < 2000 {
+                vec![100, 125]
+            } else {
+                vec![100, 125, 150]
+            })
+        });
+        assert_eq!(l.scales, [100, 125]);
+    }
 
     fn headset(decoders: Vec<Decoder>) -> HeadsetCaps {
         HeadsetCaps {

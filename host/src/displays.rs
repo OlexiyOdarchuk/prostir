@@ -1666,9 +1666,9 @@ impl Displays {
         self.desktop.caps().screenshot_one_output
     }
 
-    /// The scales the desktop gives an output.
-    pub fn scales(&self) -> &crate::platform::Scales {
-        &self.desktop.caps().scales
+    /// The scales the desktop gives an output of `w`x`h` pixels.
+    pub fn scales_for(&self, w: u32, h: u32) -> crate::platform::Scales {
+        self.desktop.scales_for(w, h)
     }
 
     /// Whether the desktop lets the mouse be moved from here.

@@ -42,8 +42,9 @@
 //! 3. Refresh rates: [`VirtualSpec::refresh`], one of [`DesktopCaps::refresh`]
 //!    (Linux: 60 only).
 //! 4. Scales in steps, through an undocumented call: [`VirtualSpec::scale`] in percent,
-//!    [`Scales::Steps`]; the scales offered to the headset are those of
-//!    [`DesktopCaps::scales`] (`Displays::scales`), and the desktop checks its own.
+//!    [`Scales::Steps`], which may depend on the mode ([`Desktop::scales_for`]); the
+//!    scales offered to the headset are those the desktop gives every size offered,
+//!    and the desktop checks its own.
 //! 5. Physical pixels, the primary output always at (0, 0): the desktop converts to and
 //!    from logical pixels itself (see above), and with
 //!    [`DesktopCaps::origin_is_primary`] the core shifts its whole plan so the primary
@@ -97,7 +98,7 @@
 //!   D-Bus connection ([`DesktopCaps::cleans_up_after_crash`]).
 //! - Placement through `DisplayConfig.ApplyMonitorsConfig`, whose layout mode may be
 //!   physical (converted by the desktop) and whose scales are those each mode supports
-//!   ([`Scales::Steps`]); it has a primary monitor ([`DesktopCaps::has_primary`]).
+//!   ([`Desktop::scales_for`]); it has a primary monitor ([`DesktopCaps::has_primary`]).
 //! - No way to move windows or find the mouse without a Shell extension:
 //!   [`Desktop::windows`] and [`Desktop::pointer`] give none, so there are no window
 //!   panels and the headset is not offered to move the mouse
@@ -129,6 +130,13 @@ pub trait Desktop: Send {
     /// is not); [`PhysicalDisplay::default`] marks the one to show in the headset when
     /// nothing else was chosen.
     fn physical(&self) -> Vec<PhysicalDisplay>;
+
+    /// The scales it gives an output of `w`x`h` pixels, in percent: where scales
+    /// depend on the mode (Windows, GNOME), those that mode supports; else
+    /// [`DesktopCaps::scales`].
+    fn scales_for(&self, _w: u32, _h: u32) -> Scales {
+        self.caps().scales.clone()
+    }
 
     /// A new virtual monitor. Dropping the output removes it from the desktop.
     fn make(&mut self, spec: &VirtualSpec) -> Result<Box<dyn Output>>;
@@ -382,7 +390,8 @@ pub struct DesktopCaps {
     /// The primary output is always at (0, 0): the core shifts its whole plan so that
     /// it is (the places the headset is told shift with it).
     pub origin_is_primary: bool,
-    /// The scales it gives an output, in percent.
+    /// The scales it gives an output of any size, in percent (see
+    /// [`Desktop::scales_for`] for those of one size).
     pub scales: Scales,
     /// Refresh rates it makes virtual monitors with, in Hz.
     pub refresh: Vec<u16>,
