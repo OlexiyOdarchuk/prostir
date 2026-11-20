@@ -27,9 +27,11 @@
 //! - `audio`: `AudioOut` (PC sound to the headset, as a default output device while it
 //!   exists: its `route` and the `device` it is captured from), `MicIn` (the headset
 //!   microphone as the default input: `push`, `set_recording`), `SinkVolume` (the
-//!   level of the headset's device: `open`, `set`, `level`, `outdated`), `watch` (a
-//!   `Watcher` that sends the sound system's changes as events, without polling),
-//!   `restore_after_crash`. The types they share are in `sound.rs`.
+//!   level of the headset's device: `open`, `set`, `level`, `outdated`; none of them
+//!   waits for the sound system), `watch` (a `Watcher` that sends the sound system's
+//!   changes as events, without polling), `prepare` (finds out at start, off the
+//!   control loop, whether the volume can be shared), `restore_after_crash`. The
+//!   types they share are in `sound.rs`.
 //! - `sound_source::Watcher` (`start`, `output`): the output whose window plays sound.
 //! - `notifications::watch`: the PC's desktop notifications, as text.
 //! - `tray`: `spawn`, `Handle`, `set_status`, `set_battery`, `set_settings`,
@@ -69,8 +71,17 @@ mod contract;
 pub use contract::*;
 
 // The sound part of the contract, and following the sound system's changes (the same
-// loop for PipeWire's `pactl subscribe` and the fake desktop's).
+// loop for PipeWire's `pactl subscribe` and the fake desktop's). Windows (step 11c)
+// hears of its devices' changes from the system itself (`IMMNotificationClient`,
+// `IAudioEndpointVolumeCallback`) and needs none of the `unix` modules: the loop of
+// `sound_events` reads lines from a pipe, `pulse` runs `pactl`, `process` other
+// programs.
+#[cfg(unix)]
+mod process;
+#[cfg(unix)]
+mod pulse;
 pub mod sound;
+#[cfg(unix)]
 mod sound_events;
 
 #[cfg(all(target_os = "linux", not(feature = "fake-desktop")))]

@@ -426,18 +426,40 @@ pub mod audio {
         }
     }
 
+    /// With `PROSTIR_FAKE_PACTL=1` the sound system is `pactl`, as on Linux: whatever
+    /// the test put first on `PATH` under that name (`host/tests/e2e/fake-pactl`).
+    fn real_pactl() -> bool {
+        std::env::var_os("PROSTIR_FAKE_PACTL").is_some_and(|v| v == "1")
+    }
+
+    /// As on Linux, with `pactl`; nothing to find out in memory.
+    pub fn prepare() {
+        if real_pactl() {
+            crate::platform::pulse::prepare(&[]);
+        }
+    }
+
     /// The fake sound device for the headset: its level is what a test sets (`volume
     /// 40`, `volume 40 muted`, `drag 0 100 1000`: the slider from 0 to 100 in a
-    /// second), and what the PC sets goes into the log.
-    pub struct SinkVolume;
+    /// second), and what the PC sets goes into the log. With `pactl`, Linux's.
+    pub enum SinkVolume {
+        Memory,
+        Pactl(crate::platform::pulse::SinkVolume),
+    }
 
     impl SinkVolume {
         pub fn open() -> Option<Self> {
-            Some(Self)
+            if real_pactl() {
+                return crate::platform::pulse::SinkVolume::open().map(Self::Pactl);
+            }
+            Some(Self::Memory)
         }
 
         /// As `pactl` does it: the volume, then the mute, each a change of its own.
         pub fn set(&self, level: u8, muted: bool) {
+            if let Self::Pactl(v) = self {
+                return v.set(level, muted);
+            }
             let mut sys = system();
             let was = sys.level;
             sys.level = Some((level, muted));
@@ -458,16 +480,26 @@ pub mod audio {
 
         /// Where the device is now, if known.
         pub fn level(&self) -> Option<(u8, bool)> {
-            system().level
+            match self {
+                Self::Memory => system().level,
+                Self::Pactl(v) => v.level(),
+            }
         }
 
         pub fn outdated(&self, writes: u64) -> bool {
-            writes < system().writes
+            match self {
+                Self::Memory => writes < system().writes,
+                Self::Pactl(v) => v.outdated(writes),
+            }
         }
     }
 
-    /// Follows the fake sound system with the same watcher as the real one.
+    /// Follows the fake sound system with the same watcher as the real one (or the
+    /// real one through `pactl`).
     pub fn watch(events: EventSink) -> Option<Watcher> {
+        if real_pactl() {
+            return Watcher::start(crate::platform::pulse::Pactl::headset(), events);
+        }
         Watcher::start(Fake, events)
     }
 

@@ -7,8 +7,7 @@
 
 use std::os::fd::AsRawFd;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -19,16 +18,25 @@ use log::{info, warn};
 use prostir_proto::{AUDIO_CHANNELS, AUDIO_RATE, MIC_CHANNELS};
 
 use crate::events::EventSink;
+use crate::platform::process::spawn_tied;
+use crate::platform::pulse::{self, MIC, Pactl, SINK, TIMEOUT, pactl, state_in};
 use crate::platform::run;
 use crate::platform::sound::{OutputDevice, Route};
-use crate::platform::sound_events::{End, Indices, Reading, SoundSystem, Subscription};
 
+pub use crate::platform::pulse::SinkVolume;
 pub use crate::platform::sound_events::Watcher;
 
-const SINK: &str = "prostir_headset";
+/// Follows the sound system while Prostir's devices exist (the headset's output device
+/// and the headset microphone): their changes go to `events`.
+pub fn watch(events: EventSink) -> Option<Watcher> {
+    Watcher::start(Pactl::headset(), events)
+}
 
-/// `pw-cli` and `pactl` answer at once while PipeWire is well.
-const TIMEOUT: Duration = Duration::from_secs(3);
+/// Finds out, off the control loop, whether the PC can share its volume: `pw-cli`
+/// makes the device, `pactl` reads and sets it.
+pub fn prepare() {
+    pulse::prepare(&["pw-cli"]);
+}
 
 /// A PipeWire node created with `pw-cli`; destroyed on drop.
 struct VirtualNode {
@@ -90,20 +98,6 @@ pub fn restore_after_crash() {
     for name in [SINK, MIC, MIC_FEED] {
         destroy_node(name);
     }
-}
-
-/// `pactl` with its output in English, as it is parsed.
-fn pactl_command() -> Command {
-    let mut cmd = Command::new("pactl");
-    cmd.env("LC_ALL", "C");
-    cmd
-}
-
-fn pactl(args: &[&str]) -> Option<String> {
-    let out = run(pactl_command().args(args), TIMEOUT).ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
 }
 
 /// Sound going to the headset while this exists.
@@ -188,163 +182,6 @@ impl Drop for AudioOut {
     }
 }
 
-/// Reading or setting the headset's device, one at a time: a level is never read
-/// between the two halves of a write (the volume, then the mute).
-static DEVICE: Mutex<()> = Mutex::new(());
-/// How many times the PC set the headset's device, counted under [`DEVICE`].
-static WRITES: AtomicU64 = AtomicU64::new(0);
-
-/// The volume of the sound device for the headset ("Prostir: headset"), as the PC's
-/// slider and keys show it: read and set with `pactl`; its changes come as events
-/// from [`watch`]. The capture reads the device's monitor, before its volume and
-/// mute, so a level written here does not change what the headset gets.
-pub struct SinkVolume {
-    sink: String,
-}
-
-impl SinkVolume {
-    /// Where the PC can share its volume: `pactl` is there.
-    pub fn open() -> Option<Self> {
-        static PACTL: OnceLock<bool> = OnceLock::new();
-        let there = *PACTL.get_or_init(|| pactl(&["--version"]).is_some());
-        there.then_some(Self { sink: SINK.into() })
-    }
-
-    /// Puts the device at `level` percent, `muted` or not.
-    pub fn set(&self, level: u8, muted: bool) {
-        let _one = DEVICE.lock().unwrap();
-        let volume = format!("{}%", level.min(100));
-        let mute = if muted { "1" } else { "0" };
-        let set = pactl(&["set-sink-volume", &self.sink, &volume]).is_some()
-            && pactl(&["set-sink-mute", &self.sink, mute]).is_some();
-        WRITES.fetch_add(1, Ordering::SeqCst);
-        if set {
-            info!(
-                "volume: the headset's device at {level}{}",
-                if muted { " muted" } else { "" }
-            );
-        } else {
-            warn!("volume: the headset's device could not be set");
-        }
-    }
-
-    /// Where the device is now, if known.
-    pub fn level(&self) -> Option<(u8, bool)> {
-        let _one = DEVICE.lock().unwrap();
-        read_volume(&self.sink).map(|r| (r.level, r.muted))
-    }
-
-    /// Whether a reading of the device taken after `writes` writes is old: the PC set
-    /// it since, and that write's own echo comes after.
-    pub fn outdated(&self, writes: u64) -> bool {
-        writes < WRITES.load(Ordering::SeqCst)
-    }
-}
-
-/// The level of `sink` now; [`DEVICE`] is held.
-fn read_volume(sink: &str) -> Option<Reading> {
-    let level = parse_volume(&pactl(&["get-sink-volume", sink])?)?;
-    let muted = parse_mute(&pactl(&["get-sink-mute", sink])?)?;
-    Some(Reading {
-        level: level.min(100) as u8,
-        muted,
-        writes: WRITES.load(Ordering::SeqCst),
-    })
-}
-
-/// The loudest channel of `pactl get-sink-volume`, in percent:
-/// `Volume: front-left: 26214 /  40% / -23.88 dB,   front-right: ...`.
-fn parse_volume(text: &str) -> Option<u32> {
-    let line = text
-        .lines()
-        .find(|l| l.trim_start().starts_with("Volume:"))?;
-    line.split_whitespace()
-        .filter_map(|w| w.strip_suffix('%')?.parse::<u32>().ok())
-        .max()
-}
-
-/// `Mute: yes` or `Mute: no`.
-fn parse_mute(text: &str) -> Option<bool> {
-    match text.trim().strip_prefix("Mute:")?.trim() {
-        "yes" => Some(true),
-        "no" => Some(false),
-        _ => None,
-    }
-}
-
-/// The number of the device named `name` in `pactl list short sinks` (or sources).
-fn index_in(list: &str, name: &str) -> Option<u32> {
-    list.lines().find_map(|l| {
-        let mut cols = l.split('\t');
-        let index = cols.next()?.trim().parse().ok()?;
-        (cols.next() == Some(name)).then_some(index)
-    })
-}
-
-/// Follows the sound system while Prostir's devices exist (the headset's output device
-/// and the headset microphone): their changes go to `events`.
-pub fn watch(events: EventSink) -> Option<Watcher> {
-    Watcher::start(Pactl::named(SINK, MIC), events)
-}
-
-/// The sound system through `pactl`, for the devices named so.
-struct Pactl {
-    sink: String,
-    mic: String,
-}
-
-/// A running `pactl subscribe`: killed to end it.
-struct Subscribed(Mutex<Option<Child>>);
-
-impl End for Subscribed {
-    fn end(&self) {
-        if let Some(mut child) = self.0.lock().unwrap().take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
-}
-
-impl SoundSystem for Pactl {
-    fn subscribe(&mut self) -> std::io::Result<Subscription> {
-        let mut cmd = pactl_command();
-        cmd.arg("subscribe")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        // Started from the watcher's thread: it dies with that thread, and with Prostir.
-        let mut child = spawn_tied(&mut cmd)?;
-        let out = child
-            .stdout
-            .take()
-            .ok_or_else(|| std::io::Error::other("no output"))?;
-        Ok(Subscription {
-            lines: std::fs::File::from(std::os::fd::OwnedFd::from(out)),
-            end: Arc::new(Subscribed(Mutex::new(Some(child)))),
-        })
-    }
-
-    fn indices(&mut self) -> Option<Indices> {
-        let sinks = pactl(&["list", "short", "sinks"])?;
-        let sources = pactl(&["list", "short", "sources"])?;
-        Some(Indices {
-            sink: index_in(&sinks, &self.sink),
-            mic: index_in(&sources, &self.mic),
-        })
-    }
-
-    fn volume(&mut self) -> Option<Reading> {
-        let _one = DEVICE.lock().unwrap();
-        read_volume(&self.sink)
-    }
-
-    fn recording(&mut self) -> Option<bool> {
-        let list = pactl(&["list", "short", "sources"])?;
-        Some(state_in(&list, &self.mic).is_some_and(|s| s == "RUNNING"))
-    }
-}
-
-const MIC: &str = "prostir_mic";
 const MIC_FEED: &str = "prostir_mic_feed";
 
 /// The longest the headset's sound waits in the feed stream (`pacat`'s latency).
@@ -573,39 +410,9 @@ fn pacat(sink: &str) -> Command {
     cmd
 }
 
-/// Spawns a helper that dies with Prostir, even if Prostir crashes.
-fn spawn_tied(cmd: &mut Command) -> std::io::Result<Child> {
-    use std::os::unix::process::CommandExt;
-    // SAFETY: prctl only.
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
-            Ok(())
-        });
-    }
-    cmd.spawn()
-}
-
 /// `RUNNING`, `IDLE` or `SUSPENDED` for a source, from `pactl list short sources`.
 fn source_state(name: &str) -> Option<String> {
     state_in(&pactl(&["list", "short", "sources"])?, name).map(str::to_owned)
-}
-
-/// The state of source `name` in `list` (`pactl list short sources`): its last column.
-fn state_in<'a>(list: &'a str, name: &str) -> Option<&'a str> {
-    list.lines().find_map(|l| {
-        let cols: Vec<&str> = l.split('\t').collect();
-        (cols.get(1) == Some(&name)).then(|| cols.last().unwrap_or(&"").trim())
-    })
-}
-
-impl Pactl {
-    fn named(sink: &str, mic: &str) -> Self {
-        Self {
-            sink: sink.into(),
-            mic: mic.into(),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -636,38 +443,6 @@ mod tests {
                 .any(|a| a == "--property=state.restore-props=false")
         );
         assert!(pa.iter().any(|a| a == "--device=feed"));
-    }
-
-    /// What `pactl` says (with `LC_ALL=C`) about the headset's device.
-    #[test]
-    fn the_device_as_pactl_says_it() {
-        let stereo = "Volume: front-left: 26214 /  40% / -23.88 dB,   front-right: 26869 /  41% \
-                      / -23.23 dB\n        balance 0.02\n";
-        assert_eq!(parse_volume(stereo), Some(41), "the loudest channel");
-        assert_eq!(
-            parse_volume("Volume: mono: 98304 / 150% / 10.57 dB\n"),
-            Some(150)
-        );
-        assert_eq!(
-            parse_volume("Volume: front-left: 0 /   0% / -inf dB"),
-            Some(0)
-        );
-        assert_eq!(parse_volume("Гучність: 40%"), None);
-        assert_eq!(parse_volume(""), None);
-        assert_eq!(parse_mute("Mute: yes\n"), Some(true));
-        assert_eq!(parse_mute("Mute: no"), Some(false));
-        assert_eq!(parse_mute("Mute: maybe"), None);
-        let sinks = "61\talsa_output.pci-0000_00_1f.3.HiFi__HDMI3__sink\tPipeWire\ts32le 2ch \
-                     48000Hz\tSUSPENDED\n183693\tprostir_headset\tPipeWire\tfloat32le 2ch \
-                     48000Hz\tRUNNING\n";
-        assert_eq!(index_in(sinks, "prostir_headset"), Some(183693));
-        assert_eq!(index_in(sinks, "prostir"), None);
-        let sources = "183693\tprostir_headset.monitor\tPipeWire\tfloat32le 2ch 48000Hz\tIDLE\n\
-                       183776\tprostir_mic\tPipeWire\tfloat32le 1ch 48000Hz\tRUNNING\n";
-        assert_eq!(index_in(sources, "prostir_mic"), Some(183776));
-        assert_eq!(state_in(sources, "prostir_mic"), Some("RUNNING"));
-        assert_eq!(state_in(sources, "prostir_headset.monitor"), Some("IDLE"));
-        assert_eq!(state_in(sources, "prostir_headset"), None);
     }
 
     /// Nobody takes the sound: the session loop does not wait, at most a pipe's worth
@@ -1145,10 +920,11 @@ mod sound_harness {
         );
         let (events, received) = crate::events::channel();
         // The watcher first, then the devices, as Prostir starts them.
-        let watcher = Watcher::start(Pactl::named(sink, &mic_name), events).unwrap();
+        let followed = pulse::Device::new(sink);
+        let watcher = Watcher::start(Pactl::new(followed.clone(), &mic_name), events).unwrap();
         let device = VirtualNode::create(sink, "Prostir test", "Audio/Sink").unwrap();
         let mic = MicIn::start_as(&mic_name, &feed, false).unwrap();
-        let volume = SinkVolume { sink: sink.into() };
+        let volume = SinkVolume::of(followed);
         // What the new devices are: their first events.
         let until = Instant::now() + Duration::from_secs(3);
         while Instant::now() < until {

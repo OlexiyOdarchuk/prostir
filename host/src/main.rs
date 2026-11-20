@@ -980,6 +980,8 @@ fn serve(args: Args) -> Result<()> {
         });
     }
     let _instance = platform::single_instance()?;
+    // Whether the PC can share its volume, found out meanwhile.
+    platform::audio::prepare();
     // The command line holds for this run only.
     let run = store::Run {
         bitrate: args.bitrate,

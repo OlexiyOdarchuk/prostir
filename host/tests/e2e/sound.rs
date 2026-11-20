@@ -9,7 +9,7 @@ use prostir_proto::request::{Outcome, Request};
 use prostir_proto::state::{UpKind, UpState, permission};
 use prostir_testkit::{FIRST_VOLUME, FakeHeadset, View, quest_step};
 
-use crate::pc::{Options, Pc};
+use crate::pc::{Options, Pc, TestDir};
 use crate::{SOON, session};
 
 /// The levels the PC put its sound device at, in order (from the log).
@@ -414,4 +414,147 @@ fn a_new_sound_device_takes_the_headsets_level() {
         "the headset was asked"
     );
     assert_eq!(headset.volume(), Some(FIRST_VOLUME));
+}
+
+/// A stand-in `pactl` (`fake-pactl/pactl`, first on the PC app's `PATH`) whose sound
+/// system is files in `dir`: the test moves the slider and starts recordings there.
+struct FakePactl {
+    dir: TestDir,
+    index: u32,
+}
+
+impl FakePactl {
+    fn new(name: &str) -> Self {
+        let dir = TestDir::new(name);
+        let index = 50;
+        let at = |f: &str| dir.path().join(f);
+        std::fs::write(at("sink"), format!("{index} prostir_headset\n")).unwrap();
+        std::fs::write(at("volume"), "100\n").unwrap();
+        std::fs::write(at("mute"), "no\n").unwrap();
+        std::fs::write(at("mic"), "51 prostir_mic IDLE\n").unwrap();
+        std::fs::write(at("events"), "").unwrap();
+        Self { dir, index }
+    }
+
+    /// The PC app's environment for it.
+    fn env(&self) -> Vec<(String, String)> {
+        let tools = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/e2e/fake-pactl");
+        let path = std::env::var("PATH").unwrap_or_default();
+        vec![
+            ("PROSTIR_FAKE_PACTL".into(), "1".into()),
+            (
+                "FAKE_PACTL_DIR".into(),
+                self.dir.path().to_string_lossy().into_owned(),
+            ),
+            ("PATH".into(), format!("{tools}:{path}")),
+        ]
+    }
+
+    fn read(&self, file: &str) -> String {
+        std::fs::read_to_string(self.dir.path().join(file))
+            .unwrap_or_default()
+            .trim()
+            .to_owned()
+    }
+
+    fn write(&self, file: &str, text: &str) {
+        std::fs::write(self.dir.path().join(file), format!("{text}\n")).unwrap();
+    }
+
+    /// What `pactl subscribe` says next.
+    fn say(&self, line: &str) {
+        use std::io::Write;
+        let mut events = std::fs::OpenOptions::new()
+            .append(true)
+            .open(self.dir.path().join("events"))
+            .unwrap();
+        writeln!(events, "{line}").unwrap();
+    }
+
+    /// The slider moved to `level`.
+    fn slide(&self, level: u8) {
+        self.write("volume", &level.to_string());
+        self.say(&format!("Event 'change' on sink #{}", self.index));
+    }
+
+    /// How many times `pactl subscribe` was started.
+    fn subscriptions(&self) -> usize {
+        self.read("calls")
+            .lines()
+            .filter(|l| *l == "subscribe")
+            .count()
+    }
+}
+
+/// The PC's own `pactl` code, as on Linux, against a stand-in `pactl`: the headset's
+/// level goes to the device on a thread of its own, the slider asks the headset, a
+/// program recording gets the microphone, and a `pactl subscribe` that dies starts
+/// again and catches up with what changed meanwhile.
+#[test]
+fn the_pc_follows_pactl() {
+    let pactl = FakePactl::new("pactl-state");
+    let options = Options {
+        env: pactl.env(),
+        ..Options::default()
+    };
+    let (_dir, mut pc, _keys, mut headset) = session("pactl", &options);
+    let set = |level: u8| format!("volume: the headset's device at {level}");
+    pc.wait_log(SOON, &set(FIRST_VOLUME));
+    assert_eq!(pactl.read("volume"), FIRST_VOLUME.to_string());
+    let pc_caps = headset.view().pc.caps.clone().unwrap();
+    assert!(pc_caps.has(prostir_proto::state::caps::pc::VOLUME));
+    headset.take_for(Duration::from_millis(500)).unwrap();
+    let asks = headset.view().volume_asks.len();
+
+    // The slider: one request, and the headset's step on the device.
+    pactl.slide(21);
+    pc.wait_log(SOON, &set(quest_step(21)));
+    assert_eq!(pactl.read("volume"), quest_step(21).to_string());
+    headset.take_for(Duration::from_millis(500)).unwrap();
+    assert_eq!(headset.view().volume_asks.len(), asks + 1);
+
+    // A program records, then stops.
+    pactl.write("mic", "51 prostir_mic RUNNING");
+    pactl.say("Event 'new' on source-output #77");
+    headset
+        .wait(SOON, "the microphone wanted", mic_wanted)
+        .unwrap();
+    pactl.write("mic", "51 prostir_mic IDLE");
+    pactl.say("Event 'remove' on source-output #77");
+    headset
+        .wait(SOON, "the microphone no longer wanted", |v| !mic_wanted(v))
+        .unwrap();
+
+    // `pactl subscribe` dies; the slider moves meanwhile.
+    let pid: libc::pid_t = pactl.read("subscribe.pid").parse().unwrap();
+    // SAFETY: a signal to the stand-in this test started through the PC app.
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    pc.wait_log(SOON, "sound: the sound system's events stopped");
+    pactl.write("volume", "60");
+    pc.wait_log(SOON, "sound: following the sound system again");
+    pc.wait_log(SOON, &set(quest_step(60)));
+    headset.take_for(Duration::from_millis(500)).unwrap();
+    assert_eq!(headset.view().volume_asks.len(), asks + 2);
+    assert_eq!(headset.volume(), Some(quest_step(60)));
+    assert_eq!(pactl.subscriptions(), 2);
+}
+
+/// A `pactl` too old to read a device's level (before PulseAudio 14): the PC does not
+/// offer the headset its volume, and never sets the device.
+#[test]
+fn an_old_pactl_shares_no_volume() {
+    let pactl = FakePactl::new("pactl-old-state");
+    let mut env = pactl.env();
+    env.push(("FAKE_PACTL_VERSION".into(), "13.99.1".into()));
+    let options = Options {
+        env,
+        ..Options::default()
+    };
+    let (_dir, mut pc, _keys, mut headset) = session("pactl-old", &options);
+    pc.wait_log(SOON, "volume: not shared with the headset");
+    headset.take_for(Duration::from_secs(1)).unwrap();
+    let pc_caps = headset.view().pc.caps.clone().unwrap();
+    assert!(!pc_caps.has(prostir_proto::state::caps::pc::VOLUME));
+    assert!(!pactl.read("calls").contains("set-sink-volume"));
+    assert_eq!(pactl.read("volume"), "100");
 }
