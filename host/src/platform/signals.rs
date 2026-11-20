@@ -1,6 +1,9 @@
 //! Signals that ask Prostir to quit (SIGTERM, SIGINT, SIGHUP): a handler writes the
 //! signal's number to a pipe, and a thread of its own sleeps in the kernel reading it
-//! until one comes. The same on every Linux desktop and on the fake one.
+//! until one comes. The same on every Linux desktop and on the fake one. The sockets'
+//! watcher (`crate::wake`) reads such a pipe itself, with SIGUSR1 (wake the program
+//! for its window) and SIGCHLD (the program ended) in it too; the full program takes
+//! SIGUSR1 and does nothing with it, so a signal meant for the watcher never ends it.
 //!
 //! Not a signalfd: that needs the signals blocked in every thread, and programs started
 //! with `std::process::Command` keep a blocked mask, so a helper stopped with SIGTERM
@@ -14,7 +17,7 @@ use std::time::Duration;
 use log::{info, warn};
 
 /// The signals that ask Prostir to quit.
-const QUIT_SIGNALS: [libc::c_int; 3] = [libc::SIGTERM, libc::SIGINT, libc::SIGHUP];
+pub const QUIT_SIGNALS: [libc::c_int; 3] = [libc::SIGTERM, libc::SIGINT, libc::SIGHUP];
 
 /// How long quitting may take once asked by a signal: stuck past it (in a dialog, say),
 /// the monitors are removed directly and the program leaves.
@@ -35,17 +38,20 @@ extern "C" fn on_signal(signal: libc::c_int) {
 }
 
 /// The signal's name, for the log.
-fn name(signal: u8) -> &'static str {
-    match libc::c_int::from(signal) {
+pub fn name(signal: libc::c_int) -> &'static str {
+    match signal {
         libc::SIGTERM => "SIGTERM",
         libc::SIGINT => "SIGINT",
         libc::SIGHUP => "SIGHUP",
+        libc::SIGUSR1 => "SIGUSR1",
+        libc::SIGCHLD => "SIGCHLD",
         _ => "a signal",
     }
 }
 
-/// The pipe, and the handler for the quit signals: the end to read them from.
-fn install() -> std::io::Result<OwnedFd> {
+/// The pipe, and the handler for `signals`: the end to read them from. Once per
+/// process.
+pub fn install(signals: &[libc::c_int]) -> std::io::Result<OwnedFd> {
     let mut fds = [0; 2];
     // SAFETY: pipe2 fills the two descriptors, owned right below.
     if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
@@ -62,13 +68,17 @@ fn install() -> std::io::Result<OwnedFd> {
         std::os::fd::IntoRawFd::into_raw_fd(write),
         Ordering::Relaxed,
     );
-    for signal in QUIT_SIGNALS {
+    for &signal in signals {
         // SAFETY: an all-zero sigaction is valid; the handler only does what a signal
         // handler may (see `on_signal`).
         let failed = unsafe {
             let mut action: libc::sigaction = std::mem::zeroed();
             action.sa_sigaction = on_signal as *const () as libc::sighandler_t;
             action.sa_flags = libc::SA_RESTART;
+            // A child stopped or continued (a test freezing it) is no news.
+            if signal == libc::SIGCHLD {
+                action.sa_flags |= libc::SA_NOCLDSTOP;
+            }
             libc::sigemptyset(&mut action.sa_mask);
             libc::sigaction(signal, &action, std::ptr::null_mut()) != 0
         };
@@ -79,14 +89,14 @@ fn install() -> std::io::Result<OwnedFd> {
     Ok(read)
 }
 
-/// Sleeps until a quit signal comes; its name (`None`: the pipe broke).
-fn wait_for_signal(pipe: &OwnedFd) -> Option<&'static str> {
+/// Sleeps until a signal comes; which one (`None`: the pipe broke).
+pub fn wait_for_signal(pipe: &OwnedFd) -> Option<libc::c_int> {
     let mut byte = 0u8;
     loop {
         // SAFETY: reads one byte into a byte.
         let n = unsafe { libc::read(pipe.as_raw_fd(), (&raw mut byte).cast(), 1) };
         match n {
-            1 => return Some(name(byte)),
+            1 => return Some(libc::c_int::from(byte)),
             n if n < 0
                 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted => {}
             _ => return None,
@@ -99,7 +109,7 @@ fn wait_for_signal(pipe: &OwnedFd) -> Option<&'static str> {
 /// within a few seconds, the program removes its monitors (what KWin would do itself,
 /// Hyprland not) and leaves.
 pub fn quit_on_signals(on_quit: impl FnOnce(&'static str) + Send + 'static) {
-    let pipe = match install() {
+    let pipe = match install(&[QUIT_SIGNALS.as_slice(), &[libc::SIGUSR1]].concat()) {
         Ok(pipe) => pipe,
         Err(e) => {
             warn!("cannot watch for signals: {e}");
@@ -109,9 +119,16 @@ pub fn quit_on_signals(on_quit: impl FnOnce(&'static str) + Send + 'static) {
     let spawned = std::thread::Builder::new()
         .name("signals".into())
         .spawn(move || {
-            let Some(signal) = wait_for_signal(&pipe) else {
-                warn!("reading signals failed: quit signals are ignored");
-                return;
+            let signal = loop {
+                match wait_for_signal(&pipe) {
+                    // For the sockets' watcher; nothing to do here.
+                    Some(libc::SIGUSR1) => continue,
+                    Some(signal) => break name(signal),
+                    None => {
+                        warn!("reading signals failed: quit signals are ignored");
+                        return;
+                    }
+                }
             };
             info!("{signal} received: quitting");
             on_quit(signal);
@@ -137,10 +154,10 @@ mod tests {
     /// say) with SIGTERM still stops it.
     #[test]
     fn a_signal_reaches_the_pipe_and_programs_keep_theirs() {
-        let pipe = install().unwrap();
+        let pipe = install(&QUIT_SIGNALS).unwrap();
         // SAFETY: raises a signal whose handler is installed just above.
         assert_eq!(unsafe { libc::raise(libc::SIGHUP) }, 0);
-        assert_eq!(wait_for_signal(&pipe), Some("SIGHUP"));
+        assert_eq!(wait_for_signal(&pipe), Some(libc::SIGHUP));
         let out = std::process::Command::new("sh")
             .args(["-c", "grep -E 'SigBlk|SigCgt' /proc/self/status"])
             .output()

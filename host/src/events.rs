@@ -41,8 +41,21 @@ pub enum Event {
     /// A request of the local API (`prostir ctl`, the settings window, D-Bus), and
     /// where its reply goes.
     Ctl(Request, Reply),
-    /// The PC began or stopped showing a pairing code.
+    /// The PC began or stopped showing a pairing code, or a headset began or stopped
+    /// waiting for its code to be typed in the settings window.
     Pairing,
+    /// A headset paired, named so: the pairing window closes.
+    Paired { name: String },
+    /// A pairing attempt failed: the codes did not match.
+    WrongCode,
+    /// A headset that is not one of this PC's asked for it (`crate::find`).
+    Asked(crate::find::Asker),
+    /// The notice of a new headset nearby: its button was pressed (`true`), or it is
+    /// gone.
+    Notice(bool),
+    /// The settings window came onto the session bus (`true`) or left it: while it is
+    /// there, the program stays.
+    Window(bool),
     /// A signal asked the program to quit.
     Quit,
 }

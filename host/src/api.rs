@@ -21,6 +21,8 @@ pub enum CtlReply {
     Done,
     /// The display made for it.
     Added(u32),
+    /// The pairing window opened, for so many seconds.
+    Pairing(u32),
     Failed(Failure),
 }
 
@@ -48,6 +50,7 @@ impl CtlReply {
         match self {
             Self::Done => {}
             Self::Added(id) => answer.id = Some(*id),
+            Self::Pairing(seconds) => answer.seconds_left = Some(*seconds),
             Self::Failed(f) => {
                 answer.error = Some(f.error);
                 answer.text = Some(f.text.clone());

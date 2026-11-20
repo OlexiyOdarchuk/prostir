@@ -141,11 +141,82 @@ impl Brain {
                 .push_back((Asked::Known(command), Some(reply)));
             return;
         }
+        if let Request::PairingCode { code } = request {
+            return self.code_typed(code, reply);
+        }
         let result = self.carry_out(request);
         if let Some(d) = self.displays.as_mut() {
             d.apply(&self.store.wanted());
         }
         self.answer(reply, result);
+    }
+
+    /// The code a headset shows, typed in the settings window: it goes to the
+    /// connection waiting for it, and the answer comes once that attempt ends.
+    fn code_typed(&mut self, code: String, reply: Reply) {
+        let digits = code
+            .chars()
+            .filter(char::is_ascii_digit)
+            .collect::<String>();
+        if digits.len() != 6 || code.chars().any(|c| !c.is_ascii_digit() && c != ' ') {
+            let text = t("Код: шість цифр", "The code: six digits");
+            return self.answer(reply, CtlReply::failed(ApiError::BadArgument, text));
+        }
+        if self.code_reply.is_some() || !pairing::type_code(digits) {
+            let text = t(
+                "Жоден шолом не чекає на код",
+                "No headset is waiting for a code",
+            );
+            return self.answer(reply, CtlReply::failed(ApiError::NotAllowed, text));
+        }
+        self.code_reply = Some(reply);
+    }
+
+    /// The attempt with the code the settings window typed ended (or its headset
+    /// went): its answer, now the state shows how it ended.
+    pub(crate) fn code_tried(&mut self) {
+        if let Some(reply) = self.code_reply.take() {
+            self.answer(reply, done());
+        }
+    }
+
+    /// Shows the notice of a new headset nearby; its button opens the pairing window
+    /// (`Event::Notice`). A thread waits for it, asleep in the kernel.
+    pub(crate) fn notice_new_headset(&mut self) {
+        let Some(mut notice) = crate::wake::new_headset_notice() else {
+            return;
+        };
+        info!("a new headset asked for this PC: telling the person at the PC");
+        let now = std::time::Instant::now();
+        self.door.notice_up(true, now);
+        let until = now + crate::door::NOTICE_TIME;
+        let events = self.events.clone();
+        let spawned = std::thread::Builder::new()
+            .name("notice".into())
+            .spawn(move || {
+                let mut pressed = false;
+                while let Some(left) = until.checked_duration_since(std::time::Instant::now()) {
+                    match platform::sockets::readable(&[notice.fd()], Some(left)) {
+                        Ok(ready) if ready[0] => match notice.check() {
+                            Some(p) => {
+                                pressed = p;
+                                break;
+                            }
+                            None => continue,
+                        },
+                        _ => break,
+                    }
+                }
+                drop(notice);
+                if pressed {
+                    events.send(crate::events::Event::Notice(true));
+                }
+                events.send(crate::events::Event::Notice(false));
+            });
+        if let Err(e) = spawned {
+            warn!("no notice of the new headset: {e}");
+            self.door.notice_up(false, now);
+        }
     }
 
     fn answer(&mut self, reply: Reply, result: CtlReply) {
@@ -277,12 +348,19 @@ impl Brain {
                 "Мікрофон шолома вмикають лише в шоломі",
                 "The headset microphone is switched in the headset only",
             )),
-            Request::PairNewHeadset | Request::StopPairing | Request::PairingCode { .. } => {
-                unsupported(t(
-                    "Новий шолом сполучається сам, коли просить про це",
-                    "A new headset pairs by itself when it asks to",
-                ))
+            Request::PairNewHeadset => {
+                info!("pairing a new headset: from the local API");
+                CtlReply::Pairing(
+                    self.door
+                        .open_pairing(std::time::Instant::now(), crate::door::pairing_time()),
+                )
             }
+            Request::StopPairing => {
+                self.door.stop_pairing();
+                done()
+            }
+            // Handled in `ctl`: answered once the attempt ends.
+            Request::PairingCode { .. } => unsupported(""),
             Request::SetScale { id: n, scale } => self.rescale(ScreenId::saved(n), scale),
             Request::Place { id: n, x, y } => match self.displays.as_mut() {
                 Some(d) => match d.move_to(ScreenId::saved(n), x, y) {
@@ -760,11 +838,12 @@ impl Brain {
                 mic,
                 mic_failure,
             },
-            pairing: pairing::code_shown().map(|code| api::Pairing {
-                pc_code: Some(code),
-                ..api::Pairing::default()
-            }),
-            nearby: Vec::new(),
+            pairing: self.door.pairing_state(
+                std::time::Instant::now(),
+                pairing::code_shown(),
+                pairing::code_for(),
+            ),
+            nearby: self.door.nearby(),
             counting: wanted.count,
             problems,
         }
@@ -904,10 +983,29 @@ pub fn open_settings() -> Result<(), Failure> {
     Ok(())
 }
 
+/// Wakes Prostir for the settings window (`prostir open`, Prostir not on the bus): the
+/// sockets' watcher starts it for the window (SIGUSR1); else systemd starts it, when
+/// its socket waits for the headset; else it starts anew.
+pub fn wake_for_window() -> std::io::Result<crate::ctl::Woken> {
+    use crate::ctl::Woken;
+    if let Some(pid) = platform::watcher() {
+        // SAFETY: a signal to a process of this user, which takes it.
+        if unsafe { libc::kill(pid as libc::pid_t, libc::SIGUSR1) } == 0 {
+            return Ok(Woken::Asleep { opens_window: true });
+        }
+    }
+    if platform::autostart::start_service() {
+        return Ok(Woken::Asleep {
+            opens_window: false,
+        });
+    }
+    start_detached().map(Woken::Started)
+}
+
 /// Starts `prostir serve --open-settings` on its own, apart from this terminal
 /// (`prostir open`). What it says goes where this program's errors go (the journal,
 /// when the desktop started it).
-pub fn start_detached() -> std::io::Result<std::process::Child> {
+fn start_detached() -> std::io::Result<std::process::Child> {
     use std::os::unix::process::CommandExt;
     // A wrapper (Nix) names the program to start; else this very file.
     let exe = match std::env::var_os("PROSTIR_EXE").filter(|e| !e.is_empty()) {

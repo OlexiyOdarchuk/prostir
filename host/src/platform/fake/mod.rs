@@ -64,7 +64,7 @@ pub fn config_home() -> Option<PathBuf> {
 
 /// One fake PC per settings directory; refuses to start unless asked for and given
 /// one, so neither a test nor a fake build started by mistake touches the real settings.
-pub fn single_instance() -> Result<std::fs::File> {
+pub fn single_instance(role: &str) -> Result<std::fs::File> {
     anyhow::ensure!(
         asked_for(),
         "this build has a fake desktop for tests; it runs only with PROSTIR_FAKE_DESKTOP=1"
@@ -73,21 +73,19 @@ pub fn single_instance() -> Result<std::fs::File> {
         "the fake desktop needs XDG_CONFIG_HOME set to a directory of its own (a test's)",
     )?;
     std::fs::create_dir_all(&dir)?;
-    let path = dir.join("prostir-fake.lock");
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&path)
-        .with_context(|| format!("cannot open {}", path.display()))?;
-    use std::os::fd::AsRawFd;
-    // SAFETY: flock on a file descriptor this function owns.
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        anyhow::bail!("a fake Prostir already runs with {}", dir.display());
-    }
+    let file = super::lock::take(&dir.join("prostir-fake.lock"), role)
+        .with_context(|| format!("a fake Prostir already runs with {}", dir.display()))?;
     log::warn!("fake desktop (a test build): settings in {}", dir.display());
     Ok(file)
 }
+
+/// The fake sockets' watcher with these settings, if one runs: its process id.
+pub fn watcher() -> Option<u32> {
+    super::lock::holder(&config_home()?.join("prostir-fake.lock"), "watcher")
+}
+
+/// The fake desktop needs nothing of a session.
+pub fn import_session_environment() {}
 
 /// Nothing outlives a fake run.
 pub fn clean_up_after_crash() {}
@@ -646,12 +644,22 @@ pub mod autostart {
     }
 
     pub fn set(_on: bool) {}
+
+    pub fn quit_until_login() {}
+
+    pub fn start_service() -> bool {
+        false
+    }
+
+    pub fn socket_waits() -> bool {
+        false
+    }
 }
 
 /// A tray without an icon: a test "clicks" its items by writing their names, one a
-/// line, to `$XDG_RUNTIME_DIR/fake-tray` (`forget`, `recenter`, `settings`, `quit`,
-/// `sharp on`, `sharp off`, `quality 15`, `quality 50`), which is read and removed
-/// once written.
+/// line, to `$XDG_RUNTIME_DIR/fake-tray` (`forget`, `recenter`, `settings`, `pair`,
+/// `pair stop`, `quit`, `sharp on`, `sharp off`, `quality 15`, `quality 50`), which is
+/// read and removed once written.
 pub mod tray {
     use crate::events::EventSink;
     use crate::platform::{TrayCommand, TrayStatus};
@@ -668,6 +676,8 @@ pub mod tray {
                         prostir_proto::request::Command::Recenter,
                     )),
                     "settings" => TrayCommand::ShowSettings,
+                    "pair" => TrayCommand::PairNewHeadset,
+                    "pair stop" => TrayCommand::StopPairing,
                     "quit" => TrayCommand::Quit,
                     "sharp on" => TrayCommand::SetSharp(true),
                     "sharp off" => TrayCommand::SetSharp(false),
@@ -729,5 +739,69 @@ pub mod dialogs {
     pub fn notify_and_wait(title: &str, body: &str) -> bool {
         notify(title, body);
         false
+    }
+
+    /// A notification with a button: in the log, and a test "presses" the button by
+    /// writing `click` to `$XDG_RUNTIME_DIR/fake-notice`, or closes it with `close`.
+    pub struct Notice {
+        read: std::fs::File,
+    }
+
+    pub fn notice(title: &str, body: &str, button: &str, _plain: &str) -> Option<Notice> {
+        use std::os::fd::FromRawFd;
+        let mut fds = [0; 2];
+        // SAFETY: pipe2 fills the two descriptors, owned right below.
+        if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+            return None;
+        }
+        // SAFETY: new descriptors nothing else owns.
+        let (read, write) = unsafe {
+            (
+                std::fs::File::from_raw_fd(fds[0]),
+                std::fs::File::from_raw_fd(fds[1]),
+            )
+        };
+        let write = std::sync::Mutex::new(Some(write));
+        let watched = super::watch_file("fake-notice", move |text| {
+            use std::io::Write;
+            let mut write = write.lock().unwrap();
+            match text.trim() {
+                "click" => {
+                    if let Some(w) = write.as_mut() {
+                        let _ = w.write_all(b"pair\n");
+                    }
+                }
+                "close" => {}
+                other => {
+                    log::warn!("fake notice: no {other:?}");
+                    return true;
+                }
+            }
+            // The notice is done: its end closes.
+            *write = None;
+            false
+        });
+        if !watched {
+            return None;
+        }
+        log::info!("notification: {title}: {body} [{button}]");
+        Some(Notice { read })
+    }
+
+    impl Notice {
+        pub fn fd(&self) -> std::os::fd::RawFd {
+            use std::os::fd::AsRawFd;
+            self.read.as_raw_fd()
+        }
+
+        pub fn check(&mut self) -> Option<bool> {
+            use std::io::Read;
+            let mut buf = [0u8; 16];
+            match self.read.read(&mut buf) {
+                Ok(n) if n > 0 => Some(buf[..n].starts_with(b"pair")),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => None,
+                _ => Some(false),
+            }
+        }
     }
 }

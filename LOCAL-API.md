@@ -36,6 +36,14 @@ object a line; nothing else of this document changes.
 Prostir is not D-Bus activatable: when it is not running, calls fail with
 `org.freedesktop.DBus.Error.ServiceUnknown` at once. `prostir open` starts it.
 
+Prostir is on the bus only while something needs it. Asleep, nothing of it runs but
+what holds its sockets: systemd's `prostir.socket`, or without systemd its small
+sockets' watcher (`prostir serve` itself), which is not on the bus. A headset that
+comes (connects, or asks for the PC), `prostir open`, the tray's notice of a new
+headset start it; it leaves again 10 s after nothing needs it: no headset connected
+and no monitors waiting for one, no settings window on the bus, no pairing window
+open. A client follows it coming and going with `NameOwnerChanged` (below).
+
 If the session bus goes away while Prostir runs (dbus-daemon restarted), Prostir
 takes its name again once the bus is back, trying after 1 s, then after pauses that
 double up to a minute; meanwhile signals are not sent. Prostir connects the bus's unix
@@ -60,7 +68,7 @@ so) and does not look for one later.
 | `RemoveMonitor` | `u id` | | |
 | `ShowPhysical` | `u id, b shown` | | a display of the PC in the headset or not |
 | `SetQuality` | `u mbit` | | 5 to 100 |
-| `PairNewHeadset` | | `u seconds_left` | (from step 6.8) |
+| `PairNewHeadset` | | `u seconds_left` | opens the pairing window |
 | `StopPairing`, `ShowSettings`, `Quit` | | | |
 | `ForgetHeadset` | `s fingerprint_or_name` | | |
 
@@ -194,7 +202,10 @@ exist, monitor requests change the set kept for the next headset (its monitors s
 | `set_codec` | `codec` (`h264`, `h265`, `auto`), `cpu` (bool, default false) | `auto` is the same as `h265` (H.265 where the PC and every headset can, else H.264), and the state shows it as `h265` |
 | `sound_to_headset` | `on` | the PC's sound in the headset, or on the PC |
 | `set_counting` | `on` | count this PC among users |
-| `autostart` | `on` | start with the session; `Unsupported` where it is not set from here (Hyprland) |
+| `autostart` | `on` | start with the session: with systemd, enables `prostir.socket` (and removes an autostart entry of 0.1), else an XDG autostart entry (`prostir serve`); `Unsupported` where it is not set from here (Hyprland, whose config starts it) |
+| `pair_new_headset` | | opens the pairing window for 3 minutes (again from now if it is open), answers `seconds_left`: while it is open the PC answers every headset that asks for it, and the program stays running. It closes at its time, with `stop_pairing`, or once a headset pairs. A headset can pair over a connection (a typed address, USB) whether it is open or not; its code protects that |
+| `stop_pairing` | | closes it |
+| `pairing_code` | `code` (six digits, spaces allowed) | the code a headset shows, typed in the settings window: while the window is on the bus, a headset that shows its code waits for it here (`pairing.code_for`) instead of a dialog. Answered once that attempt ended, with the state showing how (`pairing.last`, or the headset among `headsets`); `NotAllowed` when no headset waits for a code, `BadArgument` for anything but six digits |
 | `window_look` | `theme` (`system`, `light`, `dark`), `palette` (a word: `ink`, `graphite`), `language` (a code or `null`) | the settings window's look, kept in `settings.txt` |
 | `forget_headset` | `headset`: its `key`, its whole key (64 hex digits) or its name | its session ends |
 | `forget_all` | | every paired headset |
@@ -208,9 +219,6 @@ brings them:
 
 | `request` | Arguments | |
 |---|---|---|
-| `pair_new_headset` | | opens pairing for a while, answers `seconds_left` (step 6.8; until then a new headset pairs whenever it asks) |
-| `stop_pairing` | | (step 6.8) |
-| `pairing_code` | `code` | the code a headset shows, typed in the window (step 6.8) |
 | `volume` | `level` | the headset's volume from the PC (step 6.6, sound) |
 | `set_mic` | `on` | always: the headset microphone's switch is the headset user's, changed only in the headset; the state shows it (`session.mic_on`) |
 
@@ -317,8 +325,8 @@ change older clients would misread.
 | `limits` | for the main headset while one is connected, else what any headset gets: `sizes` to offer `[w, h]`, `scales` (percent), `displays_max` (virtual monitors), `physical_max`, `streams_max`, `min` and `max` size |
 | `encoding` | as chosen: `bitrate` (Mbit/s per monitor), `sharp`, `codec` (`h264`, `h265`, `av1`), `cpu`; `using`: what it encodes with now, while there are monitors; `outputs`: how each display that streams encodes (each has an encoder of its own, picked for where its frames are): `display`, `encoder` (`VA-API`, `NVENC`, `x264`), `codec`, `hardware`, `copies` (its frames go through the CPU on their way to the encoder), `note` (why it is not on the best encoder this PC has for it, for example a session limit reached or an encoder that did not start; `null` when it is) |
 | `sound` | `to_headset`; `volume`: the main headset's volume (`level` 0 to 100, `muted`), while the PC's volume device follows it (one volume for the PC's slider and the headset's buttons), else `null`; `mic_on` (the switch of the headset whose microphone the PC takes, read only: it is changed in the headset); `mic` (`off`, `ready`, `failed`: the PC's end, the virtual microphone programs record from) and `mic_failure` |
-| `pairing` | while the PC is pairing: `pc_code` (the code to type in the headset, while the PC shows one), and from step 6.8 `seconds_left`, `seconds_total` (`0`: pairing has no time limit, as now, where a new headset pairs whenever it asks), `code_for` (a headset waiting for its code to be typed here), `last` (`{"paired": {"name": …}}`, `"wrong"`; anything else reads as other) |
-| `nearby` | headsets that asked for this PC recently, by name (from step 6.8) |
+| `pairing` | while the pairing window is open, the PC shows a code, or a headset waits for its code: `seconds_left`, `seconds_total` (how long the pairing window was opened for; `0`: no pairing window, only a code), `pc_code` (the code to type in the headset, while the PC shows one), `code_for` (a headset waiting for its code to be typed here, by name; only while the settings window is on the bus), `last` (how the last attempt since the window opened ended: `{"paired": {"name": …}}`, `"wrong"`; anything else reads as other) |
+| `nearby` | headsets that are not this PC's and asked for it in the last minute, by the name they gave (a headset gives one while it looks for a PC to pair with), else by address, the latest last |
 | `counting` | this PC counts among users |
 | `problems` | what is wrong now: `code` (an error's name) and `text` in the PC's language |
 
@@ -377,22 +385,30 @@ time Prostir comes back on the bus.
 | 64 | wrong arguments |
 
 `ctl status` when Prostir is not running does not start it: it says `Not running`
-(`{"error": "NotRunning", "text": …, "running": false}`) and exits with 2.
+(`{"error": "NotRunning", "text": …, "running": false}`), or `Waiting for the
+headset (asleep)` (`"asleep": true` too) when the sockets' watcher or systemd's socket
+waits for a headset, and exits with 2.
 
 ## `prostir open` and the settings window
 
 `prostir` without a command is `prostir serve`, as in 0.1 (`exec-once = prostir`, a
-terminal). The menu entry runs `prostir open`. When Prostir runs, it asks it for the
-settings window (`ShowSettings`). When it does not, it starts `prostir serve
---open-settings` on its own (its log goes where `open`'s errors go: the journal, when
-the desktop started it), which opens the window once it is on the bus; `open` waits
-for that as long as the new Prostir lives, and says so when it ends first. Prostir
-takes its name on the bus before it starts GStreamer, so this is quick. Prostir starts `prostir-settings` from next to
-its own program, else from `PATH`; without it, Prostir still runs and `open` says the
-window is not installed. The tray has the same item ("Settings…").
+terminal): the sockets' watcher, which sleeps until a headset comes and then starts the
+full program (`prostir serve --stay` runs the full program all along instead, with its
+sockets opened itself). The menu entry runs `prostir open`. When Prostir runs, it asks
+it for the settings window (`ShowSettings`). When it sleeps, it wakes it: the watcher
+(SIGUSR1), which starts it with the window, or systemd (`systemctl --user start
+prostir.service`), and then asks for the window once it is on the bus, 30 s at most.
+When nothing runs, it starts `prostir serve --open-settings` on its own (its log goes
+where `open`'s errors go: the journal, when the desktop started it), which opens the
+window once it is on the bus; `open` waits for that as long as the new Prostir lives,
+and says so when it ends first. Prostir takes its name on the bus before it starts
+GStreamer, so this is quick. Prostir starts `prostir-settings` from next to its own
+program, else from `PATH`; without it, Prostir still runs and `open` says the window
+is not installed. The tray has the same item ("Settings…").
 
 The settings window owns `io.github.OlexiyOdarchuk.Prostir.Settings` on the session
 bus (one window per user: a second start calls `Present` on
-`io.github.OlexiyOdarchuk.Prostir.Settings1` of the first and quits). From step 6.8,
-which lets Prostir quit when nobody needs it, Prostir stays running while that name is
-on the bus; until then it never quits by itself. `ctl watch` does not keep it running.
+`io.github.OlexiyOdarchuk.Prostir.Settings1` of the first and quits). Prostir stays
+running while that name is on the bus, and a headset showing its pairing code then
+waits for the code to be typed in the window (`pairing.code_for`, `pairing_code`)
+instead of a dialog. `ctl watch` does not keep it running.

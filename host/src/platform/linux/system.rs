@@ -43,25 +43,63 @@ pub fn config_home() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
 }
 
-/// One Prostir per desktop session: a second one would fight over the monitors (and
-/// on Hyprland, its start-up clean-up would remove the first one's). The lock file is
-/// held for the life of the process.
-pub fn single_instance() -> Result<std::fs::File> {
-    let dir = runtime_dir();
-    let display = std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-0".into());
-    let path = dir.join(format!("prostir-{display}.lock"));
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&path)
-        .with_context(|| format!("cannot open {}", path.display()))?;
-    use std::os::fd::AsRawFd;
-    // SAFETY: flock on a file descriptor this function owns.
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        anyhow::bail!("Prostir is already running on this desktop");
+/// One Prostir per user: a second one would fight over the monitors (and on
+/// Hyprland, its start-up clean-up would remove the first one's), and the port is one
+/// per PC anyway. The lock file is held for the life of the process and says who
+/// holds it (`role`: `watcher` or `serve`) and its process id.
+pub fn single_instance(role: &str) -> Result<std::fs::File> {
+    crate::platform::lock::take(&runtime_dir().join("prostir.lock"), role)
+        .context("Prostir is already running for this user")
+}
+
+/// What says which desktop the program runs on, from the user's systemd when it
+/// started Prostir before the desktop told it (a headset that asked at login): the
+/// variables the service lacks. Without them, the log says how to pass them.
+///
+/// Called while no other thread reads the environment (the light phase, before the
+/// full program starts any).
+pub fn import_session_environment() {
+    const NEEDED: [&str; 5] = [
+        "WAYLAND_DISPLAY",
+        "XDG_CURRENT_DESKTOP",
+        "HYPRLAND_INSTANCE_SIGNATURE",
+        "DISPLAY",
+        "XDG_SESSION_TYPE",
+    ];
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        return;
     }
-    Ok(file)
+    let shown = run(
+        std::process::Command::new("systemctl").args(["--user", "show-environment"]),
+        std::time::Duration::from_secs(5),
+    );
+    let text = shown
+        .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+        .unwrap_or_default();
+    for line in text.lines() {
+        if let Some((key, value)) = line.split_once('=')
+            && NEEDED.contains(&key)
+            && std::env::var_os(key).is_none()
+        {
+            log::info!("from the user's systemd: {key}");
+            // SAFETY: no other thread reads or writes the environment now (see above;
+            // `run`'s readers only read pipes).
+            unsafe { std::env::set_var(key, value) };
+        }
+    }
+    if std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        log::warn!(
+            "no desktop for Prostir: the user's systemd has no WAYLAND_DISPLAY. A desktop \
+             that does not pass it (Hyprland) needs this in its config: \
+             dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP \
+             HYPRLAND_INSTANCE_SIGNATURE"
+        );
+    }
+}
+
+/// The sockets' watcher of this user, if one runs: its process id.
+pub fn watcher() -> Option<u32> {
+    crate::platform::lock::holder(&runtime_dir().join("prostir.lock"), "watcher")
 }
 
 /// Removes what a run that crashed left behind: Hyprland's monitors (without the

@@ -4,9 +4,11 @@ mod api;
 mod brain;
 mod ctl;
 mod displays;
+mod door;
 mod encoder;
 mod errors;
 mod events;
+mod find;
 mod i18n;
 mod layout;
 mod listen;
@@ -22,10 +24,10 @@ mod screen;
 mod session;
 mod store;
 mod usage;
+mod wake;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io::ErrorKind;
-use std::net::{Ipv4Addr, TcpListener, UdpSocket};
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
@@ -99,12 +101,28 @@ struct Args {
     software: bool,
     #[arg(long, default_value_t = prostir_proto::TCP_PORT)]
     port: u16,
+    /// The UDP port headsets ask for this PC on (0: the system picks one, for tests).
+    #[arg(long, default_value_t = prostir_proto::DISCOVERY_PORT, hide = true)]
+    discovery_port: u16,
     /// Keep the virtual monitors this many seconds after the headset disconnects.
     #[arg(long, default_value_t = 30)]
     linger: u64,
-    /// Do not announce the host on the local network.
+    /// Do not answer headsets that ask for this PC on the network, and send no beacon.
     #[arg(long)]
     no_discovery: bool,
+    /// Send no beacon (headsets that do not ask yet listen for it), but answer.
+    #[arg(long, hide = true)]
+    no_beacon: bool,
+    /// Stay running while no headset needs Prostir, with its sockets opened here,
+    /// instead of sleeping in a small watcher until a headset comes.
+    #[arg(long)]
+    stay: bool,
+    /// Started by the sockets' watcher, with its sockets (it decided to start).
+    #[arg(long, hide = true)]
+    woken: bool,
+    /// Open the pairing window once ready (the button of the notice of a new headset).
+    #[arg(long, hide = true)]
+    pair: bool,
     /// Do not run `adb reverse` for USB connections.
     #[arg(long)]
     no_adb: bool,
@@ -161,6 +179,7 @@ impl Control {
         store: &Store,
         headset: &TrayLine,
         others: usize,
+        pairing: bool,
     ) {
         let status = TrayStatus {
             no_limits: headset.no_limits,
@@ -171,6 +190,7 @@ impl Control {
             mirror: displays.is_some_and(Displays::mirror_active),
             paused: displays.is_some_and(|d| !d.streaming()),
             encoding: displays.and_then(Displays::encoding_line),
+            pairing,
         };
         if self.shown.as_ref() != Some(&status) {
             tray::set_status(self.tray.as_ref(), status.clone());
@@ -243,12 +263,23 @@ struct Brain {
     answers: api::Answers,
     /// Whether each headset is worn, as last told on the local API.
     worn_told: BTreeMap<[u8; 32], bool>,
+    /// The pairing window, the headsets nearby, the settings window, and when the
+    /// program leaves (see `door`).
+    door: door::Door,
+    /// The connections being set up, and accepting them.
+    listening: listen::Listening,
+    /// The settings window typed a code a headset shows: answered once the pairing
+    /// attempt ends.
+    code_reply: Option<api::Reply>,
+    /// The person asked Prostir to quit (the tray, the local API), not a signal.
+    quit_asked: bool,
 }
 
 impl Brain {
-    /// Waits for events and deadlines until asked to quit, then ends every session
-    /// with a goodbye and puts everything back.
-    fn run(mut self, events: &Receiver<Event>) {
+    /// Waits for events and deadlines until asked to quit (or, with sockets from
+    /// outside, until nothing needs it), then ends every session with a goodbye and
+    /// puts everything back. Whether the person asked Prostir to quit.
+    fn run(mut self, events: &Receiver<Event>) -> bool {
         loop {
             let next = brain::earliest([
                 self.phase.due(),
@@ -259,6 +290,7 @@ impl Brain {
                     .as_ref()
                     .filter(|_| self.sessions.is_empty())
                     .and_then(Displays::place_due),
+                self.door.due(),
             ]);
             let first = match next {
                 // Nothing to do until something happens: no wakeups at all.
@@ -283,8 +315,44 @@ impl Brain {
                 break;
             }
             self.pass();
+            if self.leaves_now() {
+                // Nothing may slip in as it leaves: a connection accepted meanwhile,
+                // or an event already sent, keeps it.
+                self.listening.stop();
+                let event = events.try_recv();
+                if event.is_err() && !self.listening.busy() {
+                    info!("nothing needs Prostir now: leaving until a headset comes");
+                    break;
+                }
+                if let Err(e) = self.listening.resume() {
+                    error!("cannot accept connections again: {e}");
+                    self.quit = true;
+                }
+                if let Ok(event) = event {
+                    self.handle(event);
+                }
+                if self.quit {
+                    break;
+                }
+                self.pass();
+            }
         }
+        let asked = self.quit_asked;
         self.shut_down(events);
+        asked
+    }
+
+    /// Whether the program leaves now, its sockets having come from outside (see
+    /// `door`).
+    fn leaves_now(&mut self) -> bool {
+        let now = Instant::now();
+        let busy = !self.sessions.is_empty()
+            || !matches!(self.phase, Phase::Idle)
+            || !self.closing.is_empty()
+            || self.listening.busy()
+            || self.code_reply.is_some()
+            || pairing::code_shown().is_some();
+        self.door.leave_at(now, busy).is_some_and(|at| now >= at)
     }
 
     /// One event.
@@ -339,8 +407,39 @@ impl Brain {
             Event::Sound(sound) => self.sound(sound),
             Event::Tray(command) => self.tray(command),
             Event::Ctl(request, reply) => self.ctl(request, reply),
-            // The next pass shows it.
-            Event::Pairing => {}
+            Event::Pairing => {
+                // The headset whose code the settings window typed went: its answer.
+                if pairing::code_for().is_none() {
+                    self.code_tried();
+                }
+            }
+            Event::Paired { name } => {
+                info!("a headset paired: the pairing window closes");
+                self.door.paired(name);
+                self.code_tried();
+            }
+            Event::WrongCode => {
+                self.door.wrong_code();
+                self.code_tried();
+            }
+            Event::Asked(asker) => {
+                if self.door.asked(&asker, Instant::now()) {
+                    self.notice_new_headset();
+                }
+            }
+            Event::Notice(true) => {
+                info!("pairing a new headset: from the notice");
+                self.door.open_pairing(Instant::now(), door::pairing_time());
+            }
+            Event::Notice(false) => self.door.notice_up(false, Instant::now()),
+            Event::Window(on) => {
+                info!(
+                    "the settings window {} the session bus",
+                    if on { "is on" } else { "left" }
+                );
+                self.door.window(on);
+                pairing::window_types_codes(on);
+            }
             Event::Quit => self.quit = true,
         }
     }
@@ -575,8 +674,9 @@ impl Brain {
             ..line(self.roles.lead)
         };
         let others = self.sessions.len().saturating_sub(1);
+        let pairing = self.door.pairing_open();
         self.control
-            .show(self.displays.as_ref(), &self.store, &lead, others);
+            .show(self.displays.as_ref(), &self.store, &lead, others, pairing);
     }
 
     /// The session commands for the headset go to: the main one, else the first.
@@ -734,7 +834,15 @@ impl Brain {
                     || Ok(()),
                 );
             }
-            TrayCommand::Quit => self.quit = true,
+            TrayCommand::PairNewHeadset => {
+                info!("pairing a new headset: from the tray");
+                self.door.open_pairing(Instant::now(), door::pairing_time());
+            }
+            TrayCommand::StopPairing => self.door.stop_pairing(),
+            TrayCommand::Quit => {
+                self.quit = true;
+                self.quit_asked = true;
+            }
         }
         if let Some(d) = self.displays.as_mut() {
             d.apply(&self.store.wanted());
@@ -755,6 +863,7 @@ impl Brain {
             info!("the headset did not come back: removing virtual monitors");
             self.drop_displays();
         }
+        self.door.expire(now);
         if self.sessions.is_empty() {
             if let Some(d) = self.displays.as_mut() {
                 d.place();
@@ -898,27 +1007,6 @@ fn turn_away(mut conn: pairing::Connection, text: String) {
     }
 }
 
-fn spawn_discovery(port: u16) -> Result<()> {
-    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
-    socket.set_broadcast(true)?;
-    let beacon = prostir_proto::encode_beacon(port, &platform::hostname());
-    std::thread::Builder::new()
-        .name("discovery".into())
-        .spawn(move || {
-            loop {
-                // 255.255.255.255 only leaves through the default route, so also send to the
-                // broadcast address of every interface (Wi-Fi, Ethernet, hotspot).
-                let mut targets = platform::broadcast_addresses();
-                targets.push(Ipv4Addr::BROADCAST);
-                for ip in targets {
-                    let _ = socket.send_to(&beacon, (ip, prostir_proto::DISCOVERY_PORT));
-                }
-                std::thread::sleep(Duration::from_secs(1));
-            }
-        })?;
-    Ok(())
-}
-
 fn create_displays(set_primary: bool, store: &mut Store, events: &EventSink) -> Result<Displays> {
     let wanted = store.wanted();
     let (backend, codec) = encoder::pick(wanted.codec, wanted.software)?;
@@ -941,9 +1029,9 @@ fn main() -> Result<()> {
     let quiet = || {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     };
-    match cli.command {
-        None => serve(cli.serve),
-        Some(Sub::Serve(args)) => serve(args),
+    let code = match cli.command {
+        None => serve(cli.serve)?,
+        Some(Sub::Serve(args)) => serve(args)?,
         Some(Sub::Ctl { args }) => {
             quiet();
             let client = platform::local_api::Client::connect(ctl::WAIT);
@@ -953,25 +1041,115 @@ fn main() -> Result<()> {
                 out: &mut out,
                 err: &mut err,
             };
-            std::process::exit(ctl::run(&args, client.map_err(Clone::clone), &mut io));
+            ctl::run(&args, client.map_err(Clone::clone), &mut io)
         }
         Some(Sub::Open) => {
             quiet();
-            let code = match platform::local_api::Client::connect(ctl::WAIT) {
-                Ok(client) => ctl::open(&client, &local::start_detached),
+            match platform::local_api::Client::connect(ctl::WAIT) {
+                Ok(client) => ctl::open(&client, &local::wake_for_window),
                 Err(e) => {
                     eprintln!("prostir open: no session bus ({e:?})");
                     ctl::NOT_RUNNING
                 }
-            };
-            std::process::exit(code);
+            }
+        }
+    };
+    std::process::exit(code);
+}
+
+/// Where the program's sockets came from, which says how it ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    /// Opened here (`--stay`): it runs until asked to quit.
+    Own,
+    /// From the sockets' watcher, its parent: it leaves when nothing needs it, and
+    /// tells the watcher when the person asked Prostir to quit.
+    Watcher,
+    /// From systemd (`prostir.socket`): it leaves when nothing needs it, and stops the
+    /// socket when the person asked Prostir to quit.
+    Systemd,
+}
+
+/// `prostir serve`: waits for the headset and serves it. Its exit code.
+fn serve(args: Args) -> Result<i32> {
+    // Before any thread starts: it clears the variables that passed them.
+    let passed = platform::sockets::take()?;
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    let discovery = (!args.no_discovery).then_some(args.discovery_port);
+    match passed {
+        Some(mut sockets) => {
+            if args.no_discovery {
+                sockets.udp = None;
+            }
+            if args.woken {
+                return full(args, sockets, Origin::Watcher, None);
+            }
+            // systemd started it for what came: sorted first, light.
+            match wake::sort(&sockets)? {
+                Some(why) => {
+                    platform::import_session_environment();
+                    full(args, sockets, Origin::Systemd, Some(why))
+                }
+                None => {
+                    info!("nothing for Prostir to do: back to sleep");
+                    Ok(0)
+                }
+            }
+        }
+        None if args.stay => {
+            let instance = platform::single_instance("serve")?;
+            let sockets = open_sockets(&args, discovery)?;
+            full_with(args, sockets, Origin::Own, None, Some(instance))
+        }
+        None => {
+            let _instance = platform::single_instance("watcher")?;
+            let sockets = open_sockets(&args, discovery)?;
+            if !args.no_adb {
+                platform::keep_adb_reverse(sockets.port());
+            }
+            wake::watch(sockets, wake::Start::this_program()?, args.open_settings)
         }
     }
 }
 
-/// `prostir serve`: waits for the headset and serves it until asked to quit.
-fn serve(args: Args) -> Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+/// Opens the sockets here; when systemd's socket holds the port, says so.
+fn open_sockets(args: &Args, discovery: Option<u16>) -> Result<platform::sockets::Sockets> {
+    platform::sockets::open(args.port, discovery).map_err(|e| {
+        if platform::autostart::socket_waits() {
+            e.context(
+                "Prostir already waits for the headset through systemd (prostir.socket): \
+                 `prostir open` opens it, `systemctl --user stop prostir.socket` stops it",
+            )
+        } else {
+            e
+        }
+    })
+}
+
+/// The full program, with sockets from outside.
+fn full(
+    args: Args,
+    sockets: platform::sockets::Sockets,
+    origin: Origin,
+    why: Option<wake::Wake>,
+) -> Result<i32> {
+    // Under the watcher, the watcher holds the one instance.
+    let instance = match origin {
+        Origin::Watcher => None,
+        _ => Some(platform::single_instance("serve")?),
+    };
+    full_with(args, sockets, origin, why, instance)
+}
+
+/// The full program: waits for the headset and serves it until asked to quit, or
+/// (with sockets from outside) until nothing needs it. Its exit code.
+fn full_with(
+    args: Args,
+    sockets: platform::sockets::Sockets,
+    origin: Origin,
+    why: Option<wake::Wake>,
+    _instance: Option<std::fs::File>,
+) -> Result<i32> {
     let (events, received) = events::channel();
     // A signal from here on quits the usual way, putting everything back.
     {
@@ -980,7 +1158,9 @@ fn serve(args: Args) -> Result<()> {
             events.send(Event::Quit);
         });
     }
-    let _instance = platform::single_instance()?;
+    if let Some(why) = why {
+        info!("started: {why:?}");
+    }
     // Whether the PC can share its volume, found out meanwhile.
     platform::audio::prepare();
     // The command line holds for this run only.
@@ -1001,27 +1181,36 @@ fn serve(args: Args) -> Result<()> {
     // Monitors from a run that crashed: without the headset nobody sees their windows.
     platform::clean_up_after_crash();
 
-    let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, args.port))
-        .with_context(|| format!("cannot listen on port {}", args.port))?;
-    // The one listened on: with `--port 0` the system picks a free one (tests).
-    let port = listener.local_addr()?.port();
+    let port = sockets.port();
     info!(
         "Prostir {} waiting for the headset on port {port}",
         prostir_proto::app_version(env!("CARGO_PKG_VERSION")),
     );
-    if !args.no_discovery {
-        spawn_discovery(port)?;
-    }
-    if !args.no_adb {
+    // Under the watcher, the watcher keeps `adb reverse` (it runs all along).
+    if !args.no_adb && origin != Origin::Watcher {
         platform::keep_adb_reverse(port);
     }
 
     let security = Arc::new(pairing::Security::load()?);
+    let pairing_open = find::PairingOpen::default();
+    if let Some(udp) = sockets.udp {
+        let responder = find::Responder::new(security.identity.public, port, platform::hostname());
+        find::spawn(
+            udp,
+            responder,
+            security.clone(),
+            pairing_open.clone(),
+            events.clone(),
+        )?;
+        if !args.no_beacon {
+            find::spawn_beacon(port)?;
+        }
+    }
     let tray = tray::spawn(events.clone());
     // The local API: requests come in as events, what the control loop says goes out.
     let (outlet, notes) = api::channel();
     pairing::tell_about_codes(events.clone());
-    listen::spawn(listener, security.clone(), tray.clone(), events.clone())?;
+    let listening = listen::spawn(sockets.tcp, security.clone(), tray.clone(), events.clone())?;
     let mut control = Control {
         tray,
         shown: None,
@@ -1029,7 +1218,13 @@ fn serve(args: Args) -> Result<()> {
         shown_battery: None,
         for_headset: VecDeque::new(),
     };
-    control.show(None, &store, &TrayLine::default(), 0);
+    control.show(None, &store, &TrayLine::default(), 0, false);
+    let now = Instant::now();
+    let mut door = door::Door::new(pairing_open, origin != Origin::Own, now);
+    if args.pair || why == Some(wake::Wake::Pair) {
+        info!("pairing a new headset: from the notice");
+        door.open_pairing(now, door::pairing_time());
+    }
     let mut brain = Brain {
         linger: Duration::from_secs(args.linger),
         set_primary: !args.keep_primary,
@@ -1051,7 +1246,12 @@ fn serve(args: Args) -> Result<()> {
         revision: 0,
         answers: api::Answers::default(),
         worn_told: BTreeMap::new(),
+        door,
+        listening,
+        code_reply: None,
+        quit_asked: false,
     };
+
     // The local API has a state to give from the moment it is on the bus.
     brain.publish_api();
     let api = platform::local_api::serve(brain.events.clone(), brain.api.clone(), notes);
@@ -1065,17 +1265,26 @@ fn serve(args: Args) -> Result<()> {
     {
         warn!("{e}");
     }
-    brain.run(&received);
+    let quit_asked = brain.run(&received);
     if let Some(api) = api {
         api.finish();
     }
+    let code = match origin {
+        Origin::Watcher if quit_asked => wake::QUIT_ALL,
+        Origin::Systemd if quit_asked => {
+            // Asked to quit: nothing waits for the headset until the next login.
+            platform::autostart::quit_until_login();
+            0
+        }
+        _ => 0,
+    };
     // A probe of the encoders still under way (quitting right after the start) is
     // inside a driver whose library the exit tears down: the process crashed so on
     // the way out. Each probe ends within its time limit; one that hangs is left
     // behind, and then the process ends without the libraries' exit handlers.
     if !encoder::settle(encoder::PROBE_TIMEOUT) {
         warn!("a probe of the encoders did not end: quitting without waiting for it");
-        platform::end_now(0);
+        platform::end_now(code);
     }
-    Ok(())
+    Ok(code)
 }

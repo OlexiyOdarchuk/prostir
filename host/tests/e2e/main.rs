@@ -4,6 +4,7 @@
 //! with x264enc (plugins-ugly), h264parse (plugins-bad) and the base plugins.
 
 mod api;
+mod asleep;
 mod control;
 mod encoders;
 mod failures;

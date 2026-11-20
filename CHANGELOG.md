@@ -92,6 +92,34 @@
 - The codec you choose in the headset stays chosen when the graphics card has to use
   another one.
 
+### Nothing runs while the headset is off
+
+- With "Start with the system" on KDE Plasma (and other desktops with systemd),
+  nothing of Prostir runs until a headset comes: systemd waits for it
+  (`prostir.socket`) and starts Prostir when the headset connects, asks for the PC or
+  is plugged in by USB. Packages install `prostir.socket` and `prostir.service` and
+  enable nothing; the tray item, or `prostir ctl autostart on`, turns the socket on
+  and removes the autostart entry of 0.1.
+- Without systemd, and on Hyprland (`exec-once = prostir`), `prostir` sleeps in a
+  small watcher that wakes for nothing (about 1 MB of its own memory) and starts the
+  rest when a headset comes. A Quest plugged in by USB is noticed without waking for
+  other devices. A crash of the rest no longer loses the port: the next headset
+  starts it again.
+- Once no headset needs it (none connected, no monitors waiting, no settings window,
+  no pairing), Prostir leaves after 10 s, and the headset's next visit starts it
+  again. `prostir serve --stay` keeps it running, as before.
+- A headset can find its PC by asking, and the PC answers every headset only until it
+  is paired, then only its own, so others nearby do not see it. A headset can also ask
+  a PC it knows straight at its address, through a VPN such as Tailscale or WireGuard
+  too, with no port opened on the router. The PC still announces itself while it
+  runs, for headsets that do not ask yet.
+- "Pair a new headset" in the tray, the settings window or `prostir ctl pair` lets a
+  new headset find the PC for 3 minutes, until it pairs or "Stop pairing". When a new
+  headset asks for a paired PC, the PC shows "New headset nearby. Pair it?" with a
+  button that does the same.
+- A headset that shows its pairing code while the settings window is open has the
+  code typed in the window, not in a separate dialog.
+
 ### Control from the PC
 
 - `prostir ctl` asks the running Prostir from a terminal, a script or a hot key:

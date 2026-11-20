@@ -76,3 +76,76 @@ pub fn notify_and_wait(title: &str, body: &str) -> bool {
     )
     .is_ok_and(|out| out.status.success())
 }
+
+/// A desktop notification with a button, while it is up (notify-send with an action,
+/// which says the action's name when the button is pressed and ends when the
+/// notification closes). Dropping it stops waiting for the button.
+pub struct Notice {
+    child: std::process::Child,
+    out: std::process::ChildStdout,
+    said: Vec<u8>,
+    /// Shown instead when this notify-send has no buttons (before libnotify 0.7.10).
+    plain: (String, String),
+}
+
+/// Shows `title` and `body` with `button`; `plain` is the body to show instead where
+/// notifications cannot have buttons. `None` without notify-send.
+pub fn notice(title: &str, body: &str, button: &str, plain: &str) -> Option<Notice> {
+    let mut child = Command::new("notify-send")
+        .args(["--app-name=Prostir", "--icon=prostir"])
+        .arg(format!("--action=pair={button}"))
+        .args([title, body])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .inspect_err(|e| warn!("cannot show a notification: {e}"))
+        .ok()?;
+    let out = child.stdout.take()?;
+    Some(Notice {
+        child,
+        out,
+        said: Vec::new(),
+        plain: (title.to_owned(), plain.to_owned()),
+    })
+}
+
+impl Notice {
+    /// What to wait on: readable once the button is pressed or the notice closed.
+    pub fn fd(&self) -> std::os::fd::RawFd {
+        use std::os::fd::AsRawFd;
+        self.out.as_raw_fd()
+    }
+
+    /// Once [`Self::fd`] is readable: `Some(true)` the button was pressed,
+    /// `Some(false)` the notice closed without it, `None` not yet.
+    pub fn check(&mut self) -> Option<bool> {
+        use std::io::Read;
+        let mut buf = [0u8; 64];
+        match self.out.read(&mut buf) {
+            Ok(0) => {}
+            Ok(n) => {
+                self.said.extend_from_slice(&buf[..n]);
+                if self.said.len() > 256 {
+                    self.said.drain(..128);
+                }
+                let said = String::from_utf8_lossy(&self.said);
+                return said.lines().any(|l| l.trim() == "pair").then_some(true);
+            }
+            Err(e) if e.kind() == ErrorKind::Interrupted => return None,
+            Err(_) => {}
+        }
+        // It ended: without buttons in this notify-send, the plain notice instead.
+        if self.child.wait().is_ok_and(|s| !s.success()) {
+            notify(&self.plain.0, &self.plain.1);
+        }
+        Some(false)
+    }
+}
+
+impl Drop for Notice {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}

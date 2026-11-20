@@ -141,11 +141,7 @@ fn the_window_s_client_drives_the_service() {
 
     // What the service does not do (yet) reads as Unsupported, which the window
     // shows as a disabled control rather than a failure.
-    for request in [
-        Request::Volume { level: 30 },
-        Request::SetMic { on: false },
-        Request::PairNewHeadset,
-    ] {
+    for request in [Request::Volume { level: 30 }, Request::SetMic { on: false }] {
         let e = client.call(&request).unwrap_err();
         assert!(e.unsupported(), "{request:?}: {e:?}");
     }

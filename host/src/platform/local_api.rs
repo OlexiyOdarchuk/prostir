@@ -158,8 +158,53 @@ fn offer(shared: &Arc<Shared>) -> zbus::Result<Option<UnixStream>> {
             },
         )?
         .build()?;
+    follow_the_window(&bus, shared.events.clone());
     *shared.bus.lock().unwrap() = Some(bus);
     Ok(socket)
+}
+
+/// Tells the control loop whether the settings window is on the bus
+/// (`Event::Window`), now and each time it comes or goes, on a thread of its own that
+/// sleeps until the bus says so. It ends with the connection (the bus went away: the
+/// window counts as gone until the next connection says otherwise).
+fn follow_the_window(bus: &Connection, events: EventSink) {
+    use zbus::blocking::fdo::DBusProxy;
+    let name = match zbus::names::BusName::try_from(api::SETTINGS_NAME) {
+        Ok(name) => name.to_owned(),
+        Err(e) => {
+            warn!("{e}");
+            return;
+        }
+    };
+    let bus = bus.clone();
+    let spawned = std::thread::Builder::new()
+        .name("local-api-window".into())
+        .spawn(move || {
+            let proxy = match DBusProxy::new(&bus) {
+                Ok(proxy) => proxy,
+                Err(e) => return warn!("the settings window cannot be followed: {e}"),
+            };
+            // Subscribed first, so a change between the look and the subscription is
+            // not missed.
+            let changes = proxy.receive_name_owner_changed_with_args(&[(0, api::SETTINGS_NAME)]);
+            let changes = match changes {
+                Ok(changes) => changes,
+                Err(e) => return warn!("the settings window cannot be followed: {e}"),
+            };
+            if proxy.name_has_owner(name).unwrap_or(false) {
+                events.send(Event::Window(true));
+            }
+            for change in changes {
+                let Ok(args) = change.args() else { continue };
+                if !events.send(Event::Window(args.new_owner().is_some())) {
+                    return;
+                }
+            }
+            events.send(Event::Window(false));
+        });
+    if let Err(e) = spawned {
+        warn!("the settings window cannot be followed: {e}");
+    }
 }
 
 /// Sleeps until the session bus closes `socket`, then takes the name again once the
@@ -689,6 +734,10 @@ impl CtlClient for Client {
         };
         dbus.name_has_owner(BUS_NAME.try_into().expect("a valid name"))
             .unwrap_or(false)
+    }
+
+    fn asleep(&self) -> bool {
+        crate::platform::watcher().is_some() || crate::platform::autostart::socket_waits()
     }
 
     fn watch(&self, each: &mut dyn FnMut(Watched) -> bool) -> Result<(), ClientError> {

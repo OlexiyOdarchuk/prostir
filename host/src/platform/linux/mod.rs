@@ -16,8 +16,8 @@ mod usb;
 pub use desktop::connect;
 pub use screenshot::screenshot_path;
 pub use system::{
-    broadcast_addresses, clean_up_after_crash, config_home, give_memory_back, hostname, run,
-    single_instance,
+    broadcast_addresses, clean_up_after_crash, config_home, give_memory_back, hostname,
+    import_session_environment, run, single_instance, watcher,
 };
 pub use system::{cache_home, encoder_drivers};
 pub use usb::keep_adb_reverse;

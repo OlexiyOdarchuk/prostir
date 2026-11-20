@@ -45,9 +45,7 @@ pub type Handle = ksni::blocking::Handle<Tray>;
 pub fn spawn(commands: EventSink) -> Option<Handle> {
     // Rewritten on each start, so it names this install's program even after an
     // upgrade moved it (a Nix store path, say).
-    if autostart::enabled() {
-        autostart::set(true);
-    }
+    autostart::refresh();
     let tray = Tray {
         status: Status::default(),
         pairing_code: None,
@@ -373,6 +371,24 @@ impl ksni::Tray for Tray {
                     tray.commands.tray(Command::ShowSettings);
                 }),
                 ..Default::default()
+            }
+            .into(),
+            if self.status.pairing {
+                StandardItem {
+                    label: t("Зупинити сполучення", "Stop pairing").into(),
+                    activate: Box::new(|tray: &mut Self| {
+                        tray.commands.tray(Command::StopPairing);
+                    }),
+                    ..Default::default()
+                }
+            } else {
+                StandardItem {
+                    label: t("Сполучити новий шолом", "Pair a new headset").into(),
+                    activate: Box::new(|tray: &mut Self| {
+                        tray.commands.tray(Command::PairNewHeadset);
+                    }),
+                    ..Default::default()
+                }
             }
             .into(),
             StandardItem {

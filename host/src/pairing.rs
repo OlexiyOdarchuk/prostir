@@ -98,12 +98,56 @@ impl Limiter {
 /// The connection whose code the tray shows now, if one does (by its number), and
 /// the code.
 static CODE_SHOWN_BY: Mutex<Option<(u64, String)>> = Mutex::new(None);
-/// Told when the code shown comes or goes (the local API shows it too).
+/// Told when the code shown comes or goes (the local API shows it too), and how each
+/// pairing ends.
 static ON_CODE: std::sync::OnceLock<crate::events::EventSink> = std::sync::OnceLock::new();
 
-/// From now on, `events` hears when the PC begins or stops showing a pairing code.
+/// From now on, `events` hears when the PC begins or stops showing a pairing code, and
+/// how each pairing ends.
 pub fn tell_about_codes(events: crate::events::EventSink) {
     let _ = ON_CODE.set(events);
+}
+
+fn tell(event: crate::events::Event) {
+    if let Some(events) = ON_CODE.get() {
+        events.send(event);
+    }
+}
+
+/// The settings window is on the bus: a code a headset shows is typed there, not in
+/// a dialog.
+static WINDOW_TYPES: AtomicBool = AtomicBool::new(false);
+
+/// A headset waiting for its code to be typed in the settings window: its connection's
+/// number, its name, and where the code goes.
+static CODE_FOR: Mutex<Option<(u64, String, std::sync::mpsc::Sender<String>)>> = Mutex::new(None);
+
+/// Whether the settings window is on the bus (codes are typed there). Once it leaves,
+/// a headset waiting for its code there is told no code was typed.
+pub fn window_types_codes(on: bool) {
+    WINDOW_TYPES.store(on, Ordering::Release);
+    if !on && CODE_FOR.lock().unwrap().take().is_some() {
+        code_changed();
+    }
+}
+
+/// The name of the headset waiting for its code to be typed in the settings window.
+pub fn code_for() -> Option<String> {
+    CODE_FOR
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|(_, name, _)| name.clone())
+}
+
+/// The code a headset shows, typed in the settings window: `false` when no headset
+/// waits for one.
+pub fn type_code(code: String) -> bool {
+    CODE_FOR
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|(_, _, to)| to.send(code).is_ok())
 }
 
 /// The pairing code the PC shows now, if any.
@@ -145,7 +189,22 @@ impl<'a> TrayCode<'a> {
         code_changed();
     }
 
+    /// The attempt ended: a headset waiting for its code to be typed in the settings
+    /// window waits no more, if it was this connection's.
+    fn code_done(&self) {
+        let mut waiting = CODE_FOR.lock().unwrap();
+        if waiting
+            .as_ref()
+            .is_some_and(|(by, _, _)| *by == self.connection)
+        {
+            *waiting = None;
+            drop(waiting);
+            code_changed();
+        }
+    }
+
     fn hide(&self) {
+        self.code_done();
         let mut shown_by = CODE_SHOWN_BY.lock().unwrap();
         if shown_by
             .as_ref()
@@ -448,7 +507,7 @@ fn accept_within(
                 deadline.extend(PAIRING_TIME);
                 // `None`: no attempt (the dialog was cancelled or there is none), which
                 // is not a wrong code.
-                let paired = match obtain_code(headset_shows, &tray_code) {
+                let paired = match obtain_code(headset_shows, &name, &tray_code) {
                     Ok(code) => pair(&mut conn, &security.identity, &peer, &code).map(Some),
                     Err(NoCode::Cancelled) => refuse(
                         &mut conn,
@@ -488,6 +547,13 @@ fn accept_within(
                     }
                     Some(true) => {
                         LIMITER.lock().unwrap().succeeded();
+                        tell(crate::events::Event::Paired {
+                            name: if name.is_empty() {
+                                t("Шолом", "Headset").into()
+                            } else {
+                                name.clone()
+                            },
+                        });
                         *PC_CODE.lock().unwrap() = None;
                         tray_code.hide();
                         let label = if name.is_empty() {
@@ -508,8 +574,10 @@ fn accept_within(
                     Some(false) => {
                         warn!("pairing failed: the codes did not match");
                         LIMITER.lock().unwrap().failed();
+                        tell(crate::events::Event::WrongCode);
                     }
                 }
+                tray_code.code_done();
             }
             other => bail!("unexpected message before the session: {}", brief(&other)),
         }
@@ -518,9 +586,24 @@ fn accept_within(
 
 /// The code for this attempt: typed on the PC (the headset shows it), or generated
 /// here and shown in the tray and a notification (the headset asks for it).
-fn obtain_code(headset_shows: bool, tray: &TrayCode) -> Result<String, NoCode> {
+fn obtain_code(headset_shows: bool, name: &str, tray: &TrayCode) -> Result<String, NoCode> {
     if headset_shows {
-        return ask_code();
+        if !WINDOW_TYPES.load(Ordering::Acquire) {
+            return ask_code();
+        }
+        // The settings window is open: the code is typed there.
+        let (to, code) = std::sync::mpsc::channel();
+        let name = if name.is_empty() {
+            t("Шолом", "Headset").to_owned()
+        } else {
+            name.chars().take(64).collect()
+        };
+        *CODE_FOR.lock().unwrap() = Some((tray.connection, name, to));
+        code_changed();
+        // The window shows the headset waiting until the attempt ends (`code_done`).
+        return code
+            .recv_timeout(PAIRING_TIME)
+            .map_err(|_| NoCode::Cancelled);
     }
     let mut current = PC_CODE.lock().unwrap();
     let (code, new) = match &*current {

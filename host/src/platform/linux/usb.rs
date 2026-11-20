@@ -2,8 +2,11 @@
 //! nothing running while no headset is plugged in.
 //!
 //! - The kernel says when a USB device comes or goes (its uevents, over netlink: a
-//!   thread sleeps on the socket). Only Meta's devices (vendor 2833) start anything;
-//!   whether one is plugged in is read from `/sys/bus/usb/devices`.
+//!   thread sleeps on the socket). Where udev runs, its events are read instead, with a
+//!   socket filter that lets only USB devices' in, so a laptop's sensors and the rest
+//!   never wake the thread (the sockets' watcher sleeps with it). Only Meta's devices
+//!   (vendor 2833) start anything; whether one is plugged in is read from
+//!   `/sys/bus/usb/devices`.
 //! - While one is, `adb track-devices` runs: the adb server tells it every change of a
 //!   device's state, so a headset whose owner allows USB debugging minutes later (from
 //!   `unauthorized` to `device`) gets its `adb reverse` then, with nothing asked again
@@ -58,8 +61,13 @@ enum Note {
 /// whether a Meta one is left). Its interfaces' events say nothing more.
 fn usb_event_matters(event: &[u8]) -> bool {
     let (mut action, mut subsystem, mut devtype, mut product) = (None, None, None, None);
-    // The header (`add@/devices/…`) first, then KEY=value fields.
-    for field in event.split(|b| *b == 0).skip(1) {
+    // udev's: a header of its own, then KEY=value fields where it says. The kernel's:
+    // a header (`add@/devices/…`) first, then KEY=value fields.
+    let (fields, header) = match udev_properties(event) {
+        Some(properties) => (properties, 0),
+        None => (event, 1),
+    };
+    for field in fields.split(|b| *b == 0).skip(header) {
         if let Some(v) = field.strip_prefix(b"ACTION=") {
             action = Some(v);
         } else if let Some(v) = field.strip_prefix(b"SUBSYSTEM=") {
@@ -81,8 +89,100 @@ fn usb_event_matters(event: &[u8]) -> bool {
         }
 }
 
+/// The events udev passes on (after its rules ran), in their own format.
+const UDEV_EVENTS: u32 = 2;
+/// The start of udev's header, and its magic (big-endian at offset 8).
+const UDEV_PREFIX: &[u8; 8] = b"libudev\0";
+const UDEV_MAGIC: u32 = 0xfeed_cafe;
+
+/// MurmurHash2 with seed 0, as udev hashes the subsystem and device type into the
+/// header of each event, so a socket filter can pick events by them.
+const fn murmur2(text: &[u8]) -> u32 {
+    const M: u32 = 0x5bd1_e995;
+    let mut h = text.len() as u32;
+    let mut i = 0;
+    while i + 4 <= text.len() {
+        let mut k = u32::from_le_bytes([text[i], text[i + 1], text[i + 2], text[i + 3]]);
+        k = k.wrapping_mul(M);
+        k ^= k >> 24;
+        k = k.wrapping_mul(M);
+        h = h.wrapping_mul(M) ^ k;
+        i += 4;
+    }
+    let rest = text.len() - i;
+    if rest == 3 {
+        h ^= (text[i + 2] as u32) << 16;
+    }
+    if rest >= 2 {
+        h ^= (text[i + 1] as u32) << 8;
+    }
+    if rest >= 1 {
+        h ^= text[i] as u32;
+        h = h.wrapping_mul(M);
+    }
+    h ^= h >> 13;
+    h = h.wrapping_mul(M);
+    h ^ (h >> 15)
+}
+
+/// The KEY=value fields of an event in udev's format; `None` for any other.
+fn udev_properties(event: &[u8]) -> Option<&[u8]> {
+    if !event.starts_with(UDEV_PREFIX) {
+        return None;
+    }
+    let at = |o: usize| -> Option<usize> {
+        Some(u32::from_ne_bytes(event.get(o..o + 4)?.try_into().ok()?) as usize)
+    };
+    let (off, len) = (at(16)?, at(20)?);
+    event.get(off..off.checked_add(len)?)
+}
+
+/// Lets only udev's events of USB devices (whole devices, not their interfaces) into
+/// `socket`: the subsystem's and device type's hashes in udev's header, as libudev
+/// filters. Nothing else wakes the thread that reads it (a laptop's sensors send
+/// events every few seconds).
+fn filter_usb_devices(socket: &OwnedFd) -> std::io::Result<()> {
+    let op = |code: u32, jt: u8, jf: u8, k: u32| libc::sock_filter {
+        code: code as u16,
+        jt,
+        jf,
+        k,
+    };
+    use libc::{BPF_ABS, BPF_JEQ, BPF_JMP, BPF_K, BPF_LD, BPF_RET, BPF_W};
+    let program = [
+        op(BPF_LD | BPF_W | BPF_ABS, 0, 0, 8),
+        op(BPF_JMP | BPF_JEQ | BPF_K, 0, 5, UDEV_MAGIC),
+        op(BPF_LD | BPF_W | BPF_ABS, 0, 0, 24),
+        op(BPF_JMP | BPF_JEQ | BPF_K, 0, 3, murmur2(b"usb")),
+        op(BPF_LD | BPF_W | BPF_ABS, 0, 0, 28),
+        op(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, murmur2(b"usb_device")),
+        op(BPF_RET | BPF_K, 0, 0, u32::MAX),
+        op(BPF_RET | BPF_K, 0, 0, 0),
+    ];
+    let prog = libc::sock_fprog {
+        len: program.len() as u16,
+        filter: program.as_ptr().cast_mut(),
+    };
+    // SAFETY: a valid socket and a filter program that lives through the call (the
+    // kernel copies it).
+    let failed = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_ATTACH_FILTER,
+            (&raw const prog).cast(),
+            std::mem::size_of::<libc::sock_fprog>() as libc::socklen_t,
+        ) != 0
+    };
+    if failed {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Sends [`Note::Usb`] on a thread of its own each time a USB device that matters
-/// comes or goes. An error when the kernel's events cannot be read.
+/// comes or goes: udev's events of USB devices where udev runs (filtered in the
+/// kernel), else every event of the kernel. An error when the events cannot be read.
 fn follow_usb(notes: Sender<Note>) -> std::io::Result<()> {
     // SAFETY: a plain socket call; the descriptor is owned right below.
     let fd = unsafe {
@@ -97,10 +197,13 @@ fn follow_usb(notes: Sender<Note>) -> std::io::Result<()> {
     }
     // SAFETY: a new descriptor nothing else owns.
     let socket = unsafe { OwnedFd::from_raw_fd(fd) };
+    // udev runs where its control socket is: its events, filtered, wake the thread only
+    // for USB devices.
+    let udev = Path::new("/run/udev/control").exists() && filter_usb_devices(&socket).is_ok();
     // SAFETY: an all-zero sockaddr_nl is valid; its family and group are set below.
     let mut addr: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
     addr.nl_family = libc::AF_NETLINK as libc::sa_family_t;
-    addr.nl_groups = KERNEL_EVENTS;
+    addr.nl_groups = if udev { UDEV_EVENTS } else { KERNEL_EVENTS };
     // SAFETY: binds the socket to an address of the size given.
     let bound = unsafe {
         libc::bind(
@@ -384,6 +487,40 @@ mod tests {
             out.push(0);
         }
         out
+    }
+
+    /// udev's hash of the subsystem, as its events carry it (`hwmon` as seen in a
+    /// real event of this PC's sensors).
+    #[test]
+    fn subsystems_hash_as_udev_hashes_them() {
+        assert_eq!(murmur2(b"hwmon"), 0x22df_0017);
+        assert_eq!(murmur2(b"usb"), 0x0577_c5e5);
+        assert_eq!(murmur2(b"usb_device"), 0x27f8_f50c);
+        assert_eq!(murmur2(b""), 0);
+    }
+
+    /// An event in udev's format: its fields where its header says.
+    #[test]
+    fn udev_events_are_read_by_their_header() {
+        let fields = event(&[
+            "ACTION=add",
+            "SUBSYSTEM=usb",
+            "DEVTYPE=usb_device",
+            "PRODUCT=2833/186/ffff",
+        ]);
+        let mut udev = UDEV_PREFIX.to_vec();
+        udev.extend_from_slice(&UDEV_MAGIC.to_be_bytes());
+        for n in [40u32, 40, fields.len() as u32] {
+            udev.extend_from_slice(&n.to_ne_bytes());
+        }
+        udev.extend_from_slice(&murmur2(b"usb").to_be_bytes());
+        udev.extend_from_slice(&murmur2(b"usb_device").to_be_bytes());
+        udev.extend_from_slice(&[0; 8]);
+        assert_eq!(udev.len(), 40);
+        udev.extend_from_slice(&fields);
+        assert!(usb_event_matters(&udev));
+        // Cut short: nothing read.
+        assert!(!usb_event_matters(&udev[..45]));
     }
 
     #[test]

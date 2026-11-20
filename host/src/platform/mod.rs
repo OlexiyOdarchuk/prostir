@@ -36,15 +36,22 @@
 //! - `notifications::watch`: the PC's desktop notifications, as text.
 //! - `tray`: `spawn`, `Handle`, `set_status`, `set_battery`, `set_settings`,
 //!   `set_pairing`; the tray menu also turns autostart on and off.
-//! - `autostart`: `available`, `enabled`, `set` (starting with the session).
+//! - `autostart`: `available`, `enabled`, `set` (starting with the session),
+//!   `quit_until_login`, `start_service`, `socket_waits` (what holds the sockets
+//!   while Prostir sleeps, where the system does: systemd's socket on Linux).
 //! - The local API's transport (`local_api` on Linux: D-Bus): `serve`, and a
 //!   `Client` for `prostir ctl`.
 //! - `dialogs`: `ask_code` (the pairing code typed on the PC), `notify` and
-//!   `notify_and_wait` (desktop notifications).
-//! - System: `config_home`, `single_instance`, `clean_up_after_crash`,
-//!   `give_memory_back`, `hostname`, `broadcast_addresses`, `screenshot_path`. The
-//!   private runtime dir, and running a program with a time limit, stay inside the
-//!   platform.
+//!   `notify_and_wait` (desktop notifications), `notice` (a notification with a
+//!   button, as a `Notice` whose descriptor the watcher sleeps on).
+//! - System: `config_home`, `single_instance` (with who holds it) and `watcher`,
+//!   `clean_up_after_crash`, `give_memory_back`, `hostname`, `broadcast_addresses`,
+//!   `screenshot_path`, `import_session_environment`. The private runtime dir, and
+//!   running a program with a time limit, stay inside the platform.
+//! - `sockets` (`take`, `open`, `filter_queries`, `readable`, `start_with`): the
+//!   sockets passed from outside or opened here, and starting the full program with
+//!   them. Windows passes inherited sockets in `PROSTIR_SOCKETS` instead of
+//!   `LISTEN_FDS`, and starts the program without `fork`.
 //! - `keep_adb_reverse`: a headset on USB reaches the PC through 127.0.0.1. A service
 //!   of the operating system started once, not part of the desktop (see `contract.rs`).
 //!
@@ -101,8 +108,17 @@ mod net;
 pub use net::*;
 
 // Signals that ask the program to quit, the same on every Linux desktop and the fake one.
-mod signals;
+pub mod signals;
 pub use signals::quit_on_signals;
+
+// The sockets a headset reaches the PC through, opened here or passed from outside
+// (systemd, the sockets' watcher), the same with the fake desktop as with a real one.
+#[cfg(unix)]
+pub mod sockets;
+
+// The lock file of the one Prostir of a user.
+#[cfg(unix)]
+mod lock;
 
 /// Ends the process at once, without the exit handlers of the libraries it loaded:
 /// for a thread left inside one of them (a probe of an encoder that hangs in its
@@ -211,6 +227,10 @@ pub enum TrayCommand {
     Headset(prostir_proto::request::Asked<prostir_proto::request::Command>),
     /// Open the settings window.
     ShowSettings,
+    /// Open the pairing window: a new headset can pair (and is answered when it asks
+    /// for the PC) for a while.
+    PairNewHeadset,
+    StopPairing,
     Quit,
 }
 
@@ -232,14 +252,12 @@ pub struct TrayStatus {
     /// A display is not on the best encoder for it, or encodes on the CPU: which, and
     /// why (see `Displays::encoding_line`).
     pub encoding: Option<String>,
+    /// The pairing window is open.
+    pub pairing: bool,
 }
 
 /// Why there is no pairing code typed on the PC (see `dialogs::ask_code`).
 pub enum NoCode {
-    #[cfg_attr(
-        feature = "fake-desktop",
-        expect(dead_code, reason = "the fake pairing dialog is never cancelled")
-    )]
     Cancelled,
     /// The PC has no program to ask with.
     NoDialog,

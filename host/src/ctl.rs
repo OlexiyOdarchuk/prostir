@@ -63,6 +63,12 @@ pub trait CtlClient {
     fn running(&self) -> bool;
     /// Calls `each` with what happens until it returns `false`.
     fn watch(&self, each: &mut dyn FnMut(Watched) -> bool) -> Result<(), ClientError>;
+    /// While Prostir is not running: whether it sleeps until a headset comes (its
+    /// sockets' watcher, or systemd's socket, waits for one). Looked at without
+    /// waking it.
+    fn asleep(&self) -> bool {
+        false
+    }
 }
 
 /// What `ctl` was asked.
@@ -355,9 +361,20 @@ pub fn run(args: &[String], client: Result<&dyn CtlClient, ClientError>, io: &mu
             match client.state() {
                 Ok((revision, text)) => show_state(&ctl, revision, &text, json, io),
                 Err(e @ ClientError::NotRunning) if ctl == Ctl::Status => {
+                    let asleep = client.asleep();
                     if json {
                         let (_, name, text) = what_failed(&e, false);
-                        let _ = writeln!(io.out, "{}", error_json(name, &text, Some(false)));
+                        let mut value = error_json(name, &text, Some(false));
+                        if asleep {
+                            value["asleep"] = true.into();
+                        }
+                        let _ = writeln!(io.out, "{value}");
+                    } else if asleep {
+                        let _ = writeln!(
+                            io.out,
+                            "{}",
+                            t("Чекає на шолом (спить)", "Waiting for the headset (asleep)")
+                        );
                     } else {
                         let _ = writeln!(io.out, "{}", t("Не працює", "Not running"));
                     }
@@ -411,12 +428,12 @@ fn what_failed(e: &ClientError, for_headset: bool) -> (i32, &'static str, String
 }
 
 /// `{"error": name, "text": text}`, with `running` where it says so.
-fn error_json(name: &str, text: &str, running: Option<bool>) -> String {
+fn error_json(name: &str, text: &str, running: Option<bool>) -> serde_json::Value {
     let mut value = serde_json::json!({ "error": name, "text": text });
     if let Some(running) = running {
         value["running"] = running.into();
     }
-    value.to_string()
+    value
 }
 
 /// The line for people when a request was done.
@@ -653,29 +670,53 @@ fn event_line(event: &api::Event) -> Option<String> {
     })
 }
 
+/// How Prostir was woken for the window (`prostir open`).
+pub enum Woken {
+    /// Started anew (`prostir serve --open-settings`): it opens the window itself.
+    Started(std::process::Child),
+    /// What holds its sockets while it sleeps (the sockets' watcher, systemd) starts
+    /// it; `opens_window`: it then opens the window itself, else it is asked to.
+    Asleep { opens_window: bool },
+}
+
+/// How long `prostir open` waits for a sleeping Prostir to come on the bus.
+const WAKE_WAIT: Duration = Duration::from_secs(30);
+
 /// `prostir open` (the menu entry): the settings window, from Prostir. When Prostir
 /// is not running, `start` starts it (`prostir serve --open-settings`, which opens the
 /// window itself once it is on the bus), and this waits for as long as it lives and
 /// is not on the bus yet.
-pub fn open(
-    client: &dyn CtlClient,
-    start: &dyn Fn() -> std::io::Result<std::process::Child>,
-) -> i32 {
+pub fn open(client: &dyn CtlClient, wake: &dyn Fn() -> std::io::Result<Woken>) -> i32 {
     if !client.running() {
-        let mut child = match start() {
-            Ok(child) => child,
+        let woken = match wake() {
+            Ok(woken) => woken,
             Err(e) => {
                 eprintln!("prostir open: {e}");
                 return NOT_RUNNING;
             }
         };
+        let until = std::time::Instant::now() + WAKE_WAIT;
+        let (mut child, opens_window) = match woken {
+            Woken::Started(child) => (Some(child), true),
+            Woken::Asleep { opens_window } => (None, opens_window),
+        };
         loop {
             if client.running() {
-                return DONE;
+                if opens_window {
+                    return DONE;
+                }
+                break;
             }
-            if let Ok(Some(status)) = child.try_wait() {
+            let ended = match &mut child {
+                Some(child) => child.try_wait().ok().flatten().map(|s| s.to_string()),
+                None if std::time::Instant::now() >= until => {
+                    Some(t("не відповів", "no answer").into())
+                }
+                None => None,
+            };
+            if let Some(how) = ended {
                 eprintln!(
-                    "prostir open: {} ({status})",
+                    "prostir open: {} ({how})",
                     t(
                         "Prostir завершився, не запустившись",
                         "Prostir ended before it started"
@@ -1009,7 +1050,9 @@ mod tests {
         let started = std::cell::Cell::new(false);
         let start = || {
             started.set(true);
-            std::process::Command::new("true").spawn()
+            std::process::Command::new("true")
+                .spawn()
+                .map(Woken::Started)
         };
         assert_eq!(open(&running, &start), DONE);
         assert!(!started.get(), "already running");
@@ -1018,7 +1061,11 @@ mod tests {
         let fail = || Err(std::io::Error::other("no program"));
         assert_eq!(open(&gone, &fail), NOT_RUNNING);
         // Started, but it ends without coming on the bus: said at once.
-        let ends = || std::process::Command::new("false").spawn();
+        let ends = || {
+            std::process::Command::new("false")
+                .spawn()
+                .map(Woken::Started)
+        };
         let began = std::time::Instant::now();
         assert_eq!(open(&gone, &ends), NOT_RUNNING);
         assert!(began.elapsed() < Duration::from_secs(5));

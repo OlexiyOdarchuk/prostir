@@ -61,6 +61,13 @@ impl TestDir {
         keys
     }
 
+    /// The PC's key (made on first use), as headsets know it.
+    pub fn pc_key(&self) -> [u8; 32] {
+        Identity::load_or_create(&self.config().join("prostir/identity"))
+            .unwrap()
+            .public
+    }
+
     /// Makes the PC forget every headset it paired with (the tray's "Forget paired
     /// headsets").
     pub fn forget_headsets(&self) {
@@ -141,6 +148,91 @@ pub struct Options {
     pub encoder: Option<&'static str>,
     /// More of the PC app's environment (`PROSTIR_FAKE_NO_SOUND`, `PATH`).
     pub env: Vec<(String, String)>,
+    /// Asleep in its sockets' watcher until a headset comes, as `prostir serve`
+    /// runs; without it, `--stay`: the full program all along.
+    pub watcher: bool,
+    /// Answers headsets that ask for it, on a UDP port the system picks (no beacon:
+    /// nothing goes out to the network); without it, `--no-discovery`.
+    pub discovery: bool,
+    /// Started as systemd starts it, by `systemd-socket-activate` holding its sockets.
+    pub activate: Option<Activate>,
+}
+
+/// The PC app started by `systemd-socket-activate`, as `prostir.socket` starts it: it
+/// holds the TCP and UDP sockets (on ports of their own on 127.0.0.1) and starts the
+/// PC app with them when something comes. One `systemd-socket-activate` listens on one
+/// kind of socket, so two run, one inside the other, passing the outer one's socket on.
+pub struct Activate {
+    pub tcp: SocketAddr,
+    pub udp: SocketAddr,
+    /// A connection starts it (else a datagram).
+    pub by_connection: bool,
+}
+
+impl Activate {
+    /// Two free ports on 127.0.0.1, and `systemd-socket-activate` to hold them; `None`,
+    /// saying so loudly, without it (it must be there on CI).
+    pub fn new(by_connection: bool) -> Option<Self> {
+        if let Err(e) = Command::new("systemd-socket-activate")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .status()
+        {
+            if std::env::var_os("CI").is_some() {
+                panic!("no systemd-socket-activate ({e}), which CI must have");
+            }
+            eprintln!(
+                "\n*** no systemd-socket-activate ({e}): the socket activation test is SKIPPED ***\n"
+            );
+            return None;
+        }
+        let tcp = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let udp = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        Some(Self {
+            tcp: tcp.local_addr().unwrap(),
+            udp: udp.local_addr().unwrap(),
+            by_connection,
+        })
+    }
+
+    /// `cmd` (the PC app with its arguments and environment) started by
+    /// `systemd-socket-activate`, which passes on only the environment it is told.
+    fn wrap(&self, cmd: &Command) -> Command {
+        let mut env: BTreeMap<String, String> = std::env::vars().collect();
+        for (k, v) in cmd.get_envs() {
+            let k = k.to_string_lossy().into_owned();
+            match v {
+                Some(v) => env.insert(k, v.to_string_lossy().into_owned()),
+                None => env.remove(&k),
+            };
+        }
+        let mut outer = Command::new("systemd-socket-activate");
+        outer.args(["-l", &self.tcp.to_string()]);
+        if !self.by_connection {
+            outer.arg("--now");
+        }
+        outer.args([
+            "--",
+            "systemd-socket-activate",
+            "-d",
+            "-l",
+            &self.udp.to_string(),
+        ]);
+        if self.by_connection {
+            outer.arg("--now");
+        }
+        for (k, v) in env {
+            outer.arg(format!("--setenv={k}={v}"));
+        }
+        outer
+            .arg("--")
+            .arg(cmd.get_program())
+            .args(cmd.get_args())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        outer
+    }
 }
 
 impl Default for Options {
@@ -159,6 +251,9 @@ impl Default for Options {
             headsets: 0,
             encoder: None,
             env: Vec::new(),
+            watcher: false,
+            discovery: false,
+            activate: None,
         }
     }
 }
@@ -254,10 +349,21 @@ pub fn ctl_on(address: &str, args: &[&str]) -> Ctl {
     }
 }
 
+/// The port number after `after` in a log line.
+pub fn port_in(line: &str, after: &str) -> u16 {
+    let rest = line.split_once(after).expect("a port in the line").1;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits
+        .parse()
+        .unwrap_or_else(|_| panic!("no port in {line:?}"))
+}
+
 /// A running PC app. Stopped (killed if it has to be) when dropped.
 pub struct Pc {
     child: Child,
     pub addr: SocketAddr,
+    /// Where it answers headsets that ask for it, with `Options::discovery`.
+    pub discovery: Option<SocketAddr>,
     log: Arc<Mutex<Vec<String>>>,
     /// Its `XDG_RUNTIME_DIR`.
     run_dir: PathBuf,
@@ -273,7 +379,13 @@ impl Pc {
         }
         let bus = Bus::start(&root.join("run"));
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_prostir"));
-        cmd.args(["--port", "0", "--no-discovery", "--no-adb"])
+        cmd.args(["--port", "0", "--no-adb"])
+            .args(if options.discovery {
+                ["--discovery-port", "0", "--no-beacon"].as_slice()
+            } else {
+                ["--no-discovery"].as_slice()
+            })
+            .args((!options.watcher).then_some("--stay"))
             .args(options.software.then_some("--software"))
             .args(["--bitrate", &options.bitrate.to_string()])
             .args(["--linger", &options.linger.to_string()])
@@ -330,6 +442,9 @@ impl Pc {
             None => cmd.env_remove("PROSTIR_FAKE_TYPED_CODE"),
         };
         cmd.envs(options.env.iter().map(|(k, v)| (k, v)));
+        if let Some(activate) = &options.activate {
+            cmd = activate.wrap(&cmd);
+        }
         let mut child = cmd.spawn().expect("start the PC app");
         let log = Arc::new(Mutex::new(Vec::new()));
         let stderr = child.stderr.take().unwrap();
@@ -348,17 +463,52 @@ impl Pc {
         let mut pc = Self {
             child,
             addr: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            discovery: None,
             log,
             run_dir: root.join("run"),
             bus,
         };
+        if let Some(activate) = &options.activate {
+            // Nothing of it runs until something comes: once the socket that starts
+            // it is there.
+            pc.addr = activate.tcp;
+            pc.discovery = Some(activate.udp);
+            let first = if activate.by_connection {
+                activate.tcp
+            } else {
+                activate.udp
+            };
+            pc.wait_log(Duration::from_secs(10), &format!("Listening on {first} as"));
+            return pc;
+        }
         let line = pc.wait_log(Duration::from_secs(30), "waiting for the headset on port");
-        let port = line.rsplit(' ').next().unwrap().parse().unwrap();
-        pc.addr.set_port(port);
-        if pc.bus.is_some() {
+        pc.addr.set_port(port_in(&line, "on port "));
+        if options.discovery {
+            let line = pc.wait_log(Duration::from_secs(10), "discovery on UDP port ");
+            let port = port_in(&line, "discovery on UDP port ");
+            pc.discovery = Some(SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
+        }
+        if pc.bus.is_some() && !options.watcher {
             pc.wait_log(Duration::from_secs(10), "local API on D-Bus as");
         }
         pc
+    }
+
+    /// The process id of its full program: itself, or under its sockets' watcher the
+    /// watcher's child, while one runs.
+    pub fn program(&self) -> Option<u32> {
+        let watcher = self.child.id();
+        let children =
+            std::fs::read_to_string(format!("/proc/{watcher}/task/{watcher}/children")).ok()?;
+        match children.split_whitespace().next() {
+            Some(child) => child.parse().ok(),
+            None => Some(watcher),
+        }
+    }
+
+    /// Its own process id (the sockets' watcher's, when it has one).
+    pub fn pid(&self) -> u32 {
+        self.child.id()
     }
 
     /// Stops its session bus and starts another at the same address, as a session
@@ -460,6 +610,12 @@ impl Pc {
         std::fs::rename(&new, &path).unwrap();
     }
 
+    /// Presses the button of the notification the PC app shows (`click`), or closes it
+    /// (`close`).
+    pub fn notice(&self, what: &str) {
+        self.order("fake-notice", what);
+    }
+
     /// Has another program do `command` on the fake desktop (see the fake desktop
     /// for the commands, e.g. `resize Fake-2 320x240`).
     pub fn desktop(&self, command: &str) {
@@ -469,25 +625,33 @@ impl Pc {
     /// How many times each thread of the PC app went to sleep and woke since it
     /// started (`voluntary_ctxt_switches`), by thread id, with the thread's name.
     pub fn wakeups(&self) -> BTreeMap<u32, (String, u64)> {
-        let mut threads = BTreeMap::new();
-        let tasks = format!("/proc/{}/task", self.child.id());
-        for task in std::fs::read_dir(tasks).into_iter().flatten().flatten() {
-            let Ok(tid) = task.file_name().to_string_lossy().parse::<u32>() else {
-                continue;
-            };
-            let name = std::fs::read_to_string(task.path().join("comm")).unwrap_or_default();
-            let status = std::fs::read_to_string(task.path().join("status")).unwrap_or_default();
-            let woke = status
-                .lines()
-                .find_map(|l| l.strip_prefix("voluntary_ctxt_switches:"))
-                .and_then(|n| n.trim().parse().ok());
-            if let Some(woke) = woke {
-                threads.insert(tid, (name.trim().to_owned(), woke));
-            }
-        }
-        threads
+        wakeups_of(self.child.id())
     }
+}
 
+/// How many times each thread of process `pid` went to sleep and woke since it
+/// started (`voluntary_ctxt_switches`), by thread id, with the thread's name.
+pub fn wakeups_of(pid: u32) -> BTreeMap<u32, (String, u64)> {
+    let mut threads = BTreeMap::new();
+    let tasks = format!("/proc/{pid}/task");
+    for task in std::fs::read_dir(tasks).into_iter().flatten().flatten() {
+        let Ok(tid) = task.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let name = std::fs::read_to_string(task.path().join("comm")).unwrap_or_default();
+        let status = std::fs::read_to_string(task.path().join("status")).unwrap_or_default();
+        let woke = status
+            .lines()
+            .find_map(|l| l.strip_prefix("voluntary_ctxt_switches:"))
+            .and_then(|n| n.trim().parse().ok());
+        if let Some(woke) = woke {
+            threads.insert(tid, (name.trim().to_owned(), woke));
+        }
+    }
+    threads
+}
+
+impl Pc {
     /// The files the PC app has open now that are graphics devices (`/dev/dri/...`):
     /// one per card it encodes on, however many monitors it streams.
     pub fn gpu_files(&self) -> Vec<String> {

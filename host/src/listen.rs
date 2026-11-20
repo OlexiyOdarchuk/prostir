@@ -13,6 +13,7 @@ use log::{debug, warn};
 
 use crate::events::{Accepted, Event, EventSink};
 use crate::pairing;
+use crate::platform::sockets::readable;
 use crate::platform::tray;
 
 /// Connections set up at once, at most: more are closed at once, so a peer opening
@@ -37,20 +38,115 @@ impl Drop for Setup {
     }
 }
 
-/// Accepts connections on `listener` for as long as the program runs.
+/// The listening thread, while it runs: how many connections are being set up, and
+/// how to stop it.
+pub struct Listening {
+    listener: TcpListener,
+    setups: Arc<AtomicUsize>,
+    security: Arc<pairing::Security>,
+    tray: Option<tray::Handle>,
+    events: EventSink,
+    /// Written to stop the thread, which then ends.
+    stop: Option<(std::fs::File, std::thread::JoinHandle<()>)>,
+}
+
+impl Listening {
+    /// Whether a connection is being set up now (it comes as `Event::Accepted`, or
+    /// fails).
+    pub fn busy(&self) -> bool {
+        self.setups.load(Ordering::Acquire) > 0
+    }
+
+    /// Stops accepting connections, once the thread is done with the one it may be
+    /// accepting: the program is about to leave, and a connection that comes from now
+    /// on waits in the socket for the next start.
+    pub fn stop(&mut self) {
+        if let Some((mut stop, thread)) = self.stop.take() {
+            use std::io::Write;
+            let _ = stop.write_all(b"x");
+            let _ = thread.join();
+        }
+    }
+
+    /// Accepts connections again (one came as the program was about to leave).
+    pub fn resume(&mut self) -> Result<()> {
+        if self.stop.is_none() {
+            self.stop = Some(start(
+                self.listener.try_clone()?,
+                self.setups.clone(),
+                self.security.clone(),
+                self.tray.clone(),
+                self.events.clone(),
+            )?);
+        }
+        Ok(())
+    }
+}
+
+/// Accepts connections on `listener` until stopped (see [`Listening`]).
 pub fn spawn(
     listener: TcpListener,
     security: Arc<pairing::Security>,
     tray: Option<tray::Handle>,
     events: EventSink,
-) -> Result<()> {
-    std::thread::Builder::new()
+) -> Result<Listening> {
+    let setups = Arc::new(AtomicUsize::new(0));
+    let stop = start(
+        listener.try_clone()?,
+        setups.clone(),
+        security.clone(),
+        tray.clone(),
+        events.clone(),
+    )?;
+    Ok(Listening {
+        listener,
+        setups,
+        security,
+        tray,
+        events,
+        stop: Some(stop),
+    })
+}
+
+/// The listening thread, and the end of a pipe that stops it.
+fn start(
+    listener: TcpListener,
+    setups: Arc<AtomicUsize>,
+    security: Arc<pairing::Security>,
+    tray: Option<tray::Handle>,
+    events: EventSink,
+) -> Result<(std::fs::File, std::thread::JoinHandle<()>)> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let mut fds = [0; 2];
+    // SAFETY: pipe2 fills the two descriptors, owned right below.
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    // SAFETY: new descriptors nothing else owns.
+    let (stopped, stop) = unsafe {
+        (
+            std::fs::File::from_raw_fd(fds[0]),
+            std::fs::File::from_raw_fd(fds[1]),
+        )
+    };
+    let thread = std::thread::Builder::new()
         .name("listen".into())
         .spawn(move || {
-            let setups = Arc::new(AtomicUsize::new(0));
             // When the log last said connections were closed for want of a place.
             let mut said_full: Option<Instant> = None;
             loop {
+                // Asleep in the kernel until a connection or the word to stop comes.
+                let ready = match readable(&[listener.as_raw_fd(), stopped.as_raw_fd()], None) {
+                    Ok(ready) => ready,
+                    Err(e) => {
+                        warn!("waiting for connections failed: {e}");
+                        std::thread::sleep(Duration::from_millis(500));
+                        continue;
+                    }
+                };
+                if ready[1] {
+                    return;
+                }
                 let (stream, from) = match listener.accept() {
                     Ok(accepted) => accepted,
                     // Pending network errors (ENETDOWN, EHOSTUNREACH…) or running out
@@ -92,7 +188,7 @@ pub fn spawn(
                 }
             }
         })?;
-    Ok(())
+    Ok((stop, thread))
 }
 
 #[cfg(test)]
