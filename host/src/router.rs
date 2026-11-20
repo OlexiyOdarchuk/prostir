@@ -236,7 +236,7 @@ pub struct Router {
     broken: Mutex<Vec<ScreenId>>,
     /// Streams whose encoder did not open, with why: each goes on with the next
     /// encoder for it (see `Displays::tick`).
-    unopened: Mutex<Vec<(ScreenId, String)>>,
+    unopened: Mutex<Vec<(ScreenId, crate::encoder::NotOpened)>>,
     /// Streams larger than every headset decodes, with their size and codec, for
     /// `Displays` to mark them failed.
     too_big: Mutex<Vec<TooBig>>,
@@ -617,7 +617,7 @@ impl Router {
     }
 
     /// Streams whose encoder did not open since the last call, with why.
-    pub fn take_unopened(&self) -> Vec<(ScreenId, String)> {
+    pub fn take_unopened(&self) -> Vec<(ScreenId, crate::encoder::NotOpened)> {
         std::mem::take(&mut *self.unopened.lock().unwrap())
     }
 

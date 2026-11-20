@@ -93,15 +93,16 @@ pub fn cache_home() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
 }
 
-/// What decides what the video encoders do, besides GStreamer: the kernel (its GPU
-/// drivers), the NVIDIA driver's version, the VA-API drivers (each file's size and
-/// time), and the variables that pick a VA driver. A probe of the encoders is kept
-/// until one of these changes.
+/// What decides what the video encoders do, besides GStreamer: the graphics cards
+/// (each render node's vendor, device and kernel driver), the kernel, the NVIDIA
+/// driver's version, the VA-API drivers (each file's size and time), and the variables
+/// that pick a VA driver. A probe of the encoders is kept until one of these changes.
 pub fn encoder_drivers() -> Vec<String> {
     let mut parts = vec![
         std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default(),
         std::fs::read_to_string("/sys/module/nvidia/version").unwrap_or_default(),
     ];
+    parts.extend(graphics_cards());
     for var in [
         "LIBVA_DRIVER_NAME",
         "LIBVA_DRIVERS_PATH",
@@ -138,6 +139,36 @@ pub fn encoder_drivers() -> Vec<String> {
     drivers.sort();
     parts.extend(drivers);
     parts
+}
+
+/// Each render node with the card behind it: `renderD128 0x8086 0x56a0 xe`.
+fn graphics_cards() -> Vec<String> {
+    let read = |path: PathBuf| {
+        std::fs::read_to_string(path)
+            .map(|s| s.trim().to_owned())
+            .unwrap_or_default()
+    };
+    let mut cards: Vec<String> = std::fs::read_dir("/sys/class/drm")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("renderD"))
+        .map(|e| {
+            let device = e.path().join("device");
+            let driver = std::fs::read_link(device.join("driver"))
+                .ok()
+                .and_then(|d| d.file_name().map(|n| n.to_string_lossy().into_owned()))
+                .unwrap_or_default();
+            format!(
+                "{} {} {} {driver}",
+                e.file_name().to_string_lossy(),
+                read(device.join("vendor")),
+                read(device.join("device")),
+            )
+        })
+        .collect();
+    cards.sort();
+    cards
 }
 
 /// The PC's name, for the headset's list of PCs.

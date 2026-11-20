@@ -26,11 +26,11 @@ mod choice;
 mod gpu;
 mod probe;
 
-pub use choice::{Backend, Kind, Wanted, note};
+pub use choice::{Backend, Choice, Kind, Wanted, note};
 pub use gpu::GpuDevices;
-pub use probe::catalog;
 #[cfg(not(feature = "fake-desktop"))]
 pub use probe::file_identity;
+pub use probe::{Next, catalog, start_probing};
 
 use crate::platform::AdapterId;
 
@@ -117,7 +117,39 @@ pub enum EncoderEvent {
     Failed(String),
     /// The encoder itself failed before its first frame: it did not open (no more
     /// sessions, a size or format its driver does not take). Another encoder may.
-    Unopened(String),
+    Unopened(NotOpened),
+}
+
+/// Why an encoder did not open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotOpened {
+    pub why: String,
+    /// It said it had no more sessions, or no room for one more (see
+    /// [`short_of_sessions`]).
+    pub short: bool,
+    /// It was opening again after a pause (every stream does at once then).
+    pub resumed: bool,
+}
+
+/// What encoders say when they have no session left: GStreamer's "no space left" and
+/// "busy" resource errors (the fake encoder of the tests says the first), NVENC's out
+/// of memory and client key errors (a consumer card's session cap), and VA-API's
+/// allocation, limit and busy statuses.
+const SHORT_OF_SESSIONS: &[&str] = &[
+    "NV_ENC_ERR_OUT_OF_MEMORY",
+    "NV_ENC_ERR_INCOMPATIBLE_CLIENT_KEY",
+    "NV_ENC_ERR_ENCODER_BUSY",
+    "VA_STATUS_ERROR_ALLOCATION_FAILED",
+    "VA_STATUS_ERROR_MAX_NUM_EXCEEDED",
+    "VA_STATUS_ERROR_HW_BUSY",
+];
+
+/// Whether an error (`error`, with its debug text `debug`) says the encoder has no
+/// session left, rather than anything else (a format, a size, a broken driver).
+pub fn short_of_sessions(error: Option<&gst::glib::Error>, text: &str) -> bool {
+    error.is_some_and(|e| {
+        e.matches(gst::ResourceError::NoSpaceLeft) || e.matches(gst::ResourceError::Busy)
+    }) || SHORT_OF_SESSIONS.iter().any(|s| text.contains(s))
 }
 
 pub struct Encoder {
@@ -136,8 +168,15 @@ pub struct Encoder {
     codec: Codec,
     /// It has encoded a frame since it last started.
     encoded: Arc<AtomicBool>,
+    /// It was resumed after a pause.
+    resumed: Arc<AtomicBool>,
     /// What to say of the encoder this output got, when it is not the best for it.
     note: Option<String>,
+    /// Its frames go through the CPU on their way to it.
+    copies: bool,
+    /// The graphics devices it took, let go after the pipeline stopped (the fields
+    /// drop after `Drop::drop` and in this order).
+    _devices: gpu::Lease,
     /// A fake hardware encoder that opened, counted until dropped.
     #[cfg(feature = "fake-desktop")]
     fake_open: bool,
@@ -175,6 +214,10 @@ fn encoding(input: &Input, cfg: &EncoderConfig) -> Result<String> {
         // encoder says it did not open (see `Encoder::start`).
         #[cfg(feature = "fake-desktop")]
         (Codec::H265, Backend::Fake) => bail!("the fake encoder makes H.264 only"),
+        #[cfg(feature = "fake-desktop")]
+        (Codec::H264, Backend::Fake) if probe::fake::refuses() && !probe::fake::opens() => {
+            bail!("no more encoder sessions (NV_ENC_ERR_OUT_OF_MEMORY)")
+        }
         #[cfg(feature = "fake-desktop")]
         (Codec::H264, Backend::Fake) => (
             format!(
@@ -261,11 +304,12 @@ impl Encoder {
             .by_name("sink")
             .and_then(|e| e.downcast::<gst_app::AppSink>().ok())
             .ok_or_else(|| anyhow!("appsink missing"))?;
-        gpu.share_with(&pipeline);
+        let devices = gpu.share_with(&pipeline);
 
         let on_event = Arc::new(on_event);
         // Nothing encoded yet: an error of the encoder now means it did not open.
         let encoded = Arc::new(AtomicBool::new(false));
+        let resumed = Arc::new(AtomicBool::new(false));
         let last_size = std::sync::Mutex::new((0u32, 0u32));
         let probe = Arc::new(Mutex::new(Probe::default()));
         // Frames enter the encoder in order and (no B-frames) leave in order, so a FIFO
@@ -334,6 +378,7 @@ impl Encoder {
             let stop = stop.clone();
             let on_event = on_event.clone();
             let encoded = encoded.clone();
+            let resumed = resumed.clone();
             std::thread::Builder::new()
                 .name(format!("gst-bus-{node}"))
                 .spawn(move || {
@@ -355,7 +400,12 @@ impl Encoder {
                                     .is_some_and(|s| matches!(s.name().as_str(), "enc" | "enc_in"));
                                 if by_encoder && !encoded.load(Ordering::Relaxed) {
                                     warn!("encoder for {node} did not open: {text}");
-                                    on_event(EncoderEvent::Unopened(e.error().to_string()));
+                                    let error = e.error();
+                                    on_event(EncoderEvent::Unopened(NotOpened {
+                                        why: error.to_string(),
+                                        short: short_of_sessions(Some(&error), &text),
+                                        resumed: resumed.load(Ordering::Relaxed),
+                                    }));
                                 } else {
                                     error!("encoder for {node}: {text}");
                                     on_event(EncoderEvent::Failed(text));
@@ -391,7 +441,10 @@ impl Encoder {
             kind: (cfg.backend, adapter),
             codec: cfg.codec,
             encoded,
+            resumed,
             note: None,
+            copies: false,
+            _devices: devices,
             #[cfg(feature = "fake-desktop")]
             fake_open,
         };
@@ -444,7 +497,14 @@ impl Encoder {
         self.note.as_deref()
     }
 
-    pub fn set_note(&mut self, note: Option<String>) {
+    /// Whether its frames go through the CPU on their way to it.
+    pub fn copies(&self) -> bool {
+        self.copies
+    }
+
+    /// What it was picked as for its output, and what to say of that.
+    pub fn set_choice(&mut self, choice: &Choice, note: Option<String>) {
+        self.copies = choice.copies();
         self.note = note;
     }
 
@@ -502,6 +562,9 @@ impl Encoder {
             gst::State::Playing
         };
         self.paused.store(paused, Ordering::Relaxed);
+        if !paused {
+            self.resumed.store(true, Ordering::Relaxed);
+        }
         if !paused && self.restart_on_resume {
             // Resumed as it was, an idle screen would send no frame at all (the picture
             // in the headset stays frozen, or a headset that just connected gets no

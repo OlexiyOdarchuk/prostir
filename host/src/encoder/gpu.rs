@@ -1,4 +1,4 @@
-//! One graphics device per card for every capture and encoder.
+//! One graphics device per card for the encoders (and captures) that run at once.
 //!
 //! Each GStreamer pipeline opens a device of its own unless it is given one: a VA
 //! display (a render node of the card and the driver loaded on it), a CUDA context, a
@@ -14,10 +14,27 @@
 //! the render node), `cuda-device-id` (CUDA), `adapter-luid` (Direct3D 11, the LUID a
 //! capture of the same card reports in [`crate::platform::Memory::D3D11`]).
 //!
-//! The devices live as long as the desktop's connection (`Displays` holds them), so an
-//! idle PC holds none.
+//! A device is kept only while a pipeline holds it: each pipeline gets a [`Lease`] of
+//! the devices it took, and the last lease of a device let go closes it. So a card no
+//! stream encodes on any more (a PRIME graphics card, say, once its outputs moved to
+//! the CPU) is free to sleep, and an idle PC holds none.
+//!
+//! # The bus's one sync handler
+//!
+//! GStreamer keeps one synchronous handler per bus, and setting another replaces it:
+//! the handler set here is the pipeline's only one, and no pipeline of Prostir sets
+//! another. One that needs its own must call this handler from it (chain them), or it
+//! loses the shared devices without a word.
+//!
+//! # Pipelines started at the same moment
+//!
+//! Pipelines start one after another on one thread now. A worker that starts several
+//! at once on threads of their own (the desktop's worker of a later step) can have two
+//! of them open a device of the same card before either says so: the first one said is
+//! kept and shared, the other pipeline keeps its own for its life (one device more,
+//! nothing wrong). Starting the first pipeline of a card before the others avoids it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, Weak};
 
 use gstreamer as gst;
@@ -31,28 +48,133 @@ const SHARED: &[(&str, &str)] = &[
     ("gst.d3d11.device.handle", "adapter-luid"),
 ];
 
-/// The graphics devices captures and encoders share: one per card and kind, for the
-/// life of a desktop. Cheap to clone: every clone shares the same devices.
+/// A device: its context type and card.
+type Key = (String, String);
+
+/// The devices kept, each with how many pipelines hold it.
+type Devices = BTreeMap<Key, (gst::Context, usize)>;
+
+/// The graphics devices captures and encoders share: one per card and kind, while a
+/// pipeline holds it. Cheap to clone: every clone shares the same devices.
 #[derive(Debug, Clone, Default)]
 pub struct GpuDevices {
     devices: Arc<Mutex<Devices>>,
 }
 
-/// Contexts by type and card.
-type Devices = BTreeMap<(String, String), gst::Context>;
+/// The devices one pipeline holds; dropped after the pipeline stopped, it lets them
+/// go, and closes each that no other pipeline holds.
+#[derive(Debug, Default)]
+pub struct Lease {
+    devices: Weak<Mutex<Devices>>,
+    held: Arc<Mutex<BTreeSet<Key>>>,
+}
 
 impl GpuDevices {
     /// `pipeline` takes the devices kept here, and the first it opens of a kind and card
-    /// is kept for the others. Before the pipeline leaves the `NULL` state.
-    pub fn share_with(&self, pipeline: &gst::Pipeline) {
-        let Some(bus) = pipeline.bus() else {
+    /// is kept for the others, while the lease returned lives. Before the pipeline
+    /// leaves the `NULL` state. It sets the bus's sync handler (see the top of this
+    /// file).
+    pub fn share_with(&self, pipeline: &gst::Pipeline) -> Lease {
+        let lease = self.lease();
+        if let Some(bus) = pipeline.bus() {
+            let devices = self.clone();
+            let held = lease.held.clone();
+            bus.set_sync_handler(move |_, msg| {
+                devices.on_message(&held, msg);
+                gst::BusSyncReply::Pass
+            });
+        }
+        lease
+    }
+
+    fn lease(&self) -> Lease {
+        Lease {
+            devices: Arc::downgrade(&self.devices),
+            held: Arc::default(),
+        }
+    }
+
+    /// Answers a pipeline's need for a device, or keeps the one it opened, for the
+    /// pipeline whose lease holds `held`.
+    fn on_message(&self, held: &Mutex<BTreeSet<Key>>, msg: &gst::Message) {
+        let Some(element) = msg.src().and_then(|s| s.downcast_ref::<gst::Element>()) else {
             return;
         };
-        let devices = Arc::downgrade(&self.devices);
-        bus.set_sync_handler(move |_, msg| {
-            on_message(&devices, msg);
-            gst::BusSyncReply::Pass
-        });
+        match msg.view() {
+            gst::MessageView::NeedContext(m) => {
+                let kind = m.context_type();
+                if !SHARED.iter().any(|(k, _)| *k == kind) {
+                    return;
+                }
+                let key = (kind.to_owned(), card(element, kind));
+                let context = {
+                    let mut devices = self.devices.lock().unwrap();
+                    let Some((context, users)) = devices.get_mut(&key) else {
+                        return;
+                    };
+                    if held.lock().unwrap().insert(key) {
+                        *users += 1;
+                    }
+                    context.clone()
+                };
+                element.set_context(&context);
+            }
+            gst::MessageView::HaveContext(m) => {
+                let context = m.context();
+                let kind = context.context_type();
+                if !SHARED.iter().any(|(k, _)| *k == kind) {
+                    return;
+                }
+                let key = (kind.to_owned(), card(element, kind));
+                let mut devices = self.devices.lock().unwrap();
+                match devices.get_mut(&key) {
+                    None => {
+                        info!("sharing {} {} with every encoder", key.0, key.1);
+                        held.lock().unwrap().insert(key.clone());
+                        devices.insert(key, (context, 1));
+                    }
+                    // Said again of the one kept (a bin passing it on): held once.
+                    Some((kept, users)) if kept.as_ptr() == context.as_ptr() => {
+                        if held.lock().unwrap().insert(key) {
+                            *users += 1;
+                        }
+                    }
+                    // Opened at the same moment as the one kept: this pipeline keeps
+                    // its own (see the top of this file).
+                    Some(_) => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The devices kept now, as `type card`.
+    #[cfg(test)]
+    fn kept(&self) -> Vec<String> {
+        self.devices
+            .lock()
+            .unwrap()
+            .keys()
+            .map(|(kind, card)| format!("{kind} {card}"))
+            .collect()
+    }
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        let Some(devices) = self.devices.upgrade() else {
+            return;
+        };
+        let mut devices = devices.lock().unwrap();
+        for key in std::mem::take(&mut *self.held.lock().unwrap()) {
+            if let Some((_, users)) = devices.get_mut(&key) {
+                *users -= 1;
+                if *users == 0 {
+                    info!("closing {} {}: no encoder uses it now", key.0, key.1);
+                    devices.remove(&key);
+                }
+            }
+        }
     }
 }
 
@@ -74,46 +196,47 @@ fn card(element: &gst::Element, kind: &str) -> String {
         .unwrap_or_default()
 }
 
-fn on_message(devices: &Weak<Mutex<Devices>>, msg: &gst::Message) {
-    let Some(element) = msg.src().and_then(|s| s.downcast_ref::<gst::Element>()) else {
-        return;
-    };
-    match msg.view() {
-        gst::MessageView::NeedContext(m) => {
-            let kind = m.context_type();
-            if !SHARED.iter().any(|(k, _)| *k == kind) {
-                return;
-            }
-            let Some(devices) = devices.upgrade() else {
-                return;
-            };
-            let key = (kind.to_owned(), card(element, kind));
-            let context = devices.lock().unwrap().get(&key).cloned();
-            if let Some(context) = context {
-                element.set_context(&context);
-            }
-        }
-        gst::MessageView::HaveContext(m) => {
-            let context = m.context();
-            let kind = context.context_type();
-            if !SHARED.iter().any(|(k, _)| *k == kind) {
-                return;
-            }
-            let Some(devices) = devices.upgrade() else {
-                return;
-            };
-            let key = (kind.to_owned(), card(element, kind));
-            if let std::collections::btree_map::Entry::Vacant(free) =
-                devices.lock().unwrap().entry(key)
-            {
-                info!(
-                    "sharing {} {} with every encoder",
-                    free.key().0,
-                    free.key().1
-                );
-                free.insert(context);
-            }
-        }
-        _ => {}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A device another pipeline said it opened: kept while a lease holds it, given to
+    /// the next pipeline that asks (held by its lease too), closed with the last lease.
+    #[test]
+    fn a_device_lives_as_long_as_a_pipeline_holds_it() {
+        gst::init().unwrap();
+        let gpu = GpuDevices::default();
+        let element = gst::ElementFactory::make("identity").build().unwrap();
+        let context = gst::Context::new("gst.cuda.context", true);
+        let have = gst::message::HaveContext::builder(context.clone())
+            .src(&element)
+            .build();
+        let first = gpu.lease();
+        gpu.on_message(&first.held, &have);
+        assert_eq!(gpu.kept(), vec!["gst.cuda.context ".to_owned()]);
+        let need = gst::message::NeedContext::builder("gst.cuda.context")
+            .src(&element)
+            .build();
+        let second = gpu.lease();
+        gpu.on_message(&second.held, &need);
+        // Asked twice by the same pipeline (it started over): held once.
+        gpu.on_message(&second.held, &need);
+        drop(first);
+        assert_eq!(gpu.kept().len(), 1, "the second pipeline still holds it");
+        // Another device opened at the same moment is not kept over it.
+        let other = gst::Context::new("gst.cuda.context", true);
+        let late = gst::message::HaveContext::builder(other)
+            .src(&element)
+            .build();
+        let third = gpu.lease();
+        gpu.on_message(&third.held, &late);
+        drop(third);
+        assert_eq!(gpu.kept().len(), 1);
+        drop(second);
+        assert!(gpu.kept().is_empty(), "closed with its last pipeline");
+        // Nothing kept: nothing to give.
+        let fourth = gpu.lease();
+        gpu.on_message(&fourth.held, &need);
+        assert!(fourth.held.lock().unwrap().is_empty());
     }
 }

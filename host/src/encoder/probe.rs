@@ -1,21 +1,26 @@
 //! What this PC's encoders can do: each candidate encodes a few frames in a tiny
 //! pipeline of the same elements and settings a stream uses, since an element being
 //! there does not mean its driver encodes (a VA driver without H.265, an NVIDIA plugin
-//! without the NVIDIA driver). A probe that does not end in [`PROBE_TIMEOUT`] counts as
-//! not working and holds nothing up: probes run side by side, each on a thread of its
-//! own, which is left behind when it hangs.
+//! without the NVIDIA driver). Probes run side by side on a thread of their own, started
+//! with the program ([`start_probing`]), each held to [`PROBE_TIMEOUT`] from its own
+//! start: one that hangs counts as failed and holds nothing up (its thread is left
+//! behind). An encoder is waited for only when one is needed ([`catalog`]).
 //!
 //! What they found is kept in the user's cache directory (`prostir/encoders.txt`) with
-//! a fingerprint of GStreamer and the graphics drivers, and probed again when that
-//! changes. It also keeps the session limits learned on the way: an encoder that does
-//! not open while others of it run has as many sessions as those (see
-//! [`Catalog::learn_limit`]). An encoder that did not open with nothing else running
-//! drops out for the rest of the run and the cache is made anew at the next start.
+//! a fingerprint of GStreamer, the graphics hardware and its drivers, and probed again
+//! when that changes. Only what lasts is kept as it is: an encoder that works, and one
+//! whose elements are not installed. A probe that failed or did not end, and an
+//! encoder that did not open, are kept as `retry`: probed again at the next start, in
+//! the background, while what works is used at once.
+//!
+//! Session limits are learned on the way, never guessed (NVENC ran 10 at once on driver
+//! 621): see [`Catalog::did_not_open`].
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, Once, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
@@ -25,11 +30,16 @@ use log::{info, warn};
 use prostir_proto::Codec;
 
 use super::choice::{Backend, CodecCaps, EncoderCaps, Kind, Ranked, Wanted, rank};
-use super::{EncoderConfig, Input, encoding};
+use super::{EncoderConfig, Input, NotOpened, encoding};
 use crate::platform::{AdapterId, Memory};
+use crate::screen::ScreenId;
 
-/// How long one probe may take.
+/// How long one probe may take, from its own start.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// An encoder that did not open for an output is tried for it again after this long
+/// (or at once for another output).
+pub const FORGET_FAILURE: Duration = Duration::from_secs(600);
 
 /// The probe's picture: small, but not below the smallest size any encoder takes
 /// (NVENC H.265 wants more than 128 pixels across).
@@ -56,6 +66,22 @@ fn candidates() -> Vec<(Backend, Option<AdapterId>)> {
     all
 }
 
+/// An encoder in a codec, as probed.
+type Asked = (Backend, Option<AdapterId>, Codec);
+
+/// Every encoder and codec this build probes.
+fn everything() -> Vec<Asked> {
+    candidates()
+        .into_iter()
+        .flat_map(|(b, a)| {
+            CODECS
+                .into_iter()
+                .filter(move |c| b.elements(*c).is_some())
+                .map(move |c| (b, a, c))
+        })
+        .collect()
+}
+
 /// What became of probing one encoder in one codec.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Probed {
@@ -63,19 +89,49 @@ enum Probed {
         max_w: u32,
         max_h: u32,
     },
-    /// Not there or not working, and why.
-    No(String),
+    /// An element is not installed: kept (installing it changes the fingerprint).
+    Missing(String),
+    /// It did not encode, or did not end in time: probed again at the next start.
+    Failed(String),
+}
+
+/// What an output does once its encoder did not open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Next {
+    /// Tries the same encoder once more: it may have been short of sessions for a
+    /// moment.
+    Again,
+    /// Goes on with the next encoder.
+    Another,
+}
+
+/// An encoder that did not open for an output, this run.
+#[derive(Debug, Clone)]
+struct Failure {
+    kind: Kind,
+    codec: Codec,
+    output: ScreenId,
+    why: String,
+    at: Instant,
 }
 
 /// The encoders this PC has, as probed, and what was learned of them since.
 #[derive(Debug, Clone, Default)]
 pub struct Catalog {
-    /// The ones that encode at least one codec, in the order of [`candidates`].
+    /// The ones that encode at least one codec, in the order of [`candidates`], with
+    /// the session limits kept from earlier runs.
     pub encoders: Vec<EncoderCaps>,
-    /// Why each encoder and codec that does not work does not, for the log.
+    /// Encoders and codecs whose elements are not installed, and why.
     pub missing: Vec<(Backend, Codec, String)>,
-    /// Encoders and codecs that did not open this run, with why.
-    pub failed: Vec<(Kind, Codec, String)>,
+    /// Encoders and codecs to probe again at the next start, and why.
+    pub retry: Vec<(Backend, Option<AdapterId>, Codec, String)>,
+    /// Encoders that did not open for an output this run.
+    failures: Vec<Failure>,
+    /// The sessions each encoder had open the first time this run one more did not
+    /// open for lack of them.
+    short: BTreeMap<Kind, u32>,
+    /// Session limits that hold this run: learned now, or kept and seen again.
+    limits: BTreeMap<Kind, u32>,
     /// The fingerprint it was probed with.
     key: String,
     /// Where it is kept; none where there is no cache directory.
@@ -83,89 +139,19 @@ pub struct Catalog {
 }
 
 impl Catalog {
-    /// From the cache when its fingerprint is the current one, else probed (and kept).
-    pub fn load_or_probe() -> Self {
-        let key = fingerprint();
-        let path = crate::platform::cache_home().map(|d| d.join("prostir").join("encoders.txt"));
-        if let Some(path) = &path
-            && let Some(mut catalog) = std::fs::read_to_string(path)
-                .ok()
-                .and_then(|text| Self::parse(&text, &key))
+    /// What a probe of `asked` found, in place of what was known of it.
+    fn add(&mut self, (backend, adapter, codec): Asked, probed: Probed) {
+        for e in self
+            .encoders
+            .iter_mut()
+            .filter(|e| e.kind() == (backend, adapter))
         {
-            catalog.path = Some(path.clone());
-            info!(
-                "video encoders as found before ({}): {}",
-                path.display(),
-                catalog.summary()
-            );
-            return catalog;
+            e.codecs.retain(|c| c.codec != codec);
         }
-        let started = Instant::now();
-        let mut catalog = Self::probe();
-        catalog.key = key;
-        catalog.path = path;
-        info!(
-            "video encoders probed in {} ms: {}",
-            started.elapsed().as_millis(),
-            catalog.summary()
-        );
-        for (backend, codec, why) in &catalog.missing {
-            info!("{} {codec:?}: {why}", backend.label());
-        }
-        catalog.save();
-        catalog
-    }
-
-    /// Probes every candidate in every codec, side by side.
-    fn probe() -> Self {
-        let deadline = Instant::now() + PROBE_TIMEOUT;
-        let (tx, rx) = mpsc::channel();
-        let mut asked = Vec::new();
-        for (backend, adapter) in candidates() {
-            for codec in CODECS {
-                if backend.elements(codec).is_none() {
-                    continue;
-                }
-                let index = asked.len();
-                asked.push((backend, adapter, codec));
-                let sender = tx.clone();
-                let spawned = std::thread::Builder::new()
-                    .name(format!("probe-{}", backend.name()))
-                    .spawn(move || {
-                        let _ = sender.send((index, probe_one(backend, codec)));
-                    });
-                if let Err(e) = spawned {
-                    let _ = tx.send((index, Probed::No(e.to_string())));
-                }
-            }
-        }
-        drop(tx);
-        let mut results: Vec<Option<Probed>> = vec![None; asked.len()];
-        let mut left = asked.len();
-        while left > 0 {
-            match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-                Ok((index, probed)) => {
-                    results[index] = Some(probed);
-                    left -= 1;
-                }
-                Err(_) => break,
-            }
-        }
-        let mut catalog = Self::default();
-        for ((backend, adapter, codec), probed) in asked.into_iter().zip(results) {
-            let probed = probed.unwrap_or_else(|| {
-                warn!(
-                    "{} {codec:?}: the probe did not end in {PROBE_TIMEOUT:?}",
-                    backend.label()
-                );
-                Probed::No(format!("did not answer in {} s", PROBE_TIMEOUT.as_secs()))
-            });
-            catalog.add(backend, adapter, codec, probed);
-        }
-        catalog
-    }
-
-    fn add(&mut self, backend: Backend, adapter: Option<AdapterId>, codec: Codec, probed: Probed) {
+        self.missing
+            .retain(|(b, c, _)| (*b, *c) != (backend, codec));
+        self.retry
+            .retain(|(b, a, c, _)| (*b, *a, *c) != (backend, adapter, codec));
         match probed {
             Probed::Works { max_w, max_h } => {
                 let caps = CodecCaps {
@@ -178,7 +164,12 @@ impl Catalog {
                     .iter_mut()
                     .find(|e| e.kind() == (backend, adapter))
                 {
-                    Some(e) => e.codecs.push(caps),
+                    Some(e) => {
+                        e.codecs.push(caps);
+                        // Sharpest first, as probed.
+                        e.codecs
+                            .sort_by_key(|c| CODECS.iter().position(|x| *x == c.codec));
+                    }
                     None => self.encoders.push(EncoderCaps {
                         backend,
                         adapter,
@@ -187,11 +178,34 @@ impl Catalog {
                     }),
                 }
             }
-            Probed::No(why) => self.missing.push((backend, codec, why)),
+            Probed::Missing(why) => self.missing.push((backend, codec, why)),
+            Probed::Failed(why) => self.retry.push((backend, adapter, codec, why)),
         }
+        let place = |b: Backend| candidates().iter().position(|(c, _)| *c == b);
+        self.encoders.sort_by_key(|e| place(e.backend));
     }
 
-    /// `va h265 h264`, for the log.
+    /// What to probe: every encoder and codec of this build not known yet (a new
+    /// candidate), and those to try again.
+    fn to_probe(&self) -> Vec<Asked> {
+        everything()
+            .into_iter()
+            .filter(|&(b, a, c)| {
+                let works = self
+                    .encoders
+                    .iter()
+                    .any(|e| e.kind() == (b, a) && e.codec(c).is_some());
+                let missing = self.missing.iter().any(|(mb, mc, _)| (*mb, *mc) == (b, c));
+                let again = self
+                    .retry
+                    .iter()
+                    .any(|(rb, ra, rc, _)| (*rb, *ra, *rc) == (b, a, c));
+                again || !(works || missing)
+            })
+            .collect()
+    }
+
+    /// `VA-API H265 H264`, for the log.
     fn summary(&self) -> String {
         if self.encoders.is_empty() {
             return "none".into();
@@ -208,6 +222,19 @@ impl Catalog {
             })
             .collect::<Vec<_>>()
             .join(", ")
+    }
+
+    /// Why each encoder that does not work does not, for the log.
+    fn log_missing(&self) {
+        for (backend, codec, why) in &self.missing {
+            info!("{} {codec:?}: {why}", backend.label());
+        }
+        for (backend, _, codec, why) in &self.retry {
+            info!(
+                "{} {codec:?}: {why} (probed again at the next start)",
+                backend.label()
+            );
+        }
     }
 
     /// Each codec this PC encodes, and whether on the graphics card (for the headset's
@@ -229,8 +256,9 @@ impl Catalog {
     }
 
     /// The encoder and codec this PC encodes `prefer` with when nothing else is known
-    /// (where the frames are, how large): the first hardware one in [`Backend::ORDER`]
-    /// with the codecs in their order, else x264; only x264 with `software`.
+    /// (where the frames are, which output): the first hardware one in
+    /// [`Backend::ORDER`] with the codecs in their order, else x264; only x264 with
+    /// `software`.
     pub fn pick(&self, prefer: Codec, software: bool) -> Result<(Backend, Codec)> {
         let mut codecs = vec![prefer];
         codecs.extend(
@@ -244,7 +272,7 @@ impl Catalog {
             &codecs,
             software,
             &|_| 0,
-            &self.failed,
+            &[],
         )
         .choices
         .first()
@@ -252,49 +280,128 @@ impl Catalog {
         .ok_or_else(no_encoder)
     }
 
-    /// The encoders for an output whose frames are in `memory` (see [`rank`]).
-    pub fn rank(&self, memory: Memory, wanted: Wanted, running: &dyn Fn(Kind) -> u32) -> Ranked {
+    /// The encoders for `output`, whose frames are in `memory` (see [`rank`]): with the
+    /// session limits that hold this run, past the encoders that did not open for it in
+    /// the last [`FORGET_FAILURE`].
+    pub fn rank(
+        &self,
+        memory: Memory,
+        wanted: Wanted,
+        output: ScreenId,
+        running: &dyn Fn(Kind) -> u32,
+    ) -> Ranked {
+        let encoders: Vec<EncoderCaps> = self
+            .encoders
+            .iter()
+            .map(|e| EncoderCaps {
+                sessions: self.limits.get(&e.kind()).copied(),
+                ..e.clone()
+            })
+            .collect();
+        let failed: Vec<(Kind, Codec, String)> = self
+            .failures
+            .iter()
+            .filter(|f| f.output == output && f.at.elapsed() < FORGET_FAILURE)
+            .map(|f| (f.kind, f.codec, f.why.clone()))
+            .collect();
         let codecs = wanted.codecs();
         rank(
-            &self.encoders,
+            &encoders,
             memory,
             &codecs,
             wanted.software,
             running,
-            &self.failed,
+            &failed,
         )
     }
 
-    /// Encoder `kind` did not open one more session while `open` of it ran: it opens
-    /// at most `open` (the least seen, if it was lower before), kept in the cache.
-    pub fn learn_limit(&mut self, kind: Kind, open: u32) {
-        let Some(e) = self.encoders.iter_mut().find(|e| e.kind() == kind) else {
-            return;
-        };
-        let max = e.sessions.map_or(open, |n| n.min(open)).max(1);
-        if e.sessions != Some(max) {
-            warn!("{} opens at most {max} sessions at once", kind.0.label());
-            e.sessions = Some(max);
+    /// Encoder `kind` did not open in `codec` for `output` (as `failure` says: whether
+    /// it said it had no more sessions, and whether it was opening again after a
+    /// pause), with `open` sessions of it held by the other outputs.
+    ///
+    /// A session limit is learned only of an encoder that has one (NVENC, AMF, Quick
+    /// Sync; not VA-API, whose drivers count none), only when it was short of sessions
+    /// while others ran, and only the second time this run, or the first time where a
+    /// limit was kept from earlier runs. The limit is the least number seen open then,
+    /// and rises when more are seen open later ([`Catalog::seen_open`]). One learned
+    /// while encoders opened again after a pause holds for this run only.
+    ///
+    /// Any other failure is the output's: the encoder is passed over for it (not for
+    /// the others) for [`FORGET_FAILURE`], and probed again at the next start.
+    pub fn did_not_open(
+        &mut self,
+        kind: Kind,
+        codec: Codec,
+        output: ScreenId,
+        failure: &NotOpened,
+        open: u32,
+    ) -> Next {
+        let label = kind.0.label();
+        let why = failure.why.as_str();
+        if failure.short && open > 0 && kind.0.counts_sessions() {
+            let kept = self
+                .encoders
+                .iter()
+                .find(|e| e.kind() == kind)
+                .and_then(|e| e.sessions);
+            let learned = match (self.short.remove(&kind), kept) {
+                (Some(before), _) => before.min(open),
+                (None, Some(_)) => open,
+                (None, None) => {
+                    info!("{label} did not open with {open} open: tried once more");
+                    self.short.insert(kind, open);
+                    return Next::Again;
+                }
+            };
+            let max = learned.max(1);
+            warn!("{label} opens at most {max} sessions at once");
+            self.limits.insert(kind, max);
+            if !failure.resumed
+                && let Some(e) = self.encoders.iter_mut().find(|e| e.kind() == kind)
+                && e.sessions != Some(max)
+            {
+                e.sessions = Some(max);
+                self.save();
+            }
+            return Next::Another;
+        }
+        warn!("{label} {codec:?} did not start: {why}; not used for this output for now");
+        self.failures.retain(|f| f.at.elapsed() < FORGET_FAILURE);
+        self.failures.push(Failure {
+            kind,
+            codec,
+            output,
+            why: why.to_owned(),
+            at: Instant::now(),
+        });
+        let marked = self
+            .retry
+            .iter()
+            .any(|(b, a, c, _)| (*b, *a, *c) == (kind.0, kind.1, codec));
+        if !marked {
+            self.retry.push((kind.0, kind.1, codec, why.to_owned()));
             self.save();
         }
+        Next::Another
     }
 
-    /// Encoder `kind` did not open in `codec` with no session of it running: not
-    /// tried again this run, and probed again at the next start.
-    pub fn failed(&mut self, kind: Kind, codec: Codec, why: String) {
-        warn!(
-            "{} {codec:?} did not start: {why}; not used again this run",
-            kind.0.label()
-        );
-        if !self
-            .failed
-            .iter()
-            .any(|(k, c, _)| *k == kind && *c == codec)
+    /// `open` sessions of encoder `kind` opened at once: a limit lower than that
+    /// rises to it.
+    pub fn seen_open(&mut self, kind: Kind, open: u32) {
+        if let Some(limit) = self.limits.get_mut(&kind)
+            && open > *limit
         {
-            self.failed.push((kind, codec, why));
+            *limit = open;
         }
-        if let Some(path) = &self.path {
-            let _ = std::fs::remove_file(path);
+        if let Some(e) = self.encoders.iter_mut().find(|e| e.kind() == kind)
+            && e.sessions.is_some_and(|n| open > n)
+        {
+            info!(
+                "{} has {open} sessions open, more than before",
+                kind.0.label()
+            );
+            e.sessions = Some(open);
+            self.save();
         }
     }
 
@@ -302,10 +409,12 @@ impl Catalog {
     fn text(&self) -> String {
         let mut out = format!(
             "# The video encoders Prostir found on this PC, and how many sessions each opens at\n\
-             # once. Probed again when GStreamer or a graphics driver changes; safe to delete.\n\
+             # once. Probed again when GStreamer or the graphics hardware or a driver changes,\n\
+             # and `retry` ones at every start; safe to delete.\n\
              key {}\n",
             self.key
         );
+        let line = |why: &str| why.replace(['\n', '\r'], " ");
         for e in &self.encoders {
             let codecs: Vec<String> = e
                 .codecs
@@ -327,11 +436,20 @@ impl Catalog {
             }
         }
         for (backend, codec, why) in &self.missing {
-            let why = why.replace(['\n', '\r'], " ");
             out.push_str(&format!(
-                "missing {} {} {why}\n",
+                "missing {} {} {}\n",
                 backend.name(),
-                codec_name(*codec)
+                codec_name(*codec),
+                line(why)
+            ));
+        }
+        for (backend, adapter, codec, why) in &self.retry {
+            out.push_str(&format!(
+                "retry {} {} {} {}\n",
+                backend.name(),
+                adapter_text(*adapter),
+                codec_name(*codec),
+                line(why)
             ));
         }
         out
@@ -380,12 +498,12 @@ impl Catalog {
                         Backend::named(words.next()?)?,
                         parse_adapter(words.next()?)?,
                     );
-                    let n = words.next()?.parse().ok()?;
+                    let n: u32 = words.next()?.parse().ok()?;
                     catalog
                         .encoders
                         .iter_mut()
                         .find(|e| e.kind() == kind)?
-                        .sessions = Some(n);
+                        .sessions = Some(n.max(1));
                 }
                 "missing" => {
                     let backend = Backend::named(words.next()?)?;
@@ -393,6 +511,13 @@ impl Catalog {
                     catalog
                         .missing
                         .push((backend, codec, words.collect::<Vec<_>>().join(" ")));
+                }
+                "retry" => {
+                    let backend = Backend::named(words.next()?)?;
+                    let adapter = parse_adapter(words.next()?)?;
+                    let codec = parse_codec(words.next()?)?;
+                    let why = words.collect::<Vec<_>>().join(" ");
+                    catalog.retry.push((backend, adapter, codec, why));
                 }
                 _ => return None,
             }
@@ -467,8 +592,8 @@ fn parse_adapter(text: &str) -> Option<Option<AdapterId>> {
 }
 
 /// What decides what the encoders do: GStreamer's version, the plugin files of every
-/// candidate, and the graphics drivers as the platform describes them. A short hash of
-/// it, so a change anywhere makes the cache stale.
+/// candidate, and the graphics hardware and drivers as the platform describes them. A
+/// short hash of it, so a change anywhere makes the cache stale.
 fn fingerprint() -> String {
     let mut parts = vec![gst::version_string().to_string()];
     let mut plugins: Vec<String> = candidates()
@@ -533,14 +658,14 @@ fn probe_one(backend: Backend, codec: Codec) -> Probed {
         return made;
     }
     let Some(elements) = backend.elements(codec) else {
-        return Probed::No("no such codec".into());
+        return Probed::Missing("no such codec".into());
     };
     if let Some(gone) = elements
         .iter()
         .chain([&super::parser(codec)])
         .find(|e| gst::ElementFactory::find(e).is_none())
     {
-        return Probed::No(format!("{gone} is not installed"));
+        return Probed::Missing(format!("{gone} is not installed"));
     }
     match run_probe(backend, codec) {
         Ok(()) => {
@@ -548,7 +673,7 @@ fn probe_one(backend: Backend, codec: Codec) -> Probed {
             let (max_w, max_h) = max_size(encoder).unwrap_or((u32::MAX, u32::MAX));
             Probed::Works { max_w, max_h }
         }
-        Err(e) => Probed::No(format!("{e:#}")),
+        Err(e) => Probed::Failed(format!("{e:#}")),
     }
 }
 
@@ -606,20 +731,190 @@ fn run_probe(backend: Backend, codec: Codec) -> Result<()> {
     result
 }
 
-/// The catalog of this run, probed (or read from the cache) the first time it is asked
-/// for: at the first session, not at the start of the program, so an idle PC never
-/// runs a probe.
-pub fn catalog() -> MutexGuard<'static, Catalog> {
-    static CATALOG: OnceLock<Mutex<Catalog>> = OnceLock::new();
-    CATALOG
-        .get_or_init(|| Mutex::new(Catalog::load_or_probe()))
+/// Probes `asked` side by side, each on a thread of its own and held to
+/// [`PROBE_TIMEOUT`] from when it started.
+fn probe(asked: &[Asked]) -> Vec<(Asked, Probed)> {
+    let (tx, rx) = mpsc::channel();
+    let mut deadlines = Vec::new();
+    for (index, &(backend, _, codec)) in asked.iter().enumerate() {
+        deadlines.push(Instant::now() + PROBE_TIMEOUT);
+        let sender = tx.clone();
+        let spawned = std::thread::Builder::new()
+            .name(format!("probe-{}", backend.name()))
+            .spawn(move || {
+                let _ = sender.send((index, probe_one(backend, codec)));
+            });
+        if let Err(e) = spawned {
+            let _ = tx.send((index, Probed::Failed(e.to_string())));
+        }
+    }
+    drop(tx);
+    let mut results: Vec<Option<Probed>> = vec![None; asked.len()];
+    // Until every probe answered or ran out of time, the soonest of them first.
+    while let Some(due) = (0..asked.len())
+        .filter(|i| results[*i].is_none())
+        .map(|i| deadlines[i])
+        .min()
+    {
+        match rx.recv_timeout(due.saturating_duration_since(Instant::now())) {
+            Ok((index, probed)) => results[index] = Some(probed),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                for (i, result) in results.iter_mut().enumerate() {
+                    if result.is_none() && deadlines[i] <= Instant::now() {
+                        let (backend, _, codec) = asked[i];
+                        warn!(
+                            "{} {codec:?}: the probe did not end in {PROBE_TIMEOUT:?}",
+                            backend.label()
+                        );
+                        *result = Some(Probed::Failed(format!(
+                            "did not answer in {} s",
+                            PROBE_TIMEOUT.as_secs()
+                        )));
+                    }
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    asked
+        .iter()
+        .copied()
+        .zip(results)
+        .map(|(a, r)| (a, r.unwrap_or_else(|| Probed::Failed("no answer".into()))))
+        .collect()
+}
+
+/// The catalog of this run, once found.
+struct Shared {
+    catalog: Mutex<Option<Catalog>>,
+    found: Condvar,
+}
+
+fn shared() -> &'static Shared {
+    static SHARED: OnceLock<Shared> = OnceLock::new();
+    SHARED.get_or_init(|| Shared {
+        catalog: Mutex::new(None),
+        found: Condvar::new(),
+    })
+}
+
+/// Finds what the encoders can do, on a thread of its own, once: from the cache where
+/// it is current, the `retry` ones probed again in the background meanwhile; else
+/// probed. Called when the program starts (after GStreamer), so the first headset does
+/// not wait for it; the threads end once done, and an idle PC sleeps as before.
+pub fn start_probing() {
+    static STARTED: Once = Once::new();
+    STARTED.call_once(|| {
+        let spawned = std::thread::Builder::new()
+            .name("encoders".into())
+            .spawn(find);
+        if let Err(e) = spawned {
+            warn!("no thread to probe the encoders on: {e}; probing here");
+            find();
+        }
+    });
+}
+
+fn publish(catalog: Catalog) {
+    let shared = shared();
+    *shared
+        .catalog
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(catalog);
+    shared.found.notify_all();
+}
+
+fn find() {
+    let key = fingerprint();
+    let path = crate::platform::cache_home().map(|d| d.join("prostir").join("encoders.txt"));
+    let cached = path
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|text| Catalog::parse(&text, &key));
+    let started = Instant::now();
+    let Some(mut catalog) = cached else {
+        let mut catalog = Catalog {
+            key,
+            path,
+            ..Catalog::default()
+        };
+        for (asked, probed) in probe(&everything()) {
+            catalog.add(asked, probed);
+        }
+        info!(
+            "video encoders probed in {} ms: {}",
+            started.elapsed().as_millis(),
+            catalog.summary()
+        );
+        catalog.log_missing();
+        catalog.save();
+        publish(catalog);
+        return;
+    };
+    catalog.path = path;
+    info!("video encoders as found before: {}", catalog.summary());
+    let again = catalog.to_probe();
+    publish(catalog);
+    if again.is_empty() {
+        return;
+    }
+    let names: Vec<String> = again
+        .iter()
+        .map(|(b, _, c)| format!("{} {c:?}", b.label()))
+        .collect();
+    info!("probing again in the background: {}", names.join(", "));
+    let results = probe(&again);
+    let mut catalog = self::catalog();
+    for (asked, probed) in results {
+        catalog.add(asked, probed);
+    }
+    info!(
+        "video encoders probed again in {} ms: {}",
+        started.elapsed().as_millis(),
+        catalog.summary()
+    );
+    catalog.log_missing();
+    catalog.save();
+}
+
+/// The catalog of this run, locked.
+pub struct CatalogGuard(MutexGuard<'static, Option<Catalog>>);
+
+impl std::ops::Deref for CatalogGuard {
+    type Target = Catalog;
+    fn deref(&self) -> &Catalog {
+        self.0.as_ref().expect("found before the guard is given")
+    }
+}
+
+impl std::ops::DerefMut for CatalogGuard {
+    fn deref_mut(&mut self) -> &mut Catalog {
+        self.0.as_mut().expect("found before the guard is given")
+    }
+}
+
+/// The catalog of this run, waiting for it to be found if it is not yet (it is
+/// started with the program; this starts it where it was not).
+pub fn catalog() -> CatalogGuard {
+    start_probing();
+    let shared = shared();
+    let mut guard = shared
+        .catalog
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    while guard.is_none() {
+        guard = shared
+            .found
+            .wait(guard)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    }
+    CatalogGuard(guard)
 }
 
 /// The fake hardware encoder of the end-to-end tests, as `PROSTIR_FAKE_ENCODER` says:
-/// `works` (any number of sessions), `sessions=N` (one more does not open), `broken`
-/// (its probe fails), `hangs` (its probe never ends).
+/// `works` (any number of sessions), `sessions=N` (one more does not open once it
+/// started), `refuses=N` (one more does not start at all), `broken` (its probe fails),
+/// `hangs` (its probe never ends).
 #[cfg(feature = "fake-desktop")]
 pub mod fake {
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -637,16 +932,26 @@ pub mod fake {
 
     /// The sessions it opens at once; none: any number.
     pub fn sessions() -> Option<u32> {
-        mode()?.strip_prefix("sessions=")?.parse().ok()
+        let mode = mode()?;
+        mode.strip_prefix("sessions=")
+            .or_else(|| mode.strip_prefix("refuses="))?
+            .parse()
+            .ok()
+    }
+
+    /// One more than it opens does not start at all (rather than starting and then
+    /// saying it did not open).
+    pub fn refuses() -> bool {
+        mode().is_some_and(|m| m.starts_with("refuses="))
     }
 
     /// Its probe's result, where the mode makes one up; none: probed as x264.
     pub(super) fn probe() -> Option<Probed> {
         match mode()?.as_str() {
-            "broken" => Some(Probed::No("broken on purpose".into())),
+            "broken" => Some(Probed::Failed("broken on purpose".into())),
             "hangs" => {
                 std::thread::sleep(std::time::Duration::from_secs(600));
-                Some(Probed::No("hung".into()))
+                Some(Probed::Failed("hung".into()))
             }
             _ => None,
         }
@@ -661,6 +966,8 @@ pub mod fake {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const KEY: &str = "0123456789abcdef";
 
     fn caps(backend: Backend, codecs: &[(Codec, u32)]) -> EncoderCaps {
         EncoderCaps {
@@ -679,18 +986,58 @@ mod tests {
     }
 
     fn sample() -> Catalog {
-        let mut va = caps(Backend::Va, &[(Codec::H265, 8192), (Codec::H264, 4096)]);
-        va.sessions = Some(3);
+        let mut nvenc = caps(Backend::Nvenc, &[(Codec::H265, 8192), (Codec::H264, 4096)]);
+        nvenc.sessions = Some(3);
         Catalog {
-            encoders: vec![va, caps(Backend::X264, &[(Codec::H264, 16384)])],
+            encoders: vec![
+                caps(Backend::Va, &[(Codec::H264, 4096)]),
+                nvenc,
+                caps(Backend::X264, &[(Codec::H264, 16384)]),
+            ],
             missing: vec![(
-                Backend::Nvenc,
-                Codec::H264,
-                "nvh264enc is not installed".into(),
+                Backend::Va,
+                Codec::H265,
+                "vah265enc is not installed".into(),
             )],
-            failed: Vec::new(),
-            key: "0123456789abcdef".into(),
-            path: None,
+            retry: vec![(
+                Backend::Nvenc,
+                None,
+                Codec::H264,
+                "did not answer in 3 s".into(),
+            )],
+            key: KEY.into(),
+            ..Catalog::default()
+        }
+    }
+
+    /// A catalog kept in a file of its own, for the tests that save.
+    fn kept(name: &str) -> (Catalog, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("prostir-{name}-{}", std::process::id()));
+        let path = dir.join("encoders.txt");
+        let _ = std::fs::remove_dir_all(&dir);
+        let catalog = Catalog {
+            path: Some(path.clone()),
+            ..sample()
+        };
+        (catalog, path)
+    }
+
+    fn read(path: &Path) -> Catalog {
+        Catalog::parse(&std::fs::read_to_string(path).unwrap(), KEY).unwrap()
+    }
+
+    const NVENC: Kind = (Backend::Nvenc, None);
+    const VA: Kind = (Backend::Va, None);
+
+    fn output(n: u32) -> ScreenId {
+        ScreenId::saved(n)
+    }
+
+    fn failure(short: bool, resumed: bool) -> NotOpened {
+        NotOpened {
+            why: "no".into(),
+            short,
+            resumed,
         }
     }
 
@@ -699,47 +1046,185 @@ mod tests {
     fn the_cache_reads_back_what_it_wrote() {
         let catalog = sample();
         let text = catalog.text();
-        let back = Catalog::parse(&text, "0123456789abcdef").unwrap();
+        let back = Catalog::parse(&text, KEY).unwrap();
         assert_eq!(back.encoders, catalog.encoders);
         assert_eq!(back.missing, catalog.missing);
+        assert_eq!(back.retry, catalog.retry);
         assert_eq!(back.text(), text);
-        // Another GStreamer or driver: probed again.
+        // Another GStreamer, card or driver: probed again.
         assert!(Catalog::parse(&text, "fedcba9876543210").is_none());
         // A file of another version, or half of one, is no catalog.
-        assert!(Catalog::parse("encoder va - h264 4096x4096\n", "0123456789abcdef").is_none());
-        assert!(Catalog::parse(&format!("{text}what is this\n"), "0123456789abcdef").is_none());
-        assert!(
-            Catalog::parse(
-                "key 0123456789abcdef\nencoder va - h264 4096\n",
-                "0123456789abcdef"
-            )
-            .is_none()
+        assert!(Catalog::parse("encoder va - h264 4096x4096\n", KEY).is_none());
+        assert!(Catalog::parse(&format!("{text}what is this\n"), KEY).is_none());
+        let half = format!("key {KEY}\nencoder va - h264 4096\n");
+        assert!(Catalog::parse(&half, KEY).is_none());
+        // No limit below one session.
+        let none = format!("key {KEY}\nencoder nvenc - h264 4096x4096\nsessions nvenc - 0\n");
+        assert_eq!(
+            Catalog::parse(&none, KEY).unwrap().encoders[0].sessions,
+            Some(1)
         );
     }
 
-    /// A file in the cache directory: written whole, read back, and gone once an
-    /// encoder did not start, so the next start probes again.
+    /// A probe that failed or did not end is not kept as missing: what works is used,
+    /// and it is probed again at the next start; so is an encoder this build has that
+    /// the file does not know. What works and what is not installed are not.
     #[test]
-    fn the_cache_file_is_kept_and_dropped() {
-        let dir = std::env::temp_dir().join(format!("prostir-encoders-{}", std::process::id()));
-        let path = dir.join("prostir").join("encoders.txt");
-        let mut catalog = Catalog {
-            path: Some(path.clone()),
+    fn failures_are_probed_again_and_only_they() {
+        let mut catalog = sample();
+        let again = catalog.to_probe();
+        assert!(
+            again.contains(&(Backend::Nvenc, None, Codec::H264)),
+            "{again:?}"
+        );
+        assert!(
+            !again.contains(&(Backend::Va, None, Codec::H265)),
+            "missing stays"
+        );
+        assert!(
+            !again.contains(&(Backend::Va, None, Codec::H264)),
+            "works stays"
+        );
+        assert!(!again.contains(&(Backend::X264, None, Codec::H264)));
+        // It works this time: no longer to try again.
+        catalog.add(
+            (Backend::Nvenc, None, Codec::H264),
+            Probed::Works {
+                max_w: 4096,
+                max_h: 4096,
+            },
+        );
+        assert!(catalog.retry.is_empty());
+        assert!(catalog.to_probe().is_empty());
+        assert_eq!(catalog.encoders[1].codecs.len(), 2);
+        assert_eq!(
+            catalog.encoders[1].codecs[0].codec,
+            Codec::H265,
+            "sharpest first"
+        );
+        // It fails: what it encoded before is no longer counted on.
+        catalog.add(
+            (Backend::Va, None, Codec::H264),
+            Probed::Failed("hung".into()),
+        );
+        assert!(catalog.encoders[0].codecs.is_empty());
+        assert_eq!(catalog.retry.len(), 1);
+        // A file without some encoder of this build: that one is probed.
+        let older = Catalog {
+            encoders: Vec::new(),
+            missing: Vec::new(),
+            retry: Vec::new(),
             ..sample()
         };
-        catalog.save();
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("sessions va - 3"), "{text}");
-        // Fewer sessions seen: the lower one is kept, and written.
-        catalog.learn_limit((Backend::Va, None), 2);
-        let back = Catalog::parse(&std::fs::read_to_string(&path).unwrap(), &catalog.key).unwrap();
-        assert_eq!(back.encoders[0].sessions, Some(2));
-        // More is never learned from a failure: the least seen stays.
-        catalog.learn_limit((Backend::Va, None), 5);
-        assert_eq!(catalog.encoders[0].sessions, Some(2));
-        catalog.failed((Backend::Va, None), Codec::H265, "no".into());
-        assert!(!path.exists(), "probed again at the next start");
-        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(older.to_probe(), everything());
+    }
+
+    /// Short of sessions once: the same encoder once more. Twice: the limit is the
+    /// least number seen open, kept, and the output goes on; it rises when more are
+    /// seen open.
+    #[test]
+    fn a_session_limit_takes_two_failures_and_rises() {
+        let (mut catalog, path) = kept("limit");
+        catalog.encoders[1].sessions = None;
+        let first = catalog.did_not_open(NVENC, Codec::H265, output(1), &failure(true, false), 4);
+        assert_eq!(first, Next::Again);
+        let wanted = Wanted {
+            codec: Codec::H265,
+            software: false,
+        };
+        let four = |_: Kind| 4;
+        let ranked = catalog.rank(Memory::DmaBuf, wanted, output(1), &four);
+        assert!(
+            ranked.choices.iter().any(|c| c.backend == Backend::Nvenc),
+            "not yet"
+        );
+        let second = catalog.did_not_open(NVENC, Codec::H265, output(1), &failure(true, false), 3);
+        assert_eq!(second, Next::Another);
+        assert_eq!(read(&path).encoders[1].sessions, Some(3));
+        let three = |_: Kind| 3;
+        let ranked = catalog.rank(Memory::DmaBuf, wanted, output(2), &three);
+        assert!(ranked.choices.iter().all(|c| c.backend != Backend::Nvenc));
+        catalog.seen_open(NVENC, 5);
+        assert_eq!(read(&path).encoders[1].sessions, Some(5));
+        let ranked = catalog.rank(Memory::DmaBuf, wanted, output(2), &four);
+        assert_eq!(
+            ranked.choices[0].backend,
+            Backend::Va,
+            "VA-API first on DMA-BUF"
+        );
+        assert!(ranked.choices.iter().any(|c| c.backend == Backend::Nvenc));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// A limit kept from earlier runs is a hint: the encoder is tried past it, and one
+    /// failure is enough to hold it again this run.
+    #[test]
+    fn a_kept_limit_is_tried_past_and_held_after_one_failure() {
+        let (mut catalog, path) = kept("kept-limit");
+        let hardware = Wanted {
+            codec: Codec::H264,
+            software: false,
+        };
+        let three = |_: Kind| 3;
+        let ranked = catalog.rank(Memory::System, hardware, output(1), &three);
+        assert!(ranked.choices.iter().any(|c| c.backend == Backend::Nvenc));
+        let next = catalog.did_not_open(NVENC, Codec::H264, output(1), &failure(true, false), 3);
+        assert_eq!(next, Next::Another);
+        let ranked = catalog.rank(Memory::System, hardware, output(2), &three);
+        assert!(ranked.choices.iter().all(|c| c.backend != Backend::Nvenc));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// Learned while encoders opened again after a pause: held this run, not kept.
+    #[test]
+    fn a_limit_learned_on_a_resume_is_not_kept() {
+        let (mut catalog, path) = kept("resume");
+        catalog.encoders[1].sessions = None;
+        catalog.did_not_open(NVENC, Codec::H264, output(1), &failure(true, true), 2);
+        catalog.did_not_open(NVENC, Codec::H264, output(1), &failure(true, true), 2);
+        assert_eq!(catalog.limits.get(&NVENC), Some(&2));
+        assert!(!path.exists() || read(&path).encoders[1].sessions.is_none());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// No limit of VA-API (its drivers count none), of an encoder alone, or of an
+    /// error that is not one of sessions: the output's failure, for that output only,
+    /// for a while; probed again at the next start, the file kept.
+    #[test]
+    fn other_failures_are_the_outputs() {
+        let (mut catalog, path) = kept("failure");
+        let wanted = Wanted {
+            codec: Codec::H264,
+            software: false,
+        };
+        for (kind, short, open) in [(VA, true, 3), (NVENC, true, 0), (NVENC, false, 2)] {
+            let next =
+                catalog.did_not_open(kind, Codec::H264, output(1), &failure(short, false), open);
+            assert_eq!(next, Next::Another);
+        }
+        assert!(catalog.limits.is_empty());
+        let none = |_: Kind| 0;
+        let one = catalog.rank(Memory::DmaBuf, wanted, output(1), &none);
+        assert_eq!(one.choices[0].backend, Backend::X264, "{:?}", one.choices);
+        let other = catalog.rank(Memory::DmaBuf, wanted, output(2), &none);
+        assert_eq!(other.choices[0].backend, Backend::Va);
+        let back = read(&path);
+        assert!(
+            back.retry
+                .iter()
+                .any(|r| r.0 == Backend::Va && r.2 == Codec::H264)
+        );
+        assert!(
+            !back.encoders[0].codecs.is_empty(),
+            "what works stays usable"
+        );
+        // Long ago: tried for that output again.
+        for f in &mut catalog.failures {
+            f.at = Instant::now() - FORGET_FAILURE - Duration::from_secs(1);
+        }
+        let later = catalog.rank(Memory::DmaBuf, wanted, output(1), &none);
+        assert_eq!(later.choices[0].backend, Backend::Va);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     /// The headset's menu: each codec on the graphics card and on the CPU, as found.
@@ -756,27 +1241,15 @@ mod tests {
         assert!(Catalog::default().available().is_empty());
     }
 
-    /// Without regard to where frames are: VA-API in the codec asked for, else in the
-    /// next; x264 with `--software` and when there is nothing else.
+    /// Without regard to where frames are: the first card's encoder in the codec asked
+    /// for, else in the next; x264 with `--software` and when there is nothing else.
     #[test]
     fn the_pick_for_the_pc_as_before() {
         let catalog = sample();
-        assert_eq!(
-            catalog.pick(Codec::H265, false).unwrap(),
-            (Backend::Va, Codec::H265)
-        );
-        assert_eq!(
-            catalog.pick(Codec::H264, false).unwrap(),
-            (Backend::Va, Codec::H264)
-        );
-        assert_eq!(
-            catalog.pick(Codec::Av1, false).unwrap(),
-            (Backend::Va, Codec::H265)
-        );
-        assert_eq!(
-            catalog.pick(Codec::H265, true).unwrap(),
-            (Backend::X264, Codec::H264)
-        );
+        let pick = |codec, software| catalog.pick(codec, software).unwrap();
+        assert_eq!(pick(Codec::H265, false), (Backend::Va, Codec::H264));
+        assert_eq!(pick(Codec::H264, false), (Backend::Va, Codec::H264));
+        assert_eq!(pick(Codec::H265, true), (Backend::X264, Codec::H264));
         let cpu = Catalog {
             encoders: vec![caps(Backend::X264, &[(Codec::H264, 16384)])],
             ..Catalog::default()

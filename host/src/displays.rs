@@ -13,7 +13,9 @@ use prostir_layout::desk;
 use prostir_proto::state;
 use prostir_proto::{Codec, HostMsg};
 
-use crate::encoder::{Backend, Encoder, EncoderConfig, GpuDevices, Kind, Wanted};
+use crate::encoder::{
+    Backend, Choice, Encoder, EncoderConfig, GpuDevices, Kind, Next, NotOpened, Wanted,
+};
 use crate::errors::{Counted, UserError, code_of};
 use crate::layout::panel_size;
 use crate::platform::audio::{AudioOut, MicIn};
@@ -50,6 +52,23 @@ fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
+}
+
+/// How one screen encodes (see [`Displays::encoding_report`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputEncoding {
+    pub id: ScreenId,
+    /// Its name, for people (`Prostir-2`).
+    pub name: String,
+    /// The encoder, for people (`VA-API`, `x264`).
+    pub encoder: &'static str,
+    pub codec: Codec,
+    /// On the graphics card.
+    pub hardware: bool,
+    /// Its frames go through the CPU on their way to the encoder.
+    pub copies: bool,
+    /// Why it is not the best this PC has for it, when it is not.
+    pub note: Option<String>,
 }
 
 /// Retry timing after failures: 2 s, then doubling up to 2 min.
@@ -475,11 +494,20 @@ impl Displays {
             software: cfg.backend == Backend::X264,
         };
         let running = self.running_encoders(&[id]);
-        let ranked = crate::encoder::catalog().rank(source.memory, wanted, &|kind| {
-            running.get(&kind).copied().unwrap_or(0)
-        });
-        let mut tried = Vec::new();
-        for choice in &ranked.choices {
+        let held = |kind: Kind| running.get(&kind).copied().unwrap_or(0);
+        let mut tried: Vec<(Choice, String)> = Vec::new();
+        let mut again = false;
+        let ranked = loop {
+            // Ranked anew after each failure: it may have taught a limit.
+            let ranked = crate::encoder::catalog().rank(source.memory, wanted, id, &held);
+            let Some(choice) = ranked
+                .choices
+                .iter()
+                .find(|c| !tried.iter().any(|(t, _)| t == *c))
+                .copied()
+            else {
+                break ranked;
+            };
             let cfg = EncoderConfig {
                 backend: choice.backend,
                 codec: choice.codec,
@@ -494,24 +522,42 @@ impl Displays {
                 });
             let mut encoder = match started {
                 Ok(encoder) => encoder,
+                // As one that did not open after it started.
                 Err(e) => {
-                    warn!("{name}: {choice} did not start: {e:#}");
-                    tried.push((*choice, format!("{e:#}")));
+                    let text = format!("{e:#}");
+                    warn!("{name}: {choice} did not start: {text}");
+                    let failure = NotOpened {
+                        short: crate::encoder::short_of_sessions(None, &text),
+                        why: text.clone(),
+                        resumed: false,
+                    };
+                    let next = crate::encoder::catalog().did_not_open(
+                        (choice.backend, choice.adapter),
+                        choice.codec,
+                        id,
+                        &failure,
+                        held((choice.backend, choice.adapter)),
+                    );
+                    if next == Next::Again && !again {
+                        again = true;
+                    } else {
+                        tried.push((choice, text));
+                    }
                     continue;
                 }
             };
             output.attach(&encoder)?;
-            let note = crate::encoder::note(choice, wanted, &ranked.skipped, &tried);
+            let note = crate::encoder::note(&choice, wanted, &ranked.skipped, &tried);
             match &note {
                 Some(note) => warn!("{name}: encoding with {note}"),
                 None => info!("{name}: encoding with {choice}"),
             }
-            encoder.set_note(note);
+            encoder.set_choice(&choice, note);
             if !self.streaming {
                 encoder.set_paused(true);
             }
             return Ok(encoder);
-        }
+        };
         let mut why: Vec<String> = ranked
             .skipped
             .iter()
@@ -549,27 +595,20 @@ impl Displays {
         running
     }
 
-    /// Streams whose encoder did not open go on with the next encoder for them: one
-    /// that did not open while others of it held sessions opens as many as those (kept
-    /// for the next runs; the least such count wins, so several not opening at once
-    /// settle on it), one that did not open alone is not tried again this run.
+    /// Streams whose encoder did not open go on with the next encoder for them, or try
+    /// the same once more when it was short of sessions the first time (see
+    /// `Catalog::did_not_open`, which learns limits from these). Streams that did not
+    /// open together are left out of each other's count of sessions held.
     fn retry_unopened(&mut self) {
         let unopened = self.router.take_unopened();
         let ids: Vec<ScreenId> = unopened.iter().map(|(id, _)| *id).collect();
-        for (id, why) in unopened {
+        for (id, failure) in unopened {
             let Some(encoder) = self.screens.get(&id).and_then(|s| s.stream.as_ref()) else {
                 continue;
             };
             let (kind, codec) = (encoder.kind(), encoder.codec());
             let open = self.running_encoders(&ids).get(&kind).copied().unwrap_or(0);
-            {
-                let mut catalog = crate::encoder::catalog();
-                if open > 0 {
-                    catalog.learn_limit(kind, open);
-                } else {
-                    catalog.failed(kind, codec, why);
-                }
-            }
+            crate::encoder::catalog().did_not_open(kind, codec, id, &failure, open);
             if self.is_physical(id) {
                 self.stop_physical(id);
                 self.physical_due = Instant::now();
@@ -577,17 +616,37 @@ impl Displays {
                 error!("{id}: {e:#}");
             }
         }
+        // Encoders seen holding more sessions than a limit says: it rises.
+        let mut opened: BTreeMap<Kind, u32> = BTreeMap::new();
+        for e in self.screens.values().filter_map(|s| s.stream.as_ref()) {
+            if e.opened() {
+                *opened.entry(e.kind()).or_insert(0) += 1;
+            }
+        }
+        if opened.values().any(|n| *n > 1) {
+            let mut catalog = crate::encoder::catalog();
+            for (kind, n) in opened {
+                catalog.seen_open(kind, n);
+            }
+        }
     }
 
     /// How each screen that streams encodes, and what to say of it when it is not the
-    /// best this PC has for it (see `encoder::note`): for the local API.
-    pub fn encoding_report(&self) -> Vec<(ScreenId, String, Option<String>)> {
+    /// best this PC has for it (see `encoder::note`): for the tray and the local API.
+    pub fn encoding_report(&self) -> Vec<OutputEncoding> {
         self.screens
             .values()
             .filter_map(|s| {
                 let e = s.stream.as_ref()?;
-                let what = format!("{} {:?}", e.kind().0.label(), e.codec());
-                Some((s.id, what, e.note().map(str::to_owned)))
+                Some(OutputEncoding {
+                    id: s.id,
+                    name: s.name(),
+                    encoder: e.kind().0.label(),
+                    codec: e.codec(),
+                    hardware: e.kind().0.hardware(),
+                    copies: e.copies(),
+                    note: e.note().map(str::to_owned),
+                })
             })
             .collect()
     }

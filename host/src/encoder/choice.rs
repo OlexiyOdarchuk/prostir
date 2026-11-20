@@ -117,6 +117,19 @@ impl Backend {
         self != Self::X264
     }
 
+    /// It opens only so many sessions at once (NVENC on consumer cards, AMF, Quick
+    /// Sync, and Media Foundation on top of them), so one that does not open while
+    /// others run may be out of them. VA-API drivers (Intel's, Mesa's) count none: a
+    /// failure there is memory or a format, never a limit to learn.
+    pub fn counts_sessions(self) -> bool {
+        match self {
+            Self::Va | Self::X264 => false,
+            Self::Nvenc | Self::NvencD3d11 | Self::Amf | Self::Qsv | Self::MediaFoundation => true,
+            #[cfg(feature = "fake-desktop")]
+            Self::Fake => true,
+        }
+    }
+
     /// How frames in `memory` reach it when it runs on `adapter` (none: the card the
     /// system picks, or the CPU); none when it cannot take them at all.
     pub fn path(self, memory: Memory, adapter: Option<AdapterId>) -> Option<Path> {
