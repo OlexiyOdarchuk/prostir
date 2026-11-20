@@ -31,6 +31,10 @@ impl eframe::App for Timed {
 }
 
 fn main() -> eframe::Result {
+    if prostir_settings::asks_version(std::env::args().skip(1)) {
+        println!("{}", prostir_settings::version_line());
+        return Ok(());
+    }
     let started = Instant::now();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     let mock = std::env::args().any(|a| a == "--mock")

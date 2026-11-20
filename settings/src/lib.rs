@@ -44,3 +44,30 @@ impl api::Client for NoBus {
         Ok(())
     }
 }
+
+/// `Prostir 0.2.0`, as `prostir --version` says it and its log starts with it.
+pub fn version_line() -> String {
+    format!(
+        "Prostir {}",
+        prostir_proto::app_version(env!("CARGO_PKG_VERSION"))
+    )
+}
+
+/// The command line asks for the version only (`-v`, `--version`).
+pub fn asks_version(args: impl IntoIterator<Item = String>) -> bool {
+    args.into_iter().any(|a| a == "-v" || a == "--version")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_version_when_asked() {
+        let args = |a: &[&str]| a.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        assert!(asks_version(args(&["--version"])));
+        assert!(asks_version(args(&["-v"])));
+        assert!(!asks_version(args(&["--mock"])));
+        assert!(version_line().starts_with("Prostir 0."));
+    }
+}

@@ -3681,6 +3681,7 @@ dependencies = [
  "log",
  "prostir-api",
  "prostir-lang",
+ "prostir-proto",
  "serde",
  "serde_json",
  "skrifa",
