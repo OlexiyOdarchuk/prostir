@@ -145,8 +145,6 @@ pub struct Displays {
     /// Displays larger than the headset decodes (see [`Displays::stop_too_big`]): the
     /// size and codec they did not fit in, until a headset or codec they fit.
     too_big: BTreeMap<ScreenId, ((u32, u32), Codec)>,
-    /// When a headset last asked for a keyframe of each screen.
-    keyframes_asked: BTreeMap<ScreenId, Instant>,
     /// The settings as last applied from the store (see [`Displays::apply`]).
     settings: Settings,
     /// PC sound to the headset, while one is connected.
@@ -217,7 +215,6 @@ impl Displays {
             on_desk: BTreeMap::new(),
             physical_seen: set.physical.iter().map(|(id, p)| (*id, p.seen)).collect(),
             too_big: BTreeMap::new(),
-            keyframes_asked: BTreeMap::new(),
             settings: settings.clone(),
             audio: None,
             mic: None,
@@ -1944,21 +1941,6 @@ impl Displays {
         } else {
             self.desk.ask(Job::Fresh([id].into()));
         }
-    }
-
-    /// A headset asks for a keyframe of screen `id`: at most every 300 ms for each
-    /// screen, whoever asks, or keyframes would follow one another.
-    pub fn keyframe_asked(&mut self, id: ScreenId) {
-        let now = Instant::now();
-        if self
-            .keyframes_asked
-            .get(&id)
-            .is_some_and(|t| now.duration_since(*t) < Duration::from_millis(300))
-        {
-            return;
-        }
-        self.keyframes_asked.insert(id, now);
-        self.force_keyframe(id);
     }
 
     /// Asks the encoder of screen `id` for a keyframe, without waiting for anyone.

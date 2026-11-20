@@ -363,6 +363,21 @@ fn spawn_reader(
                         generation,
                         seq,
                     } => router.frame_shown(id, ScreenId::from_wire(display), generation, seq),
+                    // A keyframe waits for nobody: asked of the encoder from here.
+                    ClientMsg::RequestKeyframe {
+                        id: display,
+                        generation,
+                    } => {
+                        let display = ScreenId::from_wire(display);
+                        if router.is_current(id, display, generation) {
+                            router.keyframe_asked(display);
+                        } else {
+                            info!(
+                                "{display}: a keyframe asked for {generation:?}, not the generation it \
+                                 streams now: none made"
+                            );
+                        }
+                    }
                     msg => {
                         if !events.send(Event::Headset(id, Instant::now(), msg)) {
                             return;
@@ -1009,7 +1024,10 @@ impl Session {
                     }
                 }
             }
-            // Only the microphone of the session that has it reaches the PC.
+            // Only the microphone of the session that has it reaches the PC. It still
+            // goes through the control loop, which takes it at once (a pass is short and
+            // waits for nothing); moving it to the reader, as keyframes, is for later
+            // (plan, step 6, section 3.2).
             ClientMsg::Up { up, data } => match self.ups.get(&up) {
                 _ if !self.standing.mic => {}
                 // The PC's end of the microphone is mono.
@@ -1020,17 +1038,6 @@ impl Session {
             ClientMsg::UpEnd { up } => {
                 if self.ups.remove(&up).is_some() {
                     info!("the headset's microphone stopped (up stream {up})");
-                }
-            }
-            ClientMsg::RequestKeyframe { id, generation } => {
-                let id = ScreenId::from_wire(id);
-                if displays.router.is_current(self.id, id, generation) {
-                    displays.keyframe_asked(id);
-                } else {
-                    info!(
-                        "{id}: a keyframe asked for {generation:?}, not the generation it \
-                         streams now: none made"
-                    );
                 }
             }
             ClientMsg::Request { req, asked } => {

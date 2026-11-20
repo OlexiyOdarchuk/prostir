@@ -105,7 +105,12 @@ struct StreamSlot {
     last_frames: [Option<Instant>; 2],
     /// Asks its encoder for a keyframe, once the encoder runs.
     keyframer: Option<crate::encoder::Keyframer>,
+    /// When a headset last asked for a keyframe of it.
+    headset_asked: Option<Instant>,
 }
+
+/// Keyframes headsets ask for, of one stream, at most this often.
+const HEADSET_KEYFRAMES: Duration = Duration::from_millis(300);
 
 /// Two frames within this: the picture moves, so a keyframe asked for comes soon.
 const FLOWING: Duration = Duration::from_millis(500);
@@ -598,6 +603,7 @@ impl Router {
             since: Instant::now(),
             last_frames: [None; 2],
             keyframer: None,
+            headset_asked: None,
         };
         inner.streams.insert(id, slot);
         for r in inner.receivers.values_mut() {
@@ -622,8 +628,8 @@ impl Router {
         }
     }
 
-    /// Asks the encoder of stream `id` for a keyframe now, if it runs: from the
-    /// control loop, without waiting for the desktop's worker that owns the encoder.
+    /// Asks the encoder of stream `id` for a keyframe now, if it runs: from any thread,
+    /// without waiting for the desktop's worker that owns the encoder.
     pub fn force_keyframe(&self, id: ScreenId) {
         let keyframer = self
             .inner
@@ -632,6 +638,30 @@ impl Router {
             .streams
             .get(&id)
             .and_then(|s| s.keyframer.clone());
+        if let Some(k) = keyframer {
+            k.ask();
+        }
+    }
+
+    /// A headset asks for a keyframe of stream `id` (from its reader, without the
+    /// control loop): at most every 300 ms for each stream, whoever asks, or keyframes
+    /// would follow one another.
+    pub fn keyframe_asked(&self, id: ScreenId) {
+        let now = Instant::now();
+        let keyframer = {
+            let mut inner = self.inner.lock().unwrap();
+            let Some(slot) = inner.streams.get_mut(&id) else {
+                return;
+            };
+            if slot
+                .headset_asked
+                .is_some_and(|t| now.duration_since(t) < HEADSET_KEYFRAMES)
+            {
+                return;
+            }
+            slot.headset_asked = Some(now);
+            slot.keyframer.clone()
+        };
         if let Some(k) = keyframer {
             k.ask();
         }
