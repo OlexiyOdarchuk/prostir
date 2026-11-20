@@ -1,9 +1,11 @@
 //! The headset's requests: each changes the PC's state and gets exactly one outcome.
 //! The parts it changed go out before the reply (see `publish`). A request this
 //! headset has no right to gets `NOT_ALLOWED`; arguments out of range get their own
-//! code, and nothing changes. A request that makes displays answers with all it made,
-//! also those that did not start: they stand in the list as `Failed`, keeping their
-//! place.
+//! code, and nothing changes. A request that makes displays answers with all it made
+//! at once, `Starting`, while the desktop's worker makes them; one that does not start
+//! then stands in the list as `Failed`, keeping its place. A request whose answer only
+//! the desktop has (a screenshot, where the mouse is, the active window) is answered
+//! once the worker did it ([`Answer::Later`]).
 
 use anyhow::{Context, Result, bail};
 use log::info;
@@ -11,12 +13,42 @@ use prostir_proto::Codec;
 use prostir_proto::request::{Outcome, Primary, Request};
 use prostir_proto::state::{Access, HeadsetCaps, Limits, Mode, caps, perms};
 
-use crate::displays::Displays;
+use crate::displays::{Displays, JobAnswer};
 use crate::errors::{self, Counted, UserError};
 use crate::keep_screens;
 use crate::platform::MonitorSpec;
 use crate::screen::ScreenId;
 use crate::store::Store;
+use crate::worker::JobId;
+
+/// What a request gets.
+pub enum Answer {
+    Now(Outcome),
+    /// Once the desktop's worker has done job `JobId` (see [`outcome_of_job`]).
+    Later(JobId),
+}
+
+/// The outcome of a request answered once its job was done: `id` and `answer` as the
+/// control loop found them, or the job's failure.
+pub fn outcome_of_job(
+    result: Result<prostir_proto::state::DisplayId>,
+    answer: JobAnswer,
+) -> Outcome {
+    match result {
+        Err(e) => errors::outcome(&e),
+        Ok(id) => match answer {
+            JobAnswer::Done => Outcome::Done,
+            JobAnswer::Added => Outcome::Added { id },
+            JobAnswer::Saved(path) => Outcome::Saved {
+                path: prostir_proto::state::clip(
+                    &home_relative(&path),
+                    prostir_proto::request::MAX_PATH,
+                ),
+            },
+            JobAnswer::Pointer(u, v) => Outcome::Pointer { id, u, v },
+        },
+    }
+}
 
 /// Who asks: what the headset can do, what the PC allows it, its rights.
 pub struct Asker<'a> {
@@ -48,8 +80,9 @@ pub fn handle(
     displays: &mut Displays,
     store: &mut Store,
     asker: &Asker,
-) -> Outcome {
-    handle_checked(request, displays, store, asker).unwrap_or_else(|e| errors::outcome(&e))
+) -> Answer {
+    handle_checked(request, displays, store, asker)
+        .unwrap_or_else(|e| Answer::Now(errors::outcome(&e)))
 }
 
 /// As [`handle`], with a failure as the error itself (its `UserError` and what lay
@@ -59,7 +92,7 @@ pub fn handle_checked(
     displays: &mut Displays,
     store: &mut Store,
     asker: &Asker,
-) -> Result<Outcome> {
+) -> Result<Answer> {
     if !asker.access.may(needs(&request)) {
         info!("the headset has no right to {request:?}");
         bail!(UserError::NotAllowed);
@@ -72,9 +105,9 @@ fn carry_out(
     displays: &mut Displays,
     store: &mut Store,
     asker: &Asker,
-) -> Result<Outcome> {
+) -> Result<Answer> {
     let limits = asker.limits;
-    Ok(match request {
+    Ok(Answer::Now(match request {
         Request::AddDisplay { mode } => {
             let spec = checked(mode, limits)?;
             let max = usize::from(limits.virtual_max);
@@ -88,9 +121,7 @@ fn carry_out(
             let id = store.new_id();
             displays.add(id, spec, max)?;
             info!("headset added {id}");
-            displays.force_keyframe(id);
             keep_screens(store, displays, true);
-            displays.sync_wallpapers();
             Outcome::Added { id: id.wire() }
         }
         Request::RemoveDisplay { id } => {
@@ -162,7 +193,6 @@ fn carry_out(
             }
             displays.force_keyframes();
             keep_screens(store, displays, true);
-            displays.sync_wallpapers();
             let ids = ids?;
             info!("headset switched to {} monitor(s)", ids.len());
             Outcome::Ids {
@@ -174,7 +204,6 @@ fn carry_out(
             displays.set_primary(id)?;
             info!("headset made {id} the primary display");
             keep_screens(store, displays, false);
-            displays.sync_wallpapers();
             Outcome::Done
         }
         Request::ShowPhysical { id, shown } => {
@@ -213,9 +242,7 @@ fn carry_out(
             let headsets = displays.router.headsets();
             let fits = Displays::codec_for(codec, &headsets);
             let (_, would) = crate::encoder::pick(fits, software).context(UserError::Encoder)?;
-            if would != displays.codec()
-                && let Some((w, h)) = displays.too_big_for(would, asker.caps)
-            {
+            if let Some((w, h)) = displays.too_big_for(would, asker.caps) {
                 bail!(UserError::BadSize { w, h, scale: 100 });
             }
             store.set_encoding(bitrate, sharp.unwrap_or(now.sharp), codec, software);
@@ -238,31 +265,18 @@ fn carry_out(
             }
             streams_within(displays.stream_count() + 1, limits)?;
             let id = store.new_id();
-            displays.detach_window(id)?;
-            Outcome::Added { id: id.wire() }
+            return Ok(Answer::Later(displays.detach_window(id)?));
         }
         Request::WindowHere { id } => {
-            displays.window_here(ScreenId::from_wire(id))?;
-            Outcome::Done
+            return Ok(Answer::Later(
+                displays.window_here(ScreenId::from_wire(id))?,
+            ));
         }
         Request::Screenshot { id } => {
-            let path = displays.screenshot(ScreenId::from_wire(id))?;
-            Outcome::Saved {
-                path: prostir_proto::state::clip(
-                    &home_relative(&path),
-                    prostir_proto::request::MAX_PATH,
-                ),
-            }
+            return Ok(Answer::Later(displays.screenshot(ScreenId::from_wire(id))?));
         }
-        Request::FindMouse => match displays.find_mouse() {
-            Some((id, u, v)) => Outcome::Pointer {
-                id: id.wire(),
-                u,
-                v,
-            },
-            None => bail!(UserError::NotOnDisplays),
-        },
-    })
+        Request::FindMouse => return Ok(Answer::Later(displays.find_mouse())),
+    }))
 }
 
 /// `LIMIT` when `streams` would be more than the headset decodes at once

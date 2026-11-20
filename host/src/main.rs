@@ -3,6 +3,7 @@
 mod api;
 mod brain;
 mod ctl;
+mod deskside;
 mod displays;
 mod door;
 mod encoder;
@@ -25,6 +26,7 @@ mod session;
 mod store;
 mod usage;
 mod wake;
+mod worker;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io::ErrorKind;
@@ -41,7 +43,6 @@ use prostir_proto::{ClientMsg, Codec, HostMsg, PcGoodbye};
 
 use brain::{Admit, LastEnded, Phase};
 use displays::Displays;
-use encoder::EncoderConfig;
 use events::{Accepted, Event, EventSink, SessionId};
 use platform::MonitorSpec;
 use platform::sound::SoundEvent;
@@ -191,6 +192,7 @@ impl Control {
             paused: displays.is_some_and(|d| !d.streaming()),
             encoding: displays.and_then(Displays::encoding_line),
             pairing,
+            desktop_stuck: displays.is_some_and(Displays::desk_stuck),
         };
         if self.shown.as_ref() != Some(&status) {
             tray::set_status(self.tray.as_ref(), status.clone());
@@ -217,9 +219,9 @@ pub fn keep_screens(store: &mut Store, displays: &Displays, chosen: bool) {
     }
 }
 
-/// While a Quest on USB waits for its `adb reverse`, how often the program looks
-/// whether it may leave.
-const USB_LOOK: Duration = Duration::from_secs(5);
+/// While a Quest on USB waits for its `adb reverse`, or a worker puts things back, how
+/// often the program looks whether it may leave.
+const LOOK_AGAIN: Duration = Duration::from_secs(2);
 
 /// Taken off for this long, the headset counts as gone.
 const TAKEN_OFF_GRACE: Duration = Duration::from_secs(10);
@@ -277,27 +279,36 @@ struct Brain {
     code_reply: Option<api::Reply>,
     /// The person asked Prostir to quit (the tray, the local API), not a signal.
     quit_asked: bool,
+    /// Connections whose session opens once the desktop's worker connected.
+    waiting_desk: Vec<Accepted>,
+    /// The desktop did not respond for too long: the program ends with an error.
+    desk_gave_up: bool,
+    /// Desktop workers let go, until each is gone (see `deskside.rs`).
+    retiring: Vec<worker::Retired>,
 }
 
 impl Brain {
     /// Waits for events and deadlines until asked to quit (or, with sockets from
     /// outside, until nothing needs it), then ends every session with a goodbye and
-    /// puts everything back. Whether the person asked Prostir to quit.
-    fn run(mut self, events: &Receiver<Event>) -> bool {
+    /// puts everything back. Whether the program is to end at once with an error (the
+    /// desktop did not respond), or without waiting for anything more (the desktop's
+    /// worker did not finish putting everything back): its exit code then; and
+    /// whether the person asked Prostir to quit.
+    fn run(mut self, events: &Receiver<Event>) -> (Option<i32>, bool) {
         loop {
             let next = brain::earliest([
                 self.phase.due(),
                 self.closing.iter().map(|c| c.until).min(),
                 self.sessions.values().filter_map(Session::volume_at).min(),
-                // Live, every pass places; between sessions only a retry wakes it.
-                self.displays
-                    .as_ref()
-                    .filter(|_| self.sessions.is_empty())
-                    .and_then(Displays::place_due),
+                self.desk_due(),
                 self.door.due(),
-                // Looked at again now and then while a Quest on USB waits for its
-                // `adb reverse` (only then).
-                platform::usb_waiting().then(|| Instant::now() + USB_LOOK),
+                // Looked at again now and then, by a program that leaves when idle,
+                // while a Quest on USB waits for its `adb reverse` or, with nothing
+                // else to do, a worker puts things back (only then).
+                (self.door.leaves()
+                    && (platform::usb_waiting()
+                        || (matches!(self.phase, Phase::Idle) && self.workers_busy())))
+                .then(|| Instant::now() + LOOK_AGAIN),
             ]);
             let first = match next {
                 // Nothing to do until something happens: no wakeups at all.
@@ -349,8 +360,16 @@ impl Brain {
             }
         }
         let asked = self.quit_asked;
-        self.shut_down(events);
-        asked
+        (self.shut_down(events), asked)
+    }
+
+    /// Whether the desktop's worker or the sound thread still has work: a session
+    /// waiting for the desktop, a worker putting things back, the sound going back.
+    fn workers_busy(&self) -> bool {
+        !self.waiting_desk.is_empty()
+            || !self.retiring.is_empty()
+            || !worker::wait_gone(Duration::ZERO)
+            || !worker::sound::wait_gone(Duration::ZERO)
     }
 
     /// Whether the program leaves now, its sockets having come from outside (see
@@ -363,6 +382,7 @@ impl Brain {
             || self.listening.busy()
             || self.code_reply.is_some()
             || pairing::code_shown().is_some()
+            || self.workers_busy()
             // A Quest on USB waits for its `adb reverse` (USB debugging not allowed yet,
             // say): the program it starts must not leave before it connects.
             || platform::usb_waiting();
@@ -457,6 +477,8 @@ impl Brain {
                 self.door.window(on);
                 pairing::window_types_codes(on);
             }
+            Event::Desk(generation, done) => self.desk(generation, done),
+            Event::SoundDevices(generation, done) => self.sound_devices(generation, done),
             Event::Quit => self.quit = true,
         }
     }
@@ -498,12 +520,19 @@ impl Brain {
     /// A connection set up and trusted: its session opens, replacing the headset's
     /// earlier one, unless too many headsets have one.
     fn accepted(&mut self, accepted: Accepted) {
+        info!(
+            "headset connected via {} from {}",
+            session::via_name(accepted.conn.link.peer.via),
+            accepted.from
+        );
+        self.open_session(accepted);
+    }
+
+    /// The session of a connection set up and trusted opens, once the desktop is
+    /// there (see [`Brain::accepted`]).
+    fn open_session(&mut self, accepted: Accepted) {
         let Accepted { conn, open, from } = accepted;
         let key = conn.link.peer.key;
-        info!(
-            "headset connected via {} from {from}",
-            session::via_name(conn.link.peer.via)
-        );
         // Forgotten after its connection was set up (the tray's item came first).
         if !self.security.trusted.lock().unwrap().contains(&key) {
             info!("the headset from {from} was forgotten meanwhile: turning it away");
@@ -542,21 +571,19 @@ impl Brain {
             }
         }
         if self.sessions.is_empty() && self.displays.as_ref().is_some_and(|d| !d.healthy()) {
-            self.displays = None;
+            self.let_go_displays();
         }
         if self.displays.is_none() {
-            match create_displays(self.set_primary, &mut self.store, &self.events) {
-                Ok(d) => self.displays = Some(d),
-                Err(e) => {
-                    error!("{e:#}");
-                    // Tell the headset why, instead of a snapshot.
-                    turn_away(conn, format!("{e:#}"));
-                    if self.sessions.is_empty() {
-                        self.phase = Phase::Idle;
-                    }
-                    return;
-                }
-            }
+            self.displays = Some(create_displays(
+                self.set_primary,
+                &mut self.store,
+                &self.events,
+            ));
+        }
+        // The session opens once the desktop is there (connecting does not hold the
+        // control loop up).
+        if !self.displays.as_ref().is_some_and(Displays::is_connected) {
+            return self.wait_for_desk(Accepted { conn, open, from });
         }
         // What the new session has of the jobs only one headset can have.
         self.arrivals.connected(key);
@@ -807,11 +834,10 @@ impl Brain {
         self.show();
     }
 
-    /// Removes the monitors and gives their memory back.
+    /// Removes the monitors (the desktop's worker puts everything back and gives their
+    /// memory back).
     fn drop_displays(&mut self) {
-        if self.displays.take().is_some() {
-            platform::give_memory_back();
-        }
+        self.let_go_displays();
     }
 
     /// An item of the tray.
@@ -887,39 +913,38 @@ impl Brain {
             self.drop_displays();
         }
         self.door.expire(now);
+        self.desk_answers_due(now);
         if self.sessions.is_empty() {
             if let Some(d) = self.displays.as_mut() {
-                d.place();
+                d.push();
             }
         } else {
             self.live_pass(now);
         }
+        self.look_at_desk(now);
         self.show();
         self.store.flush();
         self.publish_api();
     }
 
     /// A pass with sessions: the headsets told what changed (the replies after it), the
-    /// desktop laid out once (which can take it a while: the headsets know already),
-    /// told again; the clocks' work.
+    /// state wanted of the desktop handed to its worker (which can take it a while: the
+    /// headsets know already); the clocks' work.
     fn live_pass(&mut self, now: Instant) {
         let Some(displays) = self.displays.as_mut() else {
             return;
         };
         let started = Instant::now();
         for s in self.sessions.values_mut() {
-            s.publish(displays, &self.store, self.focus);
-        }
-        displays.place();
-        for s in self.sessions.values_mut() {
             s.volume_due();
             s.publish(displays, &self.store, self.focus);
         }
+        displays.push();
         self.store.flush();
         let busy = started.elapsed();
         if busy >= BUSY {
             info!(
-                "the control loop was busy for {} ms telling the headset and laying out the desktop",
+                "the control loop was busy for {} ms telling the headset",
                 busy.as_millis()
             );
         }
@@ -937,6 +962,7 @@ impl Brain {
         };
         if clocks.focus(now) {
             self.focus = displays.active_output();
+            displays.look_at_focus();
             for s in self.sessions.values_mut() {
                 s.look_at_sound(displays);
             }
@@ -944,9 +970,7 @@ impl Brain {
         if !clocks.housekeeping(now) {
             return;
         }
-        displays.tick(&mut || self.store.new_id());
-        // A display of the PC seen for the first time is kept.
-        keep_screens(&mut self.store, displays, false);
+        displays.tick();
         let healthy = displays.healthy();
         // The microphone may be free to go to the main headset now.
         self.headsets_changed();
@@ -971,11 +995,14 @@ impl Brain {
             return;
         };
         if !healthy && !self.sessions.is_empty() {
-            let why = "a virtual monitor or encoder stopped on the PC";
+            // Why no monitor could start, where none could; else one that stopped.
+            let why = displays
+                .why_none_started()
+                .unwrap_or_else(|| "a virtual monitor or encoder stopped on the PC".into());
             warn!("{why}");
             displays.router.send_all(HostMsg::Problem {
                 error: ErrorCode::ENCODER,
-                detail: why.into(),
+                detail: prostir_proto::state::clip(&why, prostir_proto::state::MAX_DETAIL),
                 display: None,
             });
             let keys: Vec<[u8; 32]> = self.sessions.keys().copied().collect();
@@ -986,10 +1013,16 @@ impl Brain {
     }
 
     /// Asked to quit: every session ends with a goodbye, which each headset gets a
-    /// moment to read; the monitors go, the files are written.
-    fn shut_down(mut self, events: &Receiver<Event>) {
+    /// moment to read; the monitors go, the files are written. Whether to end at once,
+    /// and with which code (see [`Brain::run`]).
+    fn shut_down(mut self, events: &Receiver<Event>) -> Option<i32> {
         let keys: Vec<[u8; 32]> = self.sessions.keys().copied().collect();
-        self.end_sessions(keys, PcGoodbye::Quit, api::Reason::Quit, || Ok(()));
+        let goodbye = if self.desk_gave_up {
+            PcGoodbye::Failed
+        } else {
+            PcGoodbye::Quit
+        };
+        self.end_sessions(keys, goodbye, api::Reason::Quit, || Ok(()));
         info!("quitting");
         // Whoever asked to quit hears it was done.
         self.publish_api();
@@ -1013,8 +1046,28 @@ impl Brain {
         }
         drop(self.displays.take());
         self.store.close();
+        if self.desk_gave_up {
+            return Some(1);
+        }
+        // The desktop's worker puts the monitors and windows back, the sound thread the
+        // sound.
+        let until = Instant::now() + DESK_GONE;
+        let sound_back = worker::sound::wait_gone(until.saturating_duration_since(Instant::now()));
+        if !sound_back {
+            warn!("the sound did not go back to the PC in time");
+        }
+        if !worker::wait_gone(until.saturating_duration_since(Instant::now())) {
+            warn!("the desktop did not take the monitors back in time: quitting without them");
+            return Some(0);
+        }
+        None
     }
 }
+
+/// How long quitting waits for the desktop's worker to put everything back: with the
+/// headsets' moment to read the goodbye, within the time a quit signal gives
+/// (`signals.rs`).
+const DESK_GONE: Duration = Duration::from_secs(8);
 
 /// Tells a headset why it gets no session, instead of a snapshot, and closes its
 /// connection gently (on a thread of its own: that takes a moment).
@@ -1030,21 +1083,12 @@ fn turn_away(mut conn: pairing::Connection, text: String) {
     }
 }
 
-fn create_displays(set_primary: bool, store: &mut Store, events: &EventSink) -> Result<Displays> {
-    let wanted = store.wanted();
-    let (backend, codec) = encoder::pick(wanted.codec, wanted.software)?;
-    info!("encoding with {backend:?} {codec:?}");
-    let cfg = EncoderConfig {
-        codec,
-        bitrate_kbps: wanted.bitrate * 1000,
-        backend,
-        sharp: wanted.sharp,
-    };
+/// The screens of the saved set; the desktop's worker starts connecting.
+fn create_displays(set_primary: bool, store: &mut Store, events: &EventSink) -> Displays {
     let set = store.screens().clone();
-    let mut displays = Displays::create(&set, &wanted, cfg, set_primary, &mut || store.new_id())?;
-    displays.send_sound_to(events.clone());
+    let displays = Displays::create(&set, &store.wanted(), set_primary, events);
     keep_screens(store, &displays, false);
-    Ok(displays)
+    displays
 }
 
 fn main() -> Result<()> {
@@ -1308,6 +1352,9 @@ fn full_with(
         listening,
         code_reply: None,
         quit_asked: false,
+        waiting_desk: Vec::new(),
+        desk_gave_up: false,
+        retiring: Vec::new(),
     };
 
     // The local API has a state to give from the moment it is on the bus.
@@ -1323,7 +1370,7 @@ fn full_with(
     {
         warn!("{e}");
     }
-    let quit_asked = brain.run(&received);
+    let (end_now, quit_asked) = brain.run(&received);
     if let Some(api) = api {
         api.finish();
     }
@@ -1336,6 +1383,13 @@ fn full_with(
         }
         _ => 0,
     };
+    if let Some(end) = end_now {
+        // What a run that ends this way leaves behind (Hyprland's outputs, the sound
+        // devices), as after a crash.
+        platform::clean_up_after_crash();
+        // An error stays one; otherwise as the run asked (the watcher quits too).
+        platform::end_now(if end == 0 { code } else { end });
+    }
     // A probe of the encoders still under way (quitting right after the start) is
     // inside a driver whose library the exit tears down: the process crashed so on
     // the way out. Each probe ends within its time limit; one that hangs is left

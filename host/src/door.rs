@@ -242,6 +242,12 @@ impl Door {
         self.notice = up.then_some(now + NOTICE_TIME);
     }
 
+    /// Whether the program leaves when nothing needs it (its sockets came from
+    /// outside).
+    pub fn leaves(&self) -> bool {
+        self.leave.is_some()
+    }
+
     /// A notice waits for its button now.
     pub fn notice_waits(&self) -> bool {
         self.notice.is_some()

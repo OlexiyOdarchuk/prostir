@@ -14,7 +14,11 @@
 //!   time;
 //! - `record on`, `record off`: a program records from the headset's microphone;
 //! - `sound-events stop`: the sound system's events end, as when `pactl subscribe`
-//!   dies.
+//!   dies;
+//! - `hang make 20`, `hang place 20`, `hang encoder-stop 20`, `hang sound-start 20`:
+//!   the next monitor made, layout placed, encoder stopped or sound to the headset
+//!   started takes that many seconds, as a desktop, a driver or a sound system that
+//!   hangs.
 //!
 //! The PC's own displays are `PROSTIR_FAKE_PHYSICAL`: `CONNECTOR=EDID@WxH` separated
 //! by `;` (an empty EDID: the display says nothing), all plugged in at the start.
@@ -108,6 +112,12 @@ pub struct FakeDesktop {
 
 impl FakeDesktop {
     fn connect() -> Result<Self> {
+        if let Ok(ms) = std::env::var("PROSTIR_FAKE_SLOW_CONNECT_MS") {
+            let ms: u64 = ms
+                .parse()
+                .context("PROSTIR_FAKE_SLOW_CONNECT_MS: a whole number")?;
+            std::thread::sleep(Duration::from_millis(ms));
+        }
         let fps = match std::env::var("PROSTIR_FAKE_FPS") {
             Ok(v) => v.parse().context("PROSTIR_FAKE_FPS: a whole number")?,
             Err(_) => 0,
@@ -166,6 +176,7 @@ impl Desktop for FakeDesktop {
     fn make(&mut self, spec: &VirtualSpec) -> Result<Box<dyn Output>> {
         let number = spec.number;
         std::thread::sleep(self.slow);
+        super::hang("make");
         anyhow::ensure!(
             !self.broken.contains(&number),
             "fake monitor {number} is broken"
@@ -269,6 +280,7 @@ impl Desktop for FakeDesktop {
     }
 
     fn place(&mut self, plan: &DeskPlan, _current: &Outputs) -> Result<()> {
+        super::hang("place");
         let mut layout = self.layout.lock().unwrap();
         for (key, x, y) in &plan.positions {
             if let Some(g) = layout.get_mut(key.as_str()) {
@@ -497,6 +509,16 @@ fn command(line: &str) -> Result<()> {
             return Ok(());
         }
         _ => {}
+    }
+    if let [
+        "hang",
+        point @ ("make" | "place" | "encoder-stop" | "sound-start"),
+        secs,
+    ] = words[..]
+    {
+        super::hang_next(point, Duration::from_secs(secs.parse()?));
+        info!("fake desktop: the next {point} hangs for {secs} s");
+        return Ok(());
     }
     if let [verb @ ("plug" | "unplug"), name] = words[..] {
         let mut physical = PHYSICAL.lock().unwrap();

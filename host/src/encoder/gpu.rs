@@ -42,11 +42,13 @@
 //!
 //! # Pipelines started at the same moment
 //!
-//! Pipelines start one after another on one thread now. A worker that starts several
-//! at once on threads of their own (the desktop's worker of a later step) can have two
-//! of them open a device of the same card before either says so: the first one said is
-//! kept and shared, the other pipeline keeps its own for its life (one device more,
-//! nothing wrong). Starting the first pipeline of a card before the others avoids it.
+//! The desktop's worker (`worker/`) starts pipelines one after another: each start
+//! runs on a thread of its own so it can be left behind after its time, but the
+//! worker waits for it before the next. The one case of two at once is a start left
+//! behind that is still under way when the next begins; both may then open a device
+//! of the same card before either says so: the first one said is kept and shared, the
+//! other pipeline keeps its own for its life (one device more, nothing wrong), and the
+//! late one is dropped as soon as it is done. So nothing needs a lock around a start.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, Weak};

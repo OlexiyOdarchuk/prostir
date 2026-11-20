@@ -87,7 +87,7 @@ pub fn pick(prefer: Codec, software: bool) -> Result<(Backend, Codec)> {
     catalog().pick(prefer, software)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncoderConfig {
     pub codec: Codec,
     pub bitrate_kbps: u32,
@@ -583,6 +583,23 @@ impl Encoder {
     /// Asks the encoder to emit an IDR frame (with parameter sets) as soon as possible.
     pub fn force_keyframe(&self) {
         request_keyframe(&self.sink);
+    }
+
+    /// A handle that asks it for a keyframe from any thread, while it runs.
+    pub fn keyframer(&self) -> Keyframer {
+        Keyframer(self.sink.clone())
+    }
+}
+
+/// Asks one encoder for keyframes, from any thread (see [`Encoder::keyframer`]): a
+/// headset's request does not wait for whoever owns the encoder. Asking an encoder
+/// that stopped does nothing.
+#[derive(Clone)]
+pub struct Keyframer(gst_app::AppSink);
+
+impl Keyframer {
+    pub fn ask(&self) {
+        request_keyframe(&self.0);
     }
 }
 

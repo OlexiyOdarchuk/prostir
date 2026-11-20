@@ -80,8 +80,10 @@
 //! 13. No desktop notifications without a package identity: `notifications::watch`
 //!     gives none (already so).
 //! 14. Calls that can hang (`SetDisplayConfig`, `DeviceIoControl`): every method here
-//!     may block, and the desktop's worker thread of step 6.4 calls them with a
-//!     timeout; the contract asks nothing more.
+//!     may block. Only the desktop's worker (`worker/`) calls them, so the control loop
+//!     never waits for one; one that hangs shows as the worker stuck (the PC says the
+//!     desktop does not respond after 15 s, and starts again after 2 min). Programs
+//!     run with a time limit (`process::run`); the contract asks nothing more.
 //! 15. `broadcast_addresses` and virtual network adapters: goes with the beacon (step
 //!     7), not the desktop.
 //!
@@ -416,10 +418,6 @@ pub struct DesktopCaps {
     pub moves_pointer: bool,
     /// Its virtual monitors go by themselves when Prostir is gone (KWin does that; a
     /// driver's watchdog would), so nothing is left to clean up after a crash.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the clean-up at start does not ask yet")
-    )]
     pub cleans_up_after_crash: bool,
 }
 
@@ -445,7 +443,6 @@ pub enum AddModel {
     /// each. No driver Prostir ships works so: the unchanged Virtual Display Driver
     /// does, and the owner ruled it out even as a fallback (it loses the layout and
     /// the names). Kept so a desktop can say it of a driver it finds.
-    #[cfg_attr(not(test), expect(dead_code, reason = "no driver Prostir uses"))]
     RestartsAll,
 }
 

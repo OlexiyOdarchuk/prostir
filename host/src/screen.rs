@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 
 use prostir_proto::state::DisplayId;
 
-use crate::encoder::Encoder;
-use crate::platform::{ActiveWindow, MonitorSpec, Output, OutputKey};
+use crate::platform::{MonitorSpec, OutputKey};
+use crate::worker::Encoding;
 
 /// The PC's key for a screen: in its set, its rows and its saved files. Numbers come
 /// from a counter that never goes back (see `Store::new_id`), so a number is never
@@ -51,12 +51,9 @@ impl std::fmt::Display for ScreenId {
 pub enum ScreenKind {
     /// A virtual monitor made for the headset.
     Virtual { spec: MonitorSpec },
-    /// An output made for one window, shown as a floating panel; `origin` is the window
-    /// as it was before, to put it back.
-    Window {
-        origin: ActiveWindow,
-        spec: MonitorSpec,
-    },
+    /// An output made for one window, shown as a floating panel (the desktop's worker
+    /// keeps the window as it was before, to put it back).
+    Window { spec: MonitorSpec },
     /// A display of the PC itself (`builtin`: the laptop's own panel), streamed as it
     /// is while `shown`; `key` is how it is told from others (and saved), `label` what
     /// people see it called, as the desktop last said (the saved key's connector until
@@ -96,7 +93,8 @@ pub enum ScreenState {
     Absent,
 }
 
-/// A screen: what it is, its output on the desktop and the encoder streaming it.
+/// A screen as the control loop keeps it: what it is, and what the desktop's worker
+/// said of its output and encoder (which the worker owns).
 pub struct Screen {
     pub id: ScreenId,
     pub kind: ScreenKind,
@@ -104,12 +102,17 @@ pub struct Screen {
     /// made, so the names do not grow and KScreen finds the outputs it remembers. A
     /// display of the PC has one while it streams.
     pub number: u32,
-    // Field order matters: the encoder stops before the output goes away.
-    pub stream: Option<Encoder>,
-    pub output: Option<Box<dyn Output>>,
     pub state: ScreenState,
-    /// Puts the output's size back when another program changes it.
-    pub size_guard: SizeGuard,
+    /// The desktop's key for its output, once the worker made it.
+    pub output: Option<OutputKey>,
+    /// How it encodes, while it streams.
+    pub encoding: Option<Encoding>,
+    /// Raised to have the worker try it again after a failure.
+    pub attempt: u32,
+    /// The desktop closed its output (the monitors are made anew for the next session).
+    pub closed: bool,
+    /// A display of the PC streams (it is shown and connected).
+    pub streaming: bool,
 }
 
 impl Screen {
@@ -119,10 +122,12 @@ impl Screen {
             id,
             kind,
             number,
-            stream: None,
-            output: None,
             state: ScreenState::Starting,
-            size_guard: SizeGuard::default(),
+            output: None,
+            encoding: None,
+            attempt: 0,
+            closed: false,
+            streaming: false,
         }
     }
 
@@ -132,7 +137,7 @@ impl Screen {
 
     /// The desktop's key for its output, while it has one.
     pub fn output_key(&self) -> Option<&OutputKey> {
-        self.output.as_ref().map(|o| o.key())
+        self.output.as_ref()
     }
 
     pub fn is_virtual(&self) -> bool {

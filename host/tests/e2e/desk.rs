@@ -1,0 +1,327 @@
+//! The desktop's worker: a desktop or an encoder that hangs holds up neither the
+//! requests nor the pings of the headset; the PC says the desktop does not respond
+//! after 15 s, is fine again once it does, and ends after too long, to be started
+//! again.
+
+use std::time::{Duration, Instant};
+
+use prostir_proto::request::{Outcome, Request};
+use prostir_proto::state::{DisplayState, ErrorCode, Mode};
+use prostir_testkit::{ConnectError, FakeHeadset};
+
+use crate::pc::Options;
+use crate::{SOON, session};
+
+/// A request, answered within a second: its outcome.
+fn ask_at_once(headset: &mut FakeHeadset, request: Request) -> Outcome {
+    let started = Instant::now();
+    let outcome = headset.ask(request).unwrap();
+    let took = started.elapsed();
+    assert!(took < Duration::from_secs(1), "answered after {took:?}");
+    outcome
+}
+
+/// Laying the desktop out hangs for 20 s (KScreen stuck): a monitor asked for meanwhile
+/// is added at once and streams, other requests, the tray and the pings go on; after
+/// 15 s the headset, the tray and the local API hear the desktop does not respond, and
+/// once it does again, all is as before.
+#[test]
+fn a_hung_desktop_holds_nothing_up() {
+    let (_dir, mut pc, _keys, mut headset) = session("desk-hung", &Options::default());
+    headset.take_for(Duration::from_secs(1)).unwrap();
+    pc.desktop("hang place 20");
+    pc.wait_log(SOON, "the next place hangs for 20 s");
+    let added = ask_at_once(
+        &mut headset,
+        Request::AddDisplay {
+            mode: Mode::new(320, 240),
+        },
+    );
+    let Outcome::Added { id } = added else {
+        panic!("added, not {added:?}")
+    };
+    // Listed before it is made: starting.
+    assert_eq!(
+        headset.view().display(id).map(|d| d.state.clone()),
+        Some(DisplayState::Starting)
+    );
+    pc.wait_log(SOON, "fake desktop: place hangs for 20 s");
+    let hung = Instant::now();
+    // It streams already: only laying the desktop out hangs.
+    headset
+        .wait(SOON, "the new monitor shows", |v| {
+            v.streams.get(&id).is_some_and(|s| s.has_picture())
+        })
+        .unwrap();
+    // Meanwhile requests are answered at once, the tray answers, the pings go on.
+    let pings = headset.view().pings;
+    for _ in 0..4 {
+        let done = ask_at_once(&mut headset, Request::SetSound { to_headset: true });
+        assert_eq!(done, Outcome::Done);
+        headset.take_for(Duration::from_millis(500)).unwrap();
+    }
+    pc.tray("quality 15");
+    pc.wait_log(Duration::from_secs(2), "video quality: 15 Mbit/s");
+    if let Some(status) = pc.ctl(&["status", "--json"]) {
+        assert_eq!(status.code, 0, "{status:?}");
+    }
+    assert!(
+        headset.view().pings > pings,
+        "no ping while the desktop hung"
+    );
+    assert!(
+        hung.elapsed() < Duration::from_secs(14),
+        "all that was quick"
+    );
+    // 15 s into the step: the desktop does not respond.
+    headset
+        .wait(
+            Duration::from_secs(20),
+            "told the desktop does not respond",
+            |v| v.errors.iter().any(|e| e.contains("does not respond")),
+        )
+        .unwrap();
+    let line = pc.wait_log(SOON, "the desktop does not respond:");
+    assert!(line.contains("placing the outputs"), "{line}");
+    pc.wait_log(SOON, "desktop: not responding");
+    // A request only the desktop can answer fails at once now, and is not kept for
+    // later.
+    let mouse = ask_at_once(&mut headset, Request::FindMouse);
+    assert!(
+        matches!(&mouse, Outcome::Failed { error, .. } if *error == ErrorCode::DESKTOP),
+        "{mouse:?}"
+    );
+    if let Some(status) = pc.ctl(&["status", "--json"]) {
+        let problems = status.json()["problems"].to_string();
+        assert!(problems.contains("Desktop"), "{problems}");
+    }
+    // Back after 20 s: fine again, the session went on all along.
+    pc.wait_log(Duration::from_secs(15), "the desktop responds again");
+    let fine = pc.count_log("desktop: fine");
+    pc.wait_log_after(SOON, "desktop: fine", fine.saturating_sub(1));
+    if let Some(status) = pc.ctl(&["status", "--json"]) {
+        let problems = status.json()["problems"].to_string();
+        assert!(!problems.contains("Desktop"), "{problems}");
+    }
+    let done = ask_at_once(&mut headset, Request::SetSound { to_headset: true });
+    assert_eq!(done, Outcome::Done);
+    assert!(!headset.view().closed);
+    assert_eq!(pc.count_log("session ended"), 0);
+    assert_eq!(pc.count_log("panicked"), 0);
+}
+
+/// An encoder that does not stop (a driver hanging in it) is left behind after 5 s:
+/// the monitor is gone at once for the headset, the desktop never counts as not
+/// responding, and the next monitor is made and streams.
+#[test]
+fn an_encoder_that_does_not_stop_is_left_behind() {
+    let (_dir, mut pc, _keys, mut headset) = session("desk-encoder-stop", &Options::default());
+    let ids = headset.view().order();
+    pc.desktop("hang encoder-stop 30");
+    pc.wait_log(SOON, "the next encoder-stop hangs for 30 s");
+    let done = ask_at_once(&mut headset, Request::RemoveDisplay { id: ids[1] });
+    assert_eq!(done, Outcome::Done);
+    assert!(headset.view().display(ids[1]).is_none(), "gone at once");
+    pc.wait_log(SOON, "fake desktop: encoder-stop hangs for 30 s");
+    pc.wait_log(SOON, "did not end within 5s: going on without it");
+    let added = ask_at_once(
+        &mut headset,
+        Request::AddDisplay {
+            mode: Mode::new(320, 240),
+        },
+    );
+    let Outcome::Added { id } = added else {
+        panic!("added, not {added:?}")
+    };
+    headset
+        .wait(SOON, "the new monitor shows", |v| {
+            v.streams.get(&id).is_some_and(|s| s.has_picture())
+        })
+        .unwrap();
+    assert_eq!(pc.count_log("does not respond"), 0);
+    assert!(!headset.view().closed);
+}
+
+/// A desktop that does not respond for too long (2 min; 5 s here) ends the program
+/// with an error, so that systemd or the watcher starts it again; the headset is told
+/// goodbye first.
+#[test]
+fn a_desktop_hung_too_long_ends_the_program() {
+    let options = Options {
+        desk_limits: Some((2, 5)),
+        ..Options::default()
+    };
+    let (_dir, mut pc, _keys, mut headset) = session("desk-give-up", &options);
+    headset.take_for(Duration::from_secs(1)).unwrap();
+    pc.desktop("hang place 60");
+    pc.wait_log(SOON, "the next place hangs for 60 s");
+    ask_at_once(
+        &mut headset,
+        Request::AddDisplay {
+            mode: Mode::new(320, 240),
+        },
+    );
+    pc.wait_log(SOON, "the desktop does not respond:");
+    headset.wait_closed(SOON).unwrap();
+    assert_eq!(
+        headset.view().goodbye,
+        Some(prostir_proto::PcGoodbye::Failed.code())
+    );
+    let status = pc.wait_end(SOON);
+    assert_eq!(status.code(), Some(1), "{status}");
+    pc.wait_log(SOON, "quitting, to be started again");
+}
+
+/// A worker let go while it hangs (the headset left, the monitors go with it) is
+/// still watched: the headset back is turned away at once while the new worker waits
+/// for the old one, and once the old one has hung too long the program ends, with no
+/// session to notice it. Shortened to 2 s and 12 s here.
+#[test]
+fn a_hung_worker_let_go_still_ends_the_program() {
+    let options = Options {
+        desk_limits: Some((2, 12)),
+        linger: 0,
+        ..Options::default()
+    };
+    let (_dir, mut pc, mut keys, mut headset) = session("desk-let-go", &options);
+    headset.take_for(Duration::from_secs(1)).unwrap();
+    pc.desktop("hang place 70");
+    pc.wait_log(SOON, "the next place hangs for 70 s");
+    ask_at_once(
+        &mut headset,
+        Request::AddDisplay {
+            mode: Mode::new(320, 240),
+        },
+    );
+    pc.wait_log(SOON, "fake desktop: place hangs for 70 s");
+    headset.disconnect();
+    pc.wait_log(SOON, "headset disconnected");
+    match FakeHeadset::connect(pc.addr, &mut keys, None) {
+        Err(ConnectError::Refused(text)) => assert!(text.contains("does not respond"), "{text}"),
+        Err(e) => panic!("expected Refused, got {e}"),
+        Ok(_) => panic!("a session with a desktop that does not respond"),
+    }
+    pc.wait_log(SOON, "waiting for the last desktop worker to finish");
+    let status = pc.wait_end(Duration::from_secs(20));
+    assert_eq!(status.code(), Some(1), "{status}");
+    pc.wait_log(SOON, "quitting, to be started again");
+}
+
+/// A request that waited too long for the desktop (2 s here) fails, and the desktop's
+/// job for it is taken back: once the desktop answers again, it is not done late.
+#[test]
+fn a_request_given_up_is_not_done_later() {
+    let options = Options {
+        desk_answer: Some(2),
+        ..Options::default()
+    };
+    let (_dir, mut pc, _keys, mut headset) = session("desk-given-up", &options);
+    headset.take_for(Duration::from_secs(1)).unwrap();
+    pc.desktop("hang place 6");
+    pc.wait_log(SOON, "the next place hangs for 6 s");
+    ask_at_once(
+        &mut headset,
+        Request::AddDisplay {
+            mode: Mode::new(320, 240),
+        },
+    );
+    pc.wait_log(SOON, "fake desktop: place hangs for 6 s");
+    let started = Instant::now();
+    let mouse = headset.ask(Request::FindMouse).unwrap();
+    let took = started.elapsed();
+    assert!(
+        matches!(&mouse, Outcome::Failed { error, .. } if *error == ErrorCode::DESKTOP),
+        "{mouse:?}"
+    );
+    assert!(took < Duration::from_secs(4), "answered after {took:?}");
+    pc.wait_log(SOON, "fake desktop: place is back");
+    headset.take_for(Duration::from_secs(1)).unwrap();
+    assert_eq!(pc.count_log("looking where the mouse is"), 0, "done late");
+    assert!(!headset.view().closed);
+}
+
+/// An encoder that keeps hanging (three stops left behind here) is not used any more:
+/// the next monitor stands failed, saying why, instead of piling up hung encoders.
+/// Each stop is a step of its own, so the desktop never counts as not responding.
+#[test]
+fn an_encoder_that_keeps_hanging_is_not_used_any_more() {
+    let (_dir, mut pc, _keys, mut headset) = session("desk-encoder-hangs", &Options::default());
+    let mut ids = headset.view().order();
+    for _ in 0..2 {
+        let added = ask_at_once(
+            &mut headset,
+            Request::AddDisplay {
+                mode: Mode::new(320, 240),
+            },
+        );
+        let Outcome::Added { id } = added else {
+            panic!("added, not {added:?}")
+        };
+        ids.push(id);
+    }
+    headset
+        .wait(SOON, "four monitors showing", |v| {
+            ids.iter()
+                .all(|id| v.streams.get(id).is_some_and(|s| s.has_picture()))
+        })
+        .unwrap();
+    pc.desktop("hang encoder-stop 30\nhang encoder-stop 30\nhang encoder-stop 30");
+    pc.wait_log(SOON, "the next encoder-stop hangs for 30 s");
+    for id in &ids[1..] {
+        let done = ask_at_once(&mut headset, Request::RemoveDisplay { id: *id });
+        assert_eq!(done, Outcome::Done);
+    }
+    let left = pc.count_log("going on without it");
+    pc.wait_log_after(Duration::from_secs(20), "going on without it", left + 2);
+    let added = ask_at_once(
+        &mut headset,
+        Request::AddDisplay {
+            mode: Mode::new(320, 240),
+        },
+    );
+    let Outcome::Added { id } = added else {
+        panic!("added, not {added:?}")
+    };
+    headset
+        .wait(SOON, "the new monitor failed", |v| {
+            v.display(id)
+                .is_some_and(|d| matches!(d.state, DisplayState::Failed { .. }))
+        })
+        .unwrap();
+    let state = headset.view().display(id).unwrap().state.clone();
+    let DisplayState::Failed { error, detail } = state else {
+        unreachable!()
+    };
+    assert_eq!(error.known(), ErrorCode::ENCODER, "{detail}");
+    assert!(detail.contains("did not respond"), "{detail}");
+    assert_eq!(pc.count_log("does not respond:"), 0);
+    assert!(!headset.view().closed);
+}
+
+/// Starting the PC's sound to the headset hangs (the sound system stuck for 6 s): the
+/// control loop does not wait for it; the sound comes once it is there.
+#[test]
+fn a_hung_sound_system_holds_nothing_up() {
+    let (_dir, mut pc, _keys, mut headset) = session("desk-sound", &Options::default());
+    headset.take_for(Duration::from_secs(1)).unwrap();
+    let off = ask_at_once(&mut headset, Request::SetSound { to_headset: false });
+    assert_eq!(off, Outcome::Done);
+    headset.take_for(Duration::from_secs(1)).unwrap();
+    pc.desktop("hang sound-start 6");
+    pc.wait_log(SOON, "the next sound-start hangs for 6 s");
+    let on = ask_at_once(&mut headset, Request::SetSound { to_headset: true });
+    assert_eq!(on, Outcome::Done);
+    pc.wait_log(SOON, "fake desktop: sound-start hangs for 6 s");
+    let before = headset.view().audio_bytes;
+    let pings = headset.view().pings;
+    for _ in 0..3 {
+        let done = ask_at_once(&mut headset, Request::SetSound { to_headset: true });
+        assert_eq!(done, Outcome::Done);
+        headset.take_for(Duration::from_millis(500)).unwrap();
+    }
+    assert!(headset.view().pings > pings, "no ping while the sound hung");
+    headset
+        .wait(SOON, "the sound comes", |v| v.audio_bytes > before + 10_000)
+        .unwrap();
+    assert!(!headset.view().closed);
+}

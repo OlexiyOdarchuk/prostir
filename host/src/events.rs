@@ -56,6 +56,11 @@ pub enum Event {
     /// The settings window came onto the session bus (`true`) or left it: while it is
     /// there, the program stays.
     Window(bool),
+    /// The desktop's worker did something (see `worker`): which worker, and what.
+    Desk(u64, crate::worker::Done),
+    /// The sound thread made or let go of the sound or the microphone (see
+    /// `worker/sound.rs`): whose (the desktop worker's number), and what.
+    SoundDevices(u64, crate::worker::sound::SoundDone),
     /// A signal asked the program to quit.
     Quit,
 }

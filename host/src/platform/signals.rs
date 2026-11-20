@@ -20,8 +20,10 @@ use log::{info, warn};
 pub const QUIT_SIGNALS: [libc::c_int; 3] = [libc::SIGTERM, libc::SIGINT, libc::SIGHUP];
 
 /// How long quitting may take once asked by a signal: stuck past it (in a dialog, say),
-/// the monitors are removed directly and the program leaves.
-const QUIT_WITHIN: Duration = Duration::from_secs(5);
+/// the monitors are removed directly and the program leaves. Longer than a normal quit
+/// may take: the headsets' second to read the goodbye and the desktop's worker's 8 s
+/// to put everything back (`main.rs`), so a normal stop ends with 0.
+const QUIT_WITHIN: Duration = Duration::from_secs(12);
 
 /// The end of the pipe the handler writes to (-1: none yet).
 static PIPE: AtomicI32 = AtomicI32::new(-1);

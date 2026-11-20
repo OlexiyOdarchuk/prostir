@@ -103,7 +103,14 @@ struct StreamSlot {
     since: Instant,
     /// When its last two frames came.
     last_frames: [Option<Instant>; 2],
+    /// Asks its encoder for a keyframe, once the encoder runs.
+    keyframer: Option<crate::encoder::Keyframer>,
+    /// When a headset last asked for a keyframe of it.
+    headset_asked: Option<Instant>,
 }
+
+/// Keyframes headsets ask for, of one stream, at most this often.
+const HEADSET_KEYFRAMES: Duration = Duration::from_millis(300);
 
 /// Two frames within this: the picture moves, so a keyframe asked for comes soon.
 const FLOWING: Duration = Duration::from_millis(500);
@@ -595,6 +602,8 @@ impl Router {
             keyframe_asked: None,
             since: Instant::now(),
             last_frames: [None; 2],
+            keyframer: None,
+            headset_asked: None,
         };
         inner.streams.insert(id, slot);
         for r in inner.receivers.values_mut() {
@@ -608,6 +617,68 @@ impl Router {
                 ..Delivery::default()
             };
             r.streams.insert(id, delivery);
+        }
+    }
+
+    /// The encoder of stream `id` runs: keyframes are asked of it through `keyframer`
+    /// (see [`Router::force_keyframe`]).
+    pub fn set_keyframer(&self, id: ScreenId, keyframer: crate::encoder::Keyframer) {
+        if let Some(slot) = self.inner.lock().unwrap().streams.get_mut(&id) {
+            slot.keyframer = Some(keyframer);
+        }
+    }
+
+    /// Asks the encoder of stream `id` for a keyframe now, if it runs: from any thread,
+    /// without waiting for the desktop's worker that owns the encoder.
+    pub fn force_keyframe(&self, id: ScreenId) {
+        let keyframer = self
+            .inner
+            .lock()
+            .unwrap()
+            .streams
+            .get(&id)
+            .and_then(|s| s.keyframer.clone());
+        if let Some(k) = keyframer {
+            k.ask();
+        }
+    }
+
+    /// A headset asks for a keyframe of stream `id` (from its reader, without the
+    /// control loop): at most every 300 ms for each stream, whoever asks, or keyframes
+    /// would follow one another.
+    pub fn keyframe_asked(&self, id: ScreenId) {
+        let now = Instant::now();
+        let keyframer = {
+            let mut inner = self.inner.lock().unwrap();
+            let Some(slot) = inner.streams.get_mut(&id) else {
+                return;
+            };
+            if slot
+                .headset_asked
+                .is_some_and(|t| now.duration_since(t) < HEADSET_KEYFRAMES)
+            {
+                return;
+            }
+            slot.headset_asked = Some(now);
+            slot.keyframer.clone()
+        };
+        if let Some(k) = keyframer {
+            k.ask();
+        }
+    }
+
+    /// Asks every running encoder for a keyframe.
+    pub fn force_keyframes(&self) {
+        let keyframers: Vec<_> = self
+            .inner
+            .lock()
+            .unwrap()
+            .streams
+            .values()
+            .filter_map(|s| s.keyframer.clone())
+            .collect();
+        for k in keyframers {
+            k.ask();
         }
     }
 

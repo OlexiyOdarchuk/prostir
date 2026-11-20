@@ -328,7 +328,7 @@ change older clients would misread.
 | `pairing` | while the pairing window is open, the PC shows a code, or a headset waits for its code: `seconds_left`, `seconds_total` (how long the pairing window was opened for; `0`: no pairing window, only a code), `pc_code` (the code to type in the headset, while the PC shows one), `code_for` (a headset waiting for its code to be typed here, by name; only while the settings window is on the bus), `last` (how the last attempt since the window opened ended: `{"paired": {"name": …}}`, `"wrong"`; anything else reads as other) |
 | `nearby` | headsets that are not this PC's and asked for it in the last minute, by the name they gave (a headset gives one while it looks for a PC to pair with), else by address, the latest last |
 | `counting` | this PC counts among users |
-| `problems` | what is wrong now: `code` (an error's name) and `text` in the PC's language |
+| `problems` | what is wrong now: `code` (an error's name) and `text` in the PC's language; `Desktop` while the desktop does not respond (a call into it has hung for 15 s) |
 
 The pairing code is on the bus because the tray shows it to the same user anyway; it
 is never written to the log.

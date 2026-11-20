@@ -301,46 +301,41 @@ fn rand_name() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
-/// A headset forgotten in the tray while its connection waited for the PC (making
-/// the monitors for an earlier one takes a while here) gets no session: the trust
-/// it was set up with is looked at again when its session would open.
+/// A headset forgotten in the tray while its connection waited for the PC (connecting
+/// to the desktop takes a while here) gets no session: the trust it was set up with is
+/// looked at again when its session would open. The tray answers meanwhile.
 #[test]
 fn a_headset_forgotten_meanwhile_gets_no_session() {
     let dir = TestDir::new("forgotten-meanwhile");
     dir.save_monitors(TWO_MONITORS);
     let mut keys = dir.pair();
-    let mut again = dir.keys_of("headset");
     let mut pc = Pc::start(
         &dir,
         &Options {
-            slow_monitors: Duration::from_millis(3500),
+            slow_connect: Duration::from_millis(3500),
             ..Options::default()
         },
     );
-    let second = std::thread::scope(|s| {
-        let first = s.spawn(|| connect(&pc, &mut keys));
-        // The PC is making the monitors for the first connection now.
+    let result = std::thread::scope(|s| {
+        let headset = s.spawn(|| FakeHeadset::connect(pc.addr, &mut keys, None));
+        // The PC connects to the desktop for it now.
         let asked = Instant::now();
         while pc.lines("headset connected via").is_empty() {
-            assert!(asked.elapsed() < SOON, "the first connection never came");
+            assert!(asked.elapsed() < SOON, "the connection never came");
             std::thread::sleep(Duration::from_millis(20));
         }
         pc.tray("forget");
-        while pc.lines("fake tray: forget").is_empty() {
+        while pc.lines("forgetting 1 paired headset").is_empty() {
             assert!(asked.elapsed() < SOON, "the tray never forgot");
             std::thread::sleep(Duration::from_millis(20));
         }
-        // Set up while the PC still trusted it, opened after it forgot.
-        let second = FakeHeadset::connect(pc.addr, &mut again, None);
-        let mut first = first.join().unwrap();
-        first.wait_closed(SOON).unwrap();
-        assert_eq!(
-            first.view().goodbye,
-            Some(prostir_proto::PcGoodbye::Forgotten.code())
+        assert!(
+            asked.elapsed() < Duration::from_secs(3),
+            "the tray waited for the desktop"
         );
-        second
+        headset.join().unwrap()
     });
-    match second {
+    match result {
         Err(ConnectError::Refused(text)) => assert!(text.contains("no longer trusts"), "{text}"),
         Err(e) => panic!("expected Refused, got {e}"),
         Ok(_) => panic!("a forgotten headset got a session"),

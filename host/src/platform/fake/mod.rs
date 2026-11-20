@@ -11,7 +11,8 @@
 //!   random pixels instead of grey bands, so frames are as big as on a busy screen.
 //!   `PROSTIR_FAKE_SLOW_MONITORS_MS` makes each monitor take that long to make, and
 //!   `PROSTIR_FAKE_BROKEN_MONITORS=2,3` makes those monitors (by number, from 1)
-//!   impossible to make.
+//!   impossible to make. `PROSTIR_FAKE_SLOW_CONNECT_MS` makes connecting to the
+//!   desktop take that long.
 //! - Sound is silence, 10 ms at a time, each slice starting with the time it was
 //!   made (see [`audio`]), so a fake headset can tell how late it arrives; the
 //!   microphone goes nowhere. The sound system says its changes as `pactl subscribe`
@@ -91,6 +92,30 @@ pub fn import_session_environment() {}
 pub fn clean_up_after_crash() {}
 
 pub fn give_memory_back() {}
+
+/// Calls of the desktop that hang the next time they are made, and for how long (a
+/// test writes `hang make 20` to `$XDG_RUNTIME_DIR/fake-desktop`, see `desktop.rs`).
+static HANGS: std::sync::Mutex<Vec<(String, std::time::Duration)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// The next call at `point` (`make`, `place`, `encoder-stop`) hangs for `long`.
+fn hang_next(point: &str, long: std::time::Duration) {
+    HANGS.lock().unwrap().push((point.to_owned(), long));
+}
+
+/// A call at `point`: it hangs, if a test said so.
+pub fn hang(point: &str) {
+    let long = {
+        let mut hangs = HANGS.lock().unwrap();
+        let i = hangs.iter().position(|(p, _)| p == point);
+        i.map(|i| hangs.remove(i).1)
+    };
+    if let Some(long) = long {
+        log::info!("fake desktop: {point} hangs for {} s", long.as_secs());
+        std::thread::sleep(long);
+        log::info!("fake desktop: {point} is back");
+    }
+}
 
 /// Where caches go: `$XDG_CACHE_HOME` and nowhere else, and only when the fake desktop
 /// was asked for (as [`config_home`]).
@@ -271,6 +296,7 @@ pub mod audio {
             if std::env::var_os("PROSTIR_FAKE_NO_SOUND").is_some_and(|v| v == "1") {
                 anyhow::bail!("the fake desktop makes no sound device (PROSTIR_FAKE_NO_SOUND)");
             }
+            super::hang("sound-start");
             let stop = Arc::new(AtomicBool::new(false));
             let stopped = stop.clone();
             std::thread::Builder::new()
@@ -732,10 +758,15 @@ pub mod tray {
     /// What the tray would show, in the log for the tests.
     pub fn set_status(_handle: Option<&Handle>, status: TrayStatus) {
         log::info!(
-            "fake tray: {} other headset(s), microphone denied: {}, encoding: {}",
+            "fake tray: {} other headset(s), microphone denied: {}, encoding: {}, desktop: {}",
             status.others,
             status.mic_denied,
-            status.encoding.as_deref().unwrap_or("as it should")
+            status.encoding.as_deref().unwrap_or("as it should"),
+            if status.desktop_stuck {
+                "not responding"
+            } else {
+                "fine"
+            }
         );
     }
 

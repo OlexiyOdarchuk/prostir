@@ -167,6 +167,9 @@ pub struct Session {
     mic_denied: bool,
     /// Replies to send once the parts they changed went out.
     replies: Vec<HostMsg>,
+    /// Requests whose answer waits for a job of the desktop's worker: the request,
+    /// the job, and until when it may take.
+    waiting: Vec<(ReqId, crate::worker::JobId, Instant)>,
     /// Commands sent to the headset without an answer yet: what each was, who waits
     /// for what came of it, and since when.
     commands: BTreeMap<ReqId, (String, Option<Reply>, Instant)>,
@@ -360,6 +363,21 @@ fn spawn_reader(
                         generation,
                         seq,
                     } => router.frame_shown(id, ScreenId::from_wire(display), generation, seq),
+                    // A keyframe waits for nobody: asked of the encoder from here.
+                    ClientMsg::RequestKeyframe {
+                        id: display,
+                        generation,
+                    } => {
+                        let display = ScreenId::from_wire(display);
+                        if router.is_current(id, display, generation) {
+                            router.keyframe_asked(display);
+                        } else {
+                            info!(
+                                "{display}: a keyframe asked for {generation:?}, not the generation it \
+                                 streams now: none made"
+                            );
+                        }
+                    }
                     msg => {
                         if !events.send(Event::Headset(id, Instant::now(), msg)) {
                             return;
@@ -483,6 +501,7 @@ impl Session {
             battery_warned: false,
             mic_denied: false,
             replies: Vec::new(),
+            waiting: Vec::new(),
             commands: BTreeMap::new(),
             answers: Answers::default(),
             last_command: 0,
@@ -843,6 +862,48 @@ impl Session {
         }
     }
 
+    /// The answer to a request that waited for job `job` of the desktop's worker:
+    /// whether it was this session's.
+    pub fn job_done(&mut self, job: crate::worker::JobId, outcome: &Outcome) -> bool {
+        let Some(i) = self.waiting.iter().position(|(_, j, _)| *j == job) else {
+            return false;
+        };
+        let (req, _, _) = self.waiting.remove(i);
+        if let Outcome::Failed { detail, .. } = outcome {
+            warn!("request {}: {detail}", req.0);
+        }
+        info!("request {}: answered", req.0);
+        self.replies.push(HostMsg::Reply {
+            req,
+            outcome: outcome.clone(),
+        });
+        true
+    }
+
+    /// When a request waiting for the desktop has waited long enough.
+    pub fn waiting_until(&self) -> Option<Instant> {
+        self.waiting.iter().map(|(_, _, until)| *until).min()
+    }
+
+    /// Requests that waited for the desktop until `now` (all of them with `all`, the
+    /// desktop not responding) fail with `DESKTOP`: their jobs, which nobody waits for
+    /// now.
+    pub fn give_up_waiting(&mut self, now: Instant, all: bool) -> Vec<crate::worker::JobId> {
+        let (over, still): (Vec<_>, Vec<_>) = std::mem::take(&mut self.waiting)
+            .into_iter()
+            .partition(|(_, _, until)| all || *until <= now);
+        self.waiting = still;
+        let jobs = over.iter().map(|(_, job, _)| *job).collect();
+        for (req, _, _) in over {
+            warn!("request {}: the desktop does not respond", req.0);
+            self.replies.push(HostMsg::Reply {
+                req,
+                outcome: Outcome::failed(ErrorCode::DESKTOP, &desktop_not_responding()),
+            });
+        }
+        jobs
+    }
+
     /// Tells the headset what changed, then the replies.
     pub fn publish(&mut self, displays: &mut Displays, store: &Store, focus: Option<ScreenId>) {
         let sources = publish::Sources {
@@ -968,7 +1029,10 @@ impl Session {
                     }
                 }
             }
-            // Only the microphone of the session that has it reaches the PC.
+            // Only the microphone of the session that has it reaches the PC. It still
+            // goes through the control loop, which takes it at once (a pass is short and
+            // waits for nothing); moving it to the reader, as keyframes, is for later
+            // (plan, step 6, section 3.2).
             ClientMsg::Up { up, data } => match self.ups.get(&up) {
                 _ if !self.standing.mic => {}
                 // The PC's end of the microphone is mono.
@@ -981,21 +1045,10 @@ impl Session {
                     info!("the headset's microphone stopped (up stream {up})");
                 }
             }
-            ClientMsg::RequestKeyframe { id, generation } => {
-                let id = ScreenId::from_wire(id);
-                if displays.router.is_current(self.id, id, generation) {
-                    displays.keyframe_asked(id);
-                } else {
-                    info!(
-                        "{id}: a keyframe asked for {generation:?}, not the generation it \
-                         streams now: none made"
-                    );
-                }
-            }
             ClientMsg::Request { req, asked } => {
                 let started = Instant::now();
                 let what = format!("{asked:?}");
-                let outcome = match asked {
+                let answer = match asked {
                     Asked::Known(request) => {
                         let limits = self.publisher.limits(displays, self.standing.no_limits);
                         let asker = requests::Asker {
@@ -1007,7 +1060,25 @@ impl Session {
                     }
                     Asked::Unknown { kind } => {
                         info!("the headset asked for something unknown (kind {kind})");
-                        Outcome::failed(ErrorCode::UNSUPPORTED, "")
+                        requests::Answer::Now(Outcome::failed(ErrorCode::UNSUPPORTED, ""))
+                    }
+                };
+                let outcome = match answer {
+                    requests::Answer::Now(outcome) => outcome,
+                    requests::Answer::Later(job) if displays.desk_stuck() => {
+                        displays.desk().cancel(job);
+                        displays.forget_job(job);
+                        Outcome::failed(ErrorCode::DESKTOP, &desktop_not_responding())
+                    }
+                    requests::Answer::Later(job) => {
+                        info!(
+                            "request {} ({what}): waited {} ms, answered once the desktop did it",
+                            req.0,
+                            (started - came).as_millis(),
+                        );
+                        let until = Instant::now() + crate::worker::answer_within();
+                        self.waiting.push((req, job, until));
+                        return false;
                     }
                 };
                 if let Outcome::Failed { detail, .. } = &outcome {
@@ -1047,6 +1118,12 @@ impl Session {
         }
         false
     }
+}
+
+/// What the headset and the person at the PC are told while the desktop does not
+/// respond.
+pub fn desktop_not_responding() -> String {
+    i18n::t("Стільниця не відповідає", "The desktop does not respond").into()
 }
 
 /// Whether the headset is on the head, as it last said (one that never said counts as
