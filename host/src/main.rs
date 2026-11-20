@@ -287,6 +287,18 @@ impl Brain {
             "headset connected via {} from {from}",
             session::via_name(conn.link.peer.via)
         );
+        // Forgotten after its connection was set up (the tray's item came first).
+        if !self.security.trusted.lock().unwrap().contains(&key) {
+            info!("the headset from {from} was forgotten meanwhile: turning it away");
+            return turn_away(
+                conn,
+                i18n::t(
+                    "Цей ПК більше не довіряє шолому. Сполучіть їх знову.",
+                    "This PC no longer trusts this headset. Pair them again.",
+                )
+                .into(),
+            );
+        }
         match brain::admit(self.sessions.keys(), &key) {
             Admit::Open => {}
             Admit::Replace => {
