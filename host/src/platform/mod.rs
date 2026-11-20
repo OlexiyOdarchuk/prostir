@@ -201,6 +201,9 @@ pub struct TrayStatus {
     pub no_limits: Option<bool>,
     /// The headset's microphone is on, but its system does not let it record.
     pub mic_denied: bool,
+    /// A display is not on the best encoder for it, or encodes on the CPU: which, and
+    /// why (see `Displays::encoding_line`).
+    pub encoding: Option<String>,
 }
 
 /// Why there is no pairing code typed on the PC (see `dialogs::ask_code`).

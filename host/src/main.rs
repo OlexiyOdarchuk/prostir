@@ -169,6 +169,7 @@ impl Control {
             monitors: displays.map_or(0, Displays::monitor_count),
             mirror: displays.is_some_and(Displays::mirror_active),
             paused: displays.is_some_and(|d| !d.streaming()),
+            encoding: displays.and_then(Displays::encoding_line),
         };
         if self.shown.as_ref() != Some(&status) {
             tray::set_status(self.tray.as_ref(), status.clone());

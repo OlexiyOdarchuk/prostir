@@ -651,6 +651,22 @@ impl Displays {
             .collect()
     }
 
+    /// The tray's line about encoding, when a display is not on the best encoder for it
+    /// or encodes on the CPU: the first such, and how many more.
+    pub fn encoding_line(&self) -> Option<String> {
+        let noted: Vec<OutputEncoding> = self
+            .encoding_report()
+            .into_iter()
+            .filter(|o| o.note.is_some())
+            .collect();
+        let first = noted.first()?;
+        let mut line = format!("{}: {}", first.name, first.note.as_deref().unwrap_or(""));
+        if noted.len() > 1 {
+            line.push_str(&format!(" (+{} {})", noted.len() - 1, t("ще", "more")));
+        }
+        Some(state::clip(&line, 120))
+    }
+
     /// Housekeeping, about twice a second: logs what the streams sent now and then,
     /// and follows the PC's own displays (a laptop's panel goes when its lid closes and
     /// comes back when it opens); one seen for the first time gets its number from

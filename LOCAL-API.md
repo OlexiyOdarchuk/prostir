@@ -271,7 +271,11 @@ change older clients would misread.
   },
   "encoding": {
     "bitrate": 30, "sharp": false, "codec": "h265", "cpu": false,
-    "using": {"codec": "h264", "hardware": true}
+    "using": {"codec": "h264", "hardware": true},
+    "outputs": [
+      {"display": 103, "encoder": "VA-API", "codec": "h264", "hardware": true,
+       "copies": false, "note": null}
+    ]
   },
   "sound": {
     "to_headset": true, "volume": {"level": 40, "muted": false}, "mic_on": false,
@@ -311,7 +315,7 @@ change older clients would misread.
 | `displays[].state` | `starting`, `running`, `failed` (see `failure`; it keeps its place and is tried again), `absent` (a display of the PC that is not connected now: the lid closed, the cable out), `kept` (a monitor of the set kept for the next headset, while no monitors are on the desktop) |
 | `primary` | the desktop's primary display |
 | `limits` | for the main headset while one is connected, else what any headset gets: `sizes` to offer `[w, h]`, `scales` (percent), `displays_max` (virtual monitors), `physical_max`, `streams_max`, `min` and `max` size |
-| `encoding` | as chosen: `bitrate` (Mbit/s per monitor), `sharp`, `codec` (`h264`, `h265`, `av1`), `cpu`; `using`: what it encodes with now, while there are monitors |
+| `encoding` | as chosen: `bitrate` (Mbit/s per monitor), `sharp`, `codec` (`h264`, `h265`, `av1`), `cpu`; `using`: what it encodes with now, while there are monitors; `outputs`: how each display that streams encodes (each has an encoder of its own, picked for where its frames are): `display`, `encoder` (`VA-API`, `NVENC`, `x264`), `codec`, `hardware`, `copies` (its frames go through the CPU on their way to the encoder), `note` (why it is not on the best encoder this PC has for it, for example a session limit reached or an encoder that did not start; `null` when it is) |
 | `sound` | `to_headset`; `volume`: the main headset's volume (`level` 0 to 100, `muted`), while the PC's volume device follows it (one volume for the PC's slider and the headset's buttons), else `null`; `mic_on` (the switch of the headset whose microphone the PC takes, read only: it is changed in the headset); `mic` (`off`, `ready`, `failed`: the PC's end, the virtual microphone programs record from) and `mic_failure` |
 | `pairing` | while the PC is pairing: `pc_code` (the code to type in the headset, while the PC shows one), and from step 6.8 `seconds_left`, `seconds_total` (`0`: pairing has no time limit, as now, where a new headset pairs whenever it asks), `code_for` (a headset waiting for its code to be typed here), `last` (`{"paired": {"name": …}}`, `"wrong"`; anything else reads as other) |
 | `nearby` | headsets that asked for this PC recently, by name (from step 6.8) |

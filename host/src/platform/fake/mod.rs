@@ -437,9 +437,10 @@ pub mod tray {
     /// What the tray would show, in the log for the tests.
     pub fn set_status(_handle: Option<&Handle>, status: TrayStatus) {
         log::info!(
-            "fake tray: {} other headset(s), microphone denied: {}",
+            "fake tray: {} other headset(s), microphone denied: {}, encoding: {}",
             status.others,
-            status.mic_denied
+            status.mic_denied,
+            status.encoding.as_deref().unwrap_or("as it should")
         );
     }
 
