@@ -87,7 +87,7 @@ assets="$ROOT/packaging"
 install -Dm755 "$built" "$BIN/prostir"
 install -Dm644 "$assets/prostir.svg" "$ICON"
 install -Dm644 "$assets/prostir.desktop" "$DESKTOP"
-sed -i "s|^Exec=.*|Exec=$BIN/prostir|" "$DESKTOP"
+sed -i "s|^Exec=.*|Exec=$BIN/prostir open|" "$DESKTOP"
 for f in LICENSE LICENSE-EXCEPTION.md THIRD-PARTY-LICENSES.txt; do
     if [[ -f "$ROOT/$f" ]]; then install -Dm644 "$ROOT/$f" "$DOCS/$f"; fi
 done

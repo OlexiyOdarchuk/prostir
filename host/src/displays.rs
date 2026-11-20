@@ -1017,7 +1017,7 @@ impl Displays {
     }
 
     /// What the encoders make now: the codec, and whether on the CPU.
-    fn encoding_now(&self) -> (Codec, bool) {
+    pub fn encoding_now(&self) -> (Codec, bool) {
         (
             self.cfg.codec,
             self.cfg.backend == crate::encoder::Backend::X264,
@@ -2171,6 +2171,29 @@ impl Displays {
         for (_, e) in self.encoders() {
             e.force_keyframe();
         }
+    }
+
+    /// The desktop's name for the output of screen `id`, while it has one.
+    pub fn output_of(&self, id: ScreenId) -> Option<String> {
+        let screen = self.screens.get(&id)?;
+        match &screen.kind {
+            ScreenKind::Physical { key, .. } => Some(key.connector.clone()),
+            _ => screen.output_key().map(|k| k.as_str().to_owned()),
+        }
+    }
+
+    /// Tries monitor `id` again now, if it failed (`UnknownDisplay` if there is none);
+    /// what came of it shows in its state.
+    pub fn retry(&mut self, id: ScreenId) -> Result<()> {
+        let Some(screen) = self.screens.get(&id) else {
+            bail!(UserError::UnknownDisplay);
+        };
+        // One too big for a headset waits for one it fits instead.
+        let failed = matches!(screen.state, ScreenState::Failed { .. });
+        if failed && screen.is_virtual() && !self.too_big.contains_key(&id) {
+            self.start(id)?;
+        }
+        Ok(())
     }
 
     /// Every running monitor streams, and one at least does. Otherwise the screens are

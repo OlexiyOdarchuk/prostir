@@ -1830,6 +1830,7 @@ name = "prostir-host"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "async-channel",
  "clap",
  "drm-fourcc",
  "env_logger",
@@ -1842,9 +1843,11 @@ dependencies = [
  "ksni",
  "libc",
  "log",
+ "prostir-api",
  "prostir-layout",
  "prostir-proto",
  "prostir-testkit",
+ "serde",
  "serde_json",
  "wayland-client",
  "wayland-protocols",

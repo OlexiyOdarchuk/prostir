@@ -11,7 +11,6 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
-use std::sync::mpsc::Sender;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -27,6 +26,7 @@ use prostir_proto::stats::Period;
 use prostir_proto::volume::{Act, PcVolume};
 use prostir_proto::{ClientMsg, HeadsetGoodbye, HostMsg, PcGoodbye};
 
+use crate::api::{self, ApiError, CtlReply, Reply};
 use crate::displays::Displays;
 use crate::events::{Event, EventSink, SessionId};
 use crate::platform::audio::SinkVolume;
@@ -169,7 +169,7 @@ pub struct Session {
     replies: Vec<HostMsg>,
     /// Commands sent to the headset without an answer yet: what each was, who waits
     /// for what came of it, and since when.
-    commands: BTreeMap<ReqId, (String, Option<Sender<String>>, Instant)>,
+    commands: BTreeMap<ReqId, (String, Option<Reply>, Instant)>,
     last_command: u32,
     /// The headset's sound device and the logic of one volume, where both can.
     volume: Option<(SinkVolume, PcVolume)>,
@@ -225,14 +225,6 @@ fn to_mono(stereo: &[u8]) -> Vec<u8> {
             (((l + r) / 2) as i16).to_le_bytes()
         })
         .collect()
-}
-
-/// What came of a command, as the one who asked reads it.
-fn command_result(outcome: &Outcome) -> String {
-    match outcome {
-        Outcome::Failed { error, detail } => format!("failed {}: {detail}", error.code()),
-        _ => "done".into(),
-    }
 }
 
 /// The headset's battery is low: say so on the PC, where the user is looking.
@@ -547,6 +539,48 @@ impl Session {
         std::mem::take(&mut self.fresh)
     }
 
+    /// What the PC allows this headset, as its limits say now.
+    pub fn limits(&self, displays: &Displays) -> state::Limits {
+        self.publisher.limits(displays, self.standing.no_limits)
+    }
+
+    /// The session as the local API shows it.
+    pub fn api_session(&self) -> api::Session {
+        let headset = &self.publisher.headset;
+        let line = self.tray_line();
+        let mic = headset.up.get(&UpKind::Mic);
+        api::Session {
+            via: match self.via {
+                "USB" => api::Via::Usb,
+                _ => api::Via::Wifi,
+            },
+            worn: self.worn(),
+            battery: line
+                .battery
+                .map(|(percent, charging)| api::Battery { percent, charging }),
+            profile: None,
+            mic_allowed: mic.and_then(|m| match m.permission {
+                permission::GRANTED => Some(true),
+                permission::DENIED => Some(false),
+                _ => None,
+            }),
+            mic_on: self.mic_on(),
+            main: self.standing.main,
+            commands: self.publisher.caps().has(caps::headset::COMMANDS),
+            no_limits: line.no_limits,
+        }
+    }
+
+    /// The headset's volume, while the PC's follows it.
+    pub fn shared_volume(&self) -> Option<api::Volume> {
+        self.volume.as_ref()?;
+        let v = self.publisher.headset.volume?;
+        Some(api::Volume {
+            level: v.level,
+            muted: v.muted,
+        })
+    }
+
     /// What the tray shows of this headset.
     pub fn tray_line(&self) -> TrayLine {
         let headset = &self.publisher.headset;
@@ -630,19 +664,16 @@ impl Session {
 
     /// Sends the commands waiting for the headset; gives up on those it did not answer
     /// in time.
-    pub fn commands_due(
-        &mut self,
-        waiting: &mut VecDeque<(Asked<Command>, Option<Sender<String>>)>,
-    ) {
+    pub fn commands_due(&mut self, waiting: &mut VecDeque<(Asked<Command>, Option<Reply>)>) {
         let takes = self.publisher.caps().has(caps::headset::COMMANDS);
         for (asked, reply) in waiting.drain(..) {
             let what = format!("{asked:?}");
             if !takes {
                 info!("{what}: the headset takes no commands");
                 if let Some(r) = reply {
-                    let _ = r.send(format!(
-                        "failed {}: the headset cannot do this",
-                        ErrorCode::UNSUPPORTED.code()
+                    r.send(CtlReply::failed(
+                        ApiError::Unsupported,
+                        i18n::t("Шолом не виконує команд", "The headset takes no commands"),
                     ));
                 }
                 continue;
@@ -663,7 +694,10 @@ impl Session {
             if let Some((what, reply, _)) = self.commands.remove(&req) {
                 warn!("command {} ({what}): the headset does not answer", req.0);
                 if let Some(r) = reply {
-                    let _ = r.send("the headset does not answer".into());
+                    r.send(CtlReply::failed(
+                        ApiError::TimedOut,
+                        i18n::t("Шолом не відповідає", "The headset does not answer"),
+                    ));
                 }
             }
         }
@@ -674,7 +708,10 @@ impl Session {
         for (_, (what, reply, _)) in std::mem::take(&mut self.commands) {
             info!("{what}: the headset left");
             if let Some(r) = reply {
-                let _ = r.send("the headset disconnected".into());
+                r.send(CtlReply::failed(
+                    ApiError::Disconnected,
+                    i18n::t("Шолом відключився", "The headset disconnected"),
+                ));
             }
         }
     }
@@ -915,10 +952,10 @@ impl Session {
             ClientMsg::Gaze { .. } => {}
             ClientMsg::Reply { req, outcome } => match self.commands.remove(&req) {
                 Some((what, reply, _)) => {
-                    let result = command_result(&outcome);
-                    info!("command {} ({what}): {result}", req.0);
+                    let result = CtlReply::of_outcome(&outcome);
+                    info!("command {} ({what}): {result:?}", req.0);
                     if let Some(r) = reply {
-                        let _ = r.send(result);
+                        r.send(result);
                     }
                 }
                 None => info!("an answer to command {}, which nothing waits for", req.0),

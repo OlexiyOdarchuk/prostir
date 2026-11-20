@@ -16,10 +16,7 @@ use prostir_proto::request::{Asked, Command as HeadsetCommand};
 
 /// Asks the headset to do `command`, from the tray.
 fn ask(tray: &Tray, command: HeadsetCommand) {
-    tray.commands.tray(Command::Headset {
-        asked: Asked::Known(command),
-        reply: None,
-    });
+    tray.commands.tray(Command::Headset(Asked::Known(command)));
 }
 
 /// Video quality presets offered in the menu, Mbit/s per monitor.
@@ -356,6 +353,15 @@ impl ksni::Tray for Tray {
                 // Hyprland (without uwsm) ignores XDG autostart: its own config starts it.
                 visible: !crate::platform::linux::hyprland::running(),
                 activate: Box::new(|_: &mut Self| autostart::set(!autostart::enabled())),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
+                label: t("Налаштування…", "Settings…").into(),
+                icon_name: "configure".into(),
+                activate: Box::new(|tray: &mut Self| {
+                    tray.commands.tray(Command::ShowSettings);
+                }),
                 ..Default::default()
             }
             .into(),

@@ -95,8 +95,31 @@ impl Limiter {
     }
 }
 
-/// The connection whose code the tray shows now, if one does (by its number).
-static CODE_SHOWN_BY: Mutex<Option<u64>> = Mutex::new(None);
+/// The connection whose code the tray shows now, if one does (by its number), and
+/// the code.
+static CODE_SHOWN_BY: Mutex<Option<(u64, String)>> = Mutex::new(None);
+/// Told when the code shown comes or goes (the local API shows it too).
+static ON_CODE: std::sync::OnceLock<crate::events::EventSink> = std::sync::OnceLock::new();
+
+/// From now on, `events` hears when the PC begins or stops showing a pairing code.
+pub fn tell_about_codes(events: crate::events::EventSink) {
+    let _ = ON_CODE.set(events);
+}
+
+/// The pairing code the PC shows now, if any.
+pub fn code_shown() -> Option<String> {
+    CODE_SHOWN_BY
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|(_, code)| code.clone())
+}
+
+fn code_changed() {
+    if let Some(events) = ON_CODE.get() {
+        events.send(crate::events::Event::Pairing);
+    }
+}
 /// The number of the next connection set up.
 static NEXT_CONNECTION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -117,21 +140,31 @@ impl<'a> TrayCode<'a> {
     }
 
     fn show(&self, code: String) {
-        *CODE_SHOWN_BY.lock().unwrap() = Some(self.connection);
+        *CODE_SHOWN_BY.lock().unwrap() = Some((self.connection, code.clone()));
         tray::set_pairing(self.tray, Some(code));
+        code_changed();
     }
 
     fn hide(&self) {
         let mut shown_by = CODE_SHOWN_BY.lock().unwrap();
-        if *shown_by == Some(self.connection) {
+        if shown_by
+            .as_ref()
+            .is_some_and(|(by, _)| *by == self.connection)
+        {
             *shown_by = None;
+            drop(shown_by);
             tray::set_pairing(self.tray, None);
+            code_changed();
         }
     }
 
     #[cfg(test)]
     fn shows(&self) -> bool {
-        *CODE_SHOWN_BY.lock().unwrap() == Some(self.connection)
+        CODE_SHOWN_BY
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|(by, _)| *by == self.connection)
     }
 }
 
@@ -1001,7 +1034,7 @@ mod tests {
         drop(pairing);
         assert!(later.shows(), "an earlier connection hid the newer code");
         drop(later);
-        assert_eq!(*CODE_SHOWN_BY.lock().unwrap(), None);
+        assert_eq!(code_shown(), None);
     }
 
     #[test]
