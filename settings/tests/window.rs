@@ -580,3 +580,23 @@ fn a_failed_monitor_is_named_once() {
         "Prostir-4: 2560x1440 більше, ніж шолом декодує в H265. Решта моніторів працює.",
     );
 }
+
+/// "На ПК" keeps the PC's sound on the PC, "У шоломі" sends it to the headset.
+#[test]
+fn the_sound_goes_where_the_button_says() {
+    let (mut h, handle) = window(Mock::connected(), Setup::default());
+    open(&mut h, Page::Sound);
+    assert!(handle.state().sound.to_headset);
+    press_as(&mut h, Some(Role::RadioButton), "На ПК");
+    assert_eq!(
+        handle.calls().last(),
+        Some(&Request::SoundToHeadset { on: false })
+    );
+    h.run_steps(2);
+    press_as(&mut h, Some(Role::RadioButton), "У шоломі");
+    assert_eq!(
+        handle.calls().last(),
+        Some(&Request::SoundToHeadset { on: true })
+    );
+    assert_eq!(handle.calls().len(), 2);
+}

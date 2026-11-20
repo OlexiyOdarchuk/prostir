@@ -587,3 +587,32 @@ fn an_old_pactl_shares_no_volume() {
     assert!(!pactl.read("calls").contains("set-sink-volume"));
     assert_eq!(pactl.read("volume"), "100");
 }
+
+/// "On the PC" from the PC (the settings window, `prostir ctl sound pc`) keeps the
+/// PC's sound on the PC, "In the headset" sends it to the headset: the request says
+/// which in the log, and the state follows.
+#[test]
+fn the_sound_goes_where_the_pc_says() {
+    let (_dir, mut pc, _keys, _headset) = session("sound-route", &Options::default());
+    pc.wait_log(SOON, "sound: PC sound HeadsetOnly");
+    let Some(on_pc) = pc.ctl(&["--json", "sound", "pc"]) else {
+        return;
+    };
+    assert_eq!(on_pc.code, 0, "{on_pc:?}");
+    let asked = pc.wait_log(SOON, "sound_to_headset");
+    assert!(
+        asked.contains("sound_to_headset") && asked.contains(r#""on":false"#),
+        "{asked}"
+    );
+    pc.wait_log(SOON, "sound: PC sound stays on the PC");
+    let state = pc.ctl(&["--json", "status"]).unwrap().json();
+    assert_eq!(state["sound"]["to_headset"], false, "{state}");
+    let back = pc.count_log("sound: PC sound HeadsetOnly");
+    let to_headset = pc.ctl(&["--json", "sound", "headset"]).unwrap();
+    assert_eq!(to_headset.code, 0, "{to_headset:?}");
+    let asked = pc.wait_log_after(SOON, "sound_to_headset", 1);
+    assert!(asked.contains(r#""on":true"#), "{asked}");
+    pc.wait_log_after(SOON, "sound: PC sound HeadsetOnly", back);
+    let state = pc.ctl(&["--json", "status"]).unwrap().json();
+    assert_eq!(state["sound"]["to_headset"], true, "{state}");
+}

@@ -106,6 +106,18 @@ fn failed(e: &anyhow::Error) -> CtlReply {
     CtlReply::failed(api::of_code(errors::code_of(e)), text)
 }
 
+/// A request as the log says it: its JSON, what it asks and with what (`sound_to_headset`
+/// with `"on":false`), but a pairing code, which stays out of the log.
+fn logged(request: &Request) -> String {
+    let Ok(mut json) = serde_json::to_value(request) else {
+        return String::new();
+    };
+    if let Some(code) = json.get_mut("code") {
+        *code = "…".into();
+    }
+    json.to_string()
+}
+
 /// The PC's name, as headsets list it: looked up once.
 fn hostname() -> &'static str {
     static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -115,11 +127,7 @@ fn hostname() -> &'static str {
 impl Brain {
     /// One request of the local API.
     pub(crate) fn ctl(&mut self, request: Request, reply: Reply) {
-        let kind = serde_json::to_value(&request)
-            .ok()
-            .and_then(|v| v.get("request").and_then(|k| k.as_str().map(str::to_owned)))
-            .unwrap_or_default();
-        info!("local API: {kind}");
+        info!("local API: {}", logged(&request));
         if let Some(command) = command_of(&request) {
             if self.sessions.is_empty() {
                 let text = t("Шолом не підключено", "No headset is connected");
@@ -1074,6 +1082,21 @@ fn start_detached() -> std::io::Result<std::process::Child> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The log says what a request asks and with what, never a pairing code.
+    #[test]
+    fn the_log_says_what_was_asked() {
+        let sound = logged(&Request::SoundToHeadset { on: false });
+        assert!(sound.contains(r#""request":"sound_to_headset""#), "{sound}");
+        assert!(sound.contains(r#""on":false"#), "{sound}");
+        let code = logged(&Request::PairingCode {
+            code: "482913".into(),
+        });
+        assert!(
+            code.contains("pairing_code") && !code.contains("482913"),
+            "{code}"
+        );
+    }
 
     /// A command whose arguments the protocol does not carry is refused before it
     /// goes; the longest that fits goes.
