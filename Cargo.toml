@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["proto", "layout", "host", "client", "testkit", "lang"]
-default-members = ["proto", "layout", "host", "client", "testkit", "lang"]
+members = ["proto", "layout", "host", "client", "testkit", "lang", "settings"]
+default-members = ["proto", "layout", "host", "client", "testkit", "lang", "settings"]
 
 [workspace.package]
 version = "0.2.0"

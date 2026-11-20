@@ -1,0 +1,4 @@
+# kittest writes these next to a picture that no longer matches.
+tests/snapshots/*.new.png
+tests/snapshots/*.diff.png
+tests/snapshots/*.old.png

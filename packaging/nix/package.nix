@@ -75,6 +75,7 @@ rustPlatform.buildRustPackage {
       # A workspace member (the fake headset for tests): cargo needs it present.
       (root + "/testkit")
       (root + "/lang")
+      (root + "/settings")
       (root + "/packaging/prostir.desktop")
       (root + "/packaging/prostir.svg")
     ];

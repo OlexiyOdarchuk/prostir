@@ -1,0 +1,98 @@
+# Prostir settings window: the built-in theme ("Prostir" on the Look page).
+#
+# Every colour, size and duration the window uses comes from here; the code only names
+# tokens. Your own ~/.config/prostir/window-theme.toml goes on top of this key by key:
+# copy any part of this file there and change it. A key that is missing or not
+# understood keeps the value from here, and the Look page lists what was not used.
+#
+# Ink: every surface carries a little of the Prostir blue, and the dark theme is deep
+# navy, so the window reads as Prostir before anything is chosen and the chosen option
+# sits in the same hue as everything around it. The blue is the headset's and the
+# site's (docs/site.css).
+format = 1
+name = "Prostir"
+
+# Colours: "#RRGGBB" or "#RRGGBBAA".
+[light]
+background    = "#EFF3FA"   # the page
+sidebar       = "#E1E8F4"   # the page list on the left, a step darker than the page
+surface       = "#FFFFFF"   # cards
+well          = "#E5EBF6"   # inset areas: the monitor map, the code field
+control       = "#DAE2F1"   # buttons and choices at rest
+control_hover = "#CBD7EC"
+border        = "#D2DBEA"
+text          = "#0F1A33"
+text_muted    = "#435069"
+accent        = "#2A63E0"   # the one blue: the chosen option, the main action
+accent_hover  = "#2357C8"
+accent_text   = "#FFFFFF"   # text on accent
+accent_ink    = "#1F4FBF"   # blue as text or a thin line on light surfaces
+focus         = "#2A63E0"   # the keyboard focus ring
+ok            = "#1E8E4A"
+warning       = "#A86400"
+danger        = "#C42B2B"
+screen        = "#C8D5EC"   # a Prostir monitor on the map
+screen_pc     = "#FFFFFF"   # a screen of the PC itself on the map
+screen_text   = "#0F1A33"
+selection     = "#2A63E040" # selected text
+shadow        = "#0F1A3320" # the one lifted thing: a monitor being dragged
+
+[dark]
+background    = "#0E1526"
+sidebar       = "#0A101E"
+surface       = "#152038"
+well          = "#0B1221"
+control       = "#1E2B48"
+control_hover = "#283758"
+border        = "#22304F"
+text          = "#E6ECF8"
+text_muted    = "#A4B1CC"
+accent        = "#2C66E8"   # the site's --accent-strong: white text on it keeps 4.5:1
+accent_hover  = "#3A73F0"
+accent_text   = "#FFFFFF"
+accent_ink    = "#7EA7FF"
+focus         = "#3D7EFF"   # the headset menu's accent
+ok            = "#4ADE80"
+warning       = "#FBBF24"
+danger        = "#FF7272"
+screen        = "#253660"
+screen_pc     = "#152038"
+screen_text   = "#E6ECF8"
+selection     = "#3D7EFF55"
+shadow        = "#00000080"
+
+# The app icon (packaging/prostir.svg), the same in both themes.
+[brand]
+tile        = "#161A22"
+screen      = "#4C7DF4"
+screen_side = "#3D6BE0"
+base        = "#9AA6C4"
+
+# Sizes in logical pixels.
+[shape]
+radius_small      = 6     # small marks
+radius            = 10    # buttons and choices
+radius_large      = 14    # cards
+stroke            = 1.0
+focus_width       = 2.0
+spacing           = 8
+padding           = 20    # inside cards
+section_gap       = 28    # between the parts of a page
+control_height    = 40
+sidebar_width     = 236
+content_max_width = 860
+
+[type]
+font         = "Noto Sans"          # built in, or a path to a .ttf or .otf with Cyrillic
+font_medium  = "Noto Sans Medium"
+size_small   = 13.0
+size_body    = 15.0
+size_heading = 17.0
+size_title   = 26.0
+size_display = 30.0
+
+# Durations in milliseconds; 0 changes at once.
+[motion]
+hover_ms = 90       # hover and press
+theme_ms = 240      # light and dark change as one cross-fade
+state_ms = 160      # switches, a page's state changing
