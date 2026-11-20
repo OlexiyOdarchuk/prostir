@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Prostir Settings
+Name[uk]=Налаштування Prostir
+GenericName=Virtual monitors settings
+GenericName[uk]=Налаштування віртуальних моніторів
+Comment=Monitors, headsets, sound and look of Prostir on this PC
+Comment[uk]=Монітори, шоломи, звук і вигляд Prostir на цьому ПК
+Exec=prostir-settings
+Icon=prostir
+Terminal=false
+Categories=Settings;HardwareSettings;
+Keywords=VR;XR;Quest;monitor;display;virtual;settings;
+StartupWMClass=io.github.OlexiyOdarchuk.Prostir.Settings

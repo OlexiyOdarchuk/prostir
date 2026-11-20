@@ -54,13 +54,16 @@ prostir-testkit = { path = "../testkit" }
 
 # Packages built in the release workflow: `cargo deb -p prostir-host` and
 # `cargo generate-rpm -p host`, after scripts/package-release.sh (which writes
-# build/THIRD-PARTY-LICENSES.txt) and `strip --strip-debug target/release/prostir`.
+# build/THIRD-PARTY-LICENSES.txt and builds prostir-settings too) and
+# `strip --strip-debug target/release/prostir target/release/prostir-settings`.
 # Same files as scripts/install.sh puts in ~/.local.
 #
 # Runtime needs: GStreamer with the VA plugin (hardware encoding), x264enc for the CPU
 # fallback (NVIDIA, or no VA encoder), pipewiresrc, pulsesrc, h264parse and
 # h265parse; pw-cli and pw-loopback; pactl and pacat; kscreen-doctor and qdbus6 on KDE
-# Plasma; grim for screenshots on Hyprland (optional).
+# Plasma; grim for screenshots on Hyprland (optional). The settings window
+# (prostir-settings) loads libEGL, libwayland-client, -cursor and -egl and libxkbcommon
+# at run time (the X11 libraries in an X11 session), so they are listed by hand.
 [package.metadata.deb]
 name = "prostir"
 maintainer = "Prostir contributors <https://github.com/OlexiyOdarchuk/prostir>"
@@ -71,13 +74,15 @@ Prostir puts extra monitors for a KDE Plasma 6 or Hyprland desktop into a Meta \
 Quest 3 or 3S headset. They are real outputs of the desktop, streamed to the headset over the \
 local network. This package is the PC part; the headset app comes as an APK from the \
 same release."""
-depends = "$auto, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-pipewire, pipewire-bin, pipewire-pulse, pulseaudio-utils, curl"
+depends = "$auto, libegl1, libwayland-client0, libwayland-cursor0, libwayland-egl1, libxkbcommon0, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-pipewire, pipewire-bin, pipewire-pulse, pulseaudio-utils, curl"
 # "x | hyprland": tools only KDE Plasma needs, so a Hyprland system does not pull them in.
 recommends = "mesa-va-drivers | intel-media-va-driver-non-free | intel-media-va-driver, gstreamer1.0-plugins-ugly, kdialog | zenity | fuzzel | wofi | rofi, libnotify-bin, libkscreen-bin | hyprland, qdbus-qt6 | hyprland"
-suggests = "adb, grim"
+suggests = "adb, grim, libx11-6, libxcursor1, libxi6, libxrandr2"
 assets = [
     ["target/release/prostir", "usr/bin/", "755"],
+    ["target/release/prostir-settings", "usr/bin/", "755"],
     ["../packaging/prostir.desktop", "usr/share/applications/", "644"],
+    ["../packaging/io.github.OlexiyOdarchuk.Prostir.Settings.desktop", "usr/share/applications/", "644"],
     ["../packaging/prostir.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
     ["../README.md", "usr/share/doc/prostir/README.md", "644"],
     ["../LICENSE", "usr/share/doc/prostir/LICENSE", "644"],
@@ -97,7 +102,9 @@ license = "GPL-3.0-or-later"
 auto-req = "no"
 assets = [
     { source = "target/release/prostir", dest = "/usr/bin/prostir", mode = "755" },
+    { source = "target/release/prostir-settings", dest = "/usr/bin/prostir-settings", mode = "755" },
     { source = "../packaging/prostir.desktop", dest = "/usr/share/applications/prostir.desktop", mode = "644" },
+    { source = "../packaging/io.github.OlexiyOdarchuk.Prostir.Settings.desktop", dest = "/usr/share/applications/io.github.OlexiyOdarchuk.Prostir.Settings.desktop", mode = "644" },
     { source = "../packaging/prostir.svg", dest = "/usr/share/icons/hicolor/scalable/apps/prostir.svg", mode = "644" },
     { source = "../README.md", dest = "/usr/share/doc/prostir/README.md", mode = "644", doc = true },
     { source = "../LICENSE", dest = "/usr/share/licenses/prostir/LICENSE", mode = "644" },
@@ -119,6 +126,11 @@ pipewire-pulseaudio = "*"
 pulseaudio-utils = "*"
 mesa-libgbm = "*"
 curl = "*"
+libglvnd-egl = "*"
+libwayland-client = "*"
+libwayland-cursor = "*"
+libwayland-egl = "*"
+libxkbcommon = "*"
 
 # gstreamer1-plugins-ugly (x264enc) comes from RPM Fusion; without it dnf skips it.
 [package.metadata.generate-rpm.recommends]

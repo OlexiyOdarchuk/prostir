@@ -56,7 +56,8 @@ import json, sys
 meta = json.load(sys.stdin)
 packages = {p["id"]: p for p in meta["packages"]}
 deps = {n["id"]: [d["pkg"] for d in n["deps"]] for n in meta["resolve"]["nodes"]}
-todo = [i for i, p in packages.items() if p["name"] in ("prostir-host", "prostir-proto")]
+todo = [i for i, p in packages.items()
+        if p["name"] in ("prostir-host", "prostir-proto", "prostir-settings")]
 seen = set()
 while todo:
     i = todo.pop()

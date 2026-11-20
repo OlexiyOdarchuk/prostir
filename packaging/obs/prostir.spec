@@ -27,10 +27,16 @@ BuildRequires:  pkgconfig(gstreamer-app-1.0) >= 1.24
 BuildRequires:  pkgconfig(gstreamer-video-1.0) >= 1.24
 
 # The libraries the program links come from rpm's automatic requirements. These are
-# the GStreamer plugins and the commands Prostir runs.
+# the GStreamer plugins and the commands Prostir runs, and the libraries the settings
+# window loads at run time (EGL, Wayland, the keyboard).
 Requires:       curl
 Requires:       pulseaudio-utils
 %if 0%{?suse_version}
+Requires:       libEGL1
+Requires:       libwayland-client0
+Requires:       libwayland-cursor0
+Requires:       libwayland-egl1
+Requires:       libxkbcommon0
 # gstreamer-plugins-bad: the VA-API encoders (va plugin), h264parse and h265parse.
 Requires:       gstreamer-plugin-pipewire
 Requires:       gstreamer-plugins-bad
@@ -50,6 +56,11 @@ Suggests:       zenity
 Suggests:       grim
 Suggests:       android-tools
 %else
+Requires:       libglvnd-egl
+Requires:       libwayland-client
+Requires:       libwayland-cursor
+Requires:       libwayland-egl
+Requires:       libxkbcommon
 # gstreamer1-plugins-bad-free: the VA-API encoders (va plugin), h264parse and h265parse.
 Requires:       gstreamer1-plugins-bad-free
 Requires:       gstreamer1-plugins-base
@@ -86,11 +97,13 @@ export CARGO_HOME="$PWD/.cargo-home"
 cargo build --frozen --release \
     --config 'source.crates-io.replace-with="vendored-sources"' \
     --config 'source.vendored-sources.directory="vendor"' \
-    -p prostir-host --bin prostir
+    -p prostir-host --bin prostir -p prostir-settings --bin prostir-settings
 
 %install
 install -Dm755 target/release/prostir %{buildroot}%{_bindir}/prostir
+install -Dm755 target/release/prostir-settings %{buildroot}%{_bindir}/prostir-settings
 install -Dm644 packaging/prostir.desktop %{buildroot}%{_datadir}/applications/prostir.desktop
+install -Dm644 packaging/io.github.OlexiyOdarchuk.Prostir.Settings.desktop %{buildroot}%{_datadir}/applications/io.github.OlexiyOdarchuk.Prostir.Settings.desktop
 install -Dm644 packaging/prostir.svg %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/prostir.svg
 
 %check
@@ -100,13 +113,15 @@ export CARGO_HOME="$PWD/.cargo-home"
 cargo test --frozen --release \
     --config 'source.crates-io.replace-with="vendored-sources"' \
     --config 'source.vendored-sources.directory="vendor"' \
-    -p prostir-host -p prostir-proto -- --test-threads=1
+    -p prostir-host -p prostir-proto -p prostir-lang -- --test-threads=1
 
 %files
 %license LICENSE LICENSE-EXCEPTION.md THIRD-PARTY-LICENSES.txt
 %doc README.md README.uk.md CHANGELOG.md
 %{_bindir}/prostir
+%{_bindir}/prostir-settings
 %{_datadir}/applications/prostir.desktop
+%{_datadir}/applications/io.github.OlexiyOdarchuk.Prostir.Settings.desktop
 %dir %{_datadir}/icons/hicolor
 %dir %{_datadir}/icons/hicolor/scalable
 %dir %{_datadir}/icons/hicolor/scalable/apps

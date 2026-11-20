@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # Installs the Prostir PC program for the current user, without root:
-#   ~/.local/bin/prostir, its icon and its application menu entry.
+#   ~/.local/bin/prostir and prostir-settings, the icon and the application menu
+#   entries.
 #
 #   ./install.sh                       install (or update: run it again)
 #   ./install.sh --autostart           also start Prostir when you log in
 #   ./install.sh --uninstall           remove everything this script installed
 #   ./install.sh --uninstall --purge   also remove settings and pairings (~/.config/prostir)
 #
-# In a source checkout it builds the program first (cargo build --release).
+# In a source checkout it builds the programs first (cargo build --release).
 set -euo pipefail
 
-usage() { sed -n '2,10s/^# \{0,1\}//p' "$0"; }
+usage() { sed -n '2,11s/^# \{0,1\}//p' "$0"; }
 
 autostart=0 uninstall=0 purge=0
 for arg in "$@"; do
@@ -35,6 +36,8 @@ DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
 CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
 ICON="$DATA/icons/hicolor/scalable/apps/prostir.svg"
 DESKTOP="$DATA/applications/prostir.desktop"
+SETTINGS_ID="io.github.OlexiyOdarchuk.Prostir.Settings"
+SETTINGS_DESKTOP="$DATA/applications/$SETTINGS_ID.desktop"
 AUTOSTART="$CONFIG/autostart/prostir.desktop"
 DOCS="$DATA/doc/prostir"
 SETTINGS="$CONFIG/prostir"
@@ -58,7 +61,7 @@ if (( uninstall )); then
     if pgrep -x -u "$(id -u)" prostir >/dev/null 2>&1; then
         echo "Note: Prostir is still running. Quit it from the tray; removing it does not stop it."
     fi
-    rm -f "$BIN/prostir" "$ICON" "$DESKTOP" "$AUTOSTART"
+    rm -f "$BIN/prostir" "$BIN/prostir-settings" "$ICON" "$DESKTOP" "$SETTINGS_DESKTOP" "$AUTOSTART"
     rm -rf "$DOCS"
     refresh_menu
     echo ">> Prostir removed from $BIN, the application menu and autostart."
@@ -76,18 +79,25 @@ if (( uninstall )); then
 fi
 
 if [[ -x "$ROOT/prostir" ]]; then
-    built="$ROOT/prostir"
+    built="$ROOT"
 else
     echo ">> building"
-    (cd "$ROOT" && cargo build --release --locked -p prostir-host --bin prostir)
-    built="$ROOT/target/release/prostir"
+    (cd "$ROOT" && cargo build --release --locked -p prostir-host --bin prostir \
+        -p prostir-settings --bin prostir-settings)
+    built="$ROOT/target/release"
 fi
 assets="$ROOT/packaging"
 
-install -Dm755 "$built" "$BIN/prostir"
+install -Dm755 "$built/prostir" "$BIN/prostir"
 install -Dm644 "$assets/prostir.svg" "$ICON"
 install -Dm644 "$assets/prostir.desktop" "$DESKTOP"
 sed -i "s|^Exec=.*|Exec=$BIN/prostir|" "$DESKTOP"
+# Archives made before the settings window existed have no prostir-settings.
+if [[ -x "$built/prostir-settings" ]]; then
+    install -Dm755 "$built/prostir-settings" "$BIN/prostir-settings"
+    install -Dm644 "$assets/$SETTINGS_ID.desktop" "$SETTINGS_DESKTOP"
+    sed -i "s|^Exec=.*|Exec=$BIN/prostir-settings|" "$SETTINGS_DESKTOP"
+fi
 for f in LICENSE LICENSE-EXCEPTION.md THIRD-PARTY-LICENSES.txt; do
     if [[ -f "$ROOT/$f" ]]; then install -Dm644 "$ROOT/$f" "$DOCS/$f"; fi
 done

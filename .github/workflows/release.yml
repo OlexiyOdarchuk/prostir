@@ -62,7 +62,7 @@ jobs:
         run: |
           cargo install --locked cargo-deb@3.8.0 cargo-generate-rpm@0.21.1
           # The development profile keeps debug info; the packages do not need it.
-          strip --strip-debug target/release/prostir
+          strip --strip-debug target/release/prostir target/release/prostir-settings
           cargo deb -p prostir-host --no-build -o dist/
           cargo generate-rpm -p host -o dist/
           (cd dist && sha256sum ./*.tar.gz ./*.apk ./*.deb ./*.rpm THIRD-PARTY-LICENSES.txt | sed 's| \./| |' > SHA256SUMS)
