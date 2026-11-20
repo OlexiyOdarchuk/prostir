@@ -1309,6 +1309,11 @@ impl Displays {
         self.physical().map(|s| s.id).collect()
     }
 
+    /// Whether `id` is a display of the PC itself that the headset shows.
+    pub fn is_shown_physical(&self, id: ScreenId) -> bool {
+        self.screens.get(&id).is_some_and(Screen::is_shown_physical)
+    }
+
     /// Whether `id` is a display of the PC itself.
     pub fn is_physical(&self, id: ScreenId) -> bool {
         self.screens.get(&id).is_some_and(Screen::is_physical)
@@ -1317,6 +1322,23 @@ impl Displays {
     /// The displays of the PC shown in the headset now.
     pub fn physical_shown(&self) -> usize {
         self.physical().filter(|s| s.is_shown_physical()).count()
+    }
+
+    /// The window panels.
+    pub fn window_count(&self) -> usize {
+        self.windows().count()
+    }
+
+    /// The streams there are, or are to be: every monitor and window panel, and every
+    /// display of the PC that is shown and connected.
+    pub fn stream_count(&self) -> usize {
+        self.screens
+            .values()
+            .filter(|s| {
+                !s.is_physical()
+                    || (s.is_shown_physical() && !matches!(s.state, ScreenState::Absent))
+            })
+            .count()
     }
 
     /// Makes sure the desktop's primary output (where the Plasma panel lives) is ours.

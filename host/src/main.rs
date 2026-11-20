@@ -29,7 +29,7 @@ use log::{debug, error, info, warn};
 use prostir_proto::link::{Closer, Link, Via};
 use prostir_proto::request::{Asked, Command, Outcome};
 use prostir_proto::state::{
-    ErrorCode, HeadsetState, Part, ReqId, UpKind, caps, clip, permission, perms,
+    ErrorCode, HeadsetState, Part, ReqId, UpFormat, UpKind, caps, clip, permission, perms,
 };
 use prostir_proto::stats::Period;
 use prostir_proto::volume::{Act, PcVolume};
@@ -280,8 +280,9 @@ fn serve_client(
     // The session opens now that it can be served: the monitors exist, and the writer
     // (which also pings) starts below. The headset counts silence from here. The
     // snapshot is the first message, before any stream can start.
-    // The headset's sound device, where the PC can follow its volume.
-    let sink = SinkVolume::open();
+    // The headset's sound device, where the PC can follow its volume: with the main
+    // headset only (a guest's volume does not move the PC's, nor is it asked to).
+    let sink = SinkVolume::open().filter(|_| publisher.access.is_main());
     let shares_volume = sink.is_some();
     let snapshot = publisher.snapshot(&publish::Sources {
         displays,
@@ -596,8 +597,9 @@ struct Session {
     last_command: u32,
     /// The headset's sound device and the logic of one volume, where both can.
     volume: Option<(SinkVolume, PcVolume)>,
-    /// Up streams the headset started: by number, what each carries.
-    ups: BTreeMap<u8, UpKind>,
+    /// Up streams the headset started: by number, what each carries and in how many
+    /// channels.
+    ups: BTreeMap<u8, (UpKind, u8)>,
 }
 
 /// Messages from the headset handled one after the other before the next pass of the
@@ -624,6 +626,20 @@ fn do_volume(sink: &SinkVolume, act: Option<Act>, displays: Option<&Displays>) {
         Some(Act::Write { level, muted }) => sink.set(level, muted),
         None => {}
     }
+}
+
+/// Interleaved 16-bit stereo as mono: each pair of samples is their mean.
+fn to_mono(stereo: &[u8]) -> Vec<u8> {
+    stereo
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|[l0, l1, r0, r1]| {
+            let l = i32::from(i16::from_le_bytes([*l0, *l1]));
+            let r = i32::from(i16::from_le_bytes([*r0, *r1]));
+            (((l + r) / 2) as i16).to_le_bytes()
+        })
+        .collect()
 }
 
 /// What came of a command, as the one who asked reads it.
@@ -830,21 +846,34 @@ impl Session {
         match msg {
             // The microphone, from a headset with the right to it.
             ClientMsg::UpStart { up, kind, format } => {
-                if kind == UpKind::Mic && self.publisher.access.may(perms::MIC) {
-                    info!("the headset's microphone streams ({format:?}, up stream {up})");
-                    // A new recording replaces the one before, whose end may still
-                    // be on its way: that end then ends nothing.
-                    self.ups.retain(|_, k| *k != UpKind::Mic);
-                    self.ups.insert(up, kind);
-                } else {
-                    info!("an up stream of {kind:?} this PC does not take");
+                let pcm = match format {
+                    UpFormat::Pcm16 { rate, channels } if rate == prostir_proto::AUDIO_RATE => {
+                        Some(channels)
+                    }
+                    _ => None,
+                };
+                match pcm {
+                    _ if kind != UpKind::Mic || !self.publisher.access.may(perms::MIC) => {
+                        info!("an up stream of {kind:?} this PC does not take");
+                    }
+                    Some(channels @ (1 | 2)) => {
+                        info!("the headset's microphone streams ({format:?}, up stream {up})");
+                        // A new recording replaces the one before, whose end may still
+                        // be on its way: that end then ends nothing.
+                        self.ups.retain(|_, (k, _)| *k != UpKind::Mic);
+                        self.ups.insert(up, (kind, channels));
+                    }
+                    _ => {
+                        warn!("the headset's microphone in {format:?}, which this PC does not take")
+                    }
                 }
             }
-            ClientMsg::Up { up, data } => {
-                if self.ups.get(&up) == Some(&UpKind::Mic) {
-                    displays.push_mic(data);
-                }
-            }
+            ClientMsg::Up { up, data } => match self.ups.get(&up) {
+                // The PC's end of the microphone is mono.
+                Some((UpKind::Mic, 2)) => displays.push_mic(to_mono(&data)),
+                Some((UpKind::Mic, _)) => displays.push_mic(data),
+                _ => {}
+            },
             ClientMsg::UpEnd { up } => {
                 if self.ups.remove(&up).is_some() {
                     info!("the headset's microphone stopped (up stream {up})");
@@ -1161,5 +1190,25 @@ fn main() -> Result<()> {
                 std::thread::sleep(Duration::from_millis(500));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A stereo microphone reaches the PC's mono end as the mean of its channels.
+    #[test]
+    fn stereo_becomes_mono() {
+        let frame = |l: i16, r: i16| [l.to_le_bytes(), r.to_le_bytes()].concat();
+        let stereo = [frame(100, 300), frame(-32768, -32768), frame(32767, -32767)].concat();
+        let mono: Vec<i16> = to_mono(&stereo)
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| i16::from_le_bytes(*b))
+            .collect();
+        assert_eq!(mono, [200, -32768, 0]);
+        assert!(to_mono(&[1, 2, 3]).is_empty(), "no half frame");
     }
 }

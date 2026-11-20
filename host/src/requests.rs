@@ -73,6 +73,7 @@ fn carry_out(
                     of: Counted::Monitors
                 });
             }
+            streams_within(displays.stream_count() + 1, limits)?;
             let id = store.new_id();
             displays.add(id, spec, max)?;
             info!("headset added {id}");
@@ -124,6 +125,7 @@ fn carry_out(
                     of: Counted::Physical
                 });
             }
+            streams_within(specs.len() + shown.len() + displays.window_count(), limits)?;
             let (index, main) = match primary {
                 Some(Primary::Index { index }) if usize::from(index) < specs.len() => {
                     (Some(usize::from(index)), None)
@@ -169,6 +171,9 @@ fn carry_out(
                 bail!(UserError::Unsupported);
             }
             let id = ScreenId::from_wire(id);
+            if shown && !displays.is_shown_physical(id) {
+                streams_within(displays.stream_count() + 1, limits)?;
+            }
             displays.show_physical(id, shown, usize::from(limits.physical_max))?;
             // What a display seen for the first time gets, from now on.
             store.change(|s| s.mirror = shown);
@@ -217,6 +222,7 @@ fn carry_out(
             if !asker.caps.has(caps::headset::WINDOWS) {
                 bail!(UserError::Unsupported);
             }
+            streams_within(displays.stream_count() + 1, limits)?;
             let id = store.new_id();
             displays.detach_window(id)?;
             Outcome::Added { id: id.wire() }
@@ -243,6 +249,19 @@ fn carry_out(
             None => bail!(UserError::NotOnDisplays),
         },
     })
+}
+
+/// `LIMIT` when `streams` would be more than the headset decodes at once
+/// (`Limits.streams_max`, from its `HeadsetCaps.streams_max`).
+fn streams_within(streams: usize, limits: &Limits) -> Result<()> {
+    let max = usize::from(limits.streams_max);
+    if streams > max {
+        bail!(UserError::Limit {
+            max,
+            of: Counted::Streams
+        });
+    }
+    Ok(())
 }
 
 /// The monitor `mode` asks for, if the PC makes it: a size within its limits and one

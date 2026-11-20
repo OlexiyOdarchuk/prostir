@@ -614,7 +614,7 @@ the table says. A new value later comes with a capability and a fallback of its 
 | | `Camera` / `Video`, `Poses` | host 12 / 13 and headset 4 / 5 | the same (not used yet) |
 | `Primary` | `Display` | headset 7 (it names a display of the PC) | |
 | `Outcome` | all | the request's kind | |
-| `VolumeAsk` | | host 5 and headset 2 | the PC's volume and the headset's are separate |
+| `VolumeAsk` | | host 5 and headset 2, and only to the main headset | the PC's volume and the headset's are separate |
 | `Command` | | headset 1 | no commands |
 
 Soft values need no capability: `role`, `permission` and `os` read an unknown value as
@@ -647,7 +647,7 @@ no role or right gives it no rights (a guest), never every right. A request with
 ### Volume
 
 One volume for the PC's slider and the headset's buttons, where both sides name the
-capability. The headset owns the level (its system volume is the sound); `level` is a
+capability (the host names it only to the main headset: a guest's volume is its own). The headset owns the level (its system volume is the sound); `level` is a
 percent, `0..=100`. Two counters keep the two from fighting: the headset's `seq` counts
 only its own changes (its buttons, its system menu), the host's `ask` counts its
 requests.
@@ -971,7 +971,9 @@ the next headset or codec; a window panel that large is closed, with a
 `Problem{BAD_SIZE}`. A client that still gets a stream it cannot decode (from an older
 host) shows nothing of that display and goes on with the others.
 
-At most `Limits.streams_max` streams go at once (30 at most: a lane each). A display
+At most `Limits.streams_max` streams go at once (30 at most: a lane each; never more
+than the headset's `HeadsetCaps.streams_max`): a request that would make more displays
+stream (a monitor, a window panel, a display of the PC shown) fails `LIMIT`. A display
 whose stream cannot start (its output or encoder fails) stands in `Displays` as
 `Failed`, without a `StreamStart`, keeps its place and is tried again; a display
 removed leaves `Displays`, and its `StreamEnd` and the `Displays` without it may come
@@ -1063,7 +1065,9 @@ headset's number for the stream: the current client gives each recording a new o
 (counting up, round after 255), and the host takes a new `UpStart` of a kind as the
 one stream of that kind, so the `UpEnd` of a recording before it ends nothing. The
 microphone is `Pcm16` at 48000 Hz with 1 channel (`MIC_CHANNELS`) or 2, interleaved
-signed 16-bit little-endian, 10 ms in a piece in the current client.
+signed 16-bit little-endian, 10 ms in a piece in the current client. The current host
+feeds its end of the microphone in mono: 2 channels become their mean; another format
+is not taken (the stream is dropped and logged).
 
 - The headset tells its switch and whether the system lets it record in `UpState`
   (a part, in `Open` and on every change). The host makes its end of the microphone

@@ -266,3 +266,67 @@ fn only_the_main_headset_changes_the_limits() {
         .unwrap();
     assert_eq!(failed_with(&refused), Some(ErrorCode::NOT_ALLOWED));
 }
+
+/// A headset that decodes three streams at once gets no fourth display of any kind:
+/// a monitor or a window panel beyond that is refused with `LIMIT`, however many
+/// monitors the PC would make.
+#[test]
+fn no_more_streams_than_the_headset_decodes() {
+    let dir = TestDir::new("streams-max");
+    dir.save_monitors(crate::TWO_MONITORS);
+    let mut keys = dir.pair();
+    let pc = Pc::start(&dir, &Options::default());
+    let mut state = prostir_testkit::FakeHeadset::state();
+    state.caps.as_mut().unwrap().streams_max = 3;
+    let mut headset = prostir_testkit::FakeHeadset::connect_saying(pc.addr, &mut keys, &state)
+        .unwrap_or_else(|e| panic!("connecting: {e}"));
+    headset
+        .wait(START, "every monitor showing", View::all_monitors_show)
+        .unwrap();
+    let limits = headset.view().pc.limits.clone().unwrap();
+    assert_eq!(limits.streams_max, 3);
+    assert!(limits.virtual_max > 3, "the monitors' own limit is higher");
+    let small = Mode::new(320, 240);
+    let third = headset.ask(Request::AddDisplay { mode: small }).unwrap();
+    assert!(matches!(third, Outcome::Added { .. }), "{third:?}");
+    let fourth = headset.ask(Request::AddDisplay { mode: small }).unwrap();
+    assert_eq!(failed_with(&fourth), Some(ErrorCode::LIMIT), "{fourth:?}");
+    let panel = headset.ask(Request::DetachWindow).unwrap();
+    assert_eq!(failed_with(&panel), Some(ErrorCode::LIMIT), "{panel:?}");
+    let four = headset
+        .ask(Request::SetDisplays {
+            modes: vec![small; 4],
+            primary: None,
+            shown_physical: Vec::new(),
+        })
+        .unwrap();
+    assert_eq!(failed_with(&four), Some(ErrorCode::LIMIT), "{four:?}");
+    assert_eq!(headset.view().order().len(), 3);
+}
+
+/// A guest's volume is its own: the PC neither shares its sound device's volume with
+/// a guest nor asks one to take the slider's level.
+#[test]
+fn a_guest_is_not_asked_for_the_volume() {
+    use prostir_proto::state::caps;
+    let dir = TestDir::new("guest-volume");
+    dir.save_monitors(crate::TWO_MONITORS);
+    let mut keys = dir.pair();
+    let key: String = keys
+        .identity
+        .public
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    dir.save_settings(&format!("access {key} guest input\n"));
+    let pc = Pc::start(&dir, &Options::default());
+    let mut guest = connect(&pc, &mut keys);
+    guest
+        .wait(START, "every monitor showing", View::all_monitors_show)
+        .unwrap();
+    let pc_caps = guest.view().pc.caps.clone().unwrap();
+    assert!(!pc_caps.has(caps::pc::VOLUME), "{pc_caps:?}");
+    pc.desktop("volume 40");
+    guest.take_for(std::time::Duration::from_secs(1)).unwrap();
+    assert!(guest.view().volume_asks.is_empty());
+}

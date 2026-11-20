@@ -17,6 +17,8 @@ pub enum Counted {
     Monitors,
     Windows,
     Physical,
+    /// Streams of every kind together, as many as the headset decodes at once.
+    Streams,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +85,7 @@ impl std::fmt::Display for UserError {
                     Counted::Monitors => t("моніторів", "monitors"),
                     Counted::Windows => t("вікон", "windows"),
                     Counted::Physical => t("екранів ПК", "displays of the PC"),
+                    Counted::Streams => t("екранів разом", "displays in all"),
                 };
                 write!(f, "{} {max} {what}", t("Щонайбільше", "At most"))
             }
