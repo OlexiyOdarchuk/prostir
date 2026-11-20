@@ -104,6 +104,19 @@ pub use net::*;
 mod signals;
 pub use signals::quit_on_signals;
 
+/// Ends the process at once, without the exit handlers of the libraries it loaded:
+/// for a thread left inside one of them (a probe of an encoder that hangs in its
+/// driver), which those handlers would tear down under it. What is kept is saved
+/// before.
+#[cfg(unix)]
+pub fn end_now(code: i32) -> ! {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    // SAFETY: `_exit` ends the process; nothing of it runs after.
+    unsafe { libc::_exit(code) }
+}
+
 // The local API on the session bus, the same on every Linux desktop and the fake one.
 #[cfg(target_os = "linux")]
 pub mod local_api;

@@ -31,7 +31,7 @@ pub use choice::{Backend, Choice, Kind, Wanted, note};
 pub use gpu::GpuDevices;
 #[cfg(not(feature = "fake-desktop"))]
 pub use probe::file_identity;
-pub use probe::{Next, catalog, start_probing};
+pub use probe::{Next, PROBE_TIMEOUT, catalog, settle, start_probing};
 
 use crate::platform::AdapterId;
 

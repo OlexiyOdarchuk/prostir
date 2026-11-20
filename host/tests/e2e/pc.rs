@@ -136,7 +136,7 @@ pub struct Options {
     /// build for these tests only); 0: as a release allows.
     pub headsets: usize,
     /// A fake hardware encoder (`PROSTIR_FAKE_ENCODER`: `works`, `sessions=N`,
-    /// `refuses=N`, `broken`, `hangs`), tried before every other; none: the PC's own
+    /// `refuses=N`, `broken`, `hangs`, `slow`), tried before every other; none: the PC's own
     /// encoders only.
     pub encoder: Option<&'static str>,
     /// More of the PC app's environment (`PROSTIR_FAKE_NO_SOUND`, `PATH`).

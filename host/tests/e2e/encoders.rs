@@ -84,6 +84,33 @@ fn each_va_encoder_has_a_display_while_it_streams() {
     assert!(!headset.view().closed, "the session went on");
 }
 
+/// Asked to quit right after it started, while its encoders are still probed, the PC
+/// app waits for the probes and quits cleanly: before, the exit tore a driver's library
+/// down under a probe, and the process crashed on the way out. A probe that hangs
+/// holds quitting up no longer than a probe's time limit.
+#[test]
+fn quitting_while_the_encoders_are_probed() {
+    for mode in ["slow", "hangs"] {
+        let dir = TestDir::new(&format!("probe-{mode}-quit"));
+        dir.save_monitors(THREE_MONITORS);
+        let options = Options {
+            software: false,
+            encoder: Some(mode),
+            ..Options::default()
+        };
+        let pc = Pc::start(&dir, &options);
+        // Exits with success, within 10 s.
+        pc.quit();
+        if mode == "slow" {
+            let kept = cache(&dir);
+            assert!(
+                kept.contains("encoder fake - h264"),
+                "probes not waited for: {kept:?}"
+            );
+        }
+    }
+}
+
 /// The encoders are probed when the PC app starts, before any headset, and kept: the
 /// next start reads what was found instead. A probe that never ends holds nothing up
 /// past its time limit, the encoder it was for is not used, and it is not kept as
