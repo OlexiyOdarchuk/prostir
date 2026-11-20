@@ -33,6 +33,8 @@ pub struct Kde {
     primary_nudged: Option<Instant>,
     /// Last time the laptop panel was switched back on (to avoid fighting the user).
     woke_display_at: Option<Instant>,
+    /// Displays of the PC shown so far, to number their streams in the log.
+    shown: u32,
 }
 
 impl Kde {
@@ -57,6 +59,7 @@ impl Kde {
             windows: KdeWindows::new(),
             primary_nudged: None,
             woke_display_at: None,
+            shown: 0,
         })
     }
 }
@@ -87,10 +90,11 @@ impl Desktop for Kde {
 
     fn show(&mut self, key: &OutputKey) -> Result<Box<dyn Output>> {
         // KWin streams a given display only once per connection: each one shown gets a
-        // connection of its own, kept as long as the output (so its stream number,
-        // which only tells the streams of one connection apart, is always the same).
+        // connection of its own, kept as long as the output. Its stream number tells
+        // the streams of one connection apart, and the log tells them apart by it.
         let connection = Screencast::connect()?;
-        let output = connection.mirror(0, key.as_str())?;
+        self.shown += 1;
+        let output = connection.mirror(self.shown, key.as_str())?;
         Ok(Box::new(KdeOutput::new(
             output,
             Origin::Capture,

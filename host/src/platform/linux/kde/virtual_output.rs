@@ -337,7 +337,10 @@ impl Screencast {
             None,
             Duration::from_secs(2),
         )?;
-        info!("mirroring {output_name}, PipeWire node {}", mirror.node);
+        info!(
+            "mirroring {output_name} (stream {number}), PipeWire node {}",
+            mirror.node
+        );
         Ok(mirror)
     }
 

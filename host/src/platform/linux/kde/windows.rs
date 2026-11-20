@@ -226,7 +226,10 @@ impl Scripts {
         let mut service = self.service.lock().unwrap();
         if service.is_none() {
             let (tx, rx) = sync_channel(16);
+            // A desktop just gone may hold the name a moment longer (its last report
+            // still read on another thread): the newest desktop takes it over.
             let offered = zbus::blocking::connection::Builder::session()
+                .map(|b| b.allow_name_replacements(true).replace_existing_names(true))
                 .and_then(|b| b.name(BUS))
                 .and_then(|b| b.serve_at(PATH, Host(tx)))
                 .and_then(|b| b.build());
