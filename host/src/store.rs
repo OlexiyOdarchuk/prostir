@@ -27,9 +27,10 @@ use std::time::Duration;
 
 use log::{info, warn};
 use prostir_layout::desk::Entry;
+use prostir_proto::Codec;
 use prostir_proto::state::{Access, perms, role};
-use prostir_proto::{Codec, MAX_MONITORS};
 
+use crate::displays::MONITORS_NO_LIMITS;
 use crate::platform::MonitorSpec;
 use crate::screen::ScreenId;
 
@@ -212,7 +213,7 @@ pub struct Run {
 /// else the saved ones, else one.
 pub fn startup_set(saved: &SavedScreens, args: &[MonitorSpec]) -> Option<SavedScreens> {
     if !args.is_empty() {
-        let mut set = SavedScreens::of(&args[..args.len().min(MAX_MONITORS)]);
+        let mut set = SavedScreens::of(&args[..args.len().min(MONITORS_NO_LIMITS)]);
         // The PC's own displays stay as they were, where they were seen.
         set.physical = saved.physical.clone();
         let places: Vec<Entry<ScreenId>> = saved

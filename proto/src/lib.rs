@@ -179,9 +179,6 @@ impl HeadsetGoodbye {
     }
 }
 
-/// Most virtual monitors a PC makes: more streams than this overwhelm the headset's
-/// hardware decoders.
-pub const MAX_MONITORS: usize = 6;
 /// Prefix of the UDP discovery beacon: `MAGIC ++ tcp_port (u16 LE) ++ hostname (utf-8)`.
 pub const BEACON_MAGIC: &[u8; 8] = b"PROSTIR1";
 

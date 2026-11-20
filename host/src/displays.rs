@@ -11,7 +11,7 @@ use log::{debug, error, info, warn};
 use prostir_layout::desk;
 use prostir_proto::state::{self, Gen};
 use prostir_proto::stats::{Histogram, Period};
-use prostir_proto::{Codec, HostMsg, MAX_MONITORS};
+use prostir_proto::{Codec, HostMsg};
 
 use crate::encoder::{Encoder, EncoderConfig, EncoderEvent};
 use crate::errors::{Counted, UserError, code_of};
@@ -28,6 +28,12 @@ use crate::store::{LEGACY_LAPTOP, Physical, PhysicalKey, SavedScreens, Settings}
 /// Monitors of versions before the counter were numbered from 0 (and their outputs
 /// `Prostir-(n + 1)`), below this.
 const LEGACY_IDS: u32 = 100;
+/// Virtual monitors a headset gets: more streams than this overwhelm its hardware
+/// decoders.
+pub const MONITORS_MAX: usize = 6;
+/// Virtual monitors with "No limits", for a headset that decodes more: the most the PC
+/// ever makes (the limit of the headset asking is checked before, see `requests`).
+pub const MONITORS_NO_LIMITS: usize = 10;
 /// Window panels at once: the headset has only so many video decoders.
 pub const WINDOWS_MAX: usize = 3;
 
@@ -586,7 +592,7 @@ impl Displays {
         }
         // Monitors keep the output names they had: monitor 0 is `Prostir-1` as
         // before, others the lowest free number.
-        let ids: Vec<ScreenId> = ids.into_iter().take(MAX_MONITORS).collect();
+        let ids: Vec<ScreenId> = ids.into_iter().take(MONITORS_NO_LIMITS).collect();
         let mut numbers: BTreeMap<ScreenId, u32> = BTreeMap::new();
         for id in &ids {
             let n = id.number() + 1;
@@ -1854,8 +1860,8 @@ impl Displays {
         primary: Option<usize>,
         new_id: &mut dyn FnMut() -> ScreenId,
     ) -> Result<Vec<ScreenId>> {
-        if specs.is_empty() || specs.len() > MAX_MONITORS {
-            bail!("1 to {MAX_MONITORS} monitors");
+        if specs.is_empty() || specs.len() > MONITORS_NO_LIMITS {
+            bail!("1 to {MONITORS_NO_LIMITS} monitors");
         }
         for s in specs {
             s.validate()?;

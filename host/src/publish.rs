@@ -10,9 +10,9 @@ use prostir_proto::state::{
     PcState, Prefs, SoundFrom, UpKind, UpWanted, caps, clip,
 };
 use prostir_proto::wire::WireError;
-use prostir_proto::{Codec, HostMsg, MAX_MONITORS};
+use prostir_proto::{Codec, HostMsg};
 
-use crate::displays::Displays;
+use crate::displays::{Displays, MONITORS_MAX, MONITORS_NO_LIMITS, WINDOWS_MAX};
 use crate::platform::windows;
 use crate::screen::ScreenId;
 use crate::store::Settings;
@@ -32,10 +32,6 @@ const SCALES: [u16; 3] = [100, 125, 150];
 /// The smallest and the largest monitor the PC makes, in pixels.
 pub const MIN_SIZE: (u32, u32) = (320, 240);
 pub const MAX_SIZE: (u32, u32) = (7680, 4320);
-/// Monitors with "No limits".
-const MONITORS_NO_LIMITS: u8 = 10;
-/// Window panels: the headset has only so many video decoders.
-const WINDOWS_MAX: u8 = 3;
 /// Displays of the PC itself shown at once, and with "No limits".
 const PHYSICAL_MAX: u8 = 1;
 const PHYSICAL_NO_LIMITS: u8 = 4;
@@ -172,11 +168,11 @@ pub fn limits(prefs: &Prefs, headset: &HeadsetCaps, codec: Codec) -> Limits {
     };
     Limits {
         virtual_max: if prefs.no_limits {
-            MONITORS_NO_LIMITS
+            MONITORS_NO_LIMITS as u8
         } else {
-            MAX_MONITORS as u8
+            MONITORS_MAX as u8
         },
-        windows_max: WINDOWS_MAX,
+        windows_max: WINDOWS_MAX as u8,
         physical_max: if prefs.no_limits {
             PHYSICAL_NO_LIMITS
         } else {

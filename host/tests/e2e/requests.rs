@@ -207,9 +207,9 @@ fn a_profile_gets_its_numbers_in_order() {
         .unwrap();
 }
 
-/// "No limits" of the main headset raises what the PC allows; a guest's (a headset
-/// with a line of its own in `settings.txt`) does not, and a guest may not change the
-/// monitors.
+/// "No limits" of the main headset raises what the PC allows, and the PC makes that
+/// many; a guest's (a headset with a line of its own in `settings.txt`) does not, and
+/// a guest may not change the monitors.
 #[test]
 fn only_the_main_headset_changes_the_limits() {
     let (_dir, _pc, _keys, mut headset) = session("no-limits", &Options::default());
@@ -224,6 +224,18 @@ fn only_the_main_headset_changes_the_limits() {
             v.pc.limits.as_ref().unwrap().virtual_max > before.virtual_max
         })
         .unwrap();
+    let max = headset.view().pc.limits.as_ref().unwrap().virtual_max;
+    let made = headset
+        .ask(Request::SetDisplays {
+            modes: vec![Mode::new(640, 360); usize::from(max)],
+            primary: None,
+            shown_physical: Vec::new(),
+        })
+        .unwrap();
+    let Outcome::Ids { ids } = made else {
+        panic!("{made:?}")
+    };
+    assert_eq!(ids.len(), usize::from(max));
 
     let dir = TestDir::new("guest");
     dir.save_screens("next 200\nrow\nscreen 0 640x360\n");

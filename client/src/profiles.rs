@@ -10,6 +10,8 @@ use crate::layout::Placement;
 use crate::settings::{Background, Preset, Settings};
 
 pub const SLOTS: usize = 3;
+/// Monitors in a profile: more than any PC makes (it answers with its own limit).
+const MAX_SIZES: usize = 10;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Profile {
@@ -88,8 +90,8 @@ impl Profile {
                 _ => {}
             }
         }
-        // A file edited by hand (or cut short) may list more than a PC makes.
-        sizes.truncate(prostir_proto::MAX_MONITORS);
+        // A file edited by hand may list more than any PC makes.
+        sizes.truncate(MAX_SIZES);
         if usize::from(primary) >= sizes.len() {
             primary = 0;
         }
@@ -219,12 +221,12 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    /// A profile never asks for more monitors than a PC makes.
+    /// A profile never asks for more monitors than any PC makes.
     #[test]
     fn too_many_monitors_are_cut() {
         let list = vec!["1920x1080"; 20].join(" ");
         let p = Profile::parse(&format!("monitors {list} *640x480\n")).unwrap();
-        assert_eq!(p.sizes.len(), prostir_proto::MAX_MONITORS);
+        assert_eq!(p.sizes.len(), MAX_SIZES);
         assert_eq!(p.primary, 0, "the primary one was cut off");
     }
 
