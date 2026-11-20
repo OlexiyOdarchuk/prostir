@@ -20,8 +20,8 @@ use crate::outbox::Outbox;
 use crate::platform::audio::{AudioOut, MicIn};
 use crate::platform::dialogs;
 use crate::platform::{
-    DeskPlan, Desktop, Geometry, MonitorSpec, Output, OutputHealth, OutputKey, PhysicalDisplay,
-    VirtualSpec, WindowList,
+    ActiveWindow, DeskPlan, Desktop, Geometry, MonitorSpec, Output, OutputHealth, OutputKey,
+    PhysicalDisplay, VirtualSpec, WindowList,
 };
 use crate::screen::{Screen, ScreenId, ScreenKind, ScreenState, SizeAction};
 use crate::store::{LEGACY_LAPTOP, Physical, PhysicalKey, SavedScreens, Settings};
@@ -922,7 +922,7 @@ impl Displays {
             number,
             w: spec.width,
             h: spec.height,
-            scale: (spec.scale * 100.0).round() as u16,
+            scale: spec.percent(),
             refresh: caps.refresh_for_new(),
         };
         self.desktop.make(&spec).context(UserError::Desktop)
@@ -1575,10 +1575,7 @@ impl Displays {
                     .stream_size(s.id)
                     .or_else(|| s.kind.spec().map(|m| (m.width, m.height)))
                     .unwrap_or_default();
-                let scale = s
-                    .kind
-                    .spec()
-                    .map_or(100, |m| (m.scale * 100.0).round() as u16);
+                let scale = s.kind.spec().map_or(100, MonitorSpec::percent);
                 // A display of the PC is on the desktop under its connector, shown or not.
                 let output = match &s.kind {
                     ScreenKind::Physical { key, .. } => Some(key.connector.as_str()),
@@ -2410,11 +2407,16 @@ impl Displays {
         let Some(window) = self.desktop.windows().and_then(|w| w.active()) else {
             bail!(UserError::NoWindow);
         };
-        let (width, height) = panel_size(&window);
+        // Sized and planned with the scale its output gets, in whole percent.
+        let scale = crate::platform::whole_percent(window.scale);
+        let (width, height) = panel_size(&ActiveWindow {
+            scale,
+            ..window.clone()
+        });
         let spec = MonitorSpec {
             width,
             height,
-            scale: window.scale,
+            scale,
         };
         let number = self.free_number();
         let kind = ScreenKind::Window {

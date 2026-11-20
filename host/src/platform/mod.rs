@@ -91,7 +91,8 @@ pub struct MonitorSpec {
     /// Size in pixels of the encoded stream.
     pub width: u32,
     pub height: u32,
-    /// KWin output scale (UI scaling on that monitor); 1.0 keeps what KScreen remembers.
+    /// Output scale (UI scaling on that monitor), in whole percent as the desktop gets
+    /// it ([`VirtualSpec::scale`]); 1.0 keeps what the desktop remembers.
     pub scale: f64,
 }
 
@@ -118,7 +119,10 @@ impl std::str::FromStr for MonitorSpec {
 
     fn from_str(s: &str) -> Result<Self, String> {
         let (size, scale) = match s.split_once('@') {
-            Some((a, b)) => (a, b.parse::<f64>().map_err(|e| format!("bad scale: {e}"))?),
+            Some((a, b)) => (
+                a,
+                whole_percent(b.parse::<f64>().map_err(|e| format!("bad scale: {e}"))?),
+            ),
             None => (s, 1.0),
         };
         let (w, h) = size.split_once(['x', 'X']).ok_or("expected WIDTHxHEIGHT")?;
@@ -130,6 +134,19 @@ impl std::str::FromStr for MonitorSpec {
         spec.validate().map_err(|e| e.to_string())?;
         Ok(spec)
     }
+}
+
+impl MonitorSpec {
+    /// The scale in percent, as [`VirtualSpec::scale`] has it.
+    pub fn percent(&self) -> u16 {
+        (self.scale * 100.0).round() as u16
+    }
+}
+
+/// `scale` rounded to whole percent, the steps the desktop is given scales in: a
+/// monitor is planned with the scale it gets.
+pub fn whole_percent(scale: f64) -> f64 {
+    (scale * 100.0).round() / 100.0
 }
 
 impl std::fmt::Display for MonitorSpec {
@@ -188,4 +205,21 @@ pub enum NoCode {
     Cancelled,
     /// The PC has no program to ask with.
     NoDialog,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A monitor is planned with the scale its output gets: whole percent.
+    #[test]
+    fn scales_are_whole_percent() {
+        let spec: MonitorSpec = "2560x1440@1.333333".parse().unwrap();
+        assert_eq!(spec.scale, 1.33);
+        assert_eq!(spec.percent(), 133);
+        assert_eq!(spec.to_string(), "2560x1440@1.33");
+        let plain: MonitorSpec = "1920x1080".parse().unwrap();
+        assert_eq!(plain.percent(), 100);
+        assert_eq!(whole_percent(1.25), 1.25);
+    }
 }
