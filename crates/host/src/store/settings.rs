@@ -1,0 +1,280 @@
+//! `settings.txt`: the settings, the rights of each headset, and the lines this
+//! version does not know, kept.
+
+use super::*;
+
+/// The PC's settings, as the person chose them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Settings {
+    /// Mbit/s per monitor.
+    pub bitrate: u32,
+    /// Clearer-text encoder preset.
+    pub sharp: bool,
+    pub codec: Codec,
+    /// Encode on the CPU.
+    pub software: bool,
+    /// PC sound to the headset.
+    pub audio: bool,
+    /// The laptop screen in the headset.
+    pub mirror: bool,
+    /// Count this PC among users (see `usage`).
+    pub count: bool,
+    /// Starting with the session, as the person chose it (`autostart on|off`); none
+    /// yet before the first start, which turns it on (see `platform::autostart`).
+    /// Once kept, an update never changes it.
+    pub autostart: Option<bool>,
+    /// The settings window's look (`window-theme`, `window-palette`,
+    /// `window-language`), written only when not the default.
+    pub window: prostir_api::WindowLook,
+    /// Each headset's role and rights, by its key (hex): `access KEY main input mic`.
+    /// A headset without a line is the main one, with every right.
+    pub access: BTreeMap<String, Access>,
+}
+
+impl Settings {
+    /// The role and rights of the headset with key `key`.
+    pub fn access_of(&self, key: &[u8; 32]) -> Access {
+        self.access.get(&hex(key)).copied().unwrap_or(Access::MAIN)
+    }
+}
+
+/// A key as `access` lines name it.
+pub(super) fn hex(key: &[u8; 32]) -> String {
+    prostir_proto::secure::to_hex(key)
+}
+
+/// The words of rights in `access` lines.
+pub(super) const PERMS: [(&str, u32); 6] = [
+    ("input", perms::INPUT),
+    ("mic", perms::MIC),
+    ("camera", perms::CAMERA),
+    ("clipboard", perms::CLIPBOARD),
+    ("changes", perms::CHANGES),
+    ("private", perms::PRIVATE),
+];
+
+/// The words of the rights in `perms`, as `access` lines write them.
+pub fn perm_words(perms: u32) -> Vec<String> {
+    PERMS
+        .iter()
+        .filter(|(_, bit)| perms & bit != 0)
+        .map(|(word, _)| (*word).to_owned())
+        .collect()
+}
+
+/// No right at all: a headset whose `access` line has a word that is no role or right.
+pub(super) const NO_RIGHTS: Access = Access {
+    role: role::GUEST,
+    perms: 0,
+};
+
+/// `KEY main input mic …`: a headset's role and rights, and whether the line was
+/// mistyped. A line with a key and a word that is no role or right (a typo) makes that
+/// headset a guest with no rights, never one with every right as a headset without a
+/// line is; `None` for a line without a key.
+pub(super) fn parse_access(value: &str) -> Option<(String, Access, bool)> {
+    let mut words = value.split_whitespace();
+    let key = words.next()?;
+    if key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let key = key.to_ascii_lowercase();
+    let role = match words.next() {
+        Some("main") => role::MAIN,
+        Some("guest") => role::GUEST,
+        _ => return Some((key, NO_RIGHTS, true)),
+    };
+    let mut perms = 0;
+    for w in words {
+        match PERMS.iter().find(|(name, _)| *name == w) {
+            Some((_, bit)) => perms |= bit,
+            None => return Some((key, NO_RIGHTS, true)),
+        }
+    }
+    Some((key, Access { role, perms }, false))
+}
+
+pub(super) fn access_text(key: &str, a: Access) -> String {
+    let role = if a.is_main() { "main" } else { "guest" };
+    let mut text = format!("access {key} {role}");
+    for (name, bit) in PERMS {
+        if a.may(bit) {
+            text.push(' ');
+            text.push_str(name);
+        }
+    }
+    text
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            bitrate: 30,
+            sharp: false,
+            codec: Codec::H265,
+            software: false,
+            audio: true,
+            mirror: true,
+            count: true,
+            autostart: None,
+            window: prostir_api::WindowLook::default(),
+            access: BTreeMap::new(),
+        }
+    }
+}
+
+pub(super) fn on_off(v: bool) -> &'static str {
+    if v { "on" } else { "off" }
+}
+
+pub(super) fn codec_name(codec: Codec) -> &'static str {
+    match codec {
+        Codec::H264 => "h264",
+        Codec::H265 => "h265",
+        Codec::Av1 => "av1",
+    }
+}
+
+/// A palette's or a language's name: one short word of letters, digits and `-`.
+pub fn is_word(value: &str) -> bool {
+    (1..=32).contains(&value.len())
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+pub(super) fn parse_settings(text: &str) -> (Settings, Kept) {
+    let mut s = Settings::default();
+    let mut kept = Kept::default();
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let (key, value) = line.split_once(' ').unwrap_or((line, ""));
+        let value = value.trim();
+        let flag = match value {
+            "on" => Some(true),
+            "off" => Some(false),
+            _ => None,
+        };
+        let known = match (key, flag) {
+            ("version", _) => value.parse().map(|v| kept.version = v).is_ok(),
+            ("bitrate", _) => value.parse().map(|v| s.bitrate = v).is_ok(),
+            ("codec", _) => match value {
+                "h264" => Some(Codec::H264),
+                "h265" => Some(Codec::H265),
+                "av1" => Some(Codec::Av1),
+                _ => None,
+            }
+            .map(|c| s.codec = c)
+            .is_some(),
+            ("sharp", Some(v)) => {
+                s.sharp = v;
+                true
+            }
+            ("software", Some(v)) => {
+                s.software = v;
+                true
+            }
+            ("audio", Some(v)) => {
+                s.audio = v;
+                true
+            }
+            ("mirror", Some(v)) => {
+                s.mirror = v;
+                true
+            }
+            ("count", Some(v)) => {
+                s.count = v;
+                true
+            }
+            ("autostart", Some(v)) => {
+                s.autostart = Some(v);
+                true
+            }
+            ("window-theme", _) => match value {
+                "system" => Some(prostir_api::ThemeMode::System),
+                "light" => Some(prostir_api::ThemeMode::Light),
+                "dark" => Some(prostir_api::ThemeMode::Dark),
+                _ => None,
+            }
+            .map(|theme| s.window.theme = theme)
+            .is_some(),
+            ("window-palette", _) if is_word(value) => {
+                value.clone_into(&mut s.window.palette);
+                true
+            }
+            ("window-language", _) if is_word(value) => {
+                s.window.language = Some(value.to_owned());
+                true
+            }
+            ("access", _) => match parse_access(value) {
+                // A mistyped line for the same headset wins, before or after.
+                Some((key, a, false)) if kept.mistyped.contains(&key) => {
+                    kept.beside_mistyped.insert(key, a);
+                    true
+                }
+                Some((key, a, false)) => {
+                    s.access.insert(key, a);
+                    true
+                }
+                Some((key, a, true)) => {
+                    warn!(
+                        "settings.txt: \"{line}\" has a word that is no role or right: \
+                         that headset gets no rights until it is put right"
+                    );
+                    if let Some(good) = s.access.insert(key.clone(), a)
+                        && !kept.mistyped.contains(&key)
+                    {
+                        kept.beside_mistyped.insert(key.clone(), good);
+                    }
+                    kept.mistyped.insert(key);
+                    false
+                }
+                None => false,
+            },
+            _ => false,
+        };
+        if !known {
+            kept.unknown.push(line.to_owned());
+        }
+    }
+    (s, kept)
+}
+
+pub(super) fn settings_text(s: &Settings, kept: &Kept) -> String {
+    let mut text = format!(
+        "{}bitrate {}\nsharp {}\ncodec {}\nsoftware {}\naudio {}\nmirror {}\ncount {}\n",
+        kept.head(),
+        s.bitrate,
+        on_off(s.sharp),
+        codec_name(s.codec),
+        on_off(s.software),
+        on_off(s.audio),
+        on_off(s.mirror),
+        on_off(s.count),
+    );
+    if let Some(on) = s.autostart {
+        let _ = writeln!(text, "autostart {}", on_off(on));
+    }
+    let window = prostir_api::WindowLook::default();
+    if s.window.theme != window.theme {
+        let _ = writeln!(text, "window-theme {}", s.window.theme.name());
+    }
+    if s.window.palette != window.palette {
+        let _ = writeln!(text, "window-palette {}", s.window.palette);
+    }
+    if let Some(language) = &s.window.language {
+        let _ = writeln!(text, "window-language {language}");
+    }
+    for (key, a) in &s.access {
+        // A headset with a mistyped line keeps its other line as it was.
+        let a = if kept.mistyped.contains(key) {
+            kept.beside_mistyped.get(key)
+        } else {
+            Some(a)
+        };
+        if let Some(a) = a {
+            text.push_str(&access_text(key, *a));
+            text.push('\n');
+        }
+    }
+    text
+}
