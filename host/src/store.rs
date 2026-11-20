@@ -88,23 +88,36 @@ const PERMS: [(&str, u32); 6] = [
     ("private", perms::PRIVATE),
 ];
 
-/// `KEY main input mic …`: a headset's role and rights.
-fn parse_access(value: &str) -> Option<(String, Access)> {
+/// No right at all: a headset whose `access` line has a word that is no role or right.
+const NO_RIGHTS: Access = Access {
+    role: role::GUEST,
+    perms: 0,
+};
+
+/// `KEY main input mic …`: a headset's role and rights, and whether the line was
+/// mistyped. A line with a key and a word that is no role or right (a typo) makes that
+/// headset a guest with no rights, never one with every right as a headset without a
+/// line is; `None` for a line without a key.
+fn parse_access(value: &str) -> Option<(String, Access, bool)> {
     let mut words = value.split_whitespace();
     let key = words.next()?;
     if key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
-    let role = match words.next()? {
-        "main" => role::MAIN,
-        "guest" => role::GUEST,
-        _ => return None,
+    let key = key.to_ascii_lowercase();
+    let role = match words.next() {
+        Some("main") => role::MAIN,
+        Some("guest") => role::GUEST,
+        _ => return Some((key, NO_RIGHTS, true)),
     };
     let mut perms = 0;
     for w in words {
-        perms |= PERMS.iter().find(|(name, _)| *name == w)?.1;
+        match PERMS.iter().find(|(name, _)| *name == w) {
+            Some((_, bit)) => perms |= bit,
+            None => return Some((key, NO_RIGHTS, true)),
+        }
     }
-    Some((key.to_ascii_lowercase(), Access { role, perms }))
+    Some((key, Access { role, perms }, false))
 }
 
 fn access_text(key: &str, a: &Access) -> String {
@@ -242,6 +255,9 @@ pub fn startup_set(saved: &SavedScreens, args: &[MonitorSpec]) -> Option<SavedSc
 struct Kept {
     version: u32,
     unknown: Vec<String>,
+    /// Headsets whose `access` line is mistyped: their line stays as it was, among the
+    /// unknown ones, for the user to put right.
+    mistyped: std::collections::BTreeSet<String>,
 }
 
 impl Kept {
@@ -311,9 +327,22 @@ fn parse_settings(text: &str) -> (Settings, Kept) {
                 s.count = v;
                 true
             }
-            ("access", _) => parse_access(value)
-                .map(|(key, a)| s.access.insert(key, a))
-                .is_some(),
+            ("access", _) => match parse_access(value) {
+                Some((key, a, false)) => {
+                    s.access.insert(key, a);
+                    true
+                }
+                Some((key, a, true)) => {
+                    warn!(
+                        "settings.txt: \"{line}\" has a word that is no role or right: \
+                         that headset gets no rights until it is put right"
+                    );
+                    s.access.insert(key.clone(), a);
+                    kept.mistyped.insert(key);
+                    false
+                }
+                None => false,
+            },
             _ => false,
         };
         if !known {
@@ -335,7 +364,7 @@ fn settings_text(s: &Settings, kept: &Kept) -> String {
         on_off(s.mirror),
         on_off(s.count),
     );
-    for (key, a) in &s.access {
+    for (key, a) in s.access.iter().filter(|(k, _)| !kept.mistyped.contains(*k)) {
         text.push_str(&access_text(key, a));
         text.push('\n');
     }
@@ -987,6 +1016,7 @@ mod tests {
         let kept = Kept {
             version: 3,
             unknown: vec!["theme dark".into()],
+            ..Kept::default()
         };
         let text = settings_text(&settings, &kept);
         assert_eq!(parse_settings(&text), (settings, kept.clone()));
@@ -1057,14 +1087,25 @@ mod tests {
             settings_text(&s, &kept)
                 .contains(&format!("access {} guest input mic\n", "ab".repeat(32)))
         );
-        // A key that is not one, a role or right that is not one: kept as it was.
-        for bad in ["access 12 main", "access {k} boss", "access {k} main fly"] {
+        // A key that is not one: kept as it was, and nothing more.
+        let (s, kept) = parse_settings("access 12 main");
+        assert!(s.access.is_empty() && kept.unknown == ["access 12 main"]);
+        // A role or right mistyped: that headset gets no rights at all (not every
+        // right, as without a line), and the line stays as it was to put right.
+        for bad in [
+            "access {k} boss",
+            "access {k} main fly",
+            "access {k} guest input mike",
+            "access {k}",
+        ] {
             let bad = bad.replace("{k}", &"ab".repeat(32));
             let (s, kept) = parse_settings(&bad);
-            assert!(
-                s.access.is_empty() && kept.unknown == [bad.clone()],
-                "{bad}"
-            );
+            let a = s.access_of(&key);
+            assert!(!a.is_main() && a.perms == 0, "{bad}: {a:?}");
+            assert_eq!(kept.unknown, std::slice::from_ref(&bad));
+            let text = settings_text(&s, &kept);
+            assert_eq!(text.matches("access ").count(), 1, "{text}");
+            assert_eq!(parse_settings(&text).0.access_of(&key), a, "the same again");
         }
     }
 

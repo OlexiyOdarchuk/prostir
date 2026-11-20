@@ -503,7 +503,8 @@ place 101 at 2560 2160
 ```
 
 A display of the PC that is not connected now (the lid closed, the cable out) keeps its
-number and its place in the headset, and comes back there. Another monitor in the same
+number and its place in the headset, and comes back there (the eight seen last are
+remembered). Another monitor in the same
 connector is a new display with a place of its own.
 
 One headset is the main one and may do everything. A headset can be given less with a
@@ -518,7 +519,8 @@ access 3f9a…(64 hex digits) guest input
 window to a monitor), `mic`, `changes` (monitors and the PC's settings), `private`
 (notifications, window titles, screenshots), `camera` and `clipboard` (for later). A
 guest's arrangement does not move the desktop, and its volume does not change the
-PC's.
+PC's. A line with a word that is none of these (a typo) gives that headset no rights
+at all until it is put right, and the PC's log says so.
 
 ## Update and uninstall
 

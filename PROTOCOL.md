@@ -627,7 +627,8 @@ a `Request` or `Command` of an unknown kind gets `UNSUPPORTED`, an unknown prese
 
 The host checks the rights of the headset (`Access`, told to it as a part). Without a
 line of its own in the host's `settings.txt` a headset is the main one with every
-right, so a single headset can do everything. A request without its right fails
+right, so a single headset can do everything; a line of its own with a word that is
+no role or right gives it no rights (a guest), never every right. A request without its right fails
 `NOT_ALLOWED`; anything else without its right is dropped and logged.
 
 | What | Needs |

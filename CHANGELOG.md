@@ -114,7 +114,8 @@
   the headset's answer; a headset that does not answer within 30 s is written in the
   log instead of being waited for.
 - A second headset can be given fewer rights with a line in `settings.txt`, for
-  example only moving the mouse; the main headset can do everything, as before.
+  example only moving the mouse; the main headset can do everything, as before. A
+  mistyped line gives that headset no rights rather than all of them.
 
 ## 0.1.3 (not released yet)
 
