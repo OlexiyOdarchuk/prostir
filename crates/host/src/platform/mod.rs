@@ -1,4 +1,4 @@
-//! The door from the core to the operating system: the core (`main.rs`, `session.rs`,
+//! The door from the core to the operating system: the core (`main.rs`, `session/`,
 //! `listen.rs`, `displays/`, `worker/`, `layout.rs`, `encoder.rs`, `pairing.rs`, `outbox.rs`,
 //! `usage.rs`, `i18n.rs`) reaches the desktop, the sound system and the user's files
 //! only through this module. What the platform's threads see (the tray's items, a

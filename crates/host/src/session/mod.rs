@@ -36,6 +36,12 @@ use crate::screen::ScreenId;
 use crate::store::Store;
 use crate::{i18n, keep_screens, outbox, pacing, pairing, platform, publish, requests};
 
+mod handle;
+mod link;
+mod volume;
+
+use link::{spawn_reader, spawn_writer};
+
 /// Longest notification passed to the headset, in bytes.
 const MAX_NOTICE: usize = 8 * 1024;
 
@@ -75,23 +81,6 @@ pub fn via_name(via: Via) -> &'static str {
     match via {
         Via::Usb => "USB",
         Via::Network => "Wi-Fi",
-    }
-}
-
-/// Ends the session once the writer thread stops, however it stops: the outbox takes
-/// nothing more and the connection closes, so the reader and the headset notice at once.
-/// After a goodbye the connection stays open for the control loop to close.
-struct EndSession {
-    outbox: Arc<outbox::Outbox>,
-    closer: Option<Closer>,
-}
-
-impl Drop for EndSession {
-    fn drop(&mut self) {
-        self.outbox.close();
-        if let Some(closer) = &self.closer {
-            closer.close();
-        }
     }
 }
 
@@ -204,20 +193,6 @@ impl Closing {
     }
 }
 
-/// Does what the volume logic says: asks the headset (through `outbox`) or puts the
-/// device at the headset's level.
-fn do_volume(sink: &SinkVolume, act: Option<Act>, outbox: &outbox::Outbox) {
-    match act {
-        Some(Act::Ask(asked)) => {
-            // At most every 50 ms while a slider moves.
-            info!("volume: asking the headset for {}", asked.level);
-            outbox.control(HostMsg::VolumeAsk { asked });
-        }
-        Some(Act::Write { level, muted }) => sink.set(level, muted),
-        None => {}
-    }
-}
-
 /// Interleaved 16-bit stereo as mono: each pair of samples is their mean.
 fn to_mono(stereo: &[u8]) -> Vec<u8> {
     stereo
@@ -242,151 +217,6 @@ fn notify_battery(percent: u8) {
         i18n::t("Шолом скоро розрядиться", "The headset battery is low"),
         &body,
     );
-}
-
-/// The writer thread: the only one sending, packet after packet, most important first,
-/// pacing the connection by what it measures of the network.
-fn spawn_writer(
-    outbox: Arc<outbox::Outbox>,
-    mut sender: Box<dyn prostir_proto::link::RecordSender>,
-    closer: Closer,
-    via: Via,
-) -> Result<JoinHandle<()>> {
-    Ok(std::thread::Builder::new()
-        .name("net-writer".into())
-        .spawn(move || {
-            let mut end = EndSession {
-                outbox: outbox.clone(),
-                closer: Some(closer),
-            };
-            let mut lanes = outbox::Lanes::default();
-            let mut pacer = pacing::Pacer::new(via);
-            let mut next_look = Instant::now();
-            let mut report = Period::new(PACING_REPORT_EVERY);
-            // The pace last logged: changes of a quarter or more go into the log.
-            let mut logged = 0u64;
-            // How long sending waited on the socket since the last look: most of the
-            // time means the network (or the pace) held the PC back.
-            let mut waited = Duration::ZERO;
-            let mut last_look = Instant::now();
-            while let Some(pick) = outbox.next(&mut lanes) {
-                let sending = Instant::now();
-                if let Err(e) = lanes.send(pick, &mut *sender) {
-                    info!("connection closed while sending: {e}");
-                    return;
-                }
-                let now = Instant::now();
-                waited += now - sending;
-                if now < next_look {
-                    continue;
-                }
-                next_look = now + LOOK_AT_THE_LINK;
-                let held_back = waited * 2 >= now - last_look;
-                (waited, last_look) = (Duration::ZERO, now);
-                let queued = outbox.take_queued();
-                if let Some(rtt) = outbox.take_round_trip() {
-                    pacer.pong(now, rtt);
-                }
-                let Some(link) = sender.link_info() else {
-                    continue;
-                };
-                let look = pacing::Look {
-                    now,
-                    link,
-                    held_back,
-                    queued,
-                };
-                if let Some(pace) = pacer.look(look) {
-                    sender.set_pace(pace);
-                    let ms = |d: Duration| d.as_secs_f64() * 1e3;
-                    let line = format!(
-                        "pacing at {} Mbit/s, {} (the streams need {}; round trip {:.1} ms, \
-                         lowest {:.1} ms)",
-                        mbit(pace),
-                        pacer.phase(),
-                        mbit(pacer.floor()),
-                        ms(link.rtt),
-                        ms(pacer.min_rtt().unwrap_or_default()),
-                    );
-                    if pace.abs_diff(logged) > logged / 4 {
-                        logged = pace;
-                        info!("{line}");
-                    } else {
-                        debug!("{line}");
-                    }
-                }
-                if report.due(now).is_some() {
-                    info!("pacing: {}", pacer.take_stats().summary());
-                }
-            }
-            // After the goodbye nothing more goes out, but what the headset sends
-            // until it closes the connection is still read (see `Closing`).
-            if outbox.said_goodbye() {
-                let _ = sender.finish();
-                end.closer = None;
-            }
-        })?)
-}
-
-/// The reader thread: what is instant is answered here, not in the control loop
-/// (which may wait on a desktop tool for a while), so the round trip is the
-/// network's; the rest goes to the control loop as events of session `id`.
-fn spawn_reader(
-    id: SessionId,
-    mut receiver: Box<dyn prostir_proto::link::RecordReceiver>,
-    mut packets: prostir_proto::packet::Assembler,
-    outbox: Arc<outbox::Outbox>,
-    router: Arc<Router>,
-    events: EventSink,
-) -> Result<()> {
-    receiver.set_idle_limit(Some(SILENCE));
-    std::thread::Builder::new()
-        .name("net-reader".into())
-        .spawn(move || {
-            loop {
-                let msg = match ClientMsg::recv(&mut *receiver, &mut packets) {
-                    Ok(msg) => msg,
-                    Err(e) => {
-                        events.send(Event::SessionEnded(id, e));
-                        return;
-                    }
-                };
-                match msg {
-                    ClientMsg::Ping { seq } => {
-                        outbox.control(HostMsg::Pong { seq });
-                    }
-                    ClientMsg::Pong { seq } => outbox.pong(seq),
-                    // Also here: how long a frame took to show is the headset's and the
-                    // network's time, not the control loop's.
-                    ClientMsg::FrameShown {
-                        id: display,
-                        generation,
-                        seq,
-                    } => router.frame_shown(id, ScreenId::from_wire(display), generation, seq),
-                    // A keyframe waits for nobody: asked of the encoder from here.
-                    ClientMsg::RequestKeyframe {
-                        id: display,
-                        generation,
-                    } => {
-                        let display = ScreenId::from_wire(display);
-                        if router.is_current(id, display, generation) {
-                            router.keyframe_asked(display);
-                        } else {
-                            info!(
-                                "{display}: a keyframe asked for {generation:?}, not the generation it \
-                                 streams now: none made"
-                            );
-                        }
-                    }
-                    msg => {
-                        if !events.send(Event::Headset(id, Instant::now(), msg)) {
-                            return;
-                        }
-                    }
-                }
-            }
-        })?;
-    Ok(())
 }
 
 impl Session {
@@ -670,18 +500,6 @@ impl Session {
         self.take_pc_volume();
     }
 
-    /// The headset is asked to take the level the PC's device has now, where the PC
-    /// knows it (the device does not move).
-    fn take_pc_volume(&mut self) {
-        let Some((sink, pc)) = &mut self.volume else {
-            return;
-        };
-        if let Some((level, muted)) = sink.level() {
-            let act = pc.device(level, muted, Instant::now());
-            do_volume(sink, act, &self.outbox);
-        }
-    }
-
     /// Ends the session. With `goodbye` the headset is told why and gets a moment to
     /// read it (the [`Closing`] returned); without, the connection closes now. The
     /// other sessions go on: only this one's headset leaves the router.
@@ -781,83 +599,6 @@ impl Session {
         }
     }
 
-    /// A volume from the headset (in `Open` or since): the main headset's goes to the
-    /// device. The device's own changes come first: they come through the same channel
-    /// of events (see [`Session::device_volume`]), so one that came before this level
-    /// makes it an old one, which must not be written while the slider moves.
-    fn volume_from_headset(&mut self, v: state::Volume) {
-        if !self.standing.main {
-            return;
-        }
-        if let Some((sink, pc)) = &mut self.volume {
-            let act = pc.from_headset(&v, Instant::now());
-            do_volume(sink, act, &self.outbox);
-        }
-    }
-
-    /// The sound system said the device is at `level` (moved at `at`, read after the
-    /// PC's `writes`th write of it): a move asks the headset, the PC's own write is its
-    /// echo, and a reading from before the PC's last write is old news. A device made
-    /// anew (`new_device`) is at the sound system's level, not the person's: the
-    /// headset owns the level, which goes on it.
-    pub fn device_volume(
-        &mut self,
-        level: u8,
-        muted: bool,
-        at: Instant,
-        writes: u64,
-        new_device: bool,
-    ) {
-        let Some((sink, pc)) = &mut self.volume else {
-            return;
-        };
-        if sink.outdated(writes) {
-            if new_device {
-                info!("volume: a new device for the headset, read before the PC set it");
-            }
-            return;
-        }
-        if new_device {
-            if let Some(v) = self.publisher.headset.volume {
-                info!(
-                    "volume: a new device for the headset at {level}: it takes the headset's {}",
-                    v.level
-                );
-                let act = pc.from_headset(&v, Instant::now());
-                do_volume(sink, act, &self.outbox);
-            }
-            return;
-        }
-        let act = pc.device(level, muted, at);
-        do_volume(sink, act, &self.outbox);
-    }
-
-    /// Follows the device's volume: a move waiting asks the headset, its answers go to
-    /// the device once the slider rests.
-    pub fn volume_due(&mut self) {
-        let Some((sink, pc)) = &mut self.volume else {
-            return;
-        };
-        let act = pc.tick(Instant::now());
-        do_volume(sink, act, &self.outbox);
-    }
-
-    /// When the volume has something to do next.
-    pub fn volume_at(&self) -> Option<Instant> {
-        self.volume.as_ref().and_then(|(_, pc)| pc.due())
-    }
-
-    /// Looks again which monitor the sound comes from, while the headset wants to know.
-    pub fn look_at_sound(&mut self, displays: &Displays) {
-        if let Some(w) = &self.sound_source {
-            let id = w.output().and_then(|key| displays.id_of_output(&key));
-            if self.sound_from != id {
-                info!("sound comes from {id:?}");
-            }
-            self.sound_from = id;
-        }
-    }
-
     /// The answer to a request that waited for job `job` of the desktop's worker:
     /// whether it was this session's.
     pub fn job_done(&mut self, job: crate::worker::JobId, outcome: &Outcome) -> bool {
@@ -925,193 +666,6 @@ impl Session {
         for reply in self.replies.drain(..) {
             self.outbox.control(reply);
         }
-    }
-
-    /// Follows what the headset said about itself: worn or not (frames and sound go
-    /// to it only while worn; the control loop pauses the desktop once no headset is),
-    /// its battery, and the watchers its preferences ask for (notifications only for a
-    /// headset with the right to private things).
-    fn headset_changed(&mut self, displays: &Displays) {
-        let access = self.publisher.access;
-        let headset = &self.publisher.headset;
-        let worn = worn(headset);
-        self.taken_off_at = match (worn, self.taken_off_at) {
-            (true, _) => None,
-            (false, Some(t)) => Some(t),
-            (false, None) => Some(Instant::now()),
-        };
-        let fresh = displays.router.set_worn(self.id, worn);
-        self.fresh.extend(fresh);
-        let denied = self.tray_line().mic_denied;
-        if denied && !self.mic_denied {
-            warn!("the headset's microphone has no permission: the system does not let it record");
-        }
-        self.mic_denied = denied;
-        if let Some(b) = headset.battery
-            && self.standing.lead
-            // Once per session, when it gets low.
-            && b.percent <= 15
-            && !b.charging
-            && !self.battery_warned
-        {
-            self.battery_warned = true;
-            notify_battery(b.percent);
-        }
-        let prefs = self.publisher.prefs();
-        self.notifications = if prefs.notifications && access.may(perms::PRIVATE) {
-            self.notifications.take().or_else(|| {
-                let outbox = self.outbox.clone();
-                notifications::watch(move |text| {
-                    let text = clip(&text, MAX_NOTICE);
-                    outbox.control(HostMsg::Notice { text });
-                })
-            })
-        } else {
-            None
-        };
-        self.sound_source = prefs.sound_from_screen.then(|| {
-            self.sound_source
-                .take()
-                .unwrap_or_else(|| sound_source::Watcher::start(displays.window_list()))
-        });
-    }
-
-    /// One message from the headset. Returns whether the headset's state changed
-    /// (worn or not, its microphone, its preferences), which the control loop looks at
-    /// for every session.
-    pub fn handle(
-        &mut self,
-        msg: ClientMsg,
-        came: Instant,
-        displays: &mut Displays,
-        store: &mut Store,
-    ) -> bool {
-        let volume = match &msg {
-            ClientMsg::Volume { part } => Some(*part),
-            _ => None,
-        };
-        let Some(msg) = self.publisher.headset.apply(msg) else {
-            if let Some(v) = volume {
-                self.volume_from_headset(v);
-            }
-            self.headset_changed(displays);
-            return true;
-        };
-        match msg {
-            // The microphone, from a headset with the right to it.
-            ClientMsg::UpStart { up, kind, format } => {
-                let pcm = match format {
-                    UpFormat::Pcm16 { rate, channels } if rate == prostir_proto::AUDIO_RATE => {
-                        Some(channels)
-                    }
-                    _ => None,
-                };
-                match pcm {
-                    _ if kind != UpKind::Mic || !self.publisher.access.may(perms::MIC) => {
-                        info!("an up stream of {kind:?} this PC does not take");
-                    }
-                    Some(channels @ (1 | 2)) => {
-                        info!("the headset's microphone streams ({format:?}, up stream {up})");
-                        // A new recording replaces the one before, whose end may still
-                        // be on its way: that end then ends nothing.
-                        self.ups.retain(|_, (k, _)| *k != UpKind::Mic);
-                        self.ups.insert(up, (kind, channels));
-                    }
-                    _ => {
-                        warn!(
-                            "the headset's microphone in {format:?}, which this PC does not take"
-                        );
-                    }
-                }
-            }
-            // Only the microphone of the session that has it reaches the PC. It still
-            // goes through the control loop, which takes it at once (a pass is short and
-            // waits for nothing); moving it to the reader, as keyframes, is for later
-            // (plan, step 6, section 3.2).
-            ClientMsg::Up { up, data } => match self.ups.get(&up) {
-                _ if !self.standing.mic => {}
-                // The PC's end of the microphone is mono.
-                Some((UpKind::Mic, 2)) => displays.push_mic(&to_mono(&data)),
-                Some((UpKind::Mic, _)) => displays.push_mic(&data),
-                _ => {}
-            },
-            ClientMsg::UpEnd { up } => {
-                if self.ups.remove(&up).is_some() {
-                    info!("the headset's microphone stopped (up stream {up})");
-                }
-            }
-            ClientMsg::Request { req, asked } => {
-                let started = Instant::now();
-                let what = format!("{asked:?}");
-                let answer = match asked {
-                    Asked::Known(request) => {
-                        let limits = self.publisher.limits(displays, self.standing.no_limits);
-                        let asker = requests::Asker {
-                            caps: self.publisher.caps(),
-                            limits: &limits,
-                            access: self.publisher.access,
-                        };
-                        requests::handle(request, displays, store, &asker)
-                    }
-                    Asked::Unknown { kind } => {
-                        info!("the headset asked for something unknown (kind {kind})");
-                        requests::Answer::Now(Outcome::failed(ErrorCode::UNSUPPORTED, ""))
-                    }
-                };
-                let outcome = match answer {
-                    requests::Answer::Now(outcome) => outcome,
-                    requests::Answer::Later(job) if displays.desk_stuck() => {
-                        displays.desk().cancel(job);
-                        displays.forget_job(job);
-                        Outcome::failed(ErrorCode::DESKTOP, &desktop_not_responding())
-                    }
-                    requests::Answer::Later(job) => {
-                        info!(
-                            "request {} ({what}): waited {} ms, answered once the desktop did it",
-                            req.0,
-                            (started - came).as_millis(),
-                        );
-                        let until = Instant::now() + crate::worker::answer_within();
-                        self.waiting.push((req, job, until));
-                        return false;
-                    }
-                };
-                if let Outcome::Failed { detail, .. } = &outcome {
-                    warn!("request {}: {detail}", req.0);
-                }
-                info!(
-                    "request {} ({what}): waited {} ms, done in {} ms",
-                    req.0,
-                    (started - came).as_millis(),
-                    started.elapsed().as_millis()
-                );
-                self.replies.push(HostMsg::Reply { req, outcome });
-            }
-            // Only the main headset's arrangement is the desktop's.
-            ClientMsg::Arrange { rows } if self.standing.main => {
-                displays.set_layout(&rows);
-                keep_screens(store, displays, false);
-            }
-            ClientMsg::Arrange { .. } => info!("a guest's arrangement leaves the desktop as it is"),
-            ClientMsg::MouseTo { id, u, v } if self.publisher.access.may(perms::INPUT) => {
-                displays.mouse_to(ScreenId::from_wire(id), u, v);
-            }
-            ClientMsg::MouseTo { .. } => info!("the headset has no right to move the mouse"),
-            // Used for priorities from step 10 on.
-            ClientMsg::Gaze { .. } => {}
-            ClientMsg::Reply { req, outcome } => match self.commands.remove(&req) {
-                Some((what, reply, _)) => {
-                    let result = CtlReply::of_outcome(&outcome);
-                    info!("command {} ({what}): {result:?}", req.0);
-                    if let Some(r) = reply {
-                        self.answers.push(r, result);
-                    }
-                }
-                None => info!("an answer to command {}, which nothing waits for", req.0),
-            },
-            other => warn!("ignoring {other:?}"),
-        }
-        false
     }
 }
 
