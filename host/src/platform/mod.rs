@@ -120,6 +120,8 @@ pub mod sockets;
 // The lock file of the one Prostir of a user.
 #[cfg(unix)]
 mod lock;
+#[cfg(unix)]
+pub use lock::is_held as runs_already;
 
 /// Ends the process at once, without the exit handlers of the libraries it loaded:
 /// for a thread left inside one of them (a probe of an encoder that hangs in its
@@ -235,6 +237,14 @@ pub enum TrayCommand {
     PairNewHeadset,
     StopPairing,
     Quit,
+}
+
+impl TrayCommand {
+    /// What a click on the icon itself does (its menu aside): the settings window, the
+    /// program's own window, opens or comes forward (one window per user).
+    pub fn clicked() -> Self {
+        Self::ShowSettings
+    }
 }
 
 /// What the tray shows.

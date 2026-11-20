@@ -8,6 +8,23 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
+/// Another process of the user holds the lock: Prostir runs already. Says who.
+#[derive(Debug)]
+pub struct Held(pub String);
+
+impl std::fmt::Display for Held {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "held by {}", self.0)
+    }
+}
+
+impl std::error::Error for Held {}
+
+/// Whether `e` says Prostir runs already (its lock is held by another process).
+pub fn is_held(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.is::<Held>())
+}
+
 /// Takes the lock at `path` for `role`: the open file, held until it is dropped.
 pub fn take(path: &Path, role: &str) -> Result<std::fs::File> {
     let mut file = std::fs::OpenOptions::new()
@@ -20,7 +37,7 @@ pub fn take(path: &Path, role: &str) -> Result<std::fs::File> {
     // SAFETY: flock on a file descriptor this function owns.
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         let held = std::fs::read_to_string(path).unwrap_or_default();
-        bail!("held by {}", held.trim());
+        bail!(Held(held.trim().to_owned()));
     }
     file.set_len(0)?;
     file.rewind()?;
@@ -58,6 +75,7 @@ mod tests {
         assert_eq!(holder(&path, "serve"), None, "another role");
         let again = take(&path, "serve").unwrap_err();
         assert!(format!("{again:#}").contains("watcher"), "{again:#}");
+        assert!(is_held(&again.context("Prostir is already running")));
         drop(held);
         // A program another test starts at this moment shares the lock until its
         // `exec` closes it: a moment.

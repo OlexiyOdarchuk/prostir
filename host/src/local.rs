@@ -1024,6 +1024,11 @@ fn settings_program() -> Option<std::path::PathBuf> {
 /// forward). Its process is waited for on a thread of its own, which sleeps until it
 /// closes.
 pub fn open_settings() -> Result<(), Failure> {
+    // A test build never opens a real window on the desktop the tests run on.
+    if cfg!(feature = "fake-desktop") {
+        info!("fake desktop: the settings window opens");
+        return Ok(());
+    }
     let missing = || {
         Failure::new(
             ApiError::Unsupported,

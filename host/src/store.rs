@@ -813,6 +813,20 @@ pub fn config_dir() -> Option<PathBuf> {
     Some(dir)
 }
 
+/// Prostir never ran for this user (nothing of it in `dir`, `~/.config/prostir`): not
+/// its settings, its screens, the settings of 0.1, its key or a paired headset.
+pub fn first_start(dir: &Path) -> bool {
+    [
+        "settings.txt",
+        "screens.txt",
+        "monitors.txt",
+        "identity",
+        "paired_headsets",
+    ]
+    .iter()
+    .all(|name| !dir.join(name).exists())
+}
+
 /// The settings and the set of screens, owned by the main loop.
 pub struct Store {
     /// `~/.config/prostir`; none: nothing is saved (no home directory).

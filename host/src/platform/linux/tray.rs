@@ -166,6 +166,12 @@ impl ksni::Tray for Tray {
         icon()
     }
 
+    /// A click on the icon (a double click where the panel says so): the settings
+    /// window opens or comes forward; the menu keeps its own item too.
+    fn activate(&mut self, _x: i32, _y: i32) {
+        self.commands.tray(Command::clicked());
+    }
+
     fn status(&self) -> ksni::Status {
         // Always visible (a passive icon hides in Plasma's overflow, and a fresh install
         // would show no sign of running at all); a code to read asks for attention.

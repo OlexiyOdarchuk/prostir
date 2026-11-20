@@ -404,9 +404,43 @@ pub struct Pc {
     run_dir: PathBuf,
     /// Its session bus, where `dbus-daemon` is installed.
     pub bus: Option<Bus>,
+    /// Its environment, for the same program started again ([`Pc::again`]).
+    env: Vec<(std::ffi::OsString, Option<std::ffi::OsString>)>,
 }
 
 impl Pc {
+    /// The PC app started again while this one runs, with `args` and the same
+    /// environment (as the menu, a terminal or an old autostart line starts it): what
+    /// it did, once it ended (within 30 s, else it is killed and the test fails).
+    pub fn again(&self, args: &[&str]) -> Ctl {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_prostir"));
+        cmd.args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for (k, v) in &self.env {
+            match v {
+                Some(v) => cmd.env(k, v),
+                None => cmd.env_remove(k),
+            };
+        }
+        let mut child = cmd.spawn().expect("start the PC app again");
+        let until = Instant::now() + Duration::from_secs(30);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() > until {
+                let _ = child.kill();
+                panic!("`prostir {}` did not end", args.join(" "));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let out = child.wait_with_output().unwrap();
+        Ctl {
+            code: out.status.code().unwrap_or(-1),
+            out: String::from_utf8_lossy(&out.stdout).into_owned(),
+            err: String::from_utf8_lossy(&out.stderr).into_owned(),
+        }
+    }
+
     pub fn start(dir: &TestDir, options: &Options) -> Self {
         let root = dir.path();
         for sub in ["config", "run", "home", "cache"] {
@@ -495,6 +529,10 @@ impl Pc {
             cmd.env("PROSTIR_TEST_BEACON_TO", to.to_string());
         }
         cmd.envs(options.env.iter().map(|(k, v)| (k, v)));
+        let env = cmd
+            .get_envs()
+            .map(|(k, v)| (k.to_owned(), v.map(ToOwned::to_owned)))
+            .collect();
         if let Some(activate) = &options.activate {
             cmd = activate.wrap(&cmd);
         }
@@ -520,6 +558,7 @@ impl Pc {
             log,
             run_dir: root.join("run"),
             bus,
+            env,
         };
         if let Some(activate) = &options.activate {
             // Nothing of it runs until something comes: once the socket that starts
