@@ -7,6 +7,20 @@
 //! each, while the same six encoders in one process on one device ran in full
 //! (`plans/windows-prototype.md`, section 8). So every pipeline asks here first.
 //!
+//! # VA-API keeps a display per pipeline
+//!
+//! A VA display is not a context like CUDA's: each is a file of the render node with
+//! the driver loaded on it, and the driver serves several of them side by side. Shared,
+//! five monitors held one render node file instead of five, but the encoders were no
+//! faster: on an Intel Arc (iHD 26.3.5), 4 streams of 1920x1080 at 60 frames a second,
+//! GPU buffers from a producer with its own display as KWin's are, encoder time p50
+//! 8.57 / 4.81 ms with a display each against 8.47 / 5.07 ms shared, p99 11.54 / 6.18
+//! against 12.28 / 7.40 ms (two quiet pairs of 15 s each; the PC was busy otherwise
+//! and other runs varied more between themselves than between the two ways). One lock
+//! of one display for every encoder costs at the tail, and saves only memory. So VA
+//! displays are not shared ([`SHARE_VA`]), and `encoder::live::va_display_sharing`
+//! measures it again by hand. CUDA contexts and Direct3D 11 devices are.
+//!
 //! GStreamer's elements ask for a device with a `need-context` message and say the one
 //! they opened with `have-context`. [`GpuDevices::share_with`] answers the first from
 //! what it keeps, by context type and card, and keeps the first device each card opens
@@ -43,10 +57,16 @@ use log::info;
 
 /// The context types shared, with the property that names an element's card.
 const SHARED: &[(&str, &str)] = &[
-    ("gst.va.display.handle", "device-path"),
+    (VA, "device-path"),
     ("gst.cuda.context", "cuda-device-id"),
     ("gst.d3d11.device.handle", "adapter-luid"),
 ];
+
+/// The VA display's context type.
+const VA: &str = "gst.va.display.handle";
+
+/// Whether VA displays are shared too (see the top of this file).
+const SHARE_VA: bool = false;
 
 /// A device: its context type and card.
 type Key = (String, String);
@@ -56,9 +76,20 @@ type Devices = BTreeMap<Key, (gst::Context, usize)>;
 
 /// The graphics devices captures and encoders share: one per card and kind, while a
 /// pipeline holds it. Cheap to clone: every clone shares the same devices.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct GpuDevices {
     devices: Arc<Mutex<Devices>>,
+    /// VA displays are shared too.
+    va: bool,
+}
+
+impl Default for GpuDevices {
+    fn default() -> Self {
+        Self {
+            devices: Arc::default(),
+            va: SHARE_VA,
+        }
+    }
 }
 
 /// The devices one pipeline holds; dropped after the pipeline stopped, it lets them
@@ -87,6 +118,20 @@ impl GpuDevices {
         lease
     }
 
+    /// Devices that share VA displays too, for measuring both ways.
+    #[cfg(test)]
+    pub fn sharing_va() -> Self {
+        Self {
+            va: true,
+            ..Self::default()
+        }
+    }
+
+    /// Whether context type `kind` is shared here.
+    fn shares(&self, kind: &str) -> bool {
+        SHARED.iter().any(|(k, _)| *k == kind) && (self.va || kind != VA)
+    }
+
     fn lease(&self) -> Lease {
         Lease {
             devices: Arc::downgrade(&self.devices),
@@ -103,7 +148,7 @@ impl GpuDevices {
         match msg.view() {
             gst::MessageView::NeedContext(m) => {
                 let kind = m.context_type();
-                if !SHARED.iter().any(|(k, _)| *k == kind) {
+                if !self.shares(kind) {
                     return;
                 }
                 let key = (kind.to_owned(), card(element, kind));
@@ -122,7 +167,7 @@ impl GpuDevices {
             gst::MessageView::HaveContext(m) => {
                 let context = m.context();
                 let kind = context.context_type();
-                if !SHARED.iter().any(|(k, _)| *k == kind) {
+                if !self.shares(kind) {
                     return;
                 }
                 let key = (kind.to_owned(), card(element, kind));

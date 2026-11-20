@@ -1,8 +1,7 @@
-//! The encoders: probed once and kept in the cache, one graphics device shared by all
-//! of them, a probe that hangs holding nothing up, and a session limit learned when an
+//! The encoders: probed once and kept in the cache, a graphics device each while they
+//! stream, a probe that hangs holding nothing up, and a session limit learned when an
 //! encoder does not open, the output going on with the next encoder.
 
-use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use prostir_proto::request::{Outcome, Request};
@@ -22,14 +21,14 @@ fn cache(dir: &TestDir) -> String {
     std::fs::read_to_string(dir.path().join("cache/prostir/encoders.txt")).unwrap_or_default()
 }
 
-/// Five monitors on the graphics card open its device once: one VA display (a render
-/// node of the card) for all their encoders, not one each. Once no encoder uses the
-/// card (all moved to the CPU), the device is closed while the session goes on, and
-/// opened again when they come back. Skipped where the PC has no hardware encoder that
-/// takes the fake desktop's frames.
+/// Five monitors on VA-API: each encoder keeps a VA display of its own (a file of the
+/// render node), as measured no slower than one shared (see `encoder/gpu.rs`), and lets
+/// it go with its stream: once all moved to the CPU, no graphics device is open while
+/// the session goes on, and they come back with the streams. Skipped where the PC has
+/// no VA-API encoder that takes the fake desktop's frames.
 #[test]
-fn monitors_share_one_graphics_device() {
-    let dir = TestDir::new("one-device");
+fn each_va_encoder_has_a_display_while_it_streams() {
+    let dir = TestDir::new("va-displays");
     dir.save_monitors(FIVE_MONITORS);
     let mut keys = dir.pair();
     let options = Options {
@@ -44,22 +43,17 @@ fn monitors_share_one_graphics_device() {
     pc.wait_log(START, "video encoders");
     let on_card = pc.count_log("encoding with VA-API");
     if on_card == 0 {
-        eprintln!("no VA-API encoder here: nothing shares a device");
+        eprintln!("no VA-API encoder here: no displays to count");
         return;
     }
     let files = pc.gpu_files();
-    let cards: BTreeSet<&String> = files.iter().collect();
     eprintln!(
         "{on_card} monitors on VA-API with {} graphics device files open: {files:?}",
         files.len()
     );
     assert_eq!(on_card, 5, "every monitor on the card");
-    assert_eq!(
-        files.len(),
-        cards.len(),
-        "one device per card for every encoder: {files:?}"
-    );
-    assert_eq!(pc.count_log("sharing gst.va.display.handle"), 1);
+    assert_eq!(files.len(), 5, "a display each: {files:?}");
+    assert_eq!(pc.count_log("sharing gst.va.display.handle"), 0);
 
     let encode = |headset: &mut prostir_testkit::FakeHeadset, software| {
         let asked = Request::SetEncoding {
@@ -70,22 +64,23 @@ fn monitors_share_one_graphics_device() {
         };
         assert_eq!(headset.ask(asked).unwrap(), Outcome::Done);
     };
+    let open_files = |pc: &Pc, n: usize| {
+        let until = Instant::now() + SOON;
+        while pc.gpu_files().len() != n {
+            assert!(Instant::now() < until, "open: {:?}", pc.gpu_files());
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
     encode(&mut headset, true);
-    pc.wait_log(SOON, "closing gst.va.display.handle");
-    let until = Instant::now() + SOON;
-    while !pc.gpu_files().is_empty() {
-        assert!(Instant::now() < until, "still open: {:?}", pc.gpu_files());
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    open_files(&pc, 0);
     headset
         .wait(SOON, "every monitor showing", View::all_monitors_show)
         .unwrap();
     encode(&mut headset, false);
-    pc.wait_log_after(SOON, "sharing gst.va.display.handle", 1);
     headset
         .wait(SOON, "every monitor showing", View::all_monitors_show)
         .unwrap();
-    assert_eq!(pc.gpu_files().len(), 1, "{:?}", pc.gpu_files());
+    open_files(&pc, 5);
     assert!(!headset.view().closed, "the session went on");
 }
 

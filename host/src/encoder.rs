@@ -4,7 +4,8 @@
 //! Each output gets its own encoder, picked for where its frames live
 //! ([`crate::platform::FrameSource::memory`]) so they stay on the graphics card
 //! (`choice.rs`), from the encoders this PC was found to have (`probe.rs`, kept in the
-//! cache directory), all sharing one graphics device per card (`gpu.rs`). An encoder
+//! cache directory), sharing one CUDA context or Direct3D 11 device per card (`gpu.rs`;
+//! VA-API encoders keep a display each). An encoder
 //! that does not open goes on to the next one for that output only: `Displays` hears
 //! of it as [`EncoderEvent::Unopened`] and learns the encoder's session limit from it.
 
@@ -748,5 +749,218 @@ mod live {
         std::fs::remove_file(&path).unwrap();
         assert_eq!(&png[1..4], b"PNG");
         eprintln!("decoded {} bytes into a {} byte PNG", data.len(), png.len());
+    }
+
+    /// Encoder latency with several streams on VA-API, each pipeline with a VA display
+    /// of its own or all sharing one ([`super::GpuDevices`]). Run by hand on a quiet PC:
+    /// `cargo test -p prostir-host -- --ignored va_display_sharing --nocapture`
+    /// (`PROSTIR_MEASURE_SECS`, `PROSTIR_MEASURE_SIZE=2560x1440`,
+    /// `PROSTIR_MEASURE_STREAMS=4,6`); needs VA-API.
+    ///
+    /// Frames come as GPU buffers made by a producer with a display of its own (as KWin
+    /// makes them in its own process), pushed into an `appsrc` (as on Hyprland), and go
+    /// through the same pipeline a stream uses. The time is from the frame entering the
+    /// converter to its access unit leaving the parser.
+    #[test]
+    #[ignore]
+    fn va_display_sharing() {
+        use std::collections::VecDeque;
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+
+        use gstreamer as gst;
+        use gstreamer::prelude::*;
+        use gstreamer_app as gst_app;
+
+        use super::{Backend, EncoderConfig, GpuDevices, Input, pipeline_description};
+
+        gst::init().unwrap();
+        let secs: u64 = std::env::var("PROSTIR_MEASURE_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(20);
+        let size = std::env::var("PROSTIR_MEASURE_SIZE").unwrap_or_else(|_| "2560x1440".into());
+        let (w, h) = size.split_once('x').unwrap();
+        let percentile = |v: &mut Vec<f64>, p: f64| {
+            v.sort_by(f64::total_cmp);
+            v.get(((v.len() as f64 - 1.0) * p).round() as usize)
+                .copied()
+                .unwrap_or(0.0)
+        };
+        // Shared and not in turn, so a change of the PC's load falls on both.
+        let counts: Vec<usize> = std::env::var("PROSTIR_MEASURE_STREAMS")
+            .unwrap_or_else(|_| "4,6".into())
+            .split(',')
+            .filter_map(|n| n.trim().parse().ok())
+            .collect();
+        for n in counts {
+            for shared in [false, true, false, true] {
+                let gpu = GpuDevices::sharing_va();
+                let times: Arc<Mutex<Vec<f64>>> = Arc::default();
+                let mut running = Vec::new();
+                for i in 0..n {
+                    let producer = gst::parse::launch(&format!(
+                        "videotestsrc is-live=true pattern=ball ! \
+                         video/x-raw,format=BGRx,width=320,height=180,framerate=60/1 ! \
+                         vapostproc ! video/x-raw(memory:DMABuf),width={w},height={h} ! \
+                         appsink name=out sync=false max-buffers=2 drop=true"
+                    ))
+                    .unwrap()
+                    .downcast::<gst::Pipeline>()
+                    .unwrap();
+                    let input = Input {
+                        source: "appsrc name=src is-live=true format=time do-timestamp=true \
+                                 max-buffers=2 leaky-type=downstream"
+                            .into(),
+                        label: format!("measure {i}"),
+                    };
+                    let cfg = EncoderConfig {
+                        codec: prostir_proto::Codec::H265,
+                        bitrate_kbps: 20_000,
+                        backend: Backend::Va,
+                        sharp: false,
+                    };
+                    let encoder = gst::parse::launch(&pipeline_description(&input, &cfg).unwrap())
+                        .unwrap()
+                        .downcast::<gst::Pipeline>()
+                        .unwrap();
+                    let lease = shared.then(|| gpu.share_with(&encoder));
+                    let src = encoder
+                        .by_name("src")
+                        .unwrap()
+                        .downcast::<gst_app::AppSrc>()
+                        .unwrap();
+                    let out = producer
+                        .by_name("out")
+                        .unwrap()
+                        .downcast::<gst_app::AppSink>()
+                        .unwrap();
+                    // GPU buffers go only where frames carry their layout (video meta),
+                    // which an appsink does not say it reads.
+                    out.static_pad("sink").unwrap().add_probe(
+                        gst::PadProbeType::QUERY_DOWNSTREAM,
+                        |_, info| {
+                            if let Some(gst::PadProbeData::Query(query)) = &mut info.data
+                                && let gst::QueryViewMut::Allocation(a) = query.view_mut()
+                            {
+                                a.add_allocation_meta::<gstreamer_video::VideoMeta>(None);
+                            }
+                            gst::PadProbeReturn::Ok
+                        },
+                    );
+                    // Handed on as plain GPU buffers (the file of each, as PipeWire hands
+                    // KWin's over), not as the producer's VA surfaces: one per buffer
+                    // of its pool, made once, so the encoder imports each once.
+                    let allocator = gstreamer_allocators::DmaBufAllocator::new();
+                    let mut plain: std::collections::HashMap<i32, gst::Buffer> =
+                        std::collections::HashMap::new();
+                    out.set_callbacks(
+                        gst_app::AppSinkCallbacks::builder()
+                            .new_sample(move |sink| {
+                                use gstreamer_allocators::prelude::*;
+                                use std::os::fd::FromRawFd;
+                                let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                                if src.caps().is_none() {
+                                    src.set_caps(sample.caps().map(|c| c.to_owned()).as_ref());
+                                }
+                                let buffer = sample.buffer().unwrap();
+                                let memory = buffer.peek_memory(0);
+                                let dmabuf = memory
+                                    .downcast_memory_ref::<gstreamer_allocators::DmaBufMemory>()
+                                    .unwrap();
+                                let wrapped = plain.entry(dmabuf.fd()).or_insert_with(|| {
+                                    // SAFETY: a copy of a file the producer's buffer holds,
+                                    // owned by the memory made of it from here on.
+                                    let fd = unsafe {
+                                        std::os::fd::OwnedFd::from_raw_fd(libc::dup(dmabuf.fd()))
+                                    };
+                                    // SAFETY: `fd` is a dmabuf of at least this size.
+                                    let memory =
+                                        unsafe { allocator.alloc_dmabuf(fd, memory.maxsize()) }
+                                            .unwrap();
+                                    let mut copy = gst::Buffer::new();
+                                    let meta = buffer.meta::<gstreamer_video::VideoMeta>().unwrap();
+                                    {
+                                        let copy = copy.get_mut().unwrap();
+                                        copy.append_memory(memory);
+                                        gstreamer_video::VideoMeta::add_full(
+                                            copy,
+                                            meta.video_frame_flags(),
+                                            meta.format(),
+                                            meta.width(),
+                                            meta.height(),
+                                            meta.offset(),
+                                            meta.stride(),
+                                        )
+                                        .unwrap();
+                                    }
+                                    copy
+                                });
+                                let _ = src.push_buffer(wrapped.copy());
+                                Ok(gst::FlowSuccess::Ok)
+                            })
+                            .build(),
+                    );
+                    let inside: Arc<Mutex<VecDeque<Instant>>> = Arc::default();
+                    {
+                        let inside = inside.clone();
+                        let pad = encoder
+                            .by_name("enc_in")
+                            .unwrap()
+                            .static_pad("sink")
+                            .unwrap();
+                        pad.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+                            inside.lock().unwrap().push_back(Instant::now());
+                            gst::PadProbeReturn::Ok
+                        });
+                    }
+                    let sink = encoder
+                        .by_name("sink")
+                        .unwrap()
+                        .downcast::<gst_app::AppSink>()
+                        .unwrap();
+                    let times = times.clone();
+                    sink.set_callbacks(
+                        gst_app::AppSinkCallbacks::builder()
+                            .new_sample(move |sink| {
+                                let _ = sink.pull_sample();
+                                if let Some(t0) = inside.lock().unwrap().pop_front() {
+                                    times.lock().unwrap().push(t0.elapsed().as_secs_f64() * 1e3);
+                                }
+                                Ok(gst::FlowSuccess::Ok)
+                            })
+                            .build(),
+                    );
+                    encoder.set_state(gst::State::Playing).unwrap();
+                    producer.set_state(gst::State::Playing).unwrap();
+                    running.push((producer, encoder, lease));
+                }
+                // The first second is the encoders opening.
+                std::thread::sleep(Duration::from_secs(1));
+                times.lock().unwrap().clear();
+                std::thread::sleep(Duration::from_secs(secs));
+                let mut t = std::mem::take(&mut *times.lock().unwrap());
+                for (producer, encoder, _) in &running {
+                    let _ = producer.set_state(gst::State::Null);
+                    let _ = encoder.set_state(gst::State::Null);
+                }
+                let fps = t.len() as f64 / secs as f64 / n as f64;
+                let mean = t.iter().sum::<f64>() / t.len().max(1) as f64;
+                eprintln!(
+                    "{n} streams {size}, {}: {fps:.1} frames/s each, mean {mean:.2} p50 {:.2} \
+                     p95 {:.2} p99 {:.2} max {:.2} ms",
+                    if shared {
+                        "one shared VA display"
+                    } else {
+                        "a VA display each"
+                    },
+                    percentile(&mut t, 0.5),
+                    percentile(&mut t, 0.95),
+                    percentile(&mut t, 0.99),
+                    percentile(&mut t, 1.0),
+                );
+                drop(running);
+            }
+        }
     }
 }

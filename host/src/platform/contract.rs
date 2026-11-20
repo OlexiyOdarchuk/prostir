@@ -376,8 +376,9 @@ pub struct AdapterId(pub u64);
 /// `gst.d3d11.device.handle` by LUID): a capture's pipeline calls
 /// [`GpuDevices::share_with`] as the encoder's does (see `encoder/gpu.rs`).
 ///
-/// On Linux no output makes a device (KWin and wlr-screencopy hand over buffers): the
-/// encoders share one VA display (or CUDA context) per card among themselves.
+/// On Linux no output makes a device (KWin and wlr-screencopy hand over buffers): NVENC
+/// encoders share one CUDA context per card; VA-API encoders keep a display each, which
+/// measured as fast or faster than one shared (see `encoder/gpu.rs`).
 pub use crate::encoder::GpuDevices;
 
 /// Where the mouse pointer is drawn.
