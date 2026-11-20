@@ -1264,7 +1264,7 @@ displays' own pixel sizes.
 
 ### What the host does with it
 
-(Implementation-defined; `crates/host/src/displays.rs` and `crates/layout/src/desk.rs`, a crate
+(Implementation-defined; `crates/host/src/displays/` and `crates/layout/src/desk.rs`, a crate
 the client uses too to plan the desktop it sends and shows on its map.)
 
 1. Clamps every known `center` and `middle` to ±100000.

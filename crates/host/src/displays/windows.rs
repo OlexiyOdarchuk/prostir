@@ -1,0 +1,105 @@
+//! Window panels and the jobs that answer later: a window detached into the headset,
+//! brought back, a screenshot, the mouse.
+
+use super::*;
+
+impl Displays {
+    /// The desktop's list of windows, for a thread of its own.
+    pub fn window_list(&self) -> Option<Arc<dyn WindowList>> {
+        self.facts.as_ref()?.window_list.as_ref()?.upgrade()
+    }
+
+    /// Asks where the mouse is (the answer comes as the job's).
+    pub fn find_mouse(&mut self) -> JobId {
+        let job = self.desk.job_id();
+        let until = Instant::now() + worker::answer_within();
+        self.desk.ask(Job::FindMouse { job, until });
+        job
+    }
+
+    /// Puts the mouse on screen `id` at `x`/`y` across its image (0..=65535).
+    pub fn mouse_to(&mut self, id: ScreenId, x: u16, y: u16) {
+        self.desk.ask(Job::MouseTo { id, x, y });
+    }
+
+    /// Puts the PC's active window on a panel of its own, numbered `id` (a number never
+    /// given before): an output its size, which the headset shows as a floating panel.
+    /// The answer comes as the job's.
+    pub fn detach_window(&mut self, id: ScreenId) -> Result<JobId> {
+        if self.window_count() >= WINDOWS_MAX {
+            bail!(UserError::Limit {
+                max: WINDOWS_MAX,
+                of: Counted::Windows
+            });
+        }
+        if !self.facts.as_ref().is_some_and(|f| f.has_windows) {
+            bail!(UserError::NoWindow);
+        }
+        // Made by the worker as part of the wanted state, after any output it removes.
+        let number = self.free_number();
+        let job = self.desk.job_id();
+        self.detaching.insert(id, (number, job));
+        Ok(job)
+    }
+
+    /// The worker made window panel `id`.
+    pub(super) fn panel_made(
+        &mut self,
+        id: ScreenId,
+        spec: MonitorSpec,
+        key: OutputKey,
+        encoding: worker::Encoding,
+    ) {
+        let Some((number, _)) = self.detaching.remove(&id) else {
+            return;
+        };
+        let mut screen = Screen::starting(id, number, ScreenKind::Window { spec });
+        screen.output = Some(key);
+        screen.encoding = Some(encoding);
+        screen.state = ScreenState::Running;
+        self.screens.insert(id, screen);
+    }
+
+    /// Removes a window panel; its window goes back where it was detached from (or,
+    /// when that monitor is gone, to the others), as the worker closes it.
+    pub fn close_window_panel(&mut self, id: ScreenId) {
+        if self.screens.get(&id).is_some_and(Screen::is_window) {
+            self.screens.remove(&id);
+        }
+    }
+
+    /// Moves the PC's active window to monitor `id` (the one the user looks at); the
+    /// answer comes as the job's.
+    pub fn window_here(&mut self, id: ScreenId) -> Result<JobId> {
+        if !self
+            .screens
+            .get(&id)
+            .is_some_and(|s| s.is_virtual() || (s.is_physical() && s.streaming))
+        {
+            bail!(UserError::UnknownDisplay);
+        }
+        if !self.facts.as_ref().is_some_and(|f| f.has_windows) {
+            bail!(UserError::NoWindow);
+        }
+        let job = self.desk.job_id();
+        let until = Instant::now() + worker::answer_within();
+        self.desk.ask(Job::WindowHere { job, id, until });
+        Ok(job)
+    }
+
+    /// Saves a picture of monitor `id` (all of them where only that is possible); the
+    /// answer comes as the job's.
+    pub fn screenshot(&mut self, id: ScreenId) -> Result<JobId> {
+        if !self
+            .screens
+            .get(&id)
+            .is_some_and(|s| s.is_virtual() || s.is_window())
+        {
+            bail!(UserError::UnknownDisplay);
+        }
+        let job = self.desk.job_id();
+        let until = Instant::now() + worker::answer_within();
+        self.desk.ask(Job::Screenshot { job, id, until });
+        Ok(job)
+    }
+}

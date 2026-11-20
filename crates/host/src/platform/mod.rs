@@ -1,5 +1,5 @@
 //! The door from the core to the operating system: the core (`main.rs`, `session.rs`,
-//! `listen.rs`, `displays.rs`, `worker/`, `layout.rs`, `encoder.rs`, `pairing.rs`, `outbox.rs`,
+//! `listen.rs`, `displays/`, `worker/`, `layout.rs`, `encoder.rs`, `pairing.rs`, `outbox.rs`,
 //! `usage.rs`, `i18n.rs`) reaches the desktop, the sound system and the user's files
 //! only through this module. What the platform's threads see (the tray's items, a
 //! signal to quit) goes to the control loop as events (`crate::events`).

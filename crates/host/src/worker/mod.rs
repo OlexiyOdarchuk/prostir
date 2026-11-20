@@ -1,7 +1,7 @@
 //! The desktop's worker (`desk`): the one thread that calls the desktop and starts and
 //! stops encoders, so the control loop never waits for either.
 //!
-//! The control loop owns the model of the screens (`displays.rs`): which there are,
+//! The control loop owns the model of the screens (`displays/`): which there are,
 //! their numbers, rows and states. It hands the worker the whole state it wants
 //! ([`Wanted`]), not commands; the worker compares it with what is there and does the
 //! difference one step at a time (make an output, start its encoder, place the

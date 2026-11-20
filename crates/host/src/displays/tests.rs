@@ -1,3 +1,5 @@
+use super::parts::within_limit;
+use super::physical::{least_recently_seen, match_physical, unique_edid};
 use super::*;
 
 /// The streams go in the codec chosen only where every headset decodes it, and in
