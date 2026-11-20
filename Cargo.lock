@@ -1794,6 +1794,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "prostir-api"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "prostir-client"
 version = "0.2.0"
 dependencies = [
