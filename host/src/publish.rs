@@ -12,7 +12,7 @@ use prostir_proto::state::{
 use prostir_proto::wire::WireError;
 use prostir_proto::{Codec, HostMsg};
 
-use crate::displays::{Displays, MONITORS_MAX, MONITORS_NO_LIMITS, WINDOWS_MAX};
+use crate::displays::{Displays, MONITORS_MAX, MONITORS_NO_LIMITS, STREAMS_MAX, WINDOWS_MAX};
 use crate::screen::ScreenId;
 use crate::store::Settings;
 
@@ -34,8 +34,6 @@ pub const MAX_SIZE: (u32, u32) = (7680, 4320);
 /// Displays of the PC itself shown at once, and with "No limits".
 const PHYSICAL_MAX: u8 = 1;
 const PHYSICAL_NO_LIMITS: u8 = 4;
-/// Streams at once: a lane each (`2..32`).
-const STREAMS_MAX: u8 = 30;
 
 /// What the parts are built from at one moment.
 pub struct Sources<'a> {
@@ -157,9 +155,16 @@ impl Publisher {
         changed
     }
 
-    /// The displays the headset was told about.
-    pub fn listed(&self) -> impl Iterator<Item = DisplayId> + '_ {
-        self.sent.displays.iter().flat_map(|d| d.ids())
+    /// The displays the headset was told about that may stream to it: not those
+    /// failed (for it alone, larger than it decodes or beyond the streams it takes,
+    /// or for all).
+    pub fn streamable(&self) -> impl Iterator<Item = DisplayId> + '_ {
+        self.sent
+            .displays
+            .iter()
+            .flat_map(|d| &d.displays)
+            .filter(|d| !matches!(d.state, state::DisplayState::Failed { .. }))
+            .map(|d| d.id)
     }
 }
 
@@ -171,10 +176,7 @@ pub fn limits(prefs: &Prefs, headset: &HeadsetCaps, codec: Codec) -> Limits {
     let max = decoder.map_or(MAX_SIZE, |d| {
         (MAX_SIZE.0.min(d.max_w), MAX_SIZE.1.min(d.max_h))
     });
-    let streams = match headset.streams_max {
-        0 => STREAMS_MAX,
-        n => n.min(STREAMS_MAX),
-    };
+    let streams = u8::try_from(crate::displays::streams_max(headset)).unwrap_or(STREAMS_MAX);
     Limits {
         virtual_max: if prefs.no_limits {
             MONITORS_NO_LIMITS as u8

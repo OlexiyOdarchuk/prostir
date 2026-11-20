@@ -1057,7 +1057,8 @@ impl Displays {
     /// Every screen as the headset that can do what `headset` says is told about it
     /// (`Displays`): in the order of the rows, then those the rows leave out; window
     /// panels and the PC's own displays only for a headset that shows them; one
-    /// streaming larger than it decodes failed for it. Texts are cut to fit.
+    /// streaming larger than it decodes, or beyond the streams it takes at once,
+    /// failed for it. Texts are cut to fit.
     pub fn displays_part(&self, headset: &state::HeadsetCaps) -> state::Displays {
         use prostir_proto::state::{
             DeskRect, Display, DisplayKind, DisplayState, Mode, caps, clip,
@@ -1080,6 +1081,10 @@ impl Displays {
             ScreenKind::Window { .. } => headset.has(caps::headset::WINDOWS),
             ScreenKind::Physical { .. } => headset.has(caps::headset::PHYSICAL),
         };
+        // Streams this headset takes at once: those after it, in the order of the
+        // list, stand failed for it alone.
+        let streams_max = streams_max(headset);
+        let mut streams = 0;
         let displays = order
             .into_iter()
             .filter_map(|id| self.screens.get(&id))
@@ -1132,6 +1137,25 @@ impl Displays {
                         detail: clip(why, state::MAX_DETAIL),
                     },
                     (ScreenState::Absent, _) => DisplayState::Absent,
+                };
+                let streams_here = matches!(state, DisplayState::Running | DisplayState::Starting)
+                    && (!s.is_physical() || s.is_shown_physical());
+                let state = if streams_here && streams >= streams_max {
+                    let why = format!(
+                        "{}: {} ({streams_max})",
+                        s.name(),
+                        t(
+                            "більше потоків, ніж шолом бере",
+                            "more streams than the headset takes"
+                        )
+                    );
+                    DisplayState::Failed {
+                        error: state::ErrorCode::LIMIT,
+                        detail: clip(&why, state::MAX_DETAIL),
+                    }
+                } else {
+                    streams += usize::from(streams_here);
+                    state
                 };
                 Display {
                     id: s.id.wire(),
@@ -2225,6 +2249,17 @@ impl Displays {
             primary: self.primary,
         })
     }
+}
+
+/// Streams at once at most: a lane each (`2..32`).
+pub const STREAMS_MAX: u8 = 30;
+
+/// How many streams a headset that can do what `headset` says takes at once.
+pub fn streams_max(headset: &state::HeadsetCaps) -> usize {
+    usize::from(match headset.streams_max {
+        0 => STREAMS_MAX,
+        n => n.min(STREAMS_MAX),
+    })
 }
 
 /// Why display `name` does not stream to a headset: its picture of `w`x`h` is larger

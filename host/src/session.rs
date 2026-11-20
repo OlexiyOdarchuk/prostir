@@ -466,7 +466,7 @@ impl Session {
         // the snapshot, before anything of them could go.
         displays.stop_too_big();
         // The streams the snapshot listed may start (each starts over just below).
-        let listed = publisher.listed().map(ScreenId::from_wire).collect();
+        let listed = publisher.streamable().map(ScreenId::from_wire).collect();
         displays.router.publish(id, &listed);
         displays.headset_connected();
         let mut session = Session {
@@ -746,7 +746,11 @@ impl Session {
         for msg in self.publisher.changed(&sources) {
             self.outbox.control(msg);
         }
-        let listed = self.publisher.listed().map(ScreenId::from_wire).collect();
+        let listed = self
+            .publisher
+            .streamable()
+            .map(ScreenId::from_wire)
+            .collect();
         for id in displays.router.publish(self.id, &listed) {
             displays.fresh_picture(id);
         }

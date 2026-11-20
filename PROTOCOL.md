@@ -983,7 +983,11 @@ host) shows nothing of that display and goes on with the others.
 
 At most `Limits.streams_max` streams go at once (30 at most: a lane each; never more
 than the headset's `HeadsetCaps.streams_max`): a request that would make more displays
-stream (a monitor, a window panel, a display of the PC shown) fails `LIMIT`. A display
+stream (a monitor, a window panel, a display of the PC shown) fails `LIMIT`. Displays
+that stream beyond what a headset takes (more made by another headset, or kept from
+one that takes more) stand `Failed{LIMIT}` in that headset's `Displays`, in the order
+of the list, with no `StreamStart` for it; they stream to it once fewer are ahead of
+them. A display
 whose stream cannot start (its output or encoder fails) stands in `Displays` as
 `Failed`, without a `StreamStart`, keeps its place and is tried again; a display
 removed leaves `Displays`, and its `StreamEnd` and the `Displays` without it may come

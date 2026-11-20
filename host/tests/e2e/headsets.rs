@@ -351,3 +351,50 @@ fn a_headset_that_decodes_less_fails_only_for_itself() {
     assert!(!second.view().closed);
     assert!(second.view().streams.contains_key(&narrow));
 }
+
+/// A headset that takes one stream at once gets the first monitor and the second
+/// failed (`LIMIT`) for itself only, never started there; the other headset gets
+/// both. Once the first monitor is gone, the second streams to it too.
+#[test]
+fn a_headset_that_takes_fewer_streams_fails_only_for_itself() {
+    let (_dir, pc, mut a, mut b) = two_headsets("fewer-streams", Options::default(), "");
+    let mut first = showing(&pc, &mut a);
+    let [one, two] = first.view().order()[..] else {
+        panic!("two monitors")
+    };
+    let mut few = FakeHeadset::state();
+    few.caps.as_mut().unwrap().streams_max = 1;
+    let mut second = FakeHeadset::connect_saying(pc.addr, &mut b, &few)
+        .unwrap_or_else(|e| panic!("connecting: {e}"));
+    let limited = |v: &View| {
+        matches!(
+            v.display(two).map(|d| &d.state),
+            Some(DisplayState::Failed { error, .. }) if *error == ErrorCode::LIMIT
+        )
+    };
+    second
+        .wait(SOON, "the first monitor showing", |v| {
+            v.streams.get(&one).is_some_and(|s| s.has_picture())
+        })
+        .unwrap();
+    assert!(limited(second.view()), "{:?}", second.view().displays());
+    second.take_for(Duration::from_secs(1)).unwrap();
+    assert!(!second.view().streams.contains_key(&two), "never started");
+    first.take_for(Duration::from_millis(200)).unwrap();
+    assert!(first.view().all_monitors_show() && !limited(first.view()));
+    // One monitor fewer: the other one streams to it now.
+    assert_eq!(
+        first.ask(Request::RemoveDisplay { id: one }).unwrap(),
+        Outcome::Done
+    );
+    second
+        .wait(SOON, "the second monitor showing", |v| {
+            !limited(v) && v.streams.get(&two).is_some_and(|s| s.has_picture())
+        })
+        .unwrap();
+    assert!(
+        second.view().broken.is_empty(),
+        "{:?}",
+        second.view().broken
+    );
+}
