@@ -42,6 +42,10 @@ package() {
   install -Dm644 packaging/prostir.desktop "${pkgdir}/usr/share/applications/prostir.desktop"
   install -Dm644 packaging/io.github.OlexiyOdarchuk.Prostir.Settings.desktop "${pkgdir}/usr/share/applications/io.github.OlexiyOdarchuk.Prostir.Settings.desktop"
   install -Dm644 packaging/prostir.svg "${pkgdir}/usr/share/icons/hicolor/scalable/apps/prostir.svg"
+  # Installed, not enabled: "Start with the system" in the tray enables the socket.
+  install -Dm644 packaging/systemd/prostir.socket "${pkgdir}/usr/lib/systemd/user/prostir.socket"
+  install -Dm644 packaging/systemd/prostir.service "${pkgdir}/usr/lib/systemd/user/prostir.service"
+  install -Dm644 packaging/udev/70-prostir-quest.rules "${pkgdir}/usr/lib/udev/rules.d/70-prostir-quest.rules"
   install -Dm644 LICENSE-EXCEPTION.md "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE-EXCEPTION.md"
   install -Dm644 THIRD-PARTY-LICENSES.txt "${pkgdir}/usr/share/licenses/${pkgname}/THIRD-PARTY-LICENSES.txt"
   install -Dm644 README.md "${pkgdir}/usr/share/doc/${pkgname}/README.md"

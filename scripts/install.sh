@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Installs the Prostir PC program for the current user, without root:
-#   ~/.local/bin/prostir and prostir-settings, the icon and the application menu
-#   entries.
+#   ~/.local/bin/prostir and prostir-settings, the icon, the application menu
+#   entries and the systemd user units (installed, not enabled).
 #
 #   ./install.sh                       install (or update: run it again)
 #   ./install.sh --autostart           also start Prostir when you log in
@@ -39,6 +39,7 @@ DESKTOP="$DATA/applications/prostir.desktop"
 SETTINGS_ID="io.github.OlexiyOdarchuk.Prostir.Settings"
 SETTINGS_DESKTOP="$DATA/applications/$SETTINGS_ID.desktop"
 AUTOSTART="$CONFIG/autostart/prostir.desktop"
+UNITS="$DATA/systemd/user"
 DOCS="$DATA/doc/prostir"
 SETTINGS="$CONFIG/prostir"
 
@@ -46,6 +47,11 @@ refresh_menu() {
     if command -v update-desktop-database >/dev/null; then
         update-desktop-database "$DATA/applications" 2>/dev/null || true
     fi
+}
+
+# The user's systemd runs (its private socket is there).
+user_systemd() {
+    [[ -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/systemd/private" ]] && command -v systemctl >/dev/null
 }
 
 hyprland_lines() {
@@ -61,7 +67,12 @@ if (( uninstall )); then
     if pgrep -x -u "$(id -u)" prostir >/dev/null 2>&1; then
         echo "Note: Prostir is still running. Quit it from the tray; removing it does not stop it."
     fi
+    if user_systemd && [[ -f "$UNITS/prostir.socket" ]]; then
+        systemctl --user disable --now prostir.socket 2>/dev/null || true
+    fi
     rm -f "$BIN/prostir" "$BIN/prostir-settings" "$ICON" "$DESKTOP" "$SETTINGS_DESKTOP" "$AUTOSTART"
+    rm -f "$UNITS/prostir.socket" "$UNITS/prostir.service"
+    if user_systemd; then systemctl --user daemon-reload || true; fi
     rm -rf "$DOCS"
     refresh_menu
     echo ">> Prostir removed from $BIN, the application menu and autostart."
@@ -98,6 +109,13 @@ if [[ -x "$built/prostir-settings" ]]; then
     install -Dm644 "$assets/$SETTINGS_ID.desktop" "$SETTINGS_DESKTOP"
     sed -i "s|^Exec=.*|Exec=$BIN/prostir-settings|" "$SETTINGS_DESKTOP"
 fi
+# Archives made before Prostir could sleep until the headset comes have no units.
+if [[ -f "$assets/systemd/prostir.socket" ]]; then
+    install -Dm644 "$assets/systemd/prostir.socket" "$UNITS/prostir.socket"
+    install -Dm644 "$assets/systemd/prostir.service" "$UNITS/prostir.service"
+    sed -i "s|^ExecStart=.*|ExecStart=$BIN/prostir serve|" "$UNITS/prostir.service"
+    if user_systemd; then systemctl --user daemon-reload || true; fi
+fi
 for f in LICENSE LICENSE-EXCEPTION.md THIRD-PARTY-LICENSES.txt; do
     if [[ -f "$ROOT/$f" ]]; then install -Dm644 "$ROOT/$f" "$DOCS/$f"; fi
 done
@@ -115,11 +133,17 @@ if [[ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]]; then
     # Hyprland ignores XDG autostart files unless it runs under uwsm, so print the
     # config lines instead of writing one.
     hyprland_lines
+elif (( autostart )) && user_systemd && [[ -f "$UNITS/prostir.socket" ]]; then
+    # Nothing runs until the headset comes: systemd waits for it.
+    rm -f "$AUTOSTART"
+    systemctl --user enable prostir.socket
+    echo "   From the next login it starts when the headset comes. Turn that off in the tray: \"Start with the system\"."
 elif (( autostart )); then
     install -Dm644 "$DESKTOP" "$AUTOSTART"
+    sed -i "s|^Exec=.*|Exec=$BIN/prostir serve|" "$AUTOSTART"
     echo "X-KDE-autostart-phase=2" >> "$AUTOSTART"
     echo "   It starts when you log in. Turn that off in the tray: \"Start with the system\"."
-elif [[ -f "$AUTOSTART" ]]; then
+elif [[ -f "$AUTOSTART" ]] || { user_systemd && systemctl --user -q is-enabled prostir.socket 2>/dev/null; }; then
     echo "   It starts when you log in (tray: \"Start with the system\")."
 else
     echo "   To start it when you log in: tray menu, \"Start with the system\", or run this script with --autostart."

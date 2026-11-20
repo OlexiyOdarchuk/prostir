@@ -98,6 +98,8 @@ rustPlatform.buildRustPackage {
       (root + "/packaging/prostir.desktop")
       (root + "/packaging/io.github.OlexiyOdarchuk.Prostir.Settings.desktop")
       (root + "/packaging/prostir.svg")
+      (root + "/packaging/systemd")
+      (root + "/packaging/udev")
     ];
   };
 
@@ -131,6 +133,15 @@ rustPlatform.buildRustPackage {
     install -Dm644 packaging/prostir.svg $out/share/icons/hicolor/scalable/apps/prostir.svg
     install -Dm644 packaging/io.github.OlexiyOdarchuk.Prostir.Settings.desktop \
       $out/share/applications/io.github.OlexiyOdarchuk.Prostir.Settings.desktop
+    # Installed, not enabled: "Start with the system" in the tray enables the socket
+    # (on NixOS, `systemd.packages = [ prostir ];` makes the units known).
+    install -Dm644 packaging/systemd/prostir.socket $out/lib/systemd/user/prostir.socket
+    install -Dm644 packaging/systemd/prostir.service $out/lib/systemd/user/prostir.service
+    substituteInPlace $out/lib/systemd/user/prostir.service \
+      --replace-fail /usr/bin/prostir $out/bin/prostir
+    # A Quest plugged in starts it where the socket is on (`services.udev.packages`).
+    install -Dm644 packaging/udev/70-prostir-quest.rules \
+      $out/lib/udev/rules.d/70-prostir-quest.rules
     # PATH: "Start Prostir" runs the prostir next to it.
     wrapProgram $out/bin/prostir-settings \
       --prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath windowLibs}" \

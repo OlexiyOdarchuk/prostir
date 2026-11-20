@@ -1,0 +1,17 @@
+# Prostir waits for the headset here while nothing of it runs: a headset that
+# connects or asks for this PC starts prostir.service. Installed, not enabled:
+# "Start with the system" in Prostir's menu, or `prostir ctl autostart on`, enables it
+# (systemctl --user enable prostir.socket).
+[Unit]
+Description=Prostir: wait for the headset
+Documentation=https://prostir.ishawyha.dev
+
+[Socket]
+# Connections from the headset (Wi-Fi, or USB through adb reverse).
+ListenStream=0.0.0.0:47830
+# Headsets asking for this PC (discovery). Prostir lets only its queries in.
+ListenDatagram=0.0.0.0:47831
+Accept=no
+
+[Install]
+WantedBy=sockets.target

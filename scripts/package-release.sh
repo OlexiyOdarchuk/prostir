@@ -26,6 +26,7 @@ cp target/release/prostir target/release/prostir-settings "$DIST/$NAME/"
 strip --strip-debug "$DIST/$NAME/prostir" "$DIST/$NAME/prostir-settings"
 mkdir -p "$DIST/$NAME/packaging"
 cp packaging/prostir.svg packaging/prostir.desktop packaging/io.github.OlexiyOdarchuk.Prostir.Settings.desktop "$DIST/$NAME/packaging/"
+cp -r packaging/systemd packaging/udev "$DIST/$NAME/packaging/"
 cp scripts/install.sh LICENSE LICENSE-EXCEPTION.md build/THIRD-PARTY-LICENSES.txt \
     README.md README.uk.md CHANGELOG.md "$DIST/$NAME/"
 tar -C "$DIST" -czf "$DIST/$NAME.tar.gz" "$NAME"

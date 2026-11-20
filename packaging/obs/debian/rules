@@ -36,6 +36,10 @@ override_dh_auto_install:
 	install -Dm644 packaging/prostir.desktop debian/prostir/usr/share/applications/prostir.desktop
 	install -Dm644 packaging/io.github.OlexiyOdarchuk.Prostir.Settings.desktop debian/prostir/usr/share/applications/io.github.OlexiyOdarchuk.Prostir.Settings.desktop
 	install -Dm644 packaging/prostir.svg debian/prostir/usr/share/icons/hicolor/scalable/apps/prostir.svg
+	# Installed, not enabled: "Start with the system" in the tray enables the socket.
+	install -Dm644 packaging/systemd/prostir.socket debian/prostir/usr/lib/systemd/user/prostir.socket
+	install -Dm644 packaging/systemd/prostir.service debian/prostir/usr/lib/systemd/user/prostir.service
+	install -Dm644 packaging/udev/70-prostir-quest.rules debian/prostir/usr/lib/udev/rules.d/70-prostir-quest.rules
 	install -Dm644 LICENSE-EXCEPTION.md debian/prostir/usr/share/doc/prostir/LICENSE-EXCEPTION.md
 	install -Dm644 THIRD-PARTY-LICENSES.txt debian/prostir/usr/share/doc/prostir/THIRD-PARTY-LICENSES.txt
 
