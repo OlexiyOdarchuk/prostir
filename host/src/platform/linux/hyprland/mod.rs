@@ -13,7 +13,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -268,10 +268,24 @@ struct Rules {
     dialect: AtomicU8,
     /// Where real displays stood before Prostir moved them, to put them back after.
     original: Mutex<BTreeMap<String, (i32, i32)>>,
-    /// The event stream the reload watcher reads, closed when the desktop goes so the
-    /// watcher ends.
-    events: Mutex<Option<UnixStream>>,
+    /// The reload watcher's event stream, closed when the desktop goes so the watcher
+    /// ends.
+    watch: Mutex<Watch>,
 }
+
+/// The reload watcher, as [`Rules::stop_watching`] finds it.
+#[derive(Default)]
+struct Watch {
+    /// The event stream it reads now.
+    events: Option<UnixStream>,
+    /// The desktop is gone: the watcher keeps no stream and ends.
+    stopped: bool,
+}
+
+/// The rules of the Hyprland desktop connected now, for the clean-up when quitting
+/// hangs (see [`remove_leftovers`]), which runs on another thread while the desktop
+/// still exists. Weak: the desktop owns its rules.
+static LIVE: Mutex<Weak<Rules>> = Mutex::new(Weak::new());
 
 impl Rules {
     /// Applies monitor rules in one request and remembers them.
@@ -299,7 +313,14 @@ impl Rules {
                         let Some(alive) = rules.upgrade() else {
                             return;
                         };
-                        *alive.events.lock().unwrap() = stream.try_clone().ok();
+                        // Under the same lock as `stop_watching`: a desktop gone in
+                        // between is seen here, and the stream is not kept.
+                        let mut watch = alive.watch.lock().unwrap();
+                        if watch.stopped {
+                            return;
+                        }
+                        watch.events = stream.try_clone().ok();
+                        drop(watch);
                         drop(alive);
                         for line in BufReader::new(stream).lines() {
                             let Ok(line) = line else { break };
@@ -315,7 +336,10 @@ impl Rules {
                             }
                         }
                     }
-                    if rules.strong_count() == 0 {
+                    let stopped = rules
+                        .upgrade()
+                        .is_none_or(|alive| alive.watch.lock().unwrap().stopped);
+                    if stopped {
                         return;
                     }
                     std::thread::sleep(Duration::from_secs(2));
@@ -328,7 +352,9 @@ impl Rules {
 
     /// Ends the reload watcher: its event stream closes under it.
     fn stop_watching(&self) {
-        if let Some(stream) = self.events.lock().unwrap().take() {
+        let mut watch = self.watch.lock().unwrap();
+        watch.stopped = true;
+        if let Some(stream) = watch.events.take() {
             let _ = stream.shutdown(std::net::Shutdown::Both);
         }
     }
@@ -537,10 +563,13 @@ pub fn output_name(number: u32) -> String {
     format!("{PREFIX}{number}")
 }
 
-/// Removes the outputs a run that crashed left behind, before any desktop is
-/// connected (see `system::clean_up_after_crash`).
+/// Removes the outputs a run that crashed left behind (see
+/// `system::clean_up_after_crash`): at the start, before any desktop is connected, and
+/// when quitting hangs, with the rules of the desktop still connected, so the real
+/// displays it moved go back too.
 pub fn remove_leftovers() {
-    Rules::default().remove_leftovers();
+    let live = LIVE.lock().unwrap().upgrade();
+    live.unwrap_or_default().remove_leftovers();
 }
 
 /// Logical rectangle `(x, y, w, h)` of a rule.
@@ -598,6 +627,7 @@ impl Hyprland {
         let rules = Arc::new(Rules::default());
         rules.remove_leftovers();
         rules.keep_after_reloads();
+        *LIVE.lock().unwrap() = Arc::downgrade(&rules);
         Self {
             caps: DesktopCaps {
                 name: "Hyprland",
