@@ -14,54 +14,86 @@ use crate::{SOON, START, TWO_MONITORS, connect, session};
 /// How long an idle PC is watched for wakeups.
 const WATCH: Duration = Duration::from_secs(3);
 
-/// The PC app does not wake at all for `WATCH`: no thread goes to sleep and wakes
-/// again (a loop on a clock would, every time round).
-fn assert_asleep(pc: &Pc, when: &str) {
-    let before = pc.wakeups();
-    std::thread::sleep(WATCH);
-    let after = pc.wakeups();
-    let woke: BTreeMap<String, u64> = after
+/// How many times each thread woke between two looks, by name and id (those that did).
+fn woke(
+    before: &BTreeMap<u32, (String, u64)>,
+    after: &BTreeMap<u32, (String, u64)>,
+) -> BTreeMap<String, u64> {
+    after
         .iter()
         .map(|(tid, (name, n))| {
             let was = before.get(tid).map_or(0, |(_, n)| *n);
             (format!("{name} ({tid})"), n - was)
         })
         .filter(|(_, n)| *n > 0)
-        .collect();
-    let total: u64 = woke.values().sum();
-    // One at most, for a thread that was just about to sleep when watching began.
-    assert!(
-        total <= 1,
-        "{when}: woke {total} times in {WATCH:?}: {woke:?}"
-    );
+        .collect()
 }
 
-/// Waiting for a headset, the PC sleeps: before the first session, and after one once
-/// its monitors are gone.
+/// Waits until what a change of state set going is over (threads winding down after
+/// the monitors went, say): the same threads, none of them waking, for a second.
+fn settle(pc: &Pc, when: &str) {
+    let started = Instant::now();
+    loop {
+        let before = pc.wakeups();
+        std::thread::sleep(Duration::from_secs(1));
+        let after = pc.wakeups();
+        let same = before.keys().eq(after.keys());
+        let woke = woke(&before, &after);
+        if same && woke.is_empty() {
+            return;
+        }
+        assert!(
+            started.elapsed() < SOON,
+            "{when}: the PC app did not settle: {woke:?}, threads {:?} then {:?}",
+            before.values().map(|(n, _)| n).collect::<Vec<_>>(),
+            after.values().map(|(n, _)| n).collect::<Vec<_>>(),
+        );
+    }
+}
+
+/// Once settled, the PC app does not wake at all for `WATCH`: no thread goes to sleep
+/// and wakes again (a loop on a clock would, every time round), and no thread starts
+/// or ends (one started now and then to look would not show in the counts).
+fn assert_asleep(pc: &Pc, when: &str) {
+    settle(pc, when);
+    let before = pc.wakeups();
+    std::thread::sleep(WATCH);
+    let after = pc.wakeups();
+    assert!(
+        before.keys().eq(after.keys()),
+        "{when}: threads came or went in {WATCH:?}: {:?} then {:?}",
+        before.values().map(|(n, _)| n).collect::<Vec<_>>(),
+        after.values().map(|(n, _)| n).collect::<Vec<_>>(),
+    );
+    let woke = woke(&before, &after);
+    assert!(woke.is_empty(), "{when}: woke in {WATCH:?}: {woke:?}");
+}
+
+/// Waiting for a headset, the PC sleeps: before the first session, while it keeps
+/// the monitors for the headset to come back, and after that once they are gone.
 #[test]
 fn an_idle_pc_sleeps() {
+    const LINGER: u64 = 15;
     let dir = TestDir::new("idle");
     dir.save_monitors(TWO_MONITORS);
     let mut keys = dir.pair();
     let options = Options {
-        linger: 1,
+        linger: LINGER,
         ..Options::default()
     };
     let mut pc = Pc::start(&dir, &options);
-    // What the start does (the settings written, say) is over by then.
-    std::thread::sleep(Duration::from_millis(500));
     assert_asleep(&pc, "before the first headset");
     let mut headset = connect(&pc, &mut keys);
     headset
         .wait(START, "every monitor showing", View::all_monitors_show)
         .unwrap();
     headset.disconnect();
-    pc.wait_log(SOON, "keeping virtual monitors for 1 s");
+    pc.wait_log(SOON, &format!("keeping virtual monitors for {LINGER} s"));
+    assert_asleep(&pc, "keeping the monitors");
     pc.wait_log(
-        SOON,
+        Duration::from_secs(LINGER + 10),
         "the headset did not come back: removing virtual monitors",
     );
-    std::thread::sleep(Duration::from_millis(500));
     assert_asleep(&pc, "after a session");
     // And it still wakes for a headset.
     let mut again = connect(&pc, &mut keys);
