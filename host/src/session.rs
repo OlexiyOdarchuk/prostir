@@ -977,6 +977,11 @@ impl Session {
                 let id = ScreenId::from_wire(id);
                 if displays.router.is_current(self.id, id, generation) {
                     displays.keyframe_asked(id);
+                } else {
+                    info!(
+                        "{id}: a keyframe asked for {generation:?}, not the generation it \
+                         streams now: none made"
+                    );
                 }
             }
             ClientMsg::Request { req, asked } => {
