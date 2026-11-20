@@ -150,6 +150,9 @@ pub struct Physical {
     pub key: PhysicalKey,
     pub builtin: bool,
     pub shown: bool,
+    /// When it was last connected, in seconds since 1970 (0: not known): of those
+    /// not connected, the least recently seen are forgotten first.
+    pub seen: u64,
 }
 
 /// The set of virtual monitors, the PC's own displays it knows, and how the headset
@@ -360,7 +363,8 @@ fn seen_text(e: &Entry<ScreenId>) -> String {
 /// The laptop screen's number in version 1 of `screens.txt` (its `mirror` lines).
 pub const LEGACY_LAPTOP: u32 = 100;
 
-/// `ID [edid "TEXT"] connector NAME [builtin] [shown]`: a display of the PC itself.
+/// `ID [edid "TEXT"] connector NAME [builtin] [shown] [seen SECONDS]`: a display of
+/// the PC itself.
 fn parse_physical(rest: &str) -> Option<(ScreenId, Physical)> {
     let (id, rest) = rest.split_once(' ')?;
     let id = ScreenId::saved(id.parse().ok()?);
@@ -376,11 +380,12 @@ fn parse_physical(rest: &str) -> Option<(ScreenId, Physical)> {
         return None;
     }
     let connector = words.next()?.to_owned();
-    let (mut builtin, mut shown) = (false, false);
-    for w in words {
+    let (mut builtin, mut shown, mut seen) = (false, false, 0);
+    while let Some(w) = words.next() {
         match w {
             "builtin" => builtin = true,
             "shown" => shown = true,
+            "seen" => seen = words.next()?.parse().ok()?,
             _ => return None,
         }
     }
@@ -390,6 +395,7 @@ fn parse_physical(rest: &str) -> Option<(ScreenId, Physical)> {
             key: PhysicalKey { edid, connector },
             builtin,
             shown,
+            seen,
         },
     ))
 }
@@ -405,6 +411,9 @@ fn physical_text(id: ScreenId, p: &Physical) -> String {
     }
     if p.shown {
         text.push_str(" shown");
+    }
+    if p.seen > 0 {
+        text.push_str(&format!(" seen {}", p.seen));
     }
     text.push('\n');
     text
@@ -996,6 +1005,7 @@ mod tests {
                 },
                 builtin: true,
                 shown: true,
+                seen: 1_795_000_000,
             },
         );
         set.physical.insert(
@@ -1007,6 +1017,7 @@ mod tests {
                 },
                 builtin: false,
                 shown: false,
+                seen: 0,
             },
         );
         set.rows.push(vec![Entry {
@@ -1018,9 +1029,9 @@ mod tests {
         let text = screens_text(&set, &kept, 133);
         assert!(text.contains("next 133\n"), "{text}");
         assert!(text.contains("screen 1 1440x2560@1.25 at 720 -40 primary\n"));
-        assert!(
-            text.contains("physical 100 edid \"BOE 0x0a1c 0\" connector eDP-1 builtin shown\n")
-        );
+        assert!(text.contains(
+            "physical 100 edid \"BOE 0x0a1c 0\" connector eDP-1 builtin shown seen 1795000000\n"
+        ));
         assert!(text.contains("physical 117 connector HDMI-A-1\n"));
         assert!(text.contains("place 100 at next 2200\n"));
         assert_eq!(parse_screens(&text), (set, kept, Some(133)));

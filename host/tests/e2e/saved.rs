@@ -312,7 +312,7 @@ fn a_display_of_the_pc_comes_back_with_its_number() {
                 && v.streams.get(&hdmi).is_some_and(|s| s.has_picture())
         })
         .unwrap();
-    // Kept with its numbers for the next run.
+    // Kept with its numbers, and when each was seen, for the next run.
     headset.take_for(Duration::from_millis(500)).unwrap();
     headset.disconnect();
     pc.quit();
@@ -323,7 +323,7 @@ fn a_display_of_the_pc_comes_back_with_its_number() {
     );
     assert!(
         screens.contains(&format!(
-            "physical {} edid \"BOE 0x0a1c 0\" connector eDP-1 builtin\n",
+            "physical {} edid \"BOE 0x0a1c 0\" connector eDP-1 builtin seen ",
             laptop.0
         )),
         "{screens}"

@@ -59,7 +59,8 @@
   of its own: it is recognised by its make and model, keeps its own place in the
   headset, and comes back there after the lid was closed or the cable pulled out.
   Another monitor plugged into the same connector gets a place of its own instead of
-  taking the old one's. A profile can show or hide each of them, and make one of them
+  taking the old one's. The eight seen last are remembered while not connected; older
+  ones are forgotten, so a laptop that met many projectors does not gather them. A profile can show or hide each of them, and make one of them
   the primary display.
 - A display keeps its number for good: a removed monitor's number is never given to
   another one, so after a restart or a change of monitors nothing lands in another

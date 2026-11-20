@@ -852,12 +852,15 @@ arranged (top to bottom, left to right), then those the rows leave out (window p
 displays of the PC that are hidden or absent). It is the one source of which displays
 exist. Within a session, a display leaves the headset only when it leaves this list;
 a reconnect or a `Snapshot` never removes a place (numbers are not reused, so an old
-place is in nobody's way), and a display of the PC is never removed at all (it becomes
-`Absent`).
+place is in nobody's way), and a display of the PC that is not connected stays as
+`Absent`. The host keeps the 8 of those seen most recently (implementation-defined); an
+older one leaves the list for good. `Displays` never holds more than 32: should there be
+more, absent displays of the PC are left out first.
 
 A display of the PC keeps its number by its EDID (make and model as the desktop says
 them), else by its connector: another screen in the same connector gets a new number
-and a new place.
+and a new place. One known by its connector that says its EDID later keeps its number,
+and is known by the EDID from then on.
 
 ### Requests
 

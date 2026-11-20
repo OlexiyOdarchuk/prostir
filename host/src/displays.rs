@@ -36,6 +36,16 @@ pub const MONITORS_MAX: usize = 6;
 pub const MONITORS_NO_LIMITS: usize = 10;
 /// Window panels at once: the headset has only so many video decoders.
 pub const WINDOWS_MAX: usize = 3;
+/// Displays of the PC kept while not connected: beyond these, the least recently seen
+/// are forgotten (a laptop that met many projectors would gather them for ever).
+pub const ABSENT_KEPT: usize = 8;
+
+/// Now, in seconds since 1970, for when a display of the PC was last seen.
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
 
 /// Retry timing after failures: 2 s, then doubling up to 2 min.
 #[derive(Default)]
@@ -549,6 +559,9 @@ pub struct Displays {
     layout_retry: (Instant, u32),
     /// When the PC's own displays are looked at next (see `sync_physical`).
     physical_due: Instant,
+    /// When each display of the PC was last connected, in seconds since 1970 (0: not
+    /// known), to forget the least recently seen of those not connected.
+    physical_seen: BTreeMap<ScreenId, u64>,
     /// When a headset last asked for a keyframe of each screen.
     keyframes_asked: BTreeMap<ScreenId, Instant>,
     /// The settings as last applied from the store (see [`Displays::apply`]).
@@ -608,6 +621,7 @@ impl Displays {
             layout_waits: false,
             layout_retry: (Instant::now(), 0),
             physical_due: Instant::now(),
+            physical_seen: set.physical.iter().map(|(id, p)| (*id, p.seen)).collect(),
             keyframes_asked: BTreeMap::new(),
             settings: settings.clone(),
             audio: None,
@@ -1087,10 +1101,18 @@ impl Displays {
             present.push(id);
             if let Some(s) = self.screens.get_mut(&id)
                 && let ScreenKind::Physical { key, .. } = &mut s.kind
-                && key.connector != display.connector
             {
-                info!("{id} is on {} now", display.connector);
-                key.connector = display.connector.clone();
+                if key.connector != display.connector {
+                    info!("{id} is on {} now", display.connector);
+                    key.connector = display.connector.clone();
+                }
+                // Known by its connector until now: by its EDID from now on.
+                if key.edid.is_none()
+                    && let Some(edid) = unique_edid(display, &seen)
+                {
+                    info!("{id} says it is {edid}");
+                    key.edid = Some(edid.to_owned());
+                }
             }
         }
         let ids: Vec<ScreenId> = self.physical().map(|s| s.id).collect();
@@ -1102,6 +1124,9 @@ impl Displays {
                 continue;
             };
             let streaming = s.output.is_some();
+            if here == matches!(s.state, ScreenState::Absent) {
+                self.physical_seen.insert(id, now_secs());
+            }
             if !here {
                 if !matches!(s.state, ScreenState::Absent) {
                     info!("{} is not connected", s.name());
@@ -1128,12 +1153,32 @@ impl Displays {
                 changed = true;
             }
         }
+        changed |= self.forget_long_absent();
         if seen.is_empty() && self.physical().any(Screen::is_shown_physical) {
             self.desktop.wake_physical_display();
         }
         if changed {
             self.layout_changed();
         }
+    }
+
+    /// Forgets the displays of the PC not connected beyond [`ABSENT_KEPT`], the least
+    /// recently seen first: they leave the list, the rows and the saved set. Whether
+    /// any was forgotten.
+    fn forget_long_absent(&mut self) -> bool {
+        let absent: Vec<(ScreenId, u64)> = self
+            .physical()
+            .filter(|s| matches!(s.state, ScreenState::Absent))
+            .map(|s| (s.id, self.physical_seen.get(&s.id).copied().unwrap_or(0)))
+            .collect();
+        let gone = least_recently_seen(absent, ABSENT_KEPT);
+        for id in &gone {
+            info!("forgetting {id}, not connected for the longest");
+            self.screens.remove(id);
+            self.physical_seen.remove(id);
+            self.forget(*id);
+        }
+        !gone.is_empty()
     }
 
     /// A display of the PC seen for the first time: a new number (the laptop screen of
@@ -1168,6 +1213,7 @@ impl Displays {
             connector: display.connector.clone(),
         };
         let shown = is_default && self.settings.mirror;
+        self.physical_seen.insert(id, now_secs());
         info!(
             "{} is {id} ({}), {}",
             display.connector,
@@ -1443,6 +1489,7 @@ impl Displays {
                 }
             })
             .collect::<Vec<_>>();
+        let displays = within_limit(displays);
         let primary = self
             .primary
             .map(ScreenId::wire)
@@ -2415,6 +2462,7 @@ impl Displays {
                         key: key.clone(),
                         builtin: *builtin,
                         shown: *shown,
+                        seen: self.physical_seen.get(&s.id).copied().unwrap_or(0),
                     },
                 )),
                 _ => None,
@@ -2464,23 +2512,67 @@ fn match_physical(
     let mut taken: Vec<ScreenId> = Vec::new();
     seen.iter()
         .map(|d| {
-            let unique = d
-                .edid
-                .as_ref()
-                .filter(|e| seen.iter().filter(|o| o.edid.as_ref() == Some(*e)).count() == 1);
-            let found = known.iter().find(|(id, key)| {
-                !taken.contains(id)
-                    && match (unique, &key.edid) {
-                        (Some(edid), Some(k)) => edid == k,
-                        (None, None) => key.connector == d.connector,
-                        _ => false,
-                    }
-            });
+            let unique = unique_edid(d, seen);
+            let free = |id: &ScreenId| !taken.contains(id);
+            // By its EDID; else by its connector, one known without an EDID (which
+            // may say its EDID only now).
+            let found = known
+                .iter()
+                .find(|(id, key)| free(id) && unique.is_some() && key.edid.as_deref() == unique)
+                .or_else(|| {
+                    known.iter().find(|(id, key)| {
+                        free(id) && key.edid.is_none() && key.connector == d.connector
+                    })
+                });
             let id = found.map(|(id, _)| *id);
             taken.extend(id);
             id
         })
         .collect()
+}
+
+/// The EDID display `d` says, where no other connected display says the same.
+fn unique_edid<'a>(d: &'a PhysicalDisplay, seen: &[PhysicalDisplay]) -> Option<&'a str> {
+    d.edid.as_deref().filter(|e| {
+        seen.iter()
+            .filter(|o| o.edid.as_deref() == Some(*e))
+            .count()
+            == 1
+    })
+}
+
+/// Of the displays not connected (`absent`, each with when it was last seen), those
+/// beyond the `keep` most recently seen.
+fn least_recently_seen(mut absent: Vec<(ScreenId, u64)>, keep: usize) -> Vec<ScreenId> {
+    // The most recent first; of the same moment, the newer number.
+    absent.sort_by(|a, b| b.1.cmp(&a.1).then(b.0.cmp(&a.0)));
+    absent.into_iter().skip(keep).map(|(id, _)| id).collect()
+}
+
+/// `Displays` holds at most `MAX_DISPLAYS`: beyond that, displays of the PC that are
+/// not connected go first (from the end), then the last ones, with a warning. Never
+/// more than that, so the part always goes out.
+fn within_limit(mut displays: Vec<state::Display>) -> Vec<state::Display> {
+    let max = state::MAX_DISPLAYS;
+    if displays.len() <= max {
+        return displays;
+    }
+    warn!(
+        "{} displays, the headset is told about {max}: absent ones of the PC left out first",
+        displays.len()
+    );
+    while displays.len() > max {
+        match displays
+            .iter()
+            .rposition(|d| matches!(d.state, state::DisplayState::Absent))
+        {
+            Some(i) => {
+                displays.remove(i);
+            }
+            None => displays.truncate(max),
+        }
+    }
+    displays
 }
 
 /// An output on the desktop: a screen, or another real display.
@@ -2787,6 +2879,60 @@ mod tests {
         // Each known display matches once.
         let two_on_dp2 = [display("DP-2", None), display("DP-2", None)];
         assert_eq!(match_physical(&known, &two_on_dp2), [Some(id(102)), None]);
+        // The one known by its connector says its EDID now: still that one (and
+        // `sync_physical` keeps the EDID from now on).
+        let says = [display("DP-2", Some("SAM 9"))];
+        assert_eq!(match_physical(&known, &says), [Some(id(102))]);
+        assert_eq!(unique_edid(&says[0], &says), Some("SAM 9"));
+    }
+
+    /// Of the displays of the PC not connected, the 8 seen last stay; the others
+    /// (the oldest, and those never dated) are forgotten.
+    #[test]
+    fn displays_of_the_pc_long_absent_are_forgotten() {
+        let id = ScreenId::saved;
+        let absent: Vec<(ScreenId, u64)> =
+            (0..12).map(|n| (id(100 + n), 1000 + n as u64)).collect();
+        let mut gone = least_recently_seen(absent.clone(), ABSENT_KEPT);
+        gone.sort();
+        assert_eq!(gone, [id(100), id(101), id(102), id(103)]);
+        assert!(least_recently_seen(absent[..8].to_vec(), ABSENT_KEPT).is_empty());
+        let undated = vec![(id(1), 0), (id(2), 5)];
+        assert_eq!(least_recently_seen(undated, 1), [id(1)]);
+    }
+
+    /// `Displays` never holds more than it may: absent displays of the PC are left out
+    /// first, so the part always goes out (it failed to encode before, ending every
+    /// session).
+    #[test]
+    fn the_list_of_displays_always_fits() {
+        use prostir_proto::state::{Display, DisplayKind, DisplayState, Mode};
+        let display = |n: u32, state: DisplayState| Display {
+            id: state::DisplayId(n),
+            kind: DisplayKind::Virtual,
+            name: format!("Prostir-{n}"),
+            mode: Mode::new(640, 360),
+            desk: None,
+            state,
+        };
+        let mut list: Vec<Display> = (0..10).map(|n| display(n, DisplayState::Running)).collect();
+        list.extend((10..40).map(|n| display(n, DisplayState::Absent)));
+        let kept = within_limit(list);
+        assert_eq!(kept.len(), state::MAX_DISPLAYS);
+        assert_eq!(
+            kept.iter()
+                .filter(|d| d.state == DisplayState::Running)
+                .count(),
+            10,
+            "every running one stays"
+        );
+        let part = state::Displays {
+            displays: kept,
+            primary: None,
+        };
+        assert!(prostir_proto::wire::encode(&part).is_ok());
+        let many: Vec<Display> = (0..40).map(|n| display(n, DisplayState::Running)).collect();
+        assert_eq!(within_limit(many).len(), state::MAX_DISPLAYS);
     }
 
     /// The headset's plan read back from `SetLayout` is recognised as its plan,
