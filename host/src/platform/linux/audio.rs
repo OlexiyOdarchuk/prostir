@@ -200,6 +200,11 @@ impl SinkVolume {
     pub fn changed(&self) -> Option<(u8, bool, std::time::Instant)> {
         None
     }
+
+    /// Where the device is now, if known.
+    pub fn level(&self) -> Option<(u8, bool)> {
+        None
+    }
 }
 
 pub struct MicIn {

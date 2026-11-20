@@ -7,10 +7,12 @@ use std::time::Duration;
 
 use prostir_proto::request::{Outcome, Request};
 use prostir_proto::state::{
-    Decoder, DisplayState, ErrorCode, MicDevice, Mode, Placed, Row, UpKind, perms, role,
+    Decoder, DisplayState, ErrorCode, MicDevice, Mode, Placed, Row, UpKind, UpState, permission,
+    perms, role,
 };
+use prostir_proto::volume::HeadsetVolume;
 use prostir_proto::{ClientMsg, Codec, PcGoodbye};
-use prostir_testkit::{ConnectError, FakeHeadset, Keys, View};
+use prostir_testkit::{ConnectError, FIRST_VOLUME, FakeHeadset, Keys, View};
 
 use crate::pc::{Options, Pc, TestDir};
 use crate::{SOON, START, connect, worn};
@@ -585,4 +587,111 @@ fn a_headset_coming_starts_no_stream_over_for_the_other() {
     first.take_for(Duration::from_millis(500)).unwrap();
     assert_eq!(pc.source_starts(), before, "no stream started over");
     assert!(first.view().broken.is_empty(), "{:?}", first.view().broken);
+}
+
+/// The headset that becomes the main one, or connects while another listens, does
+/// not move the PC's volume to its own level: it is asked to take the PC's.
+#[test]
+fn a_new_main_headset_takes_the_pc_volume() {
+    let (_dir, mut pc, mut a, mut b) = two_headsets("volume-stays", Options::default(), "");
+    let first = showing(&pc, &mut a);
+    pc.wait_log(SOON, &format!("fake desktop: volume set to {FIRST_VOLUME}"));
+    let mut loud = FakeHeadset::state();
+    loud.volume = Some(HeadsetVolume::new(90, false).now());
+    let mut second = FakeHeadset::connect_saying(pc.addr, &mut b, &loud)
+        .unwrap_or_else(|e| panic!("connecting: {e}"));
+    second
+        .wait(START, "every monitor showing", View::all_monitors_show)
+        .unwrap();
+    first.disconnect();
+    second
+        .wait(SOON, "the main one now", |v| {
+            v.pc.access.is_some_and(|a| a.is_main())
+        })
+        .unwrap();
+    second
+        .wait(SOON, "asked for the PC's level", |v| {
+            v.volume_asks.iter().any(|a| a.level == FIRST_VOLUME)
+        })
+        .unwrap();
+    assert_eq!(pc.count_log("fake desktop: volume set to 90"), 0, "no jump");
+}
+
+/// A monitor added while a headset that decodes less is there is never running for
+/// it before its size is known: starting, then failed (`BAD_SIZE`).
+#[test]
+fn a_monitor_too_big_for_a_headset_is_never_running_for_it() {
+    let (_dir, pc, mut a, mut b) = two_headsets("pending-size", Options::default(), "");
+    let mut first = showing(&pc, &mut a);
+    let mut small = FakeHeadset::state();
+    small.caps.as_mut().unwrap().decoders = vec![Decoder {
+        codec: 0,
+        max_w: 700,
+        max_h: 4096,
+    }];
+    let mut second = FakeHeadset::connect_saying(pc.addr, &mut b, &small)
+        .unwrap_or_else(|e| panic!("connecting: {e}"));
+    second
+        .wait(START, "every monitor showing", View::all_monitors_show)
+        .unwrap();
+    let added = first
+        .ask(Request::AddDisplay {
+            mode: Mode::new(800, 450),
+        })
+        .unwrap();
+    let Outcome::Added { id } = added else {
+        panic!("{added:?}")
+    };
+    second
+        .wait(SOON, "the new monitor failed for it", |v| {
+            matches!(
+                v.display(id).map(|d| &d.state),
+                Some(DisplayState::Failed { error, .. }) if *error == ErrorCode::BAD_SIZE
+            )
+        })
+        .unwrap();
+    let states: Vec<_> = second
+        .view()
+        .states
+        .iter()
+        .filter(|(d, _)| *d == id)
+        .collect();
+    assert!(
+        states.iter().all(|(_, s)| *s != DisplayState::Running),
+        "{states:?}"
+    );
+    first
+        .wait(SOON, "the new monitor showing", |v| {
+            v.streams.get(&id).is_some_and(|s| s.has_picture())
+        })
+        .unwrap();
+}
+
+/// The tray says the microphone has no permission for the headset whose microphone
+/// the PC takes (a guest here, the main headset having no right to it), and counts
+/// the other headset.
+#[test]
+fn the_tray_shows_the_microphone_the_pc_takes() {
+    let (_dir, mut pc, mut a, mut b) = two_headsets(
+        "tray-mic",
+        Options::default(),
+        "access {first} guest mic\naccess {second} main input changes\n",
+    );
+    let mut guest = showing(&pc, &mut a);
+    let main = showing(&pc, &mut b);
+    assert!(main.view().pc.access.unwrap().is_main());
+    pc.wait_log(
+        SOON,
+        "fake tray: 1 other headset(s), microphone denied: false",
+    );
+    let denied = UpState {
+        kind: UpKind::Mic,
+        switch: true,
+        permission: permission::DENIED,
+    };
+    guest.send(&ClientMsg::UpState { part: denied }).unwrap();
+    pc.wait_log(
+        SOON,
+        "fake tray: 1 other headset(s), microphone denied: true",
+    );
 }

@@ -1116,6 +1116,7 @@ impl Displays {
         // list, stand failed for it alone.
         let streams_max = streams_max(headset);
         let mut streams = 0;
+        let several = self.router.receivers() > 1;
         let displays = order
             .into_iter()
             .filter_map(|id| self.screens.get(&id))
@@ -1156,12 +1157,20 @@ impl Displays {
                     .router
                     .stream_format(s.id)
                     .filter(|((w, h), codec)| !headset.fits(*codec, *w, *h));
+                // Its size not known yet: starting still for a headset it might not fit
+                // (as made, larger than it decodes; a display of the PC, as large as
+                // it is, while several headsets watch).
+                let pending = self.router.stream_format(s.id).is_none()
+                    && s.kind.spec().map_or(several, |m| {
+                        !headset.fits(self.cfg.codec, m.width, m.height)
+                    });
                 let state = match (&s.state, too_big) {
                     (ScreenState::Running, Some((size, codec))) => DisplayState::Failed {
                         error: state::ErrorCode::BAD_SIZE,
                         detail: clip(&too_big_why(&s.name(), size, codec), state::MAX_DETAIL),
                     },
                     (ScreenState::Starting, _) => DisplayState::Starting,
+                    (ScreenState::Running, None) if pending => DisplayState::Starting,
                     (ScreenState::Running, None) => DisplayState::Running,
                     (ScreenState::Failed { error, why }, _) => DisplayState::Failed {
                         error: *error,

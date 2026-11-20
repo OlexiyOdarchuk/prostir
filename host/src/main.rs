@@ -464,15 +464,19 @@ impl Brain {
     }
 
     /// Shows the state in the tray: of the headsets, the session the tray follows
-    /// (the main one, else the first), with its microphone as the PC takes it, and
-    /// how many others there are.
+    /// (the main one, else the first), the microphone of the one the PC takes it from,
+    /// and how many others there are.
     fn show(&mut self) {
-        let lead = self
-            .roles
-            .lead
-            .and_then(|key| self.sessions.get(&key))
-            .map(Session::tray_line)
-            .unwrap_or_default();
+        let line = |key: Option<[u8; 32]>| {
+            key.and_then(|key| self.sessions.get(&key))
+                .map(Session::tray_line)
+                .unwrap_or_default()
+        };
+        // The microphone as the headset whose microphone the PC takes has it.
+        let lead = TrayLine {
+            mic_denied: line(self.roles.mic).mic_denied,
+            ..line(self.roles.lead)
+        };
         let others = self.sessions.len().saturating_sub(1);
         self.control
             .show(self.displays.as_ref(), &self.store, &lead, others);

@@ -498,9 +498,12 @@ impl Session {
         if session.publisher.caps().has(caps::headset::VOLUME) {
             session.volume = sink.map(|sink| (sink, PcVolume::default()));
         }
+        // The first headset brings its level to the PC; one that comes while others
+        // listen takes the PC's instead, so their sound does not jump.
         let opened_with = session.publisher.headset.volume;
-        if let Some(v) = opened_with {
-            session.volume_from_headset(v);
+        match opened_with {
+            Some(v) if others.is_empty() => session.volume_from_headset(v),
+            _ => session.take_pc_volume(),
         }
         session.headset_changed(displays);
         session.publish(displays, store, None);
@@ -595,8 +598,20 @@ impl Session {
         self.volume = sink
             .filter(|_| self.publisher.caps().has(caps::headset::VOLUME))
             .map(|sink| (sink, PcVolume::default()));
-        if let Some(v) = self.publisher.headset.volume {
-            self.volume_from_headset(v);
+        // The PC's sound does not jump to this headset's level: the headset is asked
+        // to take the PC's.
+        self.take_pc_volume();
+    }
+
+    /// The headset is asked to take the level the PC's device has now, where the PC
+    /// knows it (the device does not move).
+    fn take_pc_volume(&mut self) {
+        let Some((sink, pc)) = &mut self.volume else {
+            return;
+        };
+        if let Some((level, muted)) = sink.level() {
+            let act = pc.device(level, muted, Instant::now());
+            do_volume(sink, act, &self.outbox);
         }
     }
 

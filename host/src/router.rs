@@ -356,6 +356,11 @@ impl Router {
             .any(|r| r.headset.fits(codec, w, h))
     }
 
+    /// How many headsets have a session.
+    pub fn receivers(&self) -> usize {
+        self.inner.lock().unwrap().receivers.len()
+    }
+
     /// What the headset of every session decodes.
     pub fn headsets(&self) -> Vec<state::HeadsetCaps> {
         let inner = self.inner.lock().unwrap();

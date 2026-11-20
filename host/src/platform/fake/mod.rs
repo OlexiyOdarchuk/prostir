@@ -300,6 +300,9 @@ pub mod audio {
     pub static VOLUME: std::sync::Mutex<Option<std::sync::mpsc::Sender<(u8, bool, Instant)>>> =
         std::sync::Mutex::new(None);
 
+    /// Where the fake device is now, once something set or moved it.
+    pub static LEVEL: std::sync::Mutex<Option<(u8, bool)>> = std::sync::Mutex::new(None);
+
     impl SinkVolume {
         pub fn open() -> Option<Self> {
             let (tx, changes) = std::sync::mpsc::channel();
@@ -308,6 +311,7 @@ pub mod audio {
         }
 
         pub fn set(&self, level: u8, muted: bool) {
+            *LEVEL.lock().unwrap() = Some((level, muted));
             log::info!(
                 "fake desktop: volume set to {level}{}",
                 if muted { " muted" } else { "" }
@@ -320,6 +324,11 @@ pub mod audio {
 
         pub fn changed(&self) -> Option<(u8, bool, Instant)> {
             self.changes.try_recv().ok()
+        }
+
+        /// Where the device is now, if known.
+        pub fn level(&self) -> Option<(u8, bool)> {
+            *LEVEL.lock().unwrap()
         }
     }
 }
@@ -393,7 +402,14 @@ pub mod tray {
         .then_some(Handle)
     }
 
-    pub fn set_status(_handle: Option<&Handle>, _status: TrayStatus) {}
+    /// What the tray would show, in the log for the tests.
+    pub fn set_status(_handle: Option<&Handle>, status: TrayStatus) {
+        log::info!(
+            "fake tray: {} other headset(s), microphone denied: {}",
+            status.others,
+            status.mic_denied
+        );
+    }
 
     pub fn set_battery(_handle: Option<&Handle>, _battery: Option<(u8, bool)>) {}
 
