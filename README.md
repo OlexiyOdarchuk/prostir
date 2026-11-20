@@ -87,9 +87,10 @@ down, with flat or curved monitors. Around you, the monitors never overlap howev
 there are: when a row would reach behind your back (past 210 degrees), the circle grows
 a little, and past 1.5 m a second row starts above the main one, then a third. From
 there, grab any monitor and put it where you like: the layout is only applied when you
-pick it (or on the very first start). A new monitor takes a free place next to the
-others, at the end of a row or over or under one, nearest to where you look, and nothing
-else moves; a removed one leaves the others where they are. Let go of one almost
+pick it (or on the very first start). A new monitor takes a free place at the end of a
+row, beside the others: of the longest row with room, at the end nearer to where you
+look; over or under the rows only when no row has room. Nothing else moves; a removed
+one leaves the others where they are. Let go of one almost
 against another, at about the same distance, and it sticks to it edge to edge; while
 you drag, the edge it will stick to lights up (Monitors → Stick together). The A button
 (Line up) takes the crookedness out of your own arrangement without rebuilding it: a

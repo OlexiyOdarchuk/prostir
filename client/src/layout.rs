@@ -601,9 +601,9 @@ pub fn line_up(
 }
 
 /// Where a new monitor `new` (id, pixel size) goes next to the placed ones of
-/// `monitors`, which do not move: at the end of a row, or over the top row or under
-/// the bottom one, nearest the gaze (a direction in the room), covering nothing (see
-/// `prostir_layout::place`). The first one goes straight ahead on a circle of
+/// `monitors`, which do not move: at the end of the longest row with room, the end
+/// nearest the gaze (a direction in the room); over the top row or under the bottom
+/// one only when no row has room; covering nothing (see `prostir_layout::place`). The first one goes straight ahead on a circle of
 /// `radius`. `previous`: the rows the PC has.
 #[allow(clippy::too_many_arguments)]
 pub fn place_new(
@@ -1703,13 +1703,13 @@ mod tests {
             let id = of[of.len() - 1];
             place_new(p, of, id, center, Preset::Arc, gaze, &[], RADIUS)
         };
-        // Two side by side, two more put over them.
+        // Two side by side, two more put over them by hand.
         let mut p = arrange(Preset::Arc, &m[..2], Some(0), None, None);
-        let up = Vec3::new(0.0, 1.0, -1.0).normalize();
-        p.insert(2, new(&p, &m[..3], up));
-        // Looking right of that one.
-        let right = Quat::from_rotation_y(-0.7) * p[&2].position.normalize();
-        p.insert(3, new(&p, four, right));
+        p.extend(raised(
+            &arrange(Preset::Arc, &m[2..4], None, None, None),
+            &p,
+            &m,
+        ));
         let p = line_up(&p, four, center, Preset::Arc, Some(0), &[], None);
         let desktop = desktop_of(&p, four, Preset::Arc, Some(0));
         assert_eq!(desktop.rows.len(), 2, "{:?}", desktop.rows);
@@ -1772,6 +1772,112 @@ mod tests {
             .zip(text[0].places.clone())
             .collect();
         same(&back, "profile and back");
+    }
+
+    /// `top`, moved up as a whole to stand over `below` with a hand's gap.
+    fn raised(
+        top: &HashMap<ScreenId, Placement>,
+        below: &HashMap<ScreenId, Placement>,
+        m: &[(ScreenId, u32, u32)],
+    ) -> HashMap<ScreenId, Placement> {
+        let height = |p: &HashMap<ScreenId, Placement>, id: ScreenId| {
+            let (_, w, h) = m.iter().find(|x| x.0 == id).copied().unwrap();
+            p[&id].width * h as f32 / w as f32
+        };
+        let tallest = |p: &HashMap<ScreenId, Placement>| {
+            p.keys().map(|id| height(p, *id)).fold(0.0f32, f32::max)
+        };
+        let lift = (tallest(top) + tallest(below)) / 2.0 + 0.05;
+        let mut out = top.clone();
+        for id in top.keys() {
+            out = moved(&out, *id, 0.0, lift);
+        }
+        out
+    }
+
+    /// Rows of `p` as the PC gets them, and the row that holds `id`.
+    fn row_of(rows: &[Vec<ScreenId>], id: ScreenId) -> usize {
+        rows.iter().position(|r| r.contains(&id)).unwrap()
+    }
+
+    /// 2026-11-20, the owner's report: a new monitor went into a row of its own over
+    /// the others, and the next one over that. Four monitors in two rows and the
+    /// laptop's panel under them: whether the user looks at the menu, at a monitor or
+    /// up, a new one joins a row, beside the others.
+    #[test]
+    fn a_new_monitor_joins_a_row() {
+        let center = (Vec3::ZERO, 0.0);
+        let m = [
+            (3, 2560, 1440),
+            (1, 2560, 1440),
+            (100, 2880, 1800),
+            (0, 2560, 1440),
+            (2, 2560, 1440),
+            (104, 2560, 1440),
+        ];
+        let mut p = arrange(Preset::Arc, &m[..2], Some(1), Some(m[2]), None);
+        p.extend(raised(
+            &arrange(Preset::Arc, &m[3..5], None, None, None),
+            &p,
+            &m,
+        ));
+        let rows = desktop_of(&p, &m[..5], Preset::Arc, Some(1)).rows;
+        assert!(!covered(&p, &m[..5]));
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        for gaze in [
+            Vec3::new(0.0, -0.5, -1.0).normalize(),
+            p[&0].position.normalize(),
+            (p[&2].position + Vec3::Y).normalize(),
+            Vec3::Y,
+        ] {
+            let mut with = p.clone();
+            with.insert(
+                104,
+                place_new(&p, &m, m[5], center, Preset::Arc, gaze, &rows, RADIUS),
+            );
+            assert!(!covered(&with, &m), "it covers nothing");
+            let after = desktop_of(&with, &m, Preset::Arc, Some(1)).rows;
+            assert_eq!(after.len(), rows.len(), "no new row: {after:?}");
+            let row = &after[row_of(&after, 104)];
+            assert_eq!(row.len(), 3, "beside two others: {after:?}");
+        }
+    }
+
+    /// Three big monitors fill the row around the user (210 degrees) with the laptop's
+    /// panel under them: a new one has room only over them, and the one after it
+    /// joins it there instead of starting yet another row.
+    #[test]
+    fn with_a_full_row_new_monitors_share_one_row_over_it() {
+        let center = (Vec3::ZERO, 0.0);
+        let m = [
+            (3, 2560, 1440),
+            (1, 2560, 1440),
+            (0, 2560, 1440),
+            (100, 2880, 1800),
+            (104, 2560, 1440),
+            (105, 2560, 1440),
+        ];
+        let mut p = arrange(Preset::Arc, &m[..3], Some(1), Some(m[3]), None);
+        let ahead = Vec3::new(0.0, -0.3, -1.0).normalize();
+        let mut rows = desktop_of(&p, &m[..4], Preset::Arc, Some(1)).rows;
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        for n in [4, 5] {
+            let at = place_new(
+                &p,
+                &m[..=n],
+                m[n],
+                center,
+                Preset::Arc,
+                ahead,
+                &rows,
+                RADIUS,
+            );
+            p.insert(m[n].0, at);
+            assert!(!covered(&p, &m[..=n]), "it covers nothing");
+            rows = desktop_of(&p, &m[..=n], Preset::Arc, Some(1)).rows;
+        }
+        assert_eq!(rows.len(), 3, "one row more, not two: {rows:?}");
+        assert_eq!(row_of(&rows, 104), row_of(&rows, 105), "{rows:?}");
     }
 
     /// A small seeded generator, so a failing case comes back the same.

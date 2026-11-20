@@ -25,9 +25,10 @@
   monitors stay as they were; six big ones (three ultrawide) make two rows at about
   1.35 m.
 - Your arrangement stays yours. A layout is applied only when you pick it (and on the
-  very first start). A new monitor takes a free place next to the others, at the end
-  of a row or over or under one, nearest to where you look, and nothing else moves; a
-  removed one leaves the others where they are. Two rows stay two rows after a restart
+  very first start). A new monitor takes a free place at the end of a row, beside the
+  others: of the longest row with room, at the end nearer to where you look; over or
+  under the rows only when no row has room, and the next one then joins it there.
+  Nothing else moves; a removed one leaves the others where they are. Two rows stay two rows after a restart
   of the PC or of the headset app, a reconnect, taking the headset off, Line up and a
   profile switch.
 - Line up (the A button) takes the crookedness out of each row and nothing more: a

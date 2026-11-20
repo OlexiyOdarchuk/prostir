@@ -21,9 +21,13 @@ use crate::view::Room;
 /// Seen overlaps smaller than this fraction of the smaller monitor are a shared edge.
 const SLACK: f64 = 0.01;
 
-/// Where a new monitor of stream size `px` goes next to `monitors`, seen from `frame`,
-/// nearest the gaze (`gaze`: a direction in the room). `rows`: the rows if known (else
-/// worked out from what is seen). Nothing else moves.
+/// Where a new monitor of stream size `px` goes next to `monitors`, seen from `frame`:
+/// at an end of a row, the longest row with room first (the main one) and its end
+/// nearest the gaze (`gaze`: a direction in the room); over the top row or under the
+/// bottom one, nearest the gaze, only when no row has room for it. A new row is the
+/// user's to make, by hand: one looks at the menu or a monitor when adding, not where
+/// the new one should go. `rows`: the rows if known (else worked out from what is
+/// seen). Nothing else moves.
 pub fn place_new<K: Copy + Ord>(
     monitors: &[Monitor<K>],
     frame: &Frame,
@@ -108,6 +112,11 @@ pub fn place_new<K: Copy + Ord>(
             rr.max(right) - l.min(left) <= f64::from(limits.arc) + 1e-6
         })
     };
+    // Extending a row before making a new one, a longer row before a shorter one.
+    let rank = |row: Option<usize>| match row {
+        Some(r) => (0, usize::MAX - rows[r].len()),
+        None => (1, 0),
+    };
     let best = candidates
         .iter()
         .filter(|(p, row)| fits(p, *row))
@@ -116,7 +125,9 @@ pub fn place_new<K: Copy + Ord>(
                 let dir = p.position.as_dvec3().normalize_or(DVec3::NEG_Z);
                 dir.dot(gaze_local).clamp(-1.0, 1.0).acos()
             };
-            d(&a.0).total_cmp(&d(&b.0))
+            rank(a.1)
+                .cmp(&rank(b.1))
+                .then_with(|| d(&a.0).total_cmp(&d(&b.0)))
         })
         .map(|c| c.0);
     let chosen = best.unwrap_or_else(|| fallback(&local, &seen, gaze_local, px, limits));
