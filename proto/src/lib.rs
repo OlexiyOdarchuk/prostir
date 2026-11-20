@@ -77,7 +77,7 @@ pub fn compatible(version: u32, min: u32) -> bool {
 /// PC turn a build of another revision away with a clear word instead of a session
 /// that fails to parse. `None` in released builds, where the protocol version alone
 /// decides.
-pub const PROTO_REVISION: Option<u32> = Some(4);
+pub const PROTO_REVISION: Option<u32> = Some(5);
 
 /// The app version this build says in the handshake: `base` (the crate version), with
 /// `-dev+pN` on a development branch (see [`PROTO_REVISION`]).

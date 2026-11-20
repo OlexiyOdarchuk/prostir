@@ -90,8 +90,7 @@ wire_enum! {
         7 => LineUp,
         /// Show where the mouse is.
         8 => ShowMouse,
-        /// The headset's microphone switch (changes `UpState`).
-        9 => SetMic { on: bool },
+        // Kind 9 is retired (see `RETIRED_COMMAND_KINDS`).
         /// Follow the head.
         10 => Follow { on: bool },
         /// "Reset the arrangement".
@@ -138,6 +137,14 @@ impl Outcome {
         }
     }
 }
+
+/// Kinds of requests no longer used, never to be used again: `8` was planned as "No
+/// limits", which the headset owns.
+pub const RETIRED_REQUEST_KINDS: &[u8] = &[8];
+/// Kinds of commands no longer used, never to be used again: `9` set the headset's
+/// microphone switch, which only the user changes, in the headset. A headset reads it
+/// as a kind it does not know and answers `UNSUPPORTED`.
+pub const RETIRED_COMMAND_KINDS: &[u8] = &[9];
 
 /// A request or command as read: a kind this build knows, or another one, whose
 /// fields were skipped. It runs to the end of its message.
@@ -224,11 +231,33 @@ mod tests {
         let mut longer = bytes.clone();
         longer.push(0);
         assert!(decode::<Asked<Request>>(&longer).is_err());
-        // Kind 8 is not used.
-        assert_eq!(
-            decode::<Asked<Request>>(&[8]).unwrap(),
-            Asked::Unknown { kind: 8 }
-        );
+    }
+
+    /// Retired kinds are never given out again, and read as unknown, so an older
+    /// sender of one gets `UNSUPPORTED`.
+    #[test]
+    fn retired_kinds_stay_unused() {
+        for kind in RETIRED_REQUEST_KINDS {
+            assert!(
+                !Request::TAGS.contains(kind),
+                "request kind {kind} is retired"
+            );
+            assert_eq!(
+                decode::<Asked<Request>>(&[*kind]).unwrap(),
+                Asked::Unknown { kind: *kind }
+            );
+        }
+        for kind in RETIRED_COMMAND_KINDS {
+            assert!(
+                !Command::TAGS.contains(kind),
+                "command kind {kind} is retired"
+            );
+            // The microphone switch, as an older PC sends it.
+            assert_eq!(
+                decode::<Asked<Command>>(&[*kind, 1]).unwrap(),
+                Asked::Unknown { kind: *kind }
+            );
+        }
     }
 
     #[test]

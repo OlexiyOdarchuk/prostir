@@ -475,7 +475,7 @@ its own `PROTOCOL_VERSION` to tell which side needs an update. The current clien
 
 **Development builds.** Between releases the messages of version 2 change on the
 development branch while the version stays 2. A development build says so in its app
-version: `0.2.0-dev+p4` reads messages of revision 4 (`PROTO_REVISION`). A development
+version: `0.2.0-dev+p5` reads messages of revision 5 (`PROTO_REVISION`). A development
 host turns away a `Hello` whose app version carries another revision (or none) the same
 way as an incompatible one: `Error`, then `Incompatible`; the side with the lower
 revision is the one to update. Released builds carry no revision and do not look at
@@ -569,9 +569,8 @@ longer old one; a new `Outcome` comes only with a new kind.
 **The state before the reply.** The side that answers first sends the parts the
 request changed, then the `Reply`, in the same lane: when the headset reads
 `Added{id}`, it has the `Displays` with `id` already. The same the other way: the
-headset answers `Command FocusMode` after its `Prefs`, `Command SetMic` after its
-`UpState`, and `Command Profile` once the profile is in place (after the host's reply
-to the `SetDisplays` it sent for it).
+headset answers `Command FocusMode` after its `Prefs`, and `Command Profile` once the
+profile is in place (after the host's reply to the `SetDisplays` it sent for it).
 
 **Partial success.** A request that makes displays answers with all it made, also
 those that did not start: they stand in `Displays` as `Failed` and keep their place.
@@ -878,7 +877,8 @@ and a new place.
 
 `SetDisplays` sets the monitors of a profile, left to right: monitors of a size that
 is there already are kept with their windows; `shown_physical` are the displays of the
-PC to show, the others are hidden. Kind 8 is not used.
+PC to show, the others are hidden. Kind 8 is retired (`RETIRED_REQUEST_KINDS`) and
+never used.
 
 ### Commands
 
@@ -892,10 +892,13 @@ PC to show, the others are hidden. Kind 8 is not used.
 | 6 | `Preset` | `preset:u8` | A preset arrangement (`BAD_ARGUMENT` for one it does not know). |
 | 7 | `LineUp` | | "Line up". |
 | 8 | `ShowMouse` | | Shows where the mouse is. |
-| 9 | `SetMic` | `on:bool` | The headset's microphone switch (changes `UpState`). |
 | 10 | `Follow` | `on:bool` | Follow the head. |
 | 11 | `ResetArrangement` | | Reset the arrangement (`UNSUPPORTED` in the current client). |
 | 12 | `NoLimits` | `on:bool` | "No limits" (changes `Prefs`). |
+
+Kind 9 is retired (`RETIRED_COMMAND_KINDS`): it set the headset's microphone switch in
+development builds, and is never used again. The switch is the user's, changed only in
+the headset; a headset answers kind 9 `UNSUPPORTED` like any kind it does not know.
 
 ### Error codes
 
@@ -1051,8 +1054,7 @@ signed 16-bit little-endian, 10 ms in a piece in the current client.
 - While a program on the PC records from it, the host says `UpWanted{Mic, on: true}`;
   the headset then streams its microphone while its own switch is on, and ends the
   stream with `UpEnd` once `UpWanted` is off or the switch goes off. The switch is the
-  headset's: the host changes it only with the command `SetMic` (from its tray), which
-  the headset carries out as if the user pressed it.
+  user's, in the headset: no message of the host changes it.
 - `UpStart` needs the microphone right; the host drops a stream without it.
 
 The current client sends control messages first, then up streams and `FrameShown` in

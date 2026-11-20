@@ -5,8 +5,8 @@
 //! the headset's commands with it, and it lets a person try them by hand.
 //!
 //! A line is `recenter`, `profile NAME`, `cinema on|off`, `focus on|off`,
-//! `distance N`, `preset N`, `lineup`, `showmouse`, `mic on|off`, `follow on|off`,
-//! `reset`, `nolimits on|off`, or `raw K` (a command of kind `K` with no fields, for
+//! `distance N`, `preset N`, `lineup`, `showmouse`, `follow on|off`, `reset`,
+//! `nolimits on|off`, or `raw K` (a command of kind `K` with no fields, for
 //! tests of kinds the headset does not know).
 
 use std::io::{BufRead, BufReader, Write};
@@ -101,7 +101,6 @@ fn parse(line: &str) -> Option<Asked<Command>> {
         },
         "lineup" => Command::LineUp,
         "showmouse" => Command::ShowMouse,
-        "mic" => Command::SetMic { on: on()? },
         "follow" => Command::Follow { on: on()? },
         "reset" => Command::ResetArrangement,
         "nolimits" => Command::NoLimits { on: on()? },
@@ -138,5 +137,7 @@ mod tests {
         assert_eq!(parse("raw 200"), Some(Asked::Unknown { kind: 200 }));
         assert_eq!(parse("cinema maybe"), None);
         assert_eq!(parse("fly"), None);
+        // The headset's microphone switch is the user's, in the headset.
+        assert_eq!(parse("mic on"), None);
     }
 }

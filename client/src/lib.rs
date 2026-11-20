@@ -9,6 +9,7 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 pub mod background;
+pub mod commands;
 pub mod i18n;
 pub mod layout;
 pub mod outbox;
