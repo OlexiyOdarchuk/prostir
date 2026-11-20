@@ -645,7 +645,10 @@ pub struct Headset {
     pub name: String,
     /// The model it says it is, while connected.
     pub model: String,
-    /// When it was last connected, in Unix seconds, where known.
+    /// Its Prostir app's version as it last connected (`0.2.0`), where known: two
+    /// apps on one headset (a release and a test build) are two headsets.
+    pub app: String,
+    /// When it last connected or left, in Unix seconds, where known.
     pub last_seen: Option<u64>,
     /// Its role by its line in `settings.txt` (a headset without one is `main`).
     pub role: Role,
@@ -1104,7 +1107,8 @@ mod tests {
                 key: "a1b2c3d4e5f6".into(),
                 name: "Quest 3".into(),
                 model: "Quest 3".into(),
-                last_seen: None,
+                app: "0.2.0".into(),
+                last_seen: Some(1_795_000_000),
                 role: Role::Main,
                 rights: vec!["input".into(), "mic".into()],
                 session: Some(Session {
@@ -1204,7 +1208,7 @@ mod tests {
             r#"{"v":1,"pc":{"name":"desk","app":"0.2.0","desktop":"KDE Plasma","phase":"live"},"#,
             r#""window":{"theme":"system","palette":"ink","language":null},"autostart":true,"#,
             r#""headsets":[{"key":"a1b2c3d4e5f6","name":"Quest 3","model":"Quest 3","#,
-            r#""last_seen":null,"role":"main","rights":["input","mic"],"#,
+            r#""app":"0.2.0","last_seen":1795000000,"role":"main","rights":["input","mic"],"#,
             r#""session":{"via":"wifi","worn":true,"battery":{"percent":80,"charging":false},"#,
             r#""profile":null,"mic_allowed":true,"mic_on":false,"main":true,"commands":true,"#,
             r#""no_limits":false}}],"connecting":null,"#,

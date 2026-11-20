@@ -917,3 +917,61 @@ fn a_huge_request_is_refused() {
     let refused = call(&bus, "Call", &(huge.as_str(),)).unwrap_err();
     assert_eq!(error_name(&refused), "BadArgument");
 }
+
+/// When each paired headset last connected or left, and its app then, are in the
+/// state and kept for the next run; a headset that never connected says neither.
+#[test]
+fn when_each_headset_was_seen() {
+    let dir = TestDir::new("api-seen");
+    dir.save_monitors(TWO_MONITORS);
+    let mut keys = dir.pair();
+    dir.pair_headset("never-connected");
+    let pc = Pc::start(&dir, &Options::default());
+    let Some(bus) = &pc.bus else {
+        return;
+    };
+    let bus = bus.connect();
+    let mut headset = connect(&pc, &mut keys);
+    headset
+        .wait(START, "every monitor showing", View::all_monitors_show)
+        .unwrap();
+    let now = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    };
+    let (_, state) = get_state(&bus);
+    let connected = state.headsets.iter().find(|h| h.session.is_some()).unwrap();
+    let app = prostir_proto::app_version(env!("CARGO_PKG_VERSION"));
+    assert_eq!(connected.app, app, "{connected:?}");
+    assert!(
+        connected.last_seen.is_some_and(|t| t + 60 > now()),
+        "{connected:?}"
+    );
+    let other = state.headsets.iter().find(|h| h.session.is_none()).unwrap();
+    assert_eq!(
+        (other.app.as_str(), other.last_seen),
+        ("", None),
+        "{other:?}"
+    );
+    let key = connected.key.clone();
+    headset.disconnect();
+    let started = Instant::now();
+    loop {
+        let (_, state) = get_state(&bus);
+        let h = state.headsets.iter().find(|h| h.key == key).unwrap();
+        if h.session.is_none() {
+            assert!(h.last_seen.is_some() && h.app == app, "{h:?}");
+            break;
+        }
+        assert!(started.elapsed() < SOON, "still connected");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    pc.quit();
+    let saved = dir.saved("headsets.txt");
+    assert!(
+        saved.starts_with("seen ") && saved.lines().count() == 1,
+        "{saved}"
+    );
+}

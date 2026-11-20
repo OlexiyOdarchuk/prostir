@@ -254,7 +254,8 @@ change older clients would misread.
   "autostart": true,
   "headsets": [
     {
-      "key": "a1b2c3d4e5f6", "name": "Quest 3", "model": "Quest 3", "last_seen": null,
+      "key": "a1b2c3d4e5f6", "name": "Quest 3", "model": "Quest 3", "app": "0.2.0",
+      "last_seen": 1795000000,
       "role": "main", "rights": ["input", "mic"],
       "session": {
         "via": "wifi", "worn": true, "battery": {"percent": 80, "charging": false},
@@ -309,7 +310,8 @@ change older clients would misread.
 | `headsets[].key` | the fingerprint of its key, 12 hex digits: how requests and events name it |
 | `headsets[].name` | as it was paired |
 | `headsets[].model` | what it says it is, while connected |
-| `headsets[].last_seen` | Unix seconds, where known (not yet) |
+| `headsets[].app` | its Prostir app's version as it last connected (`0.2.0`), empty where not known: two apps on one headset (a release and a test build) are two headsets, each with its own key |
+| `headsets[].last_seen` | when it last connected or left, Unix seconds; `null` where not known (it has not connected since the PC began to keep this) |
 | `headsets[].role`, `rights` | from its line in `settings.txt` (`main` with every right without one); rights: `input`, `mic`, `camera`, `clipboard`, `changes`, `private` |
 | `headsets[].session` | while connected: `via` (`wifi`, `usb`; from 127.0.0.1 counts as USB), `worn`, `battery`, `profile` (not yet), `mic_allowed` (whether the headset's system lets it record; `null`: not known), `mic_on` (its switch), `main` (the main headset now: its arrangement is the desktop's, commands go to it), `commands` (it takes commands), `no_limits` (where it takes commands) |
 | `connecting` | a headset being connected now, by name (not yet) |

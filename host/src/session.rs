@@ -417,6 +417,7 @@ impl Session {
                     peer,
                 },
             mut packets,
+            ..
         } = conn;
         let via = via_name(peer.via);
         // What the headset said about itself; without it there is no session.

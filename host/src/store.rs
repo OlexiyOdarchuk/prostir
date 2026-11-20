@@ -1,6 +1,7 @@
-//! What the PC keeps between runs, with one owner: the settings (`settings.txt`) and
-//! the set of screens with the rows the headset shows them in (`screens.txt`), both
-//! plain `key value` text in `~/.config/prostir/`.
+//! What the PC keeps between runs, with one owner: the settings (`settings.txt`), the
+//! set of screens with the rows the headset shows them in (`screens.txt`) and when
+//! each paired headset was last seen (`headsets.txt`), all plain `key value` text in
+//! `~/.config/prostir/`.
 //!
 //! - What is kept is what the person wants, not what came out of it: the codec chosen
 //!   stays chosen when the graphics card made another one.
@@ -704,6 +705,48 @@ fn migrate(text: &str) -> (Settings, SavedScreens) {
     (settings, set)
 }
 
+/// When a paired headset last had a session, and its app then.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Seen {
+    /// Seconds since 1970.
+    pub at: u64,
+    /// The headset app's version (`0.2.0-dev+p6`), as its hello said.
+    pub app: String,
+}
+
+/// The file `headsets.txt`: `seen KEY SECONDS [APP]`, a line for each headset, KEY its
+/// whole key in hex. Lines it cannot read are left out.
+fn parse_seen_headsets(text: &str) -> BTreeMap<String, Seen> {
+    text.lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            if words.next()? != "seen" {
+                return None;
+            }
+            let key = words.next()?;
+            if key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
+            let at = words.next()?.parse().ok()?;
+            let app = words.next().unwrap_or_default().to_owned();
+            Some((key.to_ascii_lowercase(), Seen { at, app }))
+        })
+        .collect()
+}
+
+fn seen_headsets_text(seen: &BTreeMap<String, Seen>) -> String {
+    seen.iter()
+        .map(|(key, s)| {
+            let app: String = s.app.chars().filter(|c| !c.is_whitespace()).collect();
+            if app.is_empty() {
+                format!("seen {key} {}\n", s.at)
+            } else {
+                format!("seen {key} {} {app}\n", s.at)
+            }
+        })
+        .collect()
+}
+
 /// The writes waiting for the writer thread, the latest of each file.
 enum Job {
     Write(PathBuf, String),
@@ -784,6 +827,10 @@ pub struct Store {
     run: Run,
     settings_changed: bool,
     screens_changed: bool,
+    /// When each paired headset last had a session (`headsets.txt`), by its key in
+    /// hex.
+    seen: BTreeMap<String, Seen>,
+    seen_changed: bool,
     writer: Option<(Sender<Job>, Receiver<()>)>,
 }
 
@@ -802,6 +849,8 @@ impl Store {
             run,
             settings_changed: false,
             screens_changed: false,
+            seen: BTreeMap::new(),
+            seen_changed: false,
             writer: None,
         };
         store.load();
@@ -844,10 +893,13 @@ impl Store {
     fn load(&mut self) {
         let Some(dir) = self.dir.clone() else { return };
         // A write cut short leaves its temporary file; the real one is whole.
-        for name in ["settings.txt.tmp", "screens.txt.tmp"] {
+        for name in ["settings.txt.tmp", "screens.txt.tmp", "headsets.txt.tmp"] {
             let _ = std::fs::remove_file(dir.join(name));
         }
         let read = |name: &str| std::fs::read_to_string(dir.join(name)).ok();
+        if let Some(text) = read("headsets.txt") {
+            self.seen = parse_seen_headsets(&text);
+        }
         let (settings, screens) = (read("settings.txt"), read("screens.txt"));
         if settings.is_none() && screens.is_none() {
             // A first start: nothing to move over.
@@ -962,9 +1014,38 @@ impl Store {
         }
     }
 
+    /// Headset `key` has a session now, or its session ended: seen now, with its app
+    /// (`app`, from its hello; none keeps the one known).
+    pub fn headset_seen(&mut self, key: &[u8; 32], at: u64, app: Option<&str>) {
+        let seen = self.seen.entry(hex(key)).or_default();
+        seen.at = at;
+        if let Some(app) = app.filter(|a| !a.is_empty()) {
+            app.clone_into(&mut seen.app);
+        }
+        self.seen_changed = true;
+    }
+
+    /// When headset `key` last had a session, and its app then, if known.
+    pub fn last_seen(&self, key: &[u8; 32]) -> Option<&Seen> {
+        self.seen.get(&hex(key))
+    }
+
+    /// Forgets when the headsets not in `paired` were seen (they were forgotten).
+    pub fn keep_seen_of(&mut self, paired: &[[u8; 32]]) {
+        let keep: Vec<String> = paired.iter().map(hex).collect();
+        let before = self.seen.len();
+        self.seen.retain(|key, _| keep.contains(key));
+        self.seen_changed |= self.seen.len() != before;
+    }
+
     /// Hands what changed to the writer thread.
     pub fn flush(&mut self) {
         let mut jobs = Vec::new();
+        if std::mem::take(&mut self.seen_changed)
+            && let Some(path) = self.path("headsets.txt")
+        {
+            jobs.push((path, seen_headsets_text(&self.seen)));
+        }
         if std::mem::take(&mut self.settings_changed)
             && let Some(path) = self.path("settings.txt")
         {
@@ -1418,6 +1499,35 @@ mod tests {
         assert!(store.screens().specs.is_empty());
         assert!(dir.join("screens.txt.bad").exists());
         store.close();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// When each paired headset was last seen, with its app, is kept between runs;
+    /// a forgotten headset's goes, and lines that cannot be read are left out.
+    #[test]
+    fn when_each_headset_was_seen_is_kept() {
+        let dir = temp_dir("seen");
+        let (a, b) = ([0xa1; 32], [0xb2; 32]);
+        let mut store = Store::open(Some(dir.clone()), Run::default());
+        assert_eq!(store.last_seen(&a), None);
+        store.headset_seen(&a, 100, Some("0.2.0-dev+p6"));
+        store.headset_seen(&b, 200, None);
+        store.headset_seen(&a, 300, None);
+        store.close();
+        let mut store = Store::open(Some(dir.clone()), Run::default());
+        let seen = |at, app: &str| Seen {
+            at,
+            app: app.into(),
+        };
+        assert_eq!(store.last_seen(&a), Some(&seen(300, "0.2.0-dev+p6")));
+        assert_eq!(store.last_seen(&b), Some(&seen(200, "")));
+        store.keep_seen_of(&[a]);
+        assert_eq!(store.last_seen(&b), None);
+        store.close();
+        let text = std::fs::read_to_string(dir.join("headsets.txt")).unwrap();
+        assert_eq!(text, format!("seen {} 300 0.2.0-dev+p6\n", hex(&a)));
+        let odd = format!("seen nothex 1\nseen {} soon\nwhatever\n", hex(&a));
+        assert!(parse_seen_headsets(&odd).is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
 }

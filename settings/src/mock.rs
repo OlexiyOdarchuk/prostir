@@ -104,6 +104,7 @@ fn headset(key: &str, name: &str, hours_ago: u64) -> Headset {
         key: key.into(),
         name: name.into(),
         model: String::new(),
+        app: "0.2.0".into(),
         last_seen: Some(now_unix() - hours_ago * 3600),
         role: Role::Main,
         rights: ["input", "mic", "camera", "clipboard", "changes", "private"]

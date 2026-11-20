@@ -625,6 +625,7 @@ impl Brain {
             "forgot headset {}",
             prostir_proto::secure::fingerprint(&key)
         );
+        self.keep_seen_of_paired();
         // It can no longer find the PC; the headsets still trusted get the new secret
         // now, in their sessions, or at their next.
         let secret = self.security.new_find_secret();
@@ -640,6 +641,15 @@ impl Brain {
             Ok(()),
         );
         done()
+    }
+
+    /// When each headset was seen is kept for the paired ones only.
+    pub(crate) fn keep_seen_of_paired(&mut self) {
+        let paired: Vec<[u8; 32]> = {
+            let trusted = self.security.trusted.lock().unwrap();
+            trusted.entries().iter().map(|(key, _)| *key).collect()
+        };
+        self.store.keep_seen_of(&paired);
     }
 
     /// A headset's name as it was paired.
@@ -716,11 +726,13 @@ impl Brain {
                 .map(|key| {
                     let access = wanted.access_of(key);
                     let session = self.sessions.get(key);
+                    let seen = self.store.last_seen(key);
                     api::Headset {
                         key: prostir_proto::secure::fingerprint(key),
                         name: trusted.label(key).unwrap_or_default().to_owned(),
                         model: session.map(|s| s.caps().model.clone()).unwrap_or_default(),
-                        last_seen: None,
+                        app: seen.map(|s| s.app.clone()).unwrap_or_default(),
+                        last_seen: seen.map(|s| s.at),
                         role: if access.is_main() {
                             api::Role::Main
                         } else {

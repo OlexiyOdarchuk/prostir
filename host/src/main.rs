@@ -601,6 +601,7 @@ impl Brain {
             .as_mut()
             .expect("made above if it was missing");
         self.last_id += 1;
+        let app = conn.app.clone();
         match Session::start(
             self.last_id,
             conn,
@@ -618,6 +619,7 @@ impl Brain {
                     secret: self.security.find_secret(),
                 });
                 let via = session.api_session().via;
+                self.store.headset_seen(&key, unix_now(), Some(&app));
                 self.worn_told.insert(key, session.worn());
                 self.sessions.insert(key, session);
                 self.phase.session_opened(Instant::now());
@@ -779,6 +781,10 @@ impl Brain {
     ) -> Option<bool> {
         let session = self.sessions.remove(&key)?;
         self.headset_left(&key, why);
+        // Seen until now (a forgotten headset's time goes with it).
+        if self.security.trusted.lock().unwrap().contains(&key) {
+            self.store.headset_seen(&key, unix_now(), None);
+        }
         let displays = self.displays.as_mut()?;
         self.arrivals.left(key);
         let taken_off = session.taken_off_for().is_some();
@@ -874,6 +880,7 @@ impl Brain {
                     warn!("cannot forget headsets: {e}");
                 }
                 drop(trusted);
+                self.keep_seen_of_paired();
                 self.security.new_find_secret();
                 let keys: Vec<[u8; 32]> = self.sessions.keys().copied().collect();
                 self.end_sessions(
@@ -1089,6 +1096,13 @@ fn create_displays(set_primary: bool, store: &mut Store, events: &EventSink) -> 
     let displays = Displays::create(&set, &store.wanted(), set_primary, events);
     keep_screens(store, &displays, false);
     displays
+}
+
+/// Seconds since 1970, now.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// The log filter unless `RUST_LOG` says otherwise: Prostir's own lines from `level`
