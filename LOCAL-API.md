@@ -5,7 +5,7 @@ Programs of the same user on the PC (`prostir ctl`, the settings window
 The headset protocol is a separate thing (`PROTOCOL.md`).
 
 The requests, answers, events and the state are Rust types in the crate
-`prostir-api` (`api/src/lib.rs`), shared by the service (`prostir serve`) and every
+`prostir-api` (`crates/api/src/lib.rs`), shared by the service (`prostir serve`) and every
 client, so the two sides cannot drift apart. They travel as JSON. This document is the
 contract for clients written in any language; the tests of `prostir-api` pin the JSON.
 

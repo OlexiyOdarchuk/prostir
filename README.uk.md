@@ -708,12 +708,17 @@ flowchart LR
 
 Протокол описано в [PROTOCOL.md](PROTOCOL.md).
 
-Код поділено на три крейти Rust:
+Код поділено на крейти Rust, усі в `crates/`:
 
 ```
-proto/    протокол і шифрування, бібліотека для двох інших
-host/     програма для ПК: віртуальні виходи, кодери, звук, трей, пошук
-client/   застосунок для Quest: цикл OpenXR (app.rs), меню (ui.rs), розкладки (layout.rs), …
+crates/proto/     протокол і шифрування, спільні для ПК і шолома
+crates/layout/    де стоять монітори: правила розкладки, спільні для ПК і шолома
+crates/api/       типи локального API, спільні для програми на ПК і її клієнтів
+crates/lang/      переклади як дані (Fluent)
+crates/host/      програма для ПК: віртуальні виходи, кодери, звук, трей, пошук
+crates/settings/  вікно налаштувань на ПК (prostir-settings)
+crates/client/    застосунок для Quest: цикл OpenXR (app.rs), меню (ui.rs), розкладки (layout.rs), …
+crates/testkit/   фальшивий шолом для тестів і для перевірки програми на ПК вручну
 scripts/  build-apk.sh, install.sh, package-release.sh, third-party-licenses.py
 docs/     сайт (prostir.ishawyha.dev) і картинки для цього README
 ```
@@ -770,7 +775,7 @@ macOS чи GNOME, і один шолом на ПК.
 [GPL-3.0-or-later](LICENSE) з [додатковим дозволом](LICENSE-EXCEPTION.md) лінкуватися з
 Meta Platform SDK (потрібен лише для збірки в Horizon Store). Вбудований шрифт Noto Sans
 поширюється під
-[SIL Open Font License 1.1](client/assets/OFL-NotoSans.txt). Кожен реліз містить
+[SIL Open Font License 1.1](crates/client/assets/OFL-NotoSans.txt). Кожен реліз містить
 `THIRD-PARTY-LICENSES.txt` з ліцензіями крейтів Rust, шрифту й завантажувача Khronos
 OpenXR, що є у файлах релізу. Архів і пакети ставлять його поряд із текстом GPL, а APK
 містить його в `assets/licenses/`. Пише його `scripts/third-party-licenses.py`.

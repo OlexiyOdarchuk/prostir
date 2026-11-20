@@ -6,13 +6,13 @@ on:
   push:
     branches: [main, "dev/**"]
     paths:
-      - "host/**"
-      - "proto/**"
-      - "layout/**"
-      - "api/**"
-      - "testkit/**"
-      - "lang/**"
-      - "settings/**"
+      - "crates/host/**"
+      - "crates/proto/**"
+      - "crates/layout/**"
+      - "crates/api/**"
+      - "crates/testkit/**"
+      - "crates/lang/**"
+      - "crates/settings/**"
       - ".cargo/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -20,13 +20,13 @@ on:
       - ".github/actions/**"
   pull_request:
     paths:
-      - "host/**"
-      - "proto/**"
-      - "layout/**"
-      - "api/**"
-      - "testkit/**"
-      - "lang/**"
-      - "settings/**"
+      - "crates/host/**"
+      - "crates/proto/**"
+      - "crates/layout/**"
+      - "crates/api/**"
+      - "crates/testkit/**"
+      - "crates/lang/**"
+      - "crates/settings/**"
       - ".cargo/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -71,7 +71,7 @@ jobs:
       # The settings window, driven without drawing; its pictures need a graphics card
       # (or lavapipe), which the runner does not have.
       - run: cargo test -p prostir-settings --lib --test texts --test window
-      # The PC app with the fake desktop, driven by a fake headset (host/tests/e2e).
+      # The PC app with the fake desktop, driven by a fake headset (crates/host/tests/e2e).
       - name: Clippy with the fake desktop
         run: cargo clippy -p prostir-host --features fake-desktop --all-targets -- -D warnings
       - name: End-to-end tests

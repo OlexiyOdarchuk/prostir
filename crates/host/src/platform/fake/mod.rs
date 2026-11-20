@@ -1,5 +1,5 @@
 //! A desktop that exists only inside this process, for the end-to-end tests
-//! (`host/tests/e2e`): built instead of the real platform with the `fake-desktop`
+//! (`crates/host/tests/e2e`): built instead of the real platform with the `fake-desktop`
 //! feature, never in a release. The core runs as it is (monitors, router, encoders,
 //! the session loop, pairing) without KDE, Hyprland, PipeWire or a tray.
 //!
@@ -504,7 +504,7 @@ pub mod audio {
     }
 
     /// With `PROSTIR_FAKE_PACTL=1` the sound system is `pactl`, as on Linux: whatever
-    /// the test put first on `PATH` under that name (`host/tests/e2e/fake-pactl`).
+    /// the test put first on `PATH` under that name (`crates/host/tests/e2e/fake-pactl`).
     fn real_pactl() -> bool {
         std::env::var_os("PROSTIR_FAKE_PACTL").is_some_and(|v| v == "1")
     }

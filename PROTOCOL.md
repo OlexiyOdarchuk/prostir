@@ -1,24 +1,24 @@
 # Prostir protocol, version 2
 
-This document describes how the PC program (`host/`) and the Meta Quest app (`client/`)
+This document describes how the PC program (`crates/host/`) and the Meta Quest app (`crates/client/`)
 talk to each other. It is meant for anyone who wants to understand the connection or
 write their own client or host. How programs on the PC talk to the PC program
 (`prostir ctl`, the settings window, D-Bus) is in [LOCAL-API.md](LOCAL-API.md).
 
-The source of truth is the code: [`proto/src/lib.rs`](proto/src/lib.rs) (messages),
-[`proto/src/state.rs`](proto/src/state.rs) (the state each side keeps),
-[`proto/src/request.rs`](proto/src/request.rs) (requests, commands and replies),
-[`proto/src/volume.rs`](proto/src/volume.rs) (the shared volume),
-[`proto/src/wire.rs`](proto/src/wire.rs) (how values are encoded),
-[`proto/src/packet.rs`](proto/src/packet.rs) (packets),
-[`proto/src/handshake.rs`](proto/src/handshake.rs) (the version handshake on records),
-[`proto/src/link/tcp.rs`](proto/src/link/tcp.rs) (encryption),
-[`proto/src/secure.rs`](proto/src/secure.rs) (keys and pairing) and
-[`proto/src/discovery.rs`](proto/src/discovery.rs) (finding a PC).
+The source of truth is the code: [`crates/proto/src/lib.rs`](crates/proto/src/lib.rs) (messages),
+[`crates/proto/src/state.rs`](crates/proto/src/state.rs) (the state each side keeps),
+[`crates/proto/src/request.rs`](crates/proto/src/request.rs) (requests, commands and replies),
+[`crates/proto/src/volume.rs`](crates/proto/src/volume.rs) (the shared volume),
+[`crates/proto/src/wire.rs`](crates/proto/src/wire.rs) (how values are encoded),
+[`crates/proto/src/packet.rs`](crates/proto/src/packet.rs) (packets),
+[`crates/proto/src/handshake.rs`](crates/proto/src/handshake.rs) (the version handshake on records),
+[`crates/proto/src/link/tcp.rs`](crates/proto/src/link/tcp.rs) (encryption),
+[`crates/proto/src/secure.rs`](crates/proto/src/secure.rs) (keys and pairing) and
+[`crates/proto/src/discovery.rs`](crates/proto/src/discovery.rs) (finding a PC).
 
 Version 2 (Prostir 0.2) is a clean break from version 1 (Prostir 0.1.x): only the
 version handshake is the same, so the two can tell the user which side to update
-(see [The version handshake](#the-version-handshake-frozen)). Behaviour that comes from `host/` or `client/` rather than from `proto/` is
+(see [The version handshake](#the-version-handshake-frozen)). Behaviour that comes from `crates/host/` or `crates/client/` rather than from `crates/proto/` is
 what the current apps do; it is marked **implementation-defined** where another
 implementation may reasonably differ.
 
@@ -76,7 +76,7 @@ The headset sends a query (`PRSQ`) to port `47831`: as a broadcast, and straight
 addresses of PCs it knows (an address typed in, or the last one it reached, a VPN
 address such as Tailscale or WireGuard too). A PC answers (`PRSA`) to the address and
 port the query came from, and only there. Nothing else is needed for a VPN: no UPnP,
-no port opened on a router. Source: [`proto/src/discovery.rs`](proto/src/discovery.rs).
+no port opened on a router. Source: [`crates/proto/src/discovery.rs`](crates/proto/src/discovery.rs).
 
 Query, at least 128 and at most 512 bytes:
 
@@ -322,7 +322,7 @@ failed attempt.
 
 ### Limits and timeouts
 
-Host (implementation-defined values from `host/src/pairing.rs`):
+Host (implementation-defined values from `crates/host/src/pairing.rs`):
 
 | Limit | Value |
 |---|---|
@@ -338,7 +338,7 @@ off. When the headset shows the code and the host has none, the host reads and d
 headset's `PairMsg` (sent right after `PairBegin`), so the next `PairBegin` can follow on
 the same connection.
 
-Client (implementation-defined, `client/src/net.rs`): read timeout 10 s, 300 s while
+Client (implementation-defined, `crates/client/src/net.rs`): read timeout 10 s, 300 s while
 pairing; each write at most 5 s; at most 3 attempts per connection, after which it
 stops and asks the user again; it waits up to 300 s for the user to type a code shown
 by the host, looking at the connection every half second meanwhile.
@@ -460,7 +460,7 @@ fit in 64 KiB), the host once it has sent `Snapshot`.
 ### Encoding
 
 A payload is the message's fields, one after the other in the order the reference
-lists them, with nothing in between (`proto/src/wire.rs`):
+lists them, with nothing in between (`crates/proto/src/wire.rs`):
 
 | Type | Bytes |
 |---|---|
@@ -782,7 +782,7 @@ requests.
   Otherwise it sets the device to `level`, so the slider rests on the headset's step.
 - `Volume` is in `Open`, so the PC takes the headset's level at the start.
 
-`proto/src/volume.rs` has both sides of this as plain functions.
+`crates/proto/src/volume.rs` has both sides of this as plain functions.
 
 ### Steady state
 
@@ -1132,7 +1132,7 @@ in either order.
 
 ### When frames are late
 
-The host picks every packet it sends (implementation-defined, `host/src/outbox.rs`),
+The host picks every packet it sends (implementation-defined, `crates/host/src/outbox.rs`),
 in strict priority:
 
 1. control messages (everything except `Audio`, `Frame`, `StreamStart` and
@@ -1153,7 +1153,7 @@ Keyframes are never dropped for being late, and a keyframe queued drops the fram
 its stream still waiting before it (it replaces them). If more than 16 MiB of video is
 waiting, new non-key frames are refused the same way. Other streams are not affected.
 
-The host also paces the connection (`SO_MAX_PACING_RATE`, `host/src/pacing.rs`), so
+The host also paces the connection (`SO_MAX_PACING_RATE`, `crates/host/src/pacing.rs`), so
 a keyframe does not land in the Wi-Fi access point's queue all at once with sound
 stuck behind it, where nothing can overtake it any more. TCP hides lost packets behind
 retransmissions, so the sign of a full link is that queue: the round trip (TCP's, and
@@ -1240,7 +1240,7 @@ once; a reader rejects any other as invalid, and the connection ends.
 between values matter; the origin is arbitrary.
 
 The current client plans the PC desktop itself, from how it shows the displays (the
-same code the host runs, `layout/src/desk.rs`), and sends that plan: each display's
+same code the host runs, `crates/layout/src/desk.rs`), and sends that plan: each display's
 place on it, a rectangle of its stream's size, as its top-left corner plus half its
 size, rounded down (`x + w / 2`, `y + h / 2` in whole pixels). So a host that plans
 from these rectangles gets the client's plan back to the pixel, and the client's map
@@ -1264,7 +1264,7 @@ displays' own pixel sizes.
 
 ### What the host does with it
 
-(Implementation-defined; `host/src/displays.rs` and `layout/src/desk.rs`, a crate
+(Implementation-defined; `crates/host/src/displays.rs` and `crates/layout/src/desk.rs`, a crate
 the client uses too to plan the desktop it sends and shows on its map.)
 
 1. Clamps every known `center` and `middle` to ±100000.

@@ -754,12 +754,17 @@ flowchart LR
 
 The protocol is described in [PROTOCOL.md](PROTOCOL.md).
 
-The code is split into three Rust crates:
+The code is split into Rust crates, all in `crates/`:
 
 ```
-proto/    the wire protocol and encryption, a library used by the other two
-host/     the PC program: virtual outputs, encoders, sound, tray, discovery
-client/   the Quest app: OpenXR loop (app.rs), menu (ui.rs), layouts (layout.rs), …
+crates/proto/     the wire protocol and encryption, shared by the PC and the headset
+crates/layout/    where the monitors go: layout rules shared by the PC and the headset
+crates/api/       the local API's types, shared by the PC program and its clients
+crates/lang/      translations as data (Fluent)
+crates/host/      the PC program: virtual outputs, encoders, sound, tray, discovery
+crates/settings/  the PC settings window (prostir-settings)
+crates/client/    the Quest app: OpenXR loop (app.rs), menu (ui.rs), layouts (layout.rs), …
+crates/testkit/   a fake headset for tests and for checking the PC program by hand
 scripts/  build-apk.sh, install.sh, package-release.sh, third-party-licenses.py
 docs/     the website (prostir.ishawyha.dev) and the pictures for this README
 ```
@@ -817,7 +822,7 @@ per PC.
 [GPL-3.0-or-later](LICENSE), with an [additional permission](LICENSE-EXCEPTION.md) to
 link with the Meta Platform SDK (needed only for a Horizon Store build). The bundled
 Noto Sans font is under the
-[SIL Open Font License 1.1](client/assets/OFL-NotoSans.txt). Every release includes
+[SIL Open Font License 1.1](crates/client/assets/OFL-NotoSans.txt). Every release includes
 `THIRD-PARTY-LICENSES.txt` with the licenses of the Rust crates, the font and the
 Khronos OpenXR loader that the release files contain. The tarball and the packages
 install it next to the GPL text, and the APK carries it under `assets/licenses/`.

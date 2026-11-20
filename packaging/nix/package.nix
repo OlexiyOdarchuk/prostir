@@ -86,15 +86,9 @@ rustPlatform.buildRustPackage {
       (root + "/Cargo.toml")
       (root + "/Cargo.lock")
       (root + "/.cargo")
-      (root + "/proto")
-      (root + "/layout")
-      (root + "/api")
-      (root + "/host")
-      (root + "/client")
-      # A workspace member (the fake headset for tests): cargo needs it present.
-      (root + "/testkit")
-      (root + "/lang")
-      (root + "/settings")
+      # Every workspace member, the headset app and the fake headset for tests too:
+      # cargo needs them present.
+      (root + "/crates")
       (root + "/packaging/prostir.desktop")
       (root + "/packaging/io.github.OlexiyOdarchuk.Prostir.Settings.desktop")
       (root + "/packaging/prostir.svg")

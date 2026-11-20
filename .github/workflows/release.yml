@@ -43,7 +43,7 @@ jobs:
           KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASS }}
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           REQUIRE_RELEASE_KEY: "1"
-          # GoatCounter key for counting users (see host/src/usage.rs). Anyone can read
+          # GoatCounter key for counting users (see crates/host/src/usage.rs). Anyone can read
           # it out of the released binary, so it must only be allowed to record
           # pageviews, and only for the Prostir site. Without it the build never counts.
           PROSTIR_COUNT_TOKEN: ${{ secrets.GOATCOUNTER_TOKEN }}
@@ -64,7 +64,7 @@ jobs:
           # The development profile keeps debug info; the packages do not need it.
           strip --strip-debug target/release/prostir target/release/prostir-settings
           cargo deb -p prostir-host --no-build -o dist/
-          cargo generate-rpm -p host -o dist/
+          cargo generate-rpm -p crates/host -o dist/
           (cd dist && sha256sum ./*.tar.gz ./*.apk ./*.deb ./*.rpm THIRD-PARTY-LICENSES.txt | sed 's| \./| |' > SHA256SUMS)
           # The release text: this version's part of the changelog.
           v="${GITHUB_REF_NAME#v}"

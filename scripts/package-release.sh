@@ -22,7 +22,9 @@ cp build/prostir.apk "$DIST/prostir-$VERSION.apk"
 cp build/THIRD-PARTY-LICENSES.txt "$DIST/"
 
 cargo build --release --locked -p prostir-host --bin prostir -p prostir-settings --bin prostir-settings
-cp target/release/prostir target/release/prostir-settings "$DIST/$NAME/"
+# Where cargo builds: its own CARGO_TARGET_DIR when set, else target/ here.
+TARGET_DIR="${CARGO_TARGET_DIR:-target}"
+cp "$TARGET_DIR/release/prostir" "$TARGET_DIR/release/prostir-settings" "$DIST/$NAME/"
 strip --strip-debug "$DIST/$NAME/prostir" "$DIST/$NAME/prostir-settings"
 mkdir -p "$DIST/$NAME/packaging"
 cp packaging/prostir.svg packaging/prostir.desktop packaging/io.github.OlexiyOdarchuk.Prostir.Settings.desktop "$DIST/$NAME/packaging/"

@@ -177,7 +177,7 @@ The libraries the program links (GStreamer, GLib, libgbm) come from rpm's automa
 requirements and `${shlibs:Depends}`. The Mesa in Fedora and openSUSE has no H.264 or
 H.265 encoding; the main README explains RPM Fusion and Packman. Without a working GPU
 encoder Prostir falls back to x264 on the CPU (`encoder::pick` in
-`host/src/encoder.rs`), which is also what most ARM machines get.
+`crates/host/src/encoder.rs`), which is also what most ARM machines get.
 
 ## Setting up the project (once)
 

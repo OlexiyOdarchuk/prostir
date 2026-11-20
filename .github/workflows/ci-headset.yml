@@ -7,18 +7,18 @@ on:
   push:
     branches: [main, "dev/**"]
     paths:
-      - "client/**"
-      - "proto/**"
-      - "layout/**"
+      - "crates/client/**"
+      - "crates/proto/**"
+      - "crates/layout/**"
       - ".cargo/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/ci-headset.yml"
   pull_request:
     paths:
-      - "client/**"
-      - "proto/**"
-      - "layout/**"
+      - "crates/client/**"
+      - "crates/proto/**"
+      - "crates/layout/**"
       - ".cargo/**"
       - "Cargo.toml"
       - "Cargo.lock"

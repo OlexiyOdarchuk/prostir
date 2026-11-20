@@ -236,7 +236,7 @@ def main():
     w("")
     w("Noto Sans (NotoSans-Regular.ttf, NotoSans-Medium.ttf), SIL Open Font License 1.1:")
     w("")
-    w(read(os.path.join(ROOT, "client", "assets", "OFL-NotoSans.txt")))
+    w(read(os.path.join(ROOT, "crates", "client", "assets", "OFL-NotoSans.txt")))
     w("")
     w("Khronos OpenXR loader for Android (libopenxr_loader.so), Apache License 2.0,")
     w("https://github.com/KhronosGroup/OpenXR-SDK-Source")
