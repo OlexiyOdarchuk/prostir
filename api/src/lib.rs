@@ -16,6 +16,34 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Reads an enum of names leniently: a name this build does not know, or a value
+/// that is no name at all, reads as `Other` (what a newer side may send). The names
+/// are those `Serialize` writes.
+macro_rules! lenient {
+    ($ty:ident: $($var:ident),+) => {
+        impl<'de> Deserialize<'de> for $ty {
+            fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                let value = serde_json::Value::deserialize(d)?;
+                Ok([$($ty::$var),+]
+                    .into_iter()
+                    .find(|v| serde_json::to_value(v).ok().as_ref() == Some(&value))
+                    .unwrap_or($ty::Other))
+            }
+        }
+    };
+}
+
+lenient!(ApiError: Unsupported, NotAllowed, UnknownDisplay, Limit, BadSize, LastDisplay, NoWindow, Desktop, Encoder, Capture, Sound, NotOnDisplays, NoSuchProfile, BadArgument, NotConnected, TimedOut, Disconnected);
+lenient!(Via: Wifi, Usb);
+lenient!(Reason: Quit, TakenOff, Silence, Forgotten);
+lenient!(Phase: Idle, Live, Lingering);
+lenient!(ThemeMode: System, Light, Dark);
+lenient!(Role: Main, Guest);
+lenient!(DisplayKind: Virtual, Physical, Window);
+lenient!(DisplayState: Starting, Running, Failed, Absent);
+lenient!(Codec: H264, H265, Av1);
+lenient!(MicState: Off, Ready, Failed);
+
 /// The service's name on the session bus.
 pub const BUS_NAME: &str = "io.github.OlexiyOdarchuk.Prostir";
 /// Its object.
@@ -263,7 +291,7 @@ pub enum CodecChoice {
 /// What went wrong, by name: the D-Bus error is `ERROR_PREFIX` and the name. The
 /// first ones are the headset protocol's codes; `NotConnected`, `TimedOut` and
 /// `Disconnected` are the local API's own.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub enum ApiError {
     Unsupported,
     NotAllowed,
@@ -287,7 +315,6 @@ pub enum ApiError {
     Disconnected,
     /// Anything else, and any name a newer Prostir sends that this one does not know.
     #[default]
-    #[serde(other)]
     Other,
 }
 
@@ -408,13 +435,12 @@ impl Answer {
 }
 
 /// How a headset is connected.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Via {
     #[default]
     Wifi,
     Usb,
-    #[serde(other)]
     Other,
 }
 
@@ -429,7 +455,7 @@ impl Via {
 }
 
 /// Why a headset's session ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Reason {
     /// The headset app or the PC app quit.
@@ -438,7 +464,6 @@ pub enum Reason {
     /// Nothing came from it for 5 s.
     Silence,
     Forgotten,
-    #[serde(other)]
     Other,
 }
 
@@ -479,6 +504,9 @@ pub enum Event {
         headset: String,
         worn: bool,
     },
+    /// An event this build does not know (from a newer Prostir).
+    #[serde(other)]
+    Other,
 }
 
 /// Everything there is to show of Prostir, as one JSON object (`GetState`,
@@ -554,7 +582,7 @@ pub struct Pc {
 }
 
 /// Where Prostir is between headsets.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
     /// Waiting for a headset, without monitors.
@@ -564,11 +592,10 @@ pub enum Phase {
     Live,
     /// The monitors wait a while for the headset to come back.
     Lingering,
-    #[serde(other)]
     Other,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemeMode {
     /// As the desktop says.
@@ -576,7 +603,6 @@ pub enum ThemeMode {
     System,
     Light,
     Dark,
-    #[serde(other)]
     Other,
 }
 
@@ -628,13 +654,12 @@ pub struct Headset {
     pub session: Option<Session>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     #[default]
     Main,
     Guest,
-    #[serde(other)]
     Other,
 }
 
@@ -666,7 +691,7 @@ pub struct Battery {
     pub charging: bool,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DisplayKind {
     /// A monitor made for the headset.
@@ -676,11 +701,10 @@ pub enum DisplayKind {
     Physical,
     /// A small output for one window (a floating panel in the headset).
     Window,
-    #[serde(other)]
     Other,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DisplayState {
     #[default]
@@ -691,7 +715,6 @@ pub enum DisplayState {
     /// Not on the desktop now: a display of the PC not connected, or every display
     /// while there are no monitors (the set kept for the next headset).
     Absent,
-    #[serde(other)]
     Other,
 }
 
@@ -753,14 +776,13 @@ pub struct Limits {
     pub max: Option<[u32; 2]>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Codec {
     #[default]
     H264,
     H265,
     Av1,
-    #[serde(other)]
     Other,
 }
 
@@ -786,14 +808,13 @@ pub struct Using {
     pub hardware: bool,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MicState {
     #[default]
     Off,
     Ready,
     Failed,
-    #[serde(other)]
     Other,
 }
 
@@ -834,15 +855,36 @@ pub struct Pairing {
     pub last: Option<PairResult>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PairResult {
     /// A new headset is trusted now.
-    Paired { name: String },
+    Paired {
+        name: String,
+    },
     /// The codes did not match.
     Wrong,
-    #[serde(other)]
     Other,
+}
+
+/// Lenient: an ending this build does not know, with data or without, reads as
+/// `Other`; `paired` without a name reads with an empty one.
+impl<'de> Deserialize<'de> for PairResult {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(d)?;
+        if value.as_str() == Some("wrong") {
+            return Ok(Self::Wrong);
+        }
+        let name = value.get("paired").map(|p| {
+            p.get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+        });
+        Ok(match name {
+            Some(name) => Self::Paired { name: name.into() },
+            None => Self::Other,
+        })
+    }
 }
 
 /// Something wrong: its name and its text in the PC's language.
@@ -1180,5 +1222,42 @@ mod tests {
             })
         );
         assert!(State::from_json("[1").is_err());
+    }
+
+    /// Every closed set reads what a newer side may send: an unknown name, a name
+    /// with data, a value that is no name.
+    #[test]
+    fn closed_sets_read_leniently() {
+        let read = |json: &str| serde_json::from_str::<PairResult>(json).unwrap();
+        assert_eq!(read(r#""wrong""#), PairResult::Wrong);
+        assert_eq!(
+            read(r#"{"paired":{"name":"Quest 3S"}}"#),
+            PairResult::Paired {
+                name: "Quest 3S".into()
+            }
+        );
+        assert_eq!(read(r#"{"locked":{"until":5}}"#), PairResult::Other);
+        assert_eq!(read(r#""later""#), PairResult::Other);
+        assert_eq!(read("7"), PairResult::Other);
+        let kind = |json: &str| serde_json::from_str::<DisplayKind>(json).unwrap();
+        assert_eq!(kind(r#""physical""#), DisplayKind::Physical);
+        assert_eq!(kind(r#"{"hologram":{"depth":2}}"#), DisplayKind::Other);
+        assert_eq!(
+            serde_json::from_str::<ApiError>(r#"{"Later":1}"#).unwrap(),
+            ApiError::Other
+        );
+        assert_eq!(
+            serde_json::from_str::<Reason>(r#""taken-off""#).unwrap(),
+            Reason::TakenOff
+        );
+        assert_eq!(serde_json::from_str::<Via>("null").unwrap(), Via::Other);
+        let event: Event =
+            serde_json::from_str(r#"{"event":"headset_charging","headset":"a1"}"#).unwrap();
+        assert_eq!(event, Event::Other);
+        // Every name reads back as itself.
+        for e in ApiError::ALL {
+            let json = serde_json::to_string(&e).unwrap();
+            assert_eq!(serde_json::from_str::<ApiError>(&json).unwrap(), e);
+        }
     }
 }

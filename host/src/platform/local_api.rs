@@ -196,6 +196,8 @@ fn headset_signal(bus: &Connection, event: &api::Event) {
         api::Event::HeadsetWorn { headset, worn } => {
             signal(bus, "HeadsetWorn", &(headset.as_str(), *worn))
         }
+        // Only for reading what a newer Prostir sends; never sent.
+        api::Event::Other => {}
     }
 }
 

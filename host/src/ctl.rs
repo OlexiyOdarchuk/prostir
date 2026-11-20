@@ -579,7 +579,7 @@ fn watch(client: &dyn CtlClient, json: bool, io: &mut Output) -> i32 {
         let line = match seen {
             Watched::State(revision, text) => state_line(revision, &text, json, &mut said),
             Watched::Event(event) if json => Some(to_json(&event)),
-            Watched::Event(event) => Some(event_line(&event)),
+            Watched::Event(event) => event_line(&event),
             Watched::Appeared if json => Some(r#"{"event":"appeared"}"#.to_owned()),
             Watched::Appeared => Some(t("Prostir працює", "Prostir is running").to_owned()),
             Watched::Vanished if json => Some(r#"{"event":"vanished"}"#.to_owned()),
@@ -615,8 +615,8 @@ fn state_line(revision: u32, text: &str, json: bool, said: &mut String) -> Optio
     Some(line)
 }
 
-fn event_line(event: &api::Event) -> String {
-    match event {
+fn event_line(event: &api::Event) -> Option<String> {
+    Some(match event {
         api::Event::HeadsetConnected { headset, name, via } => format!(
             "{} {name} ({headset}, {})",
             t("Шолом підключився:", "Headset connected:"),
@@ -635,7 +635,8 @@ fn event_line(event: &api::Event) -> String {
                 t("Шолом зняли:", "Headset taken off:")
             }
         ),
-    }
+        api::Event::Other => return None,
+    })
 }
 
 /// `prostir open` (the menu entry): the settings window, with Prostir started first
