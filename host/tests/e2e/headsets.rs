@@ -9,7 +9,7 @@ use prostir_proto::request::{Outcome, Request};
 use prostir_proto::state::{
     Decoder, DisplayState, ErrorCode, MicDevice, Mode, Placed, Row, UpKind, perms, role,
 };
-use prostir_proto::{ClientMsg, PcGoodbye};
+use prostir_proto::{ClientMsg, Codec, PcGoodbye};
 use prostir_testkit::{ConnectError, FakeHeadset, Keys, View};
 
 use crate::pc::{Options, Pc, TestDir};
@@ -453,4 +453,71 @@ fn the_microphone_in_use_does_not_move() {
     .unwrap();
     guest.take_for(Duration::from_secs(1)).unwrap();
     assert!(!wanted(&guest), "not the guest's any more");
+}
+
+/// H.265 asked for while the other headset decodes only H.264: done, kept as chosen,
+/// and the streams stay in H.264 (one switch at most, none here); once that headset
+/// leaves, they go in H.265. Only where the PC encodes H.265 on its graphics card.
+#[test]
+fn a_codec_one_headset_cannot_decode_waits_for_it_to_leave() {
+    let options = Options {
+        software: false,
+        ..Options::default()
+    };
+    let (_dir, mut pc, mut a, mut b) =
+        two_headsets("codec-waits", options, "codec h264\nsoftware off\n");
+    let mut first = showing(&pc, &mut a);
+    let can = first.view().encoding().unwrap().choices.clone();
+    if !can.contains(&(Codec::H265, true)) {
+        eprintln!("no H.265 on the graphics card here ({can:?}): nothing to try");
+        return;
+    }
+    let mut h264 = FakeHeadset::state();
+    h264.caps
+        .as_mut()
+        .unwrap()
+        .decoders
+        .retain(|d| d.codec == 0);
+    let mut second = FakeHeadset::connect_saying(pc.addr, &mut b, &h264)
+        .unwrap_or_else(|e| panic!("connecting: {e}"));
+    second
+        .wait(START, "every monitor showing", View::all_monitors_show)
+        .unwrap();
+    let switches = pc.count_log("(from the headset menu)");
+    let asked = first
+        .ask(Request::SetEncoding {
+            bitrate: None,
+            codec: Some(Codec::H265),
+            software: Some(false),
+            sharp: None,
+        })
+        .unwrap();
+    assert_eq!(asked, Outcome::Done);
+    let encoding = first.view().encoding().unwrap();
+    assert_eq!(encoding.wanted.codec, Some(Codec::H265), "kept as chosen");
+    assert_eq!(encoding.using.map(|u| u.0), Some(Codec::H264));
+    first.take_for(Duration::from_secs(1)).unwrap();
+    assert_eq!(
+        pc.count_log("(from the headset menu)"),
+        switches,
+        "no switch"
+    );
+    assert!(
+        second
+            .view()
+            .streams
+            .values()
+            .all(|s| s.codec == Codec::H264)
+    );
+    second.disconnect();
+    pc.wait_log(SOON, "every headset decodes H265");
+    first
+        .wait(SOON, "every monitor in H.265", |v| {
+            v.order().iter().all(|id| {
+                v.streams
+                    .get(id)
+                    .is_some_and(|s| s.codec == Codec::H265 && s.has_picture())
+            })
+        })
+        .unwrap();
 }

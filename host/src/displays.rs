@@ -1028,30 +1028,49 @@ impl Displays {
     /// one in a codec some headset does not decode (a choice saved with another
     /// headset) starts over in H.264, which every headset decodes. The choice stays
     /// saved, and the streams go back to it once every headset decodes it again.
-    pub fn fit_codec<'a>(&mut self, headsets: impl IntoIterator<Item = &'a state::HeadsetCaps>) {
-        let headsets: Vec<&state::HeadsetCaps> = headsets.into_iter().collect();
-        let decoded = |c: Codec| c == Codec::H264 || headsets.iter().all(|h| h.decodes(c));
-        let (codec, software) = self.encoding_now();
-        if !decoded(codec) {
+    pub fn fit_codec(&mut self, headsets: &[state::HeadsetCaps]) {
+        if headsets.is_empty() {
+            return;
+        }
+        // The one chosen where it was put aside for a headset, else what encodes now.
+        let base = if self.fitted_down {
+            (self.settings.codec, self.settings.software)
+        } else {
+            self.encoding_now()
+        };
+        if let Err(e) = self.encode_for(base.0, base.1, headsets) {
+            warn!("{e:#}");
+        }
+    }
+
+    /// The codec the streams go in when `codec` is chosen and the headsets with a
+    /// session are `headsets`: it, where every one of them decodes it, else H.264.
+    pub fn codec_for(codec: Codec, headsets: &[state::HeadsetCaps]) -> Codec {
+        if codec == Codec::H264 || headsets.iter().all(|h| h.decodes(codec)) {
+            codec
+        } else {
+            Codec::H264
+        }
+    }
+
+    /// Encodes `codec` (on the CPU with `software`) as far as `headsets` decode it
+    /// (see [`Displays::codec_for`]), with one switch at most; the choice stays
+    /// `codec`, and the streams go back to it once every headset decodes it.
+    pub fn encode_for(
+        &mut self,
+        codec: Codec,
+        software: bool,
+        headsets: &[state::HeadsetCaps],
+    ) -> Result<()> {
+        let fits = Self::codec_for(codec, headsets);
+        let now = self.encoding_now().0;
+        if fits != codec && now != fits {
             info!("a headset does not decode {codec:?}: streaming H.264");
-            match self.encode_with(Codec::H264, software) {
-                Ok(()) => self.fitted_down = true,
-                Err(e) => warn!("{e:#}"),
-            }
-            return;
+        } else if self.fitted_down && fits == codec && now != fits {
+            info!("every headset decodes {codec:?}: streaming it again");
         }
-        let wanted = (self.settings.codec, self.settings.software);
-        if !self.fitted_down || headsets.is_empty() || !decoded(wanted.0) {
-            return;
-        }
-        self.fitted_down = false;
-        let would = crate::encoder::pick(wanted.0, wanted.1).map(|(_, c)| c);
-        if would.is_ok_and(|c| c != codec) {
-            info!("every headset decodes {:?}: streaming it again", wanted.0);
-            if let Err(e) = self.encode_with(wanted.0, wanted.1) {
-                warn!("{e:#}");
-            }
-        }
+        self.fitted_down = fits != codec;
+        self.encode_with(fits, software)
     }
 
     /// Every screen as the headset that can do what `headset` says is told about it
@@ -1309,7 +1328,13 @@ impl Displays {
         let before = self.cfg.clone();
         self.cfg.backend = backend;
         self.cfg.codec = codec;
-        let ids: Vec<ScreenId> = self.monitors().map(|s| s.id).collect();
+        // Monitors and window panels (their windows stay on them).
+        let ids: Vec<ScreenId> = self
+            .screens
+            .values()
+            .filter(|s| s.is_virtual() || s.is_window())
+            .map(|s| s.id)
+            .collect();
         for (i, &id) in ids.iter().enumerate() {
             let Err(e) = self.restart_monitor(id, Some(&before)) else {
                 continue;
@@ -1326,9 +1351,7 @@ impl Displays {
             }
             return Err(e);
         }
-        // Window panels are made again when wanted; the PC's displays start again by
-        // themselves, right away.
-        self.close_window_panels();
+        // The PC's displays start again by themselves, right away.
         let physical: Vec<ScreenId> = self.physical().map(|s| s.id).collect();
         for id in physical {
             self.stop_physical(id);
@@ -1387,6 +1410,15 @@ impl Displays {
                     screen.state = ScreenState::Running;
                 }
                 self.layout_changed();
+            }
+            // A window panel closes, its window back where it was.
+            None if self.screens.get(&id).is_some_and(Screen::is_window) => {
+                error!("{id}: no stream; the window panel closes");
+                self.router.remove_stream(id);
+                if let Some(screen) = self.screens.get_mut(&id) {
+                    screen.output = Some(output);
+                }
+                self.close_panel(id, true);
             }
             // It keeps its place, and is tried again at the next session.
             None => {
@@ -2467,6 +2499,35 @@ fn rows_in_step<K: Copy + PartialEq>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The streams go in the codec chosen only where every headset decodes it, and in
+    /// H.264 otherwise; without a headset, as chosen.
+    #[test]
+    fn the_codec_is_one_every_headset_decodes() {
+        let decoder = |codec| state::Decoder {
+            codec,
+            max_w: 4096,
+            max_h: 4096,
+        };
+        let both = state::HeadsetCaps {
+            decoders: vec![decoder(0), decoder(1)],
+            ..state::HeadsetCaps::default()
+        };
+        let h264 = state::HeadsetCaps {
+            decoders: vec![decoder(0)],
+            ..state::HeadsetCaps::default()
+        };
+        assert_eq!(Displays::codec_for(Codec::H265, &[]), Codec::H265);
+        assert_eq!(
+            Displays::codec_for(Codec::H265, std::slice::from_ref(&both)),
+            Codec::H265
+        );
+        assert_eq!(
+            Displays::codec_for(Codec::H265, &[both.clone(), h264.clone()]),
+            Codec::H264
+        );
+        assert_eq!(Displays::codec_for(Codec::H264, &[both, h264]), Codec::H264);
+    }
 
     /// On a desktop whose primary output is always at (0, 0), the plan moves with it.
     #[test]

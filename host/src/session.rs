@@ -422,7 +422,9 @@ impl Session {
             ..standing
         };
         let mut publisher = publish::Publisher::new(headset, access_in(configured, main));
-        displays.fit_codec(others.iter().chain([publisher.caps()]));
+        let mut headsets = others.to_vec();
+        headsets.push(publisher.caps().clone());
+        displays.fit_codec(&headsets);
         let outbox = Arc::new(outbox::Outbox::default());
         // The session opens now that it can be served: the monitors exist, and the
         // writer (which also pings) starts below. The headset counts silence from

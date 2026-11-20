@@ -879,7 +879,7 @@ and is known by the EDID from then on.
 | 3 | `SetDisplays` | `modes:list<Mode>(max 32), primary:opt<Primary>, shown_physical:list<DisplayId>(max 32)` | `Ids`, in the order of `modes` | changes | `LIMIT`, `BAD_SIZE`, `UNKNOWN_DISPLAY` |
 | 4 | `SetPrimary` | `id:DisplayId` | `Done` | changes | `UNKNOWN_DISPLAY` |
 | 5 | `ShowPhysical` | `id:DisplayId, shown:bool` | `Done` | changes | `UNKNOWN_DISPLAY`, `LIMIT`, `CAPTURE` |
-| 6 | `SetEncoding` | `bitrate:opt<u16>, codec:opt<Codec>, software:opt<bool>, sharp:opt<bool>` (none: as it is) | `Done` (what came of it is in `Encoding`) | changes | `ENCODER`, `BAD_ARGUMENT`, `BAD_SIZE` (a display streaming now would be larger than the headset decodes in the new codec: nothing changes) |
+| 6 | `SetEncoding` | `bitrate:opt<u16>, codec:opt<Codec>, software:opt<bool>, sharp:opt<bool>` (none: as it is) | `Done` (what came of it is in `Encoding`: a codec another headset with a session does not decode stays chosen, in `wanted`, while the host encodes H.264, in `using`, until every headset decodes it) | changes | `ENCODER`, `BAD_ARGUMENT`, `BAD_SIZE` (a display streaming now would be larger than the headset decodes in the new codec: nothing changes) |
 | 7 | `SetSound` | `to_headset:bool` | `Done` | changes | `SOUND` |
 | 9 | `DetachWindow` | | `Added` | changes, private | `NO_WINDOW`, `LIMIT` |
 | 10 | `WindowHere` | `id:DisplayId` | `Done` | input | `NO_WINDOW`, `UNKNOWN_DISPLAY` |
