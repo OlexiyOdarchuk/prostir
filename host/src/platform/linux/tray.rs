@@ -136,10 +136,7 @@ impl Tray {
 
     fn monitors_line(&self) -> String {
         let mirror = if self.status.mirror {
-            t(
-                ", екран ноутбука в шоломі",
-                ", laptop screen in the headset",
-            )
+            t(", екран ПК у шоломі", ", a PC display in the headset")
         } else {
             ""
         };
