@@ -3578,6 +3578,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 
 [[package]]
+name = "prostir-api"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "prostir-client"
 version = "0.2.0"
 dependencies = [
@@ -3606,6 +3614,7 @@ name = "prostir-host"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "async-channel",
  "clap",
  "drm-fourcc",
  "env_logger",
@@ -3618,9 +3627,11 @@ dependencies = [
  "ksni",
  "libc",
  "log",
+ "prostir-api",
  "prostir-layout",
  "prostir-proto",
  "prostir-testkit",
+ "serde",
  "serde_json",
  "wayland-client",
  "wayland-protocols",

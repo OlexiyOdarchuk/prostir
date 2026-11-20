@@ -23,7 +23,8 @@ use anyhow::{Context, Result, bail};
 
 use super::kscreen;
 use crate::encoder::Input;
-use crate::platform::{MonitorSpec, PhysicalDisplay, is_panel};
+use crate::platform::linux::is_panel;
+use crate::platform::{OutputKey, PhysicalDisplay, VirtualSpec};
 use log::{info, warn};
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
 use wayland_client::protocol::{wl_output, wl_registry};
@@ -278,20 +279,9 @@ impl Screencast {
         })
     }
 
-    /// Connector name of the first real (non-virtual) display, e.g. the laptop panel.
-    pub fn physical_output(&self) -> Option<String> {
-        let outputs = self.shared.outputs.lock().unwrap();
-        let mut names: Vec<&String> = outputs
-            .values()
-            .filter_map(|(_, info)| info.name.as_ref())
-            .filter(|n| !n.starts_with("Virtual-"))
-            .collect();
-        names.sort();
-        names.first().map(|n| (*n).clone())
-    }
-
     /// The displays of the PC itself that are on (KWin lists no output of a closed
-    /// laptop's panel, or of a display switched off).
+    /// laptop's panel, or of a display switched off); the first by connector name is
+    /// the one shown by default.
     pub fn physical_displays(&self) -> Vec<PhysicalDisplay> {
         let outputs = self.shared.outputs.lock().unwrap();
         let mut found: Vec<PhysicalDisplay> = outputs
@@ -303,14 +293,19 @@ impl Screencast {
                     .filter(|w| !w.is_empty() && *w != "unknown")
                     .collect();
                 Some(PhysicalDisplay {
-                    connector: name.clone(),
+                    key: OutputKey::new(name.clone()),
+                    label: name.clone(),
                     edid: (!said.is_empty()).then(|| said.join(" ")),
                     builtin: is_panel(name),
                     size: info.mode,
+                    default: false,
                 })
             })
             .collect();
-        found.sort_by(|a, b| a.connector.cmp(&b.connector));
+        found.sort_by(|a, b| a.key.cmp(&b.key));
+        if let Some(first) = found.first_mut() {
+            first.default = true;
+        }
         found
     }
 
@@ -343,7 +338,10 @@ impl Screencast {
             None,
             Duration::from_secs(2),
         )?;
-        info!("mirroring {output_name}, PipeWire node {}", mirror.node);
+        info!(
+            "mirroring {output_name} (stream {number}), PipeWire node {}",
+            mirror.node
+        );
         Ok(mirror)
     }
 
@@ -398,8 +396,8 @@ impl Screencast {
     }
 
     /// Creates output `Virtual-Prostir-<number>` and waits for its PipeWire node.
-    pub fn create(&self, number: u32, spec: &MonitorSpec) -> Result<VirtualOutput> {
-        spec.validate()?;
+    pub fn create(&self, spec: &VirtualSpec) -> Result<VirtualOutput> {
+        let number = spec.number;
         self.shared
             .streams
             .lock()
@@ -408,7 +406,7 @@ impl Screencast {
         let name = format!("Prostir-{number}");
         // The protocol calls these "logical", but KWin uses them as the output's mode
         // (pixel size); scale is applied separately through KScreen.
-        let (w, h) = (spec.width as i32, spec.height as i32);
+        let (w, h) = (spec.w as i32, spec.h as i32);
         let stream = if self.screencast.version() >= 4 {
             let description = format!("Prostir {number}");
             self.screencast.stream_virtual_output_with_description(
@@ -436,12 +434,12 @@ impl Screencast {
             number,
             stream,
             format!("Virtual-Prostir-{number}"),
-            Some((spec.width, spec.height)),
+            Some((spec.w, spec.h)),
             Duration::from_secs(10),
         )?;
         info!("Prostir-{number}: {spec}, PipeWire node {}", output.node);
-        if (spec.scale - 1.0).abs() > f64::EPSILON {
-            kscreen::set(output.output_name(), &format!("scale.{}", spec.scale));
+        if spec.scale != 100 {
+            kscreen::set(output.output_name(), &format!("scale.{}", spec.factor()));
         }
         Ok(output)
     }

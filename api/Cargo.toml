@@ -1,0 +1,18 @@
+[package]
+name = "prostir-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Prostir's local API: the requests, replies, events and state the PC app and its clients share"
+publish = false
+
+# Only the types and their JSON: the PC app (the service) and its clients (the settings
+# window, `prostir ctl`) build on the same ones, so they cannot drift apart. No
+# transport, no user interface.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

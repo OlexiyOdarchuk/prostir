@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use log::info;
 use prostir_proto::Codec;
 use prostir_proto::request::{Outcome, Primary, Request};
-use prostir_proto::state::{Access, ErrorCode, HeadsetCaps, Limits, Mode, caps, perms};
+use prostir_proto::state::{Access, HeadsetCaps, Limits, Mode, caps, perms};
 
 use crate::displays::Displays;
 use crate::errors::{self, Counted, UserError};
@@ -49,11 +49,22 @@ pub fn handle(
     store: &mut Store,
     asker: &Asker,
 ) -> Outcome {
+    handle_checked(request, displays, store, asker).unwrap_or_else(|e| errors::outcome(&e))
+}
+
+/// As [`handle`], with a failure as the error itself (its `UserError` and what lay
+/// under it), for the PC's own requests.
+pub fn handle_checked(
+    request: Request,
+    displays: &mut Displays,
+    store: &mut Store,
+    asker: &Asker,
+) -> Result<Outcome> {
     if !asker.access.may(needs(&request)) {
         info!("the headset has no right to {request:?}");
-        return Outcome::failed(ErrorCode::NOT_ALLOWED, &UserError::NotAllowed.to_string());
+        bail!(UserError::NotAllowed);
     }
-    carry_out(request, displays, store, asker).unwrap_or_else(|e| errors::outcome(&e))
+    carry_out(request, displays, store, asker)
 }
 
 fn carry_out(
@@ -195,9 +206,13 @@ fn carry_out(
             let bitrate = bitrate.map_or(now.bitrate, |b| u32::from(b).clamp(5, 100));
             let codec = codec.unwrap_or(now.codec);
             let software = software.unwrap_or(now.software);
-            // Nothing changes while a display streaming now would be too big for the
-            // headset in what the PC would encode with.
-            let (_, would) = crate::encoder::pick(codec, software).context(UserError::Encoder)?;
+            // What the PC would encode with: the codec chosen where every headset with
+            // a session decodes it, else H.264 (the choice stays saved). Nothing
+            // changes while a display streaming now would be too big for the headset
+            // in it.
+            let headsets = displays.router.headsets();
+            let fits = Displays::codec_for(codec, &headsets);
+            let (_, would) = crate::encoder::pick(fits, software).context(UserError::Encoder)?;
             if would != displays.codec()
                 && let Some((w, h)) = displays.too_big_for(would, asker.caps)
             {
@@ -206,8 +221,7 @@ fn carry_out(
             store.set_encoding(bitrate, sharp.unwrap_or(now.sharp), codec, software);
             // Quality and clearer text apply even when the codec cannot change.
             displays.apply(&store.wanted());
-            let result = displays.encode_with(codec, software);
-            displays.fit_codec(asker.caps);
+            let result = displays.encode_for(codec, software, &headsets);
             // A monitor whose stream could not start again is gone.
             keep_screens(store, displays, false);
             result?;
@@ -299,6 +313,7 @@ fn home_relative(path: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prostir_proto::state::ErrorCode;
 
     fn limits() -> Limits {
         crate::publish::limits(&Default::default(), &HeadsetCaps::default(), Codec::H264)

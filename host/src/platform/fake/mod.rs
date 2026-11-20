@@ -15,7 +15,8 @@
 //! - Sound is silence, 10 ms at a time, each slice starting with the time it was
 //!   made (see [`audio`]), so a fake headset can tell how late it arrives; the
 //!   microphone goes nowhere.
-//! - No windows, no mouse, no screenshots, no notifications, no USB, and no outside
+//! - No windows, no mouse, no screenshots (its desktop has no [`crate::platform::Windows`]
+//!   and no [`crate::platform::Pointer`]), no notifications, no USB, and no outside
 //!   programs are run. The tray is a file a test writes menu
 //!   items to (see [`tray`]).
 //! - Another program can resize a monitor, as sharing it in Discord does on KDE: a
@@ -31,8 +32,8 @@
 //!   dialog to type it in.
 //!
 //! It provides what the core uses of the platform contract (see `platform/mod.rs`);
-//! helpers only the Linux platform calls itself (`windows::all_windows`,
-//! `audio::restore_after_crash`) are left out.
+//! helpers only the Linux platform calls itself (`audio::restore_after_crash`) are
+//! left out.
 
 mod desktop;
 mod screen;
@@ -42,7 +43,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-pub use desktop::{FakeDesktop as Desktop, FakeOutput as Output};
+pub use desktop::connect;
 
 /// The fake desktop was asked for: `PROSTIR_FAKE_DESKTOP=1`, as the tests set it.
 fn asked_for() -> bool {
@@ -186,71 +187,13 @@ fn watch_file(name: &'static str, on_text: impl Fn(String) -> bool + Send + 'sta
 /// No headset is ever plugged in by USB.
 pub fn keep_adb_reverse(_port: u16) {}
 
-/// No windows and no mouse.
-pub mod windows {
-    use std::path::PathBuf;
-
-    use anyhow::{Result, bail};
-
-    use crate::platform::ActiveWindow;
-
-    pub fn active() -> Option<ActiveWindow> {
-        None
-    }
-
-    pub fn cursor() -> Option<(i32, i32)> {
-        None
-    }
-
-    pub fn can_move_cursor() -> bool {
-        false
-    }
-
-    pub fn move_cursor(_x: i32, _y: i32) -> bool {
-        false
-    }
-
-    pub fn move_to(_w: &ActiveWindow, _output: &str, _fill: bool) -> Result<()> {
-        bail!("the fake desktop has no windows")
-    }
-
-    pub fn put_back(_w: &ActiveWindow, _output: &str) -> Result<()> {
-        bail!("the fake desktop has no windows")
-    }
-
-    pub fn forget_panel(_output: &str) {}
-
-    pub fn vacated(_panels: &[String]) -> Vec<String> {
-        Vec::new()
-    }
-
-    pub fn screenshot(_output: Option<&str>) -> Result<PathBuf> {
-        bail!("the fake desktop takes no screenshots")
-    }
-
-    /// In the settings directory (the fake PC has no Pictures folder).
-    pub fn screenshot_path() -> Result<PathBuf> {
-        let dir = super::config_home()
-            .ok_or_else(|| anyhow::anyhow!("no settings directory"))?
-            .join("screenshots");
-        std::fs::create_dir_all(&dir)?;
-        Ok(dir.join("screenshot.png"))
-    }
-}
-
-pub mod focus {
-    /// The mouse is on no output.
-    pub struct ActiveOutput;
-
-    impl ActiveOutput {
-        pub fn new() -> Self {
-            Self
-        }
-
-        pub fn get(&self) -> Option<String> {
-            None
-        }
-    }
+/// In the settings directory (the fake PC has no Pictures folder).
+pub fn screenshot_path() -> Result<PathBuf> {
+    let dir = config_home()
+        .ok_or_else(|| anyhow::anyhow!("no settings directory"))?
+        .join("screenshots");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir.join("screenshot.png"))
 }
 
 /// Silence to the headset; the headset microphone goes nowhere.
@@ -357,6 +300,9 @@ pub mod audio {
     pub static VOLUME: std::sync::Mutex<Option<std::sync::mpsc::Sender<(u8, bool, Instant)>>> =
         std::sync::Mutex::new(None);
 
+    /// Where the fake device is now, once something set or moved it.
+    pub static LEVEL: std::sync::Mutex<Option<(u8, bool)>> = std::sync::Mutex::new(None);
+
     impl SinkVolume {
         pub fn open() -> Option<Self> {
             let (tx, changes) = std::sync::mpsc::channel();
@@ -365,6 +311,7 @@ pub mod audio {
         }
 
         pub fn set(&self, level: u8, muted: bool) {
+            *LEVEL.lock().unwrap() = Some((level, muted));
             log::info!(
                 "fake desktop: volume set to {level}{}",
                 if muted { " muted" } else { "" }
@@ -378,19 +325,28 @@ pub mod audio {
         pub fn changed(&self) -> Option<(u8, bool, Instant)> {
             self.changes.try_recv().ok()
         }
+
+        /// Where the device is now, if known.
+        pub fn level(&self) -> Option<(u8, bool)> {
+            *LEVEL.lock().unwrap()
+        }
     }
 }
 
 pub mod sound_source {
+    use std::sync::Arc;
+
+    use crate::platform::{OutputKey, WindowList};
+
     /// No app plays sound on the fake PC.
     pub struct Watcher;
 
     impl Watcher {
-        pub fn start() -> Self {
+        pub fn start(_windows: Option<Arc<dyn WindowList>>) -> Self {
             Self
         }
 
-        pub fn output(&self) -> Option<String> {
+        pub fn output(&self) -> Option<OutputKey> {
             None
         }
     }
@@ -405,9 +361,23 @@ pub mod notifications {
     }
 }
 
+/// Starting with the session: the fake PC cannot.
+pub mod autostart {
+    pub fn available() -> bool {
+        false
+    }
+
+    pub fn enabled() -> bool {
+        false
+    }
+
+    pub fn set(_on: bool) {}
+}
+
 /// A tray without an icon: a test "clicks" its items by writing their names, one a
-/// line, to `$XDG_RUNTIME_DIR/fake-tray` (`forget`, `recenter`, `quit`, `sharp on`,
-/// `sharp off`, `quality 15`, `quality 50`), which is read and removed once written.
+/// line, to `$XDG_RUNTIME_DIR/fake-tray` (`forget`, `recenter`, `settings`, `quit`,
+/// `sharp on`, `sharp off`, `quality 15`, `quality 50`), which is read and removed
+/// once written.
 pub mod tray {
     use crate::events::EventSink;
     use crate::platform::{TrayCommand, TrayStatus};
@@ -420,12 +390,10 @@ pub mod tray {
             for item in text.lines() {
                 let command = match item.trim() {
                     "forget" => TrayCommand::ForgetHeadsets,
-                    "recenter" => TrayCommand::Headset {
-                        asked: prostir_proto::request::Asked::Known(
-                            prostir_proto::request::Command::Recenter,
-                        ),
-                        reply: None,
-                    },
+                    "recenter" => TrayCommand::Headset(prostir_proto::request::Asked::Known(
+                        prostir_proto::request::Command::Recenter,
+                    )),
+                    "settings" => TrayCommand::ShowSettings,
                     "quit" => TrayCommand::Quit,
                     "sharp on" => TrayCommand::SetSharp(true),
                     "sharp off" => TrayCommand::SetSharp(false),
@@ -446,7 +414,14 @@ pub mod tray {
         .then_some(Handle)
     }
 
-    pub fn set_status(_handle: Option<&Handle>, _status: TrayStatus) {}
+    /// What the tray would show, in the log for the tests.
+    pub fn set_status(_handle: Option<&Handle>, status: TrayStatus) {
+        log::info!(
+            "fake tray: {} other headset(s), microphone denied: {}",
+            status.others,
+            status.mic_denied
+        );
+    }
 
     pub fn set_battery(_handle: Option<&Handle>, _battery: Option<(u8, bool)>) {}
 

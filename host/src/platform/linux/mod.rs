@@ -1,22 +1,35 @@
 //! Linux: KDE Plasma or Hyprland, picked at run time.
 
 pub mod audio;
-mod autostart;
+pub mod autostart;
 mod desktop;
 pub mod dialogs;
-pub mod focus;
 mod hyprland;
 mod kde;
 pub mod notifications;
+mod screenshot;
 pub mod sound_source;
 mod system;
 pub mod tray;
 mod usb;
-pub mod windows;
 
-pub use desktop::{Desktop, Output};
+pub use desktop::connect;
+pub use screenshot::screenshot_path;
 pub use system::{
     broadcast_addresses, clean_up_after_crash, config_home, give_memory_back, hostname, run,
     single_instance,
 };
 pub use usb::keep_adb_reverse;
+
+/// Whether a connector is a laptop's own panel.
+fn is_panel(connector: &str) -> bool {
+    ["eDP", "LVDS", "DSI"]
+        .iter()
+        .any(|p| connector.starts_with(p))
+}
+
+/// Whether output `name` is virtual (Prostir's on KDE or Hyprland, or KWin's for
+/// another program), not a display of the PC.
+fn named_virtual(name: &str) -> bool {
+    name.starts_with("Virtual-") || name.starts_with(hyprland::PREFIX)
+}

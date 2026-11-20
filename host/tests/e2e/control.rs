@@ -70,7 +70,8 @@ fn assert_asleep(pc: &Pc, when: &str) {
 }
 
 /// Waiting for a headset, the PC sleeps: before the first session, while it keeps
-/// the monitors for the headset to come back, and after that once they are gone.
+/// the monitors for the headset to come back, and after that once they are gone; its
+/// local API on the session bus too.
 #[test]
 fn an_idle_pc_sleeps() {
     const LINGER: u64 = 15;
@@ -82,6 +83,10 @@ fn an_idle_pc_sleeps() {
         ..Options::default()
     };
     let mut pc = Pc::start(&dir, &options);
+    // With the local API on its session bus (where there is one), asked once.
+    if let Some(status) = pc.ctl(&["status"]) {
+        assert_eq!(status.code, 0, "{status:?}");
+    }
     assert_asleep(&pc, "before the first headset");
     let mut headset = connect(&pc, &mut keys);
     headset
@@ -341,4 +346,25 @@ fn a_headset_forgotten_meanwhile_gets_no_session() {
         Ok(_) => panic!("a forgotten headset got a session"),
     }
     pc.wait_log(SOON, "was forgotten meanwhile");
+}
+
+/// A headset back whose new session cannot open (its `Open` says nothing of what it
+/// can do) replaced its old one all the same: with no session left, the encoders
+/// pause and the monitors wait for it as after any other session.
+#[test]
+fn a_replacing_session_that_cannot_open_leaves_nothing_running() {
+    let (_dir, mut pc, mut keys, headset) = session("replaced-failed", &Options::default());
+    headset.stall(Duration::from_secs(60));
+    let mut state = FakeHeadset::state();
+    state.caps = None;
+    assert!(FakeHeadset::connect_saying(pc.addr, &mut keys, &state).is_err());
+    pc.wait_log(SOON, "its earlier session gives way");
+    pc.wait_log(SOON, "the headset's Open");
+    pc.wait_log(SOON, "paused: headset not worn or gone");
+    pc.wait_log(SOON, "keeping virtual monitors for 30 s");
+    // And it comes back to the same monitors.
+    let mut back = connect(&pc, &mut keys);
+    back.wait(START, "every monitor showing", View::all_monitors_show)
+        .unwrap();
+    assert_eq!(pc.count_log("fake desktop: created"), 2, "none made anew");
 }

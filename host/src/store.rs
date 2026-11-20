@@ -61,6 +61,9 @@ pub struct Settings {
     pub mirror: bool,
     /// Count this PC among users (see `usage`).
     pub count: bool,
+    /// The settings window's look (`window-theme`, `window-palette`,
+    /// `window-language`), written only when not the default.
+    pub window: prostir_api::WindowLook,
     /// Each headset's role and rights, by its key (hex): `access KEY main input mic`.
     /// A headset without a line is the main one, with every right.
     pub access: BTreeMap<String, Access>,
@@ -87,6 +90,15 @@ const PERMS: [(&str, u32); 6] = [
     ("changes", perms::CHANGES),
     ("private", perms::PRIVATE),
 ];
+
+/// The words of the rights in `perms`, as `access` lines write them.
+pub fn perm_words(perms: u32) -> Vec<String> {
+    PERMS
+        .iter()
+        .filter(|(_, bit)| perms & bit != 0)
+        .map(|(word, _)| (*word).to_owned())
+        .collect()
+}
 
 /// No right at all: a headset whose `access` line has a word that is no role or right.
 const NO_RIGHTS: Access = Access {
@@ -142,6 +154,7 @@ impl Default for Settings {
             audio: true,
             mirror: true,
             count: true,
+            window: prostir_api::WindowLook::default(),
             access: BTreeMap::new(),
         }
     }
@@ -288,6 +301,14 @@ fn codec_name(codec: Codec) -> &'static str {
     }
 }
 
+/// A palette's or a language's name: one short word of letters, digits and `-`.
+pub fn is_word(value: &str) -> bool {
+    (1..=32).contains(&value.len())
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 fn parse_settings(text: &str) -> (Settings, Kept) {
     let mut s = Settings::default();
     let mut kept = Kept::default();
@@ -328,6 +349,22 @@ fn parse_settings(text: &str) -> (Settings, Kept) {
             }
             ("count", Some(v)) => {
                 s.count = v;
+                true
+            }
+            ("window-theme", _) => match value {
+                "system" => Some(prostir_api::ThemeMode::System),
+                "light" => Some(prostir_api::ThemeMode::Light),
+                "dark" => Some(prostir_api::ThemeMode::Dark),
+                _ => None,
+            }
+            .map(|theme| s.window.theme = theme)
+            .is_some(),
+            ("window-palette", _) if is_word(value) => {
+                s.window.palette = value.to_owned();
+                true
+            }
+            ("window-language", _) if is_word(value) => {
+                s.window.language = Some(value.to_owned());
                 true
             }
             ("access", _) => match parse_access(value) {
@@ -376,6 +413,16 @@ fn settings_text(s: &Settings, kept: &Kept) -> String {
         on_off(s.mirror),
         on_off(s.count),
     );
+    let window = prostir_api::WindowLook::default();
+    if s.window.theme != window.theme {
+        text.push_str(&format!("window-theme {}\n", s.window.theme.name()));
+    }
+    if s.window.palette != window.palette {
+        text.push_str(&format!("window-palette {}\n", s.window.palette));
+    }
+    if let Some(language) = &s.window.language {
+        text.push_str(&format!("window-language {language}\n"));
+    }
     for (key, a) in &s.access {
         // A headset with a mistyped line keeps its other line as it was.
         let a = if kept.mistyped.contains(key) {
@@ -1002,9 +1049,37 @@ mod tests {
                 audio: false,
                 mirror: true,
                 count: true,
+                window: prostir_api::WindowLook::default(),
                 access: BTreeMap::new(),
             }
         );
+    }
+
+    /// The settings window's look is kept, and only when it is not the default; a
+    /// value that does not read stays as an unknown line.
+    #[test]
+    fn the_window_look_is_kept() {
+        let (s, kept) = parse_settings("bitrate 30\n");
+        assert!(!settings_text(&s, &kept).contains("window-"));
+        let (s, kept) =
+            parse_settings("window-theme dark\nwindow-palette graphite\nwindow-language uk\n");
+        assert_eq!(
+            s.window,
+            prostir_api::WindowLook {
+                theme: prostir_api::ThemeMode::Dark,
+                palette: "graphite".into(),
+                language: Some("uk".into()),
+            }
+        );
+        let text = settings_text(&s, &kept);
+        assert!(
+            text.contains("window-theme dark\nwindow-palette graphite\nwindow-language uk\n"),
+            "{text}"
+        );
+        assert_eq!(parse_settings(&text).0, s);
+        let (s, kept) = parse_settings("window-theme purple\nwindow-palette a b\n");
+        assert_eq!(s.window, prostir_api::WindowLook::default());
+        assert_eq!(kept.unknown.len(), 2);
     }
 
     /// The six monitors of 2026-11-19, as 0.1.2 saved them.

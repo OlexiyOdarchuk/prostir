@@ -12,8 +12,7 @@ use prostir_proto::state::{
 use prostir_proto::wire::WireError;
 use prostir_proto::{Codec, HostMsg};
 
-use crate::displays::{Displays, MONITORS_MAX, MONITORS_NO_LIMITS, WINDOWS_MAX};
-use crate::platform::windows;
+use crate::displays::{Displays, MONITORS_MAX, MONITORS_NO_LIMITS, STREAMS_MAX, WINDOWS_MAX};
 use crate::screen::ScreenId;
 use crate::store::Settings;
 
@@ -35,8 +34,6 @@ pub const MAX_SIZE: (u32, u32) = (7680, 4320);
 /// Displays of the PC itself shown at once, and with "No limits".
 const PHYSICAL_MAX: u8 = 1;
 const PHYSICAL_NO_LIMITS: u8 = 4;
-/// Streams at once: a lane each (`2..32`).
-const STREAMS_MAX: u8 = 30;
 
 /// What the parts are built from at one moment.
 pub struct Sources<'a> {
@@ -48,6 +45,11 @@ pub struct Sources<'a> {
     pub sound_from: Option<ScreenId>,
     /// The PC can share the volume with the headset (its sound device follows).
     pub volume: bool,
+    /// This headset's microphone is the PC's end of the headset microphone (the
+    /// microphone goes from one headset only).
+    pub mic: bool,
+    /// "No limits" of the main headset, which the PC's limits follow.
+    pub no_limits: bool,
 }
 
 /// One session's view of the PC's state: the headset's own state, and what it was
@@ -82,13 +84,17 @@ impl Publisher {
     }
 
     /// What the PC allows this headset now. "No limits" of a guest is for its own
-    /// budgets: the PC's limits follow the main headset's.
-    pub fn limits(&self, displays: &Displays) -> Limits {
+    /// budgets: the PC's limits follow the main headset's (`no_limits`). Only scales
+    /// the desktop gives an output of every size offered are offered, so any pair the
+    /// headset picks can be made.
+    pub fn limits(&self, displays: &Displays, no_limits: bool) -> Limits {
         let prefs = Prefs {
-            no_limits: self.prefs().no_limits && self.access.is_main(),
+            no_limits,
             ..self.prefs()
         };
-        limits(&prefs, self.caps(), displays.codec())
+        let mut limits = limits(&prefs, self.caps(), displays.codec());
+        keep_scales_of_every_size(&mut limits, |w, h| displays.scales_for(w, h));
+        limits
     }
 
     /// The PC's state now, as this headset is told it.
@@ -106,10 +112,11 @@ impl Publisher {
         let sound_from = prefs.sound_from_screen.then(|| SoundFrom {
             display: listed(src.sound_from),
         });
-        // The microphone as an up stream, where both sides do it.
+        // The microphone as an up stream, where both sides do it: wanted of the one
+        // headset whose microphone the PC takes.
         let mut up_wanted = BTreeMap::new();
         if headset.has(caps::headset::MIC) {
-            let on = src.displays.recording();
+            let on = src.mic && src.displays.recording();
             up_wanted.insert(
                 UpKind::Mic,
                 UpWanted {
@@ -122,9 +129,9 @@ impl Publisher {
             info: Some(pc_info(src.displays)),
             caps: Some(host_caps(src.displays, src.volume)),
             access: Some(self.access),
-            limits: Some(self.limits(src.displays)),
+            limits: Some(self.limits(src.displays, src.no_limits)),
             encoding: Some(src.displays.encoding_part(src.wanted, headset)),
-            sound: Some(src.displays.sound_part()),
+            sound: Some(src.displays.sound_part(src.mic)),
             up_wanted,
             focus: Some(focus),
             sound_from,
@@ -148,9 +155,16 @@ impl Publisher {
         changed
     }
 
-    /// The displays the headset was told about.
-    pub fn listed(&self) -> impl Iterator<Item = DisplayId> + '_ {
-        self.sent.displays.iter().flat_map(|d| d.ids())
+    /// The displays the headset was told about that may stream to it: not those
+    /// failed (for it alone, larger than it decodes or beyond the streams it takes,
+    /// or for all).
+    pub fn streamable(&self) -> impl Iterator<Item = DisplayId> + '_ {
+        self.sent
+            .displays
+            .iter()
+            .flat_map(|d| &d.displays)
+            .filter(|d| !matches!(d.state, state::DisplayState::Failed { .. }))
+            .map(|d| d.id)
     }
 }
 
@@ -162,10 +176,7 @@ pub fn limits(prefs: &Prefs, headset: &HeadsetCaps, codec: Codec) -> Limits {
     let max = decoder.map_or(MAX_SIZE, |d| {
         (MAX_SIZE.0.min(d.max_w), MAX_SIZE.1.min(d.max_h))
     });
-    let streams = match headset.streams_max {
-        0 => STREAMS_MAX,
-        n => n.min(STREAMS_MAX),
-    };
+    let streams = u8::try_from(crate::displays::streams_max(headset)).unwrap_or(STREAMS_MAX);
     Limits {
         virtual_max: if prefs.no_limits {
             MONITORS_NO_LIMITS as u8
@@ -190,6 +201,17 @@ pub fn limits(prefs: &Prefs, headset: &HeadsetCaps, codec: Codec) -> Limits {
     }
 }
 
+/// Keeps in `limits` only the scales `scales_for` gives every size offered.
+fn keep_scales_of_every_size(
+    limits: &mut Limits,
+    scales_for: impl Fn(u32, u32) -> crate::platform::Scales,
+) {
+    let sizes = &limits.sizes;
+    limits
+        .scales
+        .retain(|s| sizes.iter().all(|m| scales_for(m.w, m.h).allows(*s)));
+}
+
 /// What this PC can do.
 fn host_caps(displays: &Displays, volume: bool) -> HostCaps {
     let mut features = vec![
@@ -202,7 +224,7 @@ fn host_caps(displays: &Displays, volume: bool) -> HostCaps {
         caps::pc::SCALE,
         caps::pc::COMMANDS,
     ];
-    if windows::can_move_cursor() {
+    if displays.moves_mouse() {
         features.push(caps::pc::MOVE_MOUSE);
     }
     if displays.screenshots_one_output() {
@@ -232,7 +254,26 @@ fn pc_info(displays: &Displays) -> PcInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::Scales;
     use prostir_proto::state::Decoder;
+
+    /// Scales that depend on the size (Windows, GNOME): only those every size offered
+    /// takes are offered.
+    #[test]
+    fn scales_offered_fit_every_size() {
+        let mut l = limits(&Prefs::default(), &HeadsetCaps::default(), Codec::H264);
+        assert_eq!(l.scales, [100, 125, 150]);
+        keep_scales_of_every_size(&mut l, |_, _| Scales::Any { min: 50, max: 400 });
+        assert_eq!(l.scales, [100, 125, 150]);
+        keep_scales_of_every_size(&mut l, |w, _| {
+            Scales::Steps(if w < 2000 {
+                vec![100, 125]
+            } else {
+                vec![100, 125, 150]
+            })
+        });
+        assert_eq!(l.scales, [100, 125]);
+    }
 
     fn headset(decoders: Vec<Decoder>) -> HeadsetCaps {
         HeadsetCaps {

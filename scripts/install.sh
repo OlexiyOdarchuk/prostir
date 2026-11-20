@@ -91,7 +91,7 @@ assets="$ROOT/packaging"
 install -Dm755 "$built/prostir" "$BIN/prostir"
 install -Dm644 "$assets/prostir.svg" "$ICON"
 install -Dm644 "$assets/prostir.desktop" "$DESKTOP"
-sed -i "s|^Exec=.*|Exec=$BIN/prostir|" "$DESKTOP"
+sed -i "s|^Exec=.*|Exec=$BIN/prostir open|" "$DESKTOP"
 # Archives made before the settings window existed have no prostir-settings.
 if [[ -x "$built/prostir-settings" ]]; then
     install -Dm755 "$built/prostir-settings" "$BIN/prostir-settings"

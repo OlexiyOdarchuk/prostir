@@ -28,7 +28,13 @@ required-features = ["fake-desktop"]
 [dependencies]
 prostir-proto = { path = "../proto" }
 prostir-layout = { path = "../layout" }
+# The local API's types (JSON), shared with its clients.
+prostir-api = { path = "../api" }
 anyhow = "1"
+# A reply for a D-Bus method that waits for the control loop (the local API).
+async-channel = "2"
+# For the local API only: the headset protocol stays on `Wire`.
+serde = "1"
 clap = { version = "4", features = ["derive"] }
 log = "0.4"
 env_logger = "0.11"

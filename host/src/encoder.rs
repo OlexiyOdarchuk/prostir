@@ -148,11 +148,14 @@ pub struct Encoder {
     /// KWin): it is started over on resuming. A capture pushing its own frames
     /// (`appsrc`) repeats the last one by itself.
     restart_on_resume: bool,
+    /// It takes frames straight from GPU buffers (dmabuf), so a capture hands it those.
+    takes_dmabuf: bool,
     bus_thread: Option<JoinHandle<()>>,
 }
 
 /// Where the frames come from: the start of the pipeline, made by the platform (a
 /// PipeWire node on KDE, frames pushed by a capture on Hyprland).
+#[derive(Debug, Clone)]
 pub struct Input {
     /// GStreamer source elements. Frames the platform pushes itself go into an `appsrc`
     /// named `src` (see [`Encoder::appsrc`]).
@@ -345,6 +348,7 @@ impl Encoder {
             stop,
             paused: Arc::new(AtomicBool::new(false)),
             restart_on_resume,
+            takes_dmabuf: cfg.backend.takes_dmabuf(),
             bus_thread: Some(bus_thread),
         };
         encoder
@@ -363,6 +367,15 @@ impl Encoder {
         self.pipeline
             .by_name("src")
             .and_then(|e| e.downcast::<gst_app::AppSrc>().ok())
+    }
+
+    /// Whether it takes frames straight from GPU buffers (dmabuf).
+    #[cfg_attr(
+        feature = "fake-desktop",
+        expect(dead_code, reason = "the fake desktop pushes no frames")
+    )]
+    pub fn takes_dmabuf(&self) -> bool {
+        self.takes_dmabuf
     }
 
     /// Set while the encoder is paused, so a capture can rest too.
@@ -503,7 +516,7 @@ impl Probe {
 /// Decodes one keyframe of a monitor's stream into a PNG in the Pictures folder (a
 /// screenshot of just that monitor where the desktop's tool cannot take one output).
 pub fn keyframe_to_png(data: &[u8], codec: Codec) -> Result<std::path::PathBuf> {
-    let path = crate::platform::windows::screenshot_path()?;
+    let path = crate::platform::screenshot_path()?;
     let (caps, parse) = match codec {
         Codec::H264 => ("video/x-h264", "h264parse"),
         Codec::H265 => ("video/x-h265", "h265parse"),

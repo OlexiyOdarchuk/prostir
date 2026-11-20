@@ -11,6 +11,12 @@ fn file() -> Option<PathBuf> {
     Some(base.join("autostart").join("prostir.desktop"))
 }
 
+/// Whether this PC can start Prostir with the session from here (Hyprland without
+/// uwsm ignores XDG autostart: its own config starts it).
+pub fn available() -> bool {
+    file().is_some() && !super::hyprland::running()
+}
+
 /// Whether Prostir starts with the session.
 pub fn enabled() -> bool {
     file().is_some_and(|p| p.exists())

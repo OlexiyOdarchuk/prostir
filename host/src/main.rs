@@ -1,7 +1,8 @@
 // Every unsafe block says why it is sound.
 #![deny(clippy::undocumented_unsafe_blocks)]
+mod api;
 mod brain;
-mod ctl_hook;
+mod ctl;
 mod displays;
 mod encoder;
 mod errors;
@@ -9,12 +10,14 @@ mod events;
 mod i18n;
 mod layout;
 mod listen;
+mod local;
 mod outbox;
 mod pacing;
 mod pairing;
 mod platform;
 mod publish;
 mod requests;
+mod router;
 mod screen;
 mod session;
 mod store;
@@ -24,11 +27,11 @@ use std::collections::{BTreeMap, VecDeque};
 use std::io::ErrorKind;
 use std::net::{Ipv4Addr, TcpListener, UdpSocket};
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use log::{error, info, warn};
 use prostir_proto::request::{Asked, Command};
 use prostir_proto::state::ErrorCode;
@@ -39,13 +42,39 @@ use displays::Displays;
 use encoder::EncoderConfig;
 use events::{Accepted, Event, EventSink, SessionId};
 use platform::MonitorSpec;
-use platform::{TrayCommand, TrayStatus, focus, tray};
+use platform::{TrayCommand, TrayStatus, tray};
 use screen::ScreenId;
-use session::{Closing, Session};
+use session::{Closing, Session, Standing, TrayLine};
 use store::Store;
 
 #[derive(Parser, Debug)]
-#[command(about = "Virtual monitors for KDE Plasma and Hyprland, streamed to a Meta Quest 3")]
+#[command(
+    about = "Virtual monitors for KDE Plasma and Hyprland, streamed to a Meta Quest 3",
+    args_conflicts_with_subcommands = true
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Sub>,
+    /// Without a command: as `prostir serve`.
+    #[command(flatten)]
+    serve: Args,
+}
+
+#[derive(Subcommand, Debug)]
+enum Sub {
+    /// Run: wait for the headset and serve it (the same as no command).
+    Serve(Args),
+    /// Open the settings window, starting Prostir first if it is not running.
+    Open,
+    /// Ask the running Prostir something (`prostir ctl help` lists the commands).
+    #[command(disable_help_flag = true)]
+    Ctl {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        args: Vec<String>,
+    },
+}
+
+#[derive(clap::Args, Debug)]
 struct Args {
     /// Monitor in pixels, optionally with KWin scale: 2560x1440 or 3840x2160@1.5. Repeat for
     /// several monitors. Without it, the set from the last session (changed from the headset
@@ -78,6 +107,9 @@ struct Args {
     /// Do not run `adb reverse` for USB connections.
     #[arg(long)]
     no_adb: bool,
+    /// Open the settings window once Prostir is ready (`prostir open` starts it so).
+    #[arg(long)]
+    open_settings: bool,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
@@ -96,34 +128,44 @@ struct Control {
     shown: Option<TrayStatus>,
     /// The settings the tray shows: quality, the text preset, the counter.
     shown_settings: Option<(u32, bool, bool)>,
-    /// How the headset is connected, while one is.
-    via: Option<&'static str>,
-    /// The headset's "No limits", while one that takes commands is connected.
-    no_limits: Option<bool>,
-    /// The connected headset's microphone is on but the system does not let it record.
-    mic_denied: bool,
-    /// Commands for the headset from the tray and the test hook, and who waits for
+    /// The battery the tray shows.
+    shown_battery: Option<Option<(u8, bool)>>,
+    /// Commands for the headset from the tray and the local API, and who waits for
     /// what came of each.
-    for_headset: VecDeque<(Asked<Command>, Option<Sender<String>>)>,
+    for_headset: VecDeque<(Asked<Command>, Option<api::Reply>)>,
 }
 
 impl Control {
     /// Commands for the headset with no headset to take them.
-    fn no_headset(&mut self) {
+    fn no_headset(&mut self, answers: &api::Answers) {
         for (asked, reply) in self.for_headset.drain(..) {
             info!("{asked:?}: no headset is connected");
             if let Some(r) = reply {
-                let _ = r.send("no headset".into());
+                answers.push(
+                    r,
+                    api::CtlReply::failed(
+                        api::ApiError::NotConnected,
+                        i18n::t("Шолом не підключено", "No headset is connected"),
+                    ),
+                );
             }
         }
     }
 
-    /// Shows the current state and settings in the tray (only what changed).
-    fn show(&mut self, displays: Option<&Displays>, store: &Store) {
+    /// Shows the current state and settings in the tray (only what changed): of the
+    /// headsets, the one the tray follows (`headset`) and how many others there are.
+    fn show(
+        &mut self,
+        displays: Option<&Displays>,
+        store: &Store,
+        headset: &TrayLine,
+        others: usize,
+    ) {
         let status = TrayStatus {
-            no_limits: self.no_limits,
-            mic_denied: self.mic_denied,
-            connected: self.via,
+            no_limits: headset.no_limits,
+            mic_denied: headset.mic_denied,
+            connected: headset.via,
+            others,
             monitors: displays.map_or(0, Displays::monitor_count),
             mirror: displays.is_some_and(Displays::mirror_active),
             paused: displays.is_some_and(|d| !d.streaming()),
@@ -131,6 +173,10 @@ impl Control {
         if self.shown.as_ref() != Some(&status) {
             tray::set_status(self.tray.as_ref(), status.clone());
             self.shown = Some(status);
+        }
+        if self.shown_battery != Some(headset.battery) {
+            tray::set_battery(self.tray.as_ref(), headset.battery);
+            self.shown_battery = Some(headset.battery);
         }
         let wanted = store.wanted();
         let settings = (wanted.bitrate, wanted.sharp, wanted.count);
@@ -173,17 +219,28 @@ struct Brain {
     /// For the sessions' readers.
     events: EventSink,
     displays: Option<Displays>,
-    /// The sessions, by the headset's key: one each, and one in all for now (see
-    /// `brain::MAX_HEADSETS` for what still assumes a single headset).
+    /// The sessions, by the headset's key: one each, at most `brain::max_headsets()`.
     sessions: BTreeMap<[u8; 32], Session>,
+    /// Which headsets' sessions have the jobs only one can have (see `brain::roles`).
+    roles: brain::Roles<[u8; 32]>,
+    /// The order the headsets with a session first connected in.
+    arrivals: brain::Arrivals<[u8; 32]>,
     /// Sessions that said goodbye, until their headset closes or their moment ends.
     closing: Vec<Closing>,
     phase: Phase,
     last_id: SessionId,
     /// The output that has the mouse, as last looked at.
     focus: Option<ScreenId>,
-    active_output: focus::ActiveOutput,
     quit: bool,
+    /// The local API: where the state, events and replies go out.
+    api: api::Outlet,
+    /// The state as last sent out, and its revision.
+    shown: Option<Arc<api::State>>,
+    revision: u32,
+    /// Replies of the local API that go out after this pass's state.
+    answers: api::Answers,
+    /// Whether each headset is worn, as last told on the local API.
+    worn_told: BTreeMap<[u8; 32], bool>,
 }
 
 impl Brain {
@@ -239,14 +296,21 @@ impl Brain {
                 };
                 if let ClientMsg::Goodbye { reason } = msg {
                     info!("{}", session::headset_left(reason));
-                    return self.end_session(key, None, Ok(()));
+                    let why = match prostir_proto::HeadsetGoodbye::from_code(reason) {
+                        prostir_proto::HeadsetGoodbye::Quit => api::Reason::Quit,
+                        prostir_proto::HeadsetGoodbye::Forgotten => api::Reason::Forgotten,
+                        _ => api::Reason::Other,
+                    };
+                    return self.end_session(key, None, why, Ok(()));
                 }
                 let (Some(session), Some(displays)) =
                     (self.sessions.get_mut(&key), self.displays.as_mut())
                 else {
                     return;
                 };
-                session.handle(msg, came, displays, &mut self.control, &mut self.store);
+                if session.handle(msg, came, displays, &mut self.store) {
+                    self.headsets_changed();
+                }
             }
             Event::SessionEnded(id, e) => {
                 if let Some(i) = self.closing.iter().position(|c| c.id == id) {
@@ -256,6 +320,10 @@ impl Brain {
                 let Some(key) = self.key_of(id) else {
                     return;
                 };
+                let why = match e.kind() {
+                    ErrorKind::TimedOut => api::Reason::Silence,
+                    _ => api::Reason::Other,
+                };
                 let result = match e.kind() {
                     ErrorKind::UnexpectedEof => Ok(()),
                     ErrorKind::TimedOut => Err(anyhow::anyhow!(
@@ -264,9 +332,12 @@ impl Brain {
                     )),
                     _ => Err(e.into()),
                 };
-                self.end_session(key, None, result);
+                self.end_session(key, None, why, result);
             }
             Event::Tray(command) => self.tray(command),
+            Event::Ctl(request, reply) => self.ctl(request, reply),
+            // The next pass shows it.
+            Event::Pairing => {}
             Event::Quit => self.quit = true,
         }
     }
@@ -300,15 +371,17 @@ impl Brain {
                 .into(),
             );
         }
-        match brain::admit(self.sessions.keys(), &key) {
+        match brain::admit(self.sessions.keys(), &key, brain::max_headsets()) {
             Admit::Open => {}
             Admit::Replace => {
                 info!("the same headset connected again: its earlier session gives way");
                 if let (Some(old), Some(displays)) =
                     (self.sessions.remove(&key), self.displays.as_mut())
                 {
-                    // It no longer reads (or soon will not): no goodbye.
-                    old.finish(None, displays, &mut self.control);
+                    // It no longer reads (or soon will not): no goodbye. Its new
+                    // session takes its place, and its roles.
+                    old.finish(None, displays);
+                    self.headset_left(&key, api::Reason::Other);
                 }
             }
             Admit::Refuse => {
@@ -340,6 +413,17 @@ impl Brain {
                 }
             }
         }
+        // What the new session has of the jobs only one headset can have.
+        self.arrivals.connected(key);
+        let order = self.in_order(Some((key, self.store.wanted().access_of(&key))));
+        let roles = brain::roles(&order, self.roles, self.mic_busy());
+        let standing = Standing {
+            main: roles.main == Some(key),
+            mic: roles.mic == Some(key),
+            lead: roles.lead == Some(key),
+            no_limits: self.main_no_limits(),
+        };
+        let others: Vec<_> = self.sessions.values().map(|s| s.caps().clone()).collect();
         let displays = self
             .displays
             .as_mut()
@@ -349,48 +433,213 @@ impl Brain {
             self.last_id,
             conn,
             open,
+            standing,
+            &others,
             displays,
-            &mut self.control,
             &mut self.store,
             &self.events,
         ) {
-            Ok(session) => {
+            Ok(mut session) => {
+                session.set_answers(self.answers.clone());
+                let via = session.api_session().via;
+                self.worn_told.insert(key, session.worn());
                 self.sessions.insert(key, session);
                 self.phase.session_opened(Instant::now());
+                self.headsets_changed();
+                self.api
+                    .send(api::Note::Event(api::Event::HeadsetConnected {
+                        headset: prostir_proto::secure::fingerprint(&key),
+                        name: self.headset_name(&key),
+                        via,
+                    }));
             }
             Err(e) => {
                 warn!("session ended: {e:#}");
-                if self.sessions.is_empty() {
-                    self.after_the_last_session();
-                }
+                self.arrivals.left(key);
+                // The codec it was fitted to, the encoders and the sound it started:
+                // as the sessions left (if any) need them.
+                self.sessions_ended(false);
             }
         }
     }
 
-    /// Ends the session of headset `key`: with `goodbye`, saying why.
-    fn end_session(&mut self, key: [u8; 32], goodbye: Option<PcGoodbye>, result: Result<()>) {
-        let (Some(session), Some(displays)) = (self.sessions.remove(&key), self.displays.as_mut())
-        else {
+    /// The keys of the headsets with a session and the rights of their lines, in the
+    /// order they first connected; with `opening`, one whose session opens now.
+    fn in_order(
+        &self,
+        opening: Option<([u8; 32], prostir_proto::state::Access)>,
+    ) -> Vec<([u8; 32], prostir_proto::state::Access)> {
+        self.arrivals
+            .keys()
+            .filter_map(|key| match (self.sessions.get(key), opening) {
+                (_, Some((k, access))) if k == *key => Some((k, access)),
+                (Some(s), _) => Some((*key, s.configured)),
+                (None, _) => None,
+            })
+            .collect()
+    }
+
+    /// The PC's end of the headset microphone is in use: a program records from it,
+    /// or the headset whose microphone it is streams it.
+    fn mic_busy(&self) -> bool {
+        self.displays.as_ref().is_some_and(Displays::recording)
+            || self
+                .roles
+                .mic
+                .and_then(|key| self.sessions.get(&key))
+                .is_some_and(Session::mic_streams)
+    }
+
+    /// "No limits" of the main headset, which the PC's limits follow.
+    fn main_no_limits(&self) -> bool {
+        self.roles
+            .main
+            .and_then(|key| self.sessions.get(&key))
+            .is_some_and(Session::no_limits)
+    }
+
+    /// A session opened or ended, or a headset said something about itself: who has
+    /// the jobs only one headset can have, whether the encoders run (while any headset
+    /// is worn, with a fresh picture for one put on again), and the PC's end of the
+    /// microphone (the switch of the headset whose microphone it takes).
+    fn headsets_changed(&mut self) {
+        let roles = brain::roles(&self.in_order(None), self.roles, self.mic_busy());
+        if roles.mic != self.roles.mic && self.roles.mic.is_some() {
+            info!("the PC's end of the headset microphone follows another headset now");
+        }
+        self.roles = roles;
+        let no_limits = self.main_no_limits();
+        let Some(displays) = self.displays.as_mut() else {
             return;
         };
-        if let Some(closing) = session.finish(goodbye, displays, &mut self.control) {
+        let mut fresh = Vec::new();
+        for (key, s) in &mut self.sessions {
+            s.set_standing(Standing {
+                main: roles.main == Some(*key),
+                mic: roles.mic == Some(*key),
+                lead: roles.lead == Some(*key),
+                no_limits,
+            });
+            fresh.extend(s.take_fresh());
+        }
+        let worn = self.sessions.values().any(Session::worn);
+        displays.worn(worn, &fresh);
+        let mic = roles
+            .mic
+            .and_then(|key| self.sessions.get(&key))
+            .is_some_and(Session::mic_on);
+        displays.set_mic(mic);
+    }
+
+    /// Shows the state in the tray: of the headsets, the session the tray follows
+    /// (the main one, else the first), the microphone of the one the PC takes it from,
+    /// and how many others there are.
+    fn show(&mut self) {
+        let line = |key: Option<[u8; 32]>| {
+            key.and_then(|key| self.sessions.get(&key))
+                .map(Session::tray_line)
+                .unwrap_or_default()
+        };
+        // The microphone as the headset whose microphone the PC takes has it.
+        let lead = TrayLine {
+            mic_denied: line(self.roles.mic).mic_denied,
+            ..line(self.roles.lead)
+        };
+        let others = self.sessions.len().saturating_sub(1);
+        self.control
+            .show(self.displays.as_ref(), &self.store, &lead, others);
+    }
+
+    /// The session commands for the headset go to: the main one, else the first.
+    fn lead_mut(&mut self) -> Option<&mut Session> {
+        let lead = self.roles.lead?;
+        self.sessions.get_mut(&lead)
+    }
+
+    /// Ends the session of headset `key`: with `goodbye`, saying why. The other
+    /// sessions go on.
+    fn end_session(
+        &mut self,
+        key: [u8; 32],
+        goodbye: Option<PcGoodbye>,
+        why: api::Reason,
+        result: Result<()>,
+    ) {
+        if let Some(taken_off) = self.close_session(key, goodbye, why, result) {
+            self.sessions_ended(taken_off);
+        }
+    }
+
+    /// Ends the sessions of `keys` at once, each with `goodbye` (and why, from
+    /// `result`): what the others need is looked at once, after the last.
+    fn end_sessions(
+        &mut self,
+        keys: Vec<[u8; 32]>,
+        goodbye: PcGoodbye,
+        why: api::Reason,
+        result: impl Fn() -> Result<()>,
+    ) {
+        let mut ended = None;
+        for key in keys {
+            ended = self
+                .close_session(key, Some(goodbye), why, result())
+                .or(ended);
+        }
+        if let Some(taken_off) = ended {
+            self.sessions_ended(taken_off);
+        }
+    }
+
+    /// Closes the session of headset `key` (see [`Session::finish`]), with nothing
+    /// else changed for the others yet: whether its headset was taken off, if it had
+    /// a session.
+    fn close_session(
+        &mut self,
+        key: [u8; 32],
+        goodbye: Option<PcGoodbye>,
+        why: api::Reason,
+        result: Result<()>,
+    ) -> Option<bool> {
+        let session = self.sessions.remove(&key)?;
+        self.headset_left(&key, why);
+        let displays = self.displays.as_mut()?;
+        self.arrivals.left(key);
+        let taken_off = session.taken_off_for().is_some();
+        if let Some(closing) = session.finish(goodbye, displays) {
             self.closing.push(closing);
         }
         match result {
             Ok(()) => info!("headset disconnected"),
             Err(e) => warn!("session ended: {e:#}"),
         }
+        Some(taken_off)
+    }
+
+    /// Sessions ended (the last of them taken off with `taken_off`): the encoders and
+    /// sound as the sessions left need them, in a codec they all decode; without any,
+    /// what becomes of the monitors.
+    fn sessions_ended(&mut self, taken_off: bool) {
+        if !self.sessions.is_empty()
+            && let Some(displays) = self.displays.as_mut()
+        {
+            // The headsets left may all decode the codec chosen again.
+            let headsets = displays.router.headsets();
+            displays.fit_codec(&headsets);
+        }
+        self.headsets_changed();
         if self.sessions.is_empty() {
-            self.after_the_last_session();
+            self.after_the_last_session(taken_off);
         }
     }
 
-    /// No session is left: the monitors stay for a while, or go now when the headset
-    /// was taken off (it reconnects by itself once worn again) or they broke.
-    fn after_the_last_session(&mut self) {
-        self.control.no_headset();
+    /// No session is left: the monitors stay for a while, or go now when the last
+    /// headset was taken off (`taken_off`: it reconnects by itself once worn again)
+    /// or they broke.
+    fn after_the_last_session(&mut self, taken_off: bool) {
+        self.control.no_headset(&self.answers);
+        self.roles = brain::Roles::NONE;
         let how = match &self.displays {
-            Some(d) if d.taken_off_for().is_some() => {
+            Some(_) if taken_off => {
                 info!("removing virtual monitors until the headset is worn again");
                 LastEnded::Drop
             }
@@ -405,7 +654,7 @@ impl Brain {
             }
             _ => self.drop_displays(),
         }
-        self.control.show(self.displays.as_ref(), &self.store);
+        self.show();
     }
 
     /// Removes the monitors and gives their memory back.
@@ -415,7 +664,7 @@ impl Brain {
         }
     }
 
-    /// An item of the tray (or a command from the test hook).
+    /// An item of the tray.
     fn tray(&mut self, command: TrayCommand) {
         match command {
             TrayCommand::SetBitrate(mbps) => {
@@ -430,10 +679,15 @@ impl Brain {
                 info!("counting this PC among users: {on}");
                 self.store.change(|s| s.count = on);
             }
-            TrayCommand::Headset { asked, reply } => {
-                self.control.for_headset.push_back((asked, reply));
+            TrayCommand::Headset(asked) => {
+                self.control.for_headset.push_back((asked, None));
                 if self.sessions.is_empty() {
-                    self.control.no_headset();
+                    self.control.no_headset(&self.answers);
+                }
+            }
+            TrayCommand::ShowSettings => {
+                if let Err(e) = local::open_settings() {
+                    warn!("{e}");
                 }
             }
             TrayCommand::ForgetHeadsets => {
@@ -444,9 +698,12 @@ impl Brain {
                 }
                 drop(trusted);
                 let keys: Vec<[u8; 32]> = self.sessions.keys().copied().collect();
-                for key in keys {
-                    self.end_session(key, Some(PcGoodbye::Forgotten), Ok(()));
-                }
+                self.end_sessions(
+                    keys,
+                    PcGoodbye::Forgotten,
+                    api::Reason::Forgotten,
+                    || Ok(()),
+                );
             }
             TrayCommand::Quit => self.quit = true,
         }
@@ -476,8 +733,9 @@ impl Brain {
         } else {
             self.live_pass(now);
         }
-        self.control.show(self.displays.as_ref(), &self.store);
+        self.show();
         self.store.flush();
+        self.publish_api();
     }
 
     /// A pass with sessions: the headsets told what changed (the replies after it), the
@@ -493,7 +751,7 @@ impl Brain {
         }
         displays.place();
         for s in self.sessions.values_mut() {
-            s.volume_due(displays);
+            s.volume_due();
             s.publish(displays, &self.store, self.focus);
         }
         self.store.flush();
@@ -504,20 +762,20 @@ impl Brain {
                 busy.as_millis()
             );
         }
-        // Commands for the headset go to the main one.
-        if let Some(s) = self.sessions.values_mut().find(|s| s.is_main()) {
-            s.commands_due(displays, &mut self.control);
-        } else if let Some(s) = self.sessions.values_mut().next() {
-            s.commands_due(displays, &mut self.control);
+        // Commands for the headset go to the main one, else the first.
+        let mut waiting = std::mem::take(&mut self.control.for_headset);
+        if let Some(s) = self.lead_mut() {
+            s.commands_due(&mut waiting);
         }
+        self.control.for_headset = waiting;
+        let Some(displays) = self.displays.as_mut() else {
+            return;
+        };
         let Phase::Live(clocks) = &mut self.phase else {
             return;
         };
         if clocks.focus(now) {
-            self.focus = self
-                .active_output
-                .get()
-                .and_then(|name| displays.id_of_output(&name));
+            self.focus = displays.active_output();
             for s in self.sessions.values_mut() {
                 s.look_at_sound(displays);
             }
@@ -525,34 +783,44 @@ impl Brain {
         if !clocks.housekeeping(now) {
             return;
         }
-        self.control.show(Some(displays), &self.store);
         displays.tick(&mut || self.store.new_id());
         // A display of the PC seen for the first time is kept.
         keep_screens(&mut self.store, displays, false);
-        if displays.taken_off_for() >= Some(TAKEN_OFF_GRACE) {
+        let healthy = displays.healthy();
+        // The microphone may be free to go to the main headset now.
+        self.headsets_changed();
+        self.show();
+        // Each headset off the head for long enough counts as gone; the others go on.
+        let taken_off: Vec<[u8; 32]> = self
+            .sessions
+            .iter()
+            .filter(|(_, s)| s.taken_off_for() >= Some(TAKEN_OFF_GRACE))
+            .map(|(key, _)| *key)
+            .collect();
+        if !taken_off.is_empty() {
             info!("headset taken off");
-            let main: Vec<[u8; 32]> = self
-                .sessions
-                .iter()
-                .filter(|(_, s)| s.is_main())
-                .map(|(key, _)| *key)
-                .collect();
-            for key in main {
-                self.end_session(key, Some(PcGoodbye::TakenOff), Ok(()));
-            }
-        } else if !displays.healthy() {
+            self.end_sessions(
+                taken_off,
+                PcGoodbye::TakenOff,
+                api::Reason::TakenOff,
+                || Ok(()),
+            );
+        }
+        let Some(displays) = self.displays.as_mut() else {
+            return;
+        };
+        if !healthy && !self.sessions.is_empty() {
             let why = "a virtual monitor or encoder stopped on the PC";
             warn!("{why}");
-            displays.router.send(HostMsg::Problem {
+            displays.router.send_all(HostMsg::Problem {
                 error: ErrorCode::ENCODER,
                 detail: why.into(),
                 display: None,
             });
             let keys: Vec<[u8; 32]> = self.sessions.keys().copied().collect();
-            for key in keys {
-                let failed = anyhow::anyhow!("virtual monitor or encoder stopped");
-                self.end_session(key, Some(PcGoodbye::Failed), Err(failed));
-            }
+            self.end_sessions(keys, PcGoodbye::Failed, api::Reason::Other, || {
+                Err(anyhow::anyhow!("virtual monitor or encoder stopped"))
+            });
         }
     }
 
@@ -560,10 +828,10 @@ impl Brain {
     /// moment to read; the monitors go, the files are written.
     fn shut_down(mut self, events: &Receiver<Event>) {
         let keys: Vec<[u8; 32]> = self.sessions.keys().copied().collect();
-        for key in keys {
-            self.end_session(key, Some(PcGoodbye::Quit), Ok(()));
-        }
+        self.end_sessions(keys, PcGoodbye::Quit, api::Reason::Quit, || Ok(()));
         info!("quitting");
+        // Whoever asked to quit hears it was done.
+        self.publish_api();
         while let Some(until) = self.closing.iter().map(|c| c.until).max() {
             let left = until.saturating_duration_since(Instant::now());
             match events.recv_timeout(left) {
@@ -639,8 +907,41 @@ fn create_displays(set_primary: bool, store: &mut Store) -> Result<Displays> {
 }
 
 fn main() -> Result<()> {
+    let cli = Cli::parse();
+    let quiet = || {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    };
+    match cli.command {
+        None => serve(cli.serve),
+        Some(Sub::Serve(args)) => serve(args),
+        Some(Sub::Ctl { args }) => {
+            quiet();
+            let client = platform::local_api::Client::connect(ctl::WAIT);
+            let client = client.as_ref().map(|c| c as &dyn ctl::CtlClient);
+            let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
+            let mut io = ctl::Output {
+                out: &mut out,
+                err: &mut err,
+            };
+            std::process::exit(ctl::run(&args, client.map_err(Clone::clone), &mut io));
+        }
+        Some(Sub::Open) => {
+            quiet();
+            let code = match platform::local_api::Client::connect(ctl::WAIT) {
+                Ok(client) => ctl::open(&client, &local::start_detached),
+                Err(e) => {
+                    eprintln!("prostir open: no session bus ({e:?})");
+                    ctl::NOT_RUNNING
+                }
+            };
+            std::process::exit(code);
+        }
+    }
+}
+
+/// `prostir serve`: waits for the headset and serves it until asked to quit.
+fn serve(args: Args) -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    let args = Args::parse();
     let (events, received) = events::channel();
     // A signal from here on quits the usual way, putting everything back.
     {
@@ -667,7 +968,6 @@ fn main() -> Result<()> {
     usage::announce_once(store.wanted().count);
     // Monitors from a run that crashed: without the headset nobody sees their windows.
     platform::clean_up_after_crash();
-    gstreamer::init().context("GStreamer init")?;
 
     let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, args.port))
         .with_context(|| format!("cannot listen on port {}", args.port))?;
@@ -686,19 +986,19 @@ fn main() -> Result<()> {
 
     let security = Arc::new(pairing::Security::load()?);
     let tray = tray::spawn(events.clone());
-    ctl_hook::spawn(events.clone());
+    // The local API: requests come in as events, what the control loop says goes out.
+    let (outlet, notes) = api::channel();
+    pairing::tell_about_codes(events.clone());
     listen::spawn(listener, security.clone(), tray.clone(), events.clone())?;
     let mut control = Control {
         tray,
         shown: None,
         shown_settings: None,
-        via: None,
-        no_limits: None,
-        mic_denied: false,
+        shown_battery: None,
         for_headset: VecDeque::new(),
     };
-    control.show(None, &store);
-    Brain {
+    control.show(None, &store, &TrayLine::default(), 0);
+    let mut brain = Brain {
         linger: Duration::from_secs(args.linger),
         set_primary: !args.keep_primary,
         store,
@@ -707,13 +1007,33 @@ fn main() -> Result<()> {
         events,
         displays: None,
         sessions: BTreeMap::new(),
+        roles: brain::Roles::NONE,
+        arrivals: brain::Arrivals::default(),
         closing: Vec::new(),
         phase: Phase::Idle,
         last_id: 0,
         focus: None,
-        active_output: focus::ActiveOutput::new(),
         quit: false,
+        api: outlet,
+        shown: None,
+        revision: 0,
+        answers: api::Answers::default(),
+        worn_told: BTreeMap::new(),
+    };
+    // The local API has a state to give from the moment it is on the bus.
+    brain.publish_api();
+    let api = platform::local_api::serve(brain.events.clone(), brain.api.clone(), notes);
+    // On the bus as early as the state can be: GStreamer's start (a scan of its
+    // plugins, the first time) comes after.
+    gstreamer::init().context("GStreamer init")?;
+    if args.open_settings
+        && let Err(e) = local::open_settings()
+    {
+        warn!("{e}");
     }
-    .run(&received);
+    brain.run(&received);
+    if let Some(api) = api {
+        api.finish();
+    }
     Ok(())
 }

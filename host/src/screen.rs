@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use prostir_proto::state::DisplayId;
 
 use crate::encoder::Encoder;
-use crate::platform::{ActiveWindow, MonitorSpec, Output, OutputBackend};
+use crate::platform::{ActiveWindow, MonitorSpec, Output, OutputKey};
 
 /// The PC's key for a screen: in its set, its rows and its saved files. Numbers come
 /// from a counter that never goes back (see `Store::new_id`), so a number is never
@@ -58,9 +58,12 @@ pub enum ScreenKind {
         spec: MonitorSpec,
     },
     /// A display of the PC itself (`builtin`: the laptop's own panel), streamed as it
-    /// is while `shown`; `key` is how it is told from others.
+    /// is while `shown`; `key` is how it is told from others (and saved), `label` what
+    /// people see it called, as the desktop last said (the saved key's connector until
+    /// it is seen).
     Physical {
         key: crate::store::PhysicalKey,
+        label: String,
         builtin: bool,
         shown: bool,
     },
@@ -103,7 +106,7 @@ pub struct Screen {
     pub number: u32,
     // Field order matters: the encoder stops before the output goes away.
     pub stream: Option<Encoder>,
-    pub output: Option<Output>,
+    pub output: Option<Box<dyn Output>>,
     pub state: ScreenState,
     /// Puts the output's size back when another program changes it.
     pub size_guard: SizeGuard,
@@ -127,9 +130,9 @@ impl Screen {
         matches!(self.state, ScreenState::Running)
     }
 
-    /// The desktop's name for its output, while it has one.
-    pub fn output_name(&self) -> Option<&str> {
-        self.output.as_ref().map(OutputBackend::output_name)
+    /// The desktop's key for its output, while it has one.
+    pub fn output_key(&self) -> Option<&OutputKey> {
+        self.output.as_ref().map(|o| o.key())
     }
 
     pub fn is_virtual(&self) -> bool {
@@ -149,11 +152,11 @@ impl Screen {
         matches!(self.kind, ScreenKind::Physical { shown: true, .. })
     }
 
-    /// The name its output and stream go by: `Prostir-N`, or the connector of a
-    /// display of the PC.
+    /// The name its output and stream go by: `Prostir-N`, or the label of a display
+    /// of the PC.
     pub fn name(&self) -> String {
         match &self.kind {
-            ScreenKind::Physical { key, .. } => key.connector.clone(),
+            ScreenKind::Physical { label, .. } => label.clone(),
             _ => format!("Prostir-{}", self.number),
         }
     }

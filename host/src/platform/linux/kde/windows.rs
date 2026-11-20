@@ -1,14 +1,128 @@
 //! KDE's windows. KWin has no query for them, so a small KWin script does the work
 //! and reports back over D-Bus to `dev.prostir.Host`.
 
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Result, bail};
 use log::warn;
 
-use crate::platform::ActiveWindow;
+use crate::platform::linux::screenshot;
+use crate::platform::{ActiveWindow, AppWindow, OutputKey, Pointer, WindowList, Windows};
+
+/// KDE's windows and mouse, for the core.
+pub struct KdeWindows {
+    /// The session bus, to ask KWin for its active output.
+    bus: Option<zbus::blocking::Connection>,
+    scripts: Arc<Scripts>,
+}
+
+impl KdeWindows {
+    pub fn new() -> Self {
+        Self {
+            bus: zbus::blocking::Connection::session().ok(),
+            scripts: Arc::new(Scripts::default()),
+        }
+    }
+}
+
+impl Windows for KdeWindows {
+    fn active(&mut self) -> Option<ActiveWindow> {
+        self.scripts.active()
+    }
+
+    /// KWin's active output: the one with the mouse, or with the focused window,
+    /// depending on the KDE setting.
+    fn active_output(&mut self) -> Option<OutputKey> {
+        let reply = self
+            .bus
+            .as_ref()?
+            .call_method(
+                Some("org.kde.KWin"),
+                "/KWin",
+                Some("org.kde.KWin"),
+                "activeOutputName",
+                &(),
+            )
+            .ok()?;
+        reply
+            .body()
+            .deserialize::<String>()
+            .ok()
+            .map(OutputKey::new)
+    }
+
+    fn move_to(&mut self, w: &ActiveWindow, output: &OutputKey, fill: bool) -> Result<()> {
+        move_to(w, output.as_str(), fill)
+    }
+
+    fn put_back(&mut self, w: &ActiveWindow, output: &OutputKey) -> Result<()> {
+        put_back(w, output.as_str())
+    }
+
+    fn forget_panel(&mut self, output: &OutputKey) {
+        kwin_unload(&format!("prostir-panel-{output}"));
+    }
+
+    /// KWin reports by itself which panels lost their window.
+    fn vacated(&mut self, _panels: &[OutputKey]) -> Vec<OutputKey> {
+        self.scripts
+            .vacated()
+            .into_iter()
+            .map(OutputKey::new)
+            .collect()
+    }
+
+    /// Spectacle takes the whole desktop: it cannot take one output by name.
+    fn screenshot(&mut self, _output: Option<&OutputKey>) -> Result<PathBuf> {
+        let mut cmd = std::process::Command::new("spectacle");
+        cmd.args(["--background", "--nonotify", "--fullscreen", "--output"]);
+        screenshot::take("spectacle", cmd)
+    }
+
+    fn list(&self) -> Arc<dyn WindowList> {
+        self.scripts.clone()
+    }
+}
+
+impl Pointer for KdeWindows {
+    fn position(&mut self) -> Option<(i32, i32)> {
+        self.scripts.cursor()
+    }
+
+    /// KWin scripts cannot move the mouse.
+    fn move_to(&mut self, _x: i32, _y: i32) -> bool {
+        false
+    }
+}
+
+/// Every window, asked of KWin from any thread.
+impl WindowList for Scripts {
+    fn all(&self) -> Vec<AppWindow> {
+        self.all_windows()
+    }
+}
+
+/// The KWin scripts that report back, and the D-Bus service they report to, while KDE
+/// is the desktop. The service goes with them, so no name stays on the bus without a
+/// session.
+#[derive(Default)]
+struct Scripts {
+    /// The service KWin scripts call, offered on first use.
+    service: Mutex<Option<Arc<Service>>>,
+    /// The service could not be offered (said once in the log; tried again later).
+    refused: AtomicBool,
+    /// Panel reports read while waiting for something else.
+    stash: Mutex<Vec<String>>,
+}
+
+struct Service {
+    _bus: zbus::blocking::Connection,
+    reports: Mutex<Receiver<Report>>,
+}
 
 /// What the KWin scripts report.
 enum Report {
@@ -21,9 +135,10 @@ enum Report {
     Windows(String),
 }
 
-pub fn active() -> Option<ActiveWindow> {
-    let script = format!(
-        "const w = workspace.activeWindow;
+impl Scripts {
+    fn active(&self) -> Option<ActiveWindow> {
+        let script = format!(
+            "const w = workspace.activeWindow;
          if (w && w.normalWindow) {{
            const g = w.frameGeometry;
            callDBus('{BUS}', '{PATH}', '{BUS}', 'Window', w.internalId.toString(),
@@ -33,58 +148,151 @@ pub fn active() -> Option<ActiveWindow> {
          }} else {{
            callDBus('{BUS}', '{PATH}', '{BUS}', 'Window', '', 0, 0, 1000, '');
          }}"
-    );
-    ask_kwin(&script, |r| match r {
-        Report::Window(w) => Some(w.clone()),
-        _ => None,
-    })
-    .flatten()
-}
+        );
+        self.ask_kwin(&script, |r| match r {
+            Report::Window(w) => Some(w.clone()),
+            _ => None,
+        })
+        .flatten()
+    }
 
-/// Where the mouse is on the desktop (logical pixels).
-pub fn cursor() -> Option<(i32, i32)> {
-    let script = format!(
-        "callDBus('{BUS}', '{PATH}', '{BUS}', 'Cursor',
+    /// Where the mouse is on the desktop (logical pixels).
+    fn cursor(&self) -> Option<(i32, i32)> {
+        let script = format!(
+            "callDBus('{BUS}', '{PATH}', '{BUS}', 'Cursor',
                   Math.round(workspace.cursorPos.x), Math.round(workspace.cursorPos.y));"
-    );
-    ask_kwin(&script, |r| match r {
-        Report::Cursor(x, y) => Some((*x, *y)),
-        _ => None,
-    })
-}
+        );
+        self.ask_kwin(&script, |r| match r {
+            Report::Cursor(x, y) => Some((*x, *y)),
+            _ => None,
+        })
+    }
 
-/// Every normal window: (process id, class, output name).
-pub fn all_windows() -> Vec<(u32, String, String)> {
-    let script = format!(
-        "var lines = [];
+    /// Every normal window.
+    fn all_windows(&self) -> Vec<AppWindow> {
+        let script = format!(
+            "var lines = [];
          workspace.windowList().forEach(function (w) {{
            if (w.normalWindow && w.output) {{
              lines.push(w.pid + '\\t' + w.resourceClass + '\\t' + w.output.name);
            }}
          }});
          callDBus('{BUS}', '{PATH}', '{BUS}', 'Windows', lines.join('\\n'));"
-    );
-    ask_kwin(&script, |r| match r {
-        Report::Windows(list) => Some(list.clone()),
-        _ => None,
-    })
-    .map(|list| {
-        list.lines()
-            .filter_map(|l| {
-                let mut f = l.split('\t');
-                Some((
-                    f.next()?.parse().ok()?,
-                    f.next()?.to_owned(),
-                    f.next()?.to_owned(),
-                ))
-            })
-            .collect()
-    })
-    .unwrap_or_default()
+        );
+        self.ask_kwin(&script, |r| match r {
+            Report::Windows(list) => Some(list.clone()),
+            _ => None,
+        })
+        .map(|list| {
+            list.lines()
+                .filter_map(|l| {
+                    let mut f = l.split('\t');
+                    Some(AppWindow {
+                        pid: f.next()?.parse().ok()?,
+                        class: f.next()?.to_owned(),
+                        output: OutputKey::new(f.next()?),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    /// Panel outputs whose window closed or left since the last call (KWin reports by
+    /// itself).
+    fn vacated(&self) -> Vec<String> {
+        let Some(service) = self.reports() else {
+            return Vec::new();
+        };
+        // Busy asking KWin something (the sound watcher, say): next time. This runs on the
+        // session loop, which must not wait for it.
+        let Ok(rx) = service.reports.try_lock() else {
+            return Vec::new();
+        };
+        let mut out = std::mem::take(&mut *self.stash.lock().unwrap());
+        while let Ok(r) = rx.try_recv() {
+            if let Report::Left(name) = r
+                && !out.contains(&name)
+            {
+                out.push(name);
+            }
+        }
+        out
+    }
+
+    /// The D-Bus service KWin scripts call, offered on first use (and again after it could
+    /// not be).
+    fn reports(&self) -> Option<Arc<Service>> {
+        let mut service = self.service.lock().unwrap();
+        if service.is_none() {
+            let (tx, rx) = sync_channel(16);
+            // A desktop just gone may hold the name a moment longer (its last report
+            // still read on another thread): the newest desktop takes it over.
+            let offered = zbus::blocking::connection::Builder::session()
+                .map(|b| b.allow_name_replacements(true).replace_existing_names(true))
+                .and_then(|b| b.name(BUS))
+                .and_then(|b| b.serve_at(PATH, Host(tx)))
+                .and_then(|b| b.build());
+            match offered {
+                Ok(bus) => {
+                    *service = Some(Arc::new(Service {
+                        _bus: bus,
+                        reports: Mutex::new(rx),
+                    }));
+                }
+                Err(e) => {
+                    if !self.refused.swap(true, Ordering::Relaxed) {
+                        warn!("cannot offer {BUS} on D-Bus: {e}");
+                    }
+                    return None;
+                }
+            }
+        }
+        service.clone()
+    }
+
+    /// Runs a KWin script that reports back, and waits (up to 2 s) for the report
+    /// `pick` accepts. Panel reports that arrive meanwhile are kept for
+    /// [`Scripts::vacated`].
+    fn ask_kwin<T>(&self, script: &str, pick: impl Fn(&Report) -> Option<T>) -> Option<T> {
+        let service = self.reports()?;
+        let rx = service.reports.lock().unwrap();
+        let mut keep = Vec::new();
+        // Drop anything stale before asking.
+        while let Ok(r) = rx.try_recv() {
+            keep.push(r);
+        }
+        keep.retain(|r| matches!(r, Report::Left(_)));
+        if let Err(e) = kwin_run("prostir-ask", script, true) {
+            warn!("KWin script: {e:#}");
+            return None;
+        }
+        let mut found = None;
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
+            match rx.recv_timeout(left) {
+                Ok(r) => match pick(&r) {
+                    Some(v) => {
+                        found = Some(v);
+                        break;
+                    }
+                    None => keep.push(r),
+                },
+                Err(_) => break,
+            }
+        }
+        drop(rx);
+        for r in keep {
+            if let Report::Left(name) = r {
+                self.stash.lock().unwrap().push(name);
+            }
+        }
+        found
+    }
 }
 
 /// Moves window `w` to `output`; `fill`: full screen there (a window panel).
-pub fn move_to(w: &ActiveWindow, output: &str, fill: bool) -> Result<()> {
+fn move_to(w: &ActiveWindow, output: &str, fill: bool) -> Result<()> {
     let script = move_script(&w.id, output, fill);
     // A panel's script stays loaded to watch its window; others are done at once.
     let name = if fill {
@@ -137,7 +345,7 @@ fn move_script(id: &str, output: &str, fill: bool) -> String {
 }
 
 /// Puts window `w` back on `output` as an ordinary window (out of full screen).
-pub fn put_back(w: &ActiveWindow, output: &str) -> Result<()> {
+fn put_back(w: &ActiveWindow, output: &str) -> Result<()> {
     let script = format!(
         "const win = workspace.windowList().find(function (w) {{
            return w.internalId.toString() === {id};
@@ -151,33 +359,6 @@ pub fn put_back(w: &ActiveWindow, output: &str) -> Result<()> {
         output = js_string(output),
     );
     kwin_run("prostir-put-back", &script, true)
-}
-
-/// Stops watching the window of panel `output`.
-pub fn forget_panel(output: &str) {
-    kwin_unload(&format!("prostir-panel-{output}"));
-}
-
-/// Panel outputs whose window closed or left since the last call (KWin reports by
-/// itself).
-pub fn vacated() -> Vec<String> {
-    let Some(rx) = reports() else {
-        return Vec::new();
-    };
-    // Busy asking KWin something (the sound watcher, say): next time. This runs on the
-    // session loop, which must not wait for it.
-    let Ok(rx) = rx.try_lock() else {
-        return Vec::new();
-    };
-    let mut out = std::mem::take(&mut *STASH.lock().unwrap());
-    while let Ok(r) = rx.try_recv() {
-        if let Report::Left(name) = r
-            && !out.contains(&name)
-        {
-            out.push(name);
-        }
-    }
-    out
 }
 
 const BUS: &str = "dev.prostir.Host";
@@ -196,7 +377,7 @@ impl Host {
             width,
             height,
             scale: f64::from(scale_milli.max(250)) / 1000.0,
-            output,
+            output: (!output.is_empty()).then(|| OutputKey::new(output)),
         });
         let _ = self.0.try_send(Report::Window(w));
     }
@@ -216,66 +397,6 @@ impl Host {
         let _ = self.0.try_send(Report::Left(output));
     }
 }
-
-/// The D-Bus service KWin scripts call, started on first use.
-fn reports() -> Option<&'static Mutex<Receiver<Report>>> {
-    static SERVICE: OnceLock<Option<(zbus::blocking::Connection, Mutex<Receiver<Report>>)>> =
-        OnceLock::new();
-    SERVICE
-        .get_or_init(|| {
-            let (tx, rx) = sync_channel(16);
-            let conn = zbus::blocking::connection::Builder::session()
-                .and_then(|b| b.name(BUS))
-                .and_then(|b| b.serve_at(PATH, Host(tx)))
-                .and_then(|b| b.build())
-                .inspect_err(|e| warn!("cannot offer {BUS} on D-Bus: {e}"))
-                .ok()?;
-            Some((conn, Mutex::new(rx)))
-        })
-        .as_ref()
-        .map(|(_, rx)| rx)
-}
-
-/// Runs a KWin script that reports back, and waits (up to 2 s) for the report
-/// `pick` accepts. Panel reports that arrive meanwhile are kept for [`vacated`].
-fn ask_kwin<T>(script: &str, pick: impl Fn(&Report) -> Option<T>) -> Option<T> {
-    let rx = reports()?;
-    let rx = rx.lock().unwrap();
-    let mut keep = Vec::new();
-    // Drop anything stale before asking.
-    while let Ok(r) = rx.try_recv() {
-        keep.push(r);
-    }
-    keep.retain(|r| matches!(r, Report::Left(_)));
-    if let Err(e) = kwin_run("prostir-ask", script, true) {
-        warn!("KWin script: {e:#}");
-        return None;
-    }
-    let mut found = None;
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
-        match rx.recv_timeout(left) {
-            Ok(r) => match pick(&r) {
-                Some(v) => {
-                    found = Some(v);
-                    break;
-                }
-                None => keep.push(r),
-            },
-            Err(_) => break,
-        }
-    }
-    drop(rx);
-    for r in keep {
-        if let Report::Left(name) = r {
-            STASH.lock().unwrap().push(name);
-        }
-    }
-    found
-}
-
-/// Panel reports read while waiting for something else.
-static STASH: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// Loads and runs a KWin script; `once`: unloaded right after it ran.
 fn kwin_run(name: &str, source: &str, once: bool) -> Result<()> {

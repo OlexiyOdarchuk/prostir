@@ -5,29 +5,41 @@
 
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::platform::{run, windows};
+use crate::platform::{OutputKey, WindowList, run};
 
 /// Looks every second and a half, off the session loop (asking KWin takes a moment).
 pub struct Watcher {
     on: Arc<AtomicBool>,
-    found: Arc<Mutex<Option<String>>>,
+    found: Arc<Mutex<Option<OutputKey>>>,
 }
 
 impl Watcher {
-    pub fn start() -> Self {
+    /// Looks with `windows`, the desktop's list of windows, while the desktop keeps it;
+    /// without one (a desktop with no windows), nothing is ever found.
+    pub fn start(windows: Option<Arc<dyn WindowList>>) -> Self {
         let on = Arc::new(AtomicBool::new(true));
         let found = Arc::new(Mutex::new(None));
         let (running, slot) = (on.clone(), found.clone());
+        let Some(windows) = windows else {
+            return Self { on, found };
+        };
+        // Held weakly: what the list holds (KWin's reports on D-Bus) goes with the
+        // desktop, not with this thread.
+        let windows: Weak<dyn WindowList> = Arc::downgrade(&windows);
         let _ = std::thread::Builder::new()
             .name("sound-source".into())
             .spawn(move || {
                 while running.load(Ordering::Relaxed) {
-                    let now = output();
+                    let Some(list) = windows.upgrade() else {
+                        break;
+                    };
+                    let now = output(list.as_ref());
+                    drop(list);
                     *slot.lock().unwrap() = now;
                     std::thread::sleep(Duration::from_millis(1500));
                 }
@@ -36,7 +48,7 @@ impl Watcher {
     }
 
     /// The output sound comes from, as last found.
-    pub fn output(&self) -> Option<String> {
+    pub fn output(&self) -> Option<OutputKey> {
         self.found.lock().unwrap().clone()
     }
 }
@@ -125,30 +137,30 @@ fn parent(pid: u32) -> Option<u32> {
 }
 
 /// The output whose window plays sound now, if one can be told.
-pub fn output() -> Option<String> {
+fn output(windows: &dyn WindowList) -> Option<OutputKey> {
     let playing = playing();
     if playing.is_empty() {
         return None;
     }
-    let windows = windows::all_windows();
+    let windows = windows.all();
     for (pid, binary) in &playing {
         // The process itself or one of its parents (browsers play from a helper
         // process).
         let mut p = (*pid > 0).then_some(*pid);
         for _ in 0..6 {
             let Some(id) = p else { break };
-            if let Some(w) = windows.iter().find(|w| w.0 == id) {
-                return Some(w.2.clone());
+            if let Some(w) = windows.iter().find(|w| w.pid == id) {
+                return Some(w.output.clone());
             }
             p = parent(id).filter(|&pp| pp > 1);
         }
         // Else by name: a window whose class is the program's name.
         let name = binary.to_lowercase();
         if let Some(w) = windows.iter().find(|w| {
-            let class = w.1.to_lowercase();
+            let class = w.class.to_lowercase();
             !class.is_empty() && (class.contains(&name) || name.contains(&class))
         }) {
-            return Some(w.2.clone());
+            return Some(w.output.clone());
         }
     }
     None
@@ -181,10 +193,12 @@ mod live {
     #[test]
     #[ignore]
     fn live_windows_and_sound() {
-        for w in crate::platform::windows::all_windows() {
+        let mut desktop = crate::platform::connect(&Default::default()).unwrap();
+        let list = desktop.windows().unwrap().list();
+        for w in list.all() {
             eprintln!("window {w:?}");
         }
         eprintln!("playing {:?}", super::playing());
-        eprintln!("sound from {:?}", super::output());
+        eprintln!("sound from {:?}", super::output(list.as_ref()));
     }
 }

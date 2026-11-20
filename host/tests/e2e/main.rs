@@ -3,9 +3,11 @@
 //! `cargo test -p prostir-host --features fake-desktop --test e2e`). Needs GStreamer
 //! with x264enc (plugins-ugly), h264parse (plugins-bad) and the base plugins.
 
+mod api;
 mod control;
 mod failures;
 mod goodbye;
+mod headsets;
 mod link;
 mod pc;
 mod requests;

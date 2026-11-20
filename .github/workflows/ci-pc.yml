@@ -9,6 +9,7 @@ on:
       - "host/**"
       - "proto/**"
       - "layout/**"
+      - "api/**"
       - "testkit/**"
       - "lang/**"
       - "settings/**"
@@ -22,6 +23,7 @@ on:
       - "host/**"
       - "proto/**"
       - "layout/**"
+      - "api/**"
       - "testkit/**"
       - "lang/**"
       - "settings/**"
@@ -50,21 +52,22 @@ jobs:
         with:
           persist-credentials: false
       # Plugins for the end-to-end tests: the runner has no graphics card, so they encode
-      # with x264 (plugins-ugly); h264parse comes from plugins-bad.
+      # with x264 (plugins-ugly); h264parse comes from plugins-bad. dbus-daemon gives the
+      # tests of the local API a session bus of their own.
       - uses: ./.github/actions/system-libraries
         with:
           packages: >-
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev pkg-config
             gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
-            gstreamer1.0-plugins-ugly
+            gstreamer1.0-plugins-ugly dbus-daemon
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch
         with:
           toolchain: stable
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: cargo fmt -p prostir-host -p prostir-proto -p prostir-layout -p prostir-testkit -p prostir-lang -p prostir-settings --check
-      - run: cargo clippy -p prostir-host -p prostir-proto -p prostir-layout -p prostir-testkit -p prostir-lang -p prostir-settings --all-targets -- -D warnings
-      - run: cargo test -p prostir-host -p prostir-proto -p prostir-layout -p prostir-testkit -p prostir-lang
+      - run: cargo fmt -p prostir-host -p prostir-proto -p prostir-layout -p prostir-api -p prostir-testkit -p prostir-lang -p prostir-settings --check
+      - run: cargo clippy -p prostir-host -p prostir-proto -p prostir-layout -p prostir-api -p prostir-testkit -p prostir-lang -p prostir-settings --all-targets -- -D warnings
+      - run: cargo test -p prostir-host -p prostir-proto -p prostir-layout -p prostir-api -p prostir-testkit -p prostir-lang
       # The settings window, driven without drawing; its pictures need a graphics card
       # (or lavapipe), which the runner does not have.
       - run: cargo test -p prostir-settings --lib --test texts --test window

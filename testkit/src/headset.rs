@@ -454,6 +454,8 @@ struct Shared {
     cut_mid_message: AtomicBool,
     /// Leave the PC's commands unanswered.
     silent: AtomicBool,
+    /// Answer the PC's commands with this failure.
+    refuse: Mutex<Option<prostir_proto::state::ErrorCode>>,
     /// The headset's volume, which the PC asks to change.
     volume: Mutex<Option<HeadsetVolume>>,
     /// Why reading stopped.
@@ -841,6 +843,12 @@ impl FakeHeadset {
         self.send(&ClientMsg::UpEnd { up: 0 })
     }
 
+    /// Answers the PC's commands with `code` from now on (a profile it does not have,
+    /// say).
+    pub fn refuse_commands(&self, code: prostir_proto::state::ErrorCode) {
+        *self.shared.refuse.lock().unwrap() = Some(code);
+    }
+
     /// Leaves the PC's commands unanswered from now on, as a headset that hangs would.
     pub fn stop_answering(&self) {
         self.shared.silent.store(true, Ordering::Relaxed);
@@ -1069,12 +1077,27 @@ fn spawn_reader(
                     // Done, as far as a fake headset does anything; a kind it does not
                     // know is unsupported, as the Quest app answers it.
                     HostMsg::Command { req, asked } if !shared.silent.load(Ordering::Relaxed) => {
+                        let refused = *shared.refuse.lock().unwrap();
                         let outcome = match asked {
+                            Asked::Known(_) if let Some(code) = refused => {
+                                Outcome::failed(code, "refused by the fake headset")
+                            }
                             Asked::Known(_) => Outcome::Done,
                             Asked::Unknown { .. } => {
                                 Outcome::failed(prostir_proto::state::ErrorCode::UNSUPPORTED, "")
                             }
                         };
+                        // "No limits" changes its preferences, which it says first, as
+                        // the Quest app does.
+                        if let (Asked::Known(Command::NoLimits { on }), Outcome::Done) =
+                            (asked, &outcome)
+                        {
+                            let part = Prefs {
+                                no_limits: *on,
+                                ..Prefs::default()
+                            };
+                            let _ = send(&mut **writer.lock().unwrap(), ClientMsg::Prefs { part });
+                        }
                         let reply = ClientMsg::Reply { req: *req, outcome };
                         let _ = send(&mut **writer.lock().unwrap(), reply);
                     }

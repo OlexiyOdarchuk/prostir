@@ -16,6 +16,8 @@
 
 use std::time::{Duration, Instant};
 
+use prostir_proto::state::{Access, perms};
+
 /// How often a live PC does its housekeeping: the streams' reports, the PC's own
 /// displays, whether a program records from the microphone, sessions taken off or
 /// broken, commands the headset did not answer.
@@ -124,25 +126,107 @@ impl Phase {
     }
 }
 
-/// How many headsets may have a session at once.
+/// How many headsets may have a session at once: the one rule that keeps it to a
+/// single headset for now (step 11 of 0.2.0 raises it).
 ///
-/// Accepting, admitting and keeping sessions (by the headset's key, each with its own
-/// number, reader and writer) already work for more than one. Raising this is not
-/// enough, though: these still assume a single headset, and are the next sub-step
-/// (step 11 of 0.2.0 needs them):
-/// - `displays::Router` has one outbox: `attach` replaces the headset it sends to,
-///   `detach` stops sending to anyone, and `publish` takes one headset's list;
-/// - `Session::start` fits the codec of every stream to this headset
-///   (`Displays::fit_codec`), stops what is too big for it (`stop_too_big`), and
-///   starts every stream over (`headset_connected`, which also clears "taken off");
-/// - `Session::finish` pauses every encoder (`set_streaming(false)`) and detaches the
-///   router for all, whichever headset left;
-/// - worn or not, and so "taken off" (`Displays::set_worn`, `taken_off_for`), the PC's
-///   end of the microphone (`set_mic`) and its pause are one for the desktop;
-/// - the tray's `Control.via`, `no_limits`, `mic_denied` and battery show one headset,
-///   and a session's end clears them for all;
-/// - commands from the tray and the test hook go to one session (the main one).
+/// Everything else already works for more than one: each session has its own outbox
+/// in the `Router` (a stream fans out to every headset, in a codec all of them decode,
+/// and fails only for a headset too small for it), its own worn or not (the encoders
+/// pause only once no headset is worn), its own rights; what only one headset can
+/// have goes to one session at a time (see [`roles`]).
 pub const MAX_HEADSETS: usize = 1;
+
+/// How many headsets may have a session at once in this run: [`MAX_HEADSETS`], or in
+/// a build for the end-to-end tests what `PROSTIR_TEST_MAX_HEADSETS` says (never a
+/// setting of a release).
+pub fn max_headsets() -> usize {
+    #[cfg(feature = "fake-desktop")]
+    if let Some(n) = std::env::var("PROSTIR_TEST_MAX_HEADSETS")
+        .ok()
+        .and_then(|n| n.parse().ok())
+    {
+        return n;
+    }
+    MAX_HEADSETS
+}
+
+/// Which sessions have the jobs only one headset can have at a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Roles<K> {
+    /// The main session: its arrangement is the desktop's, its volume the PC's, its
+    /// "No limits" the PC's limits. One whose `settings.txt` line makes it main;
+    /// of several, the one that was main already, else the first connected. The
+    /// others are guests while it lasts.
+    pub main: Option<K>,
+    /// The tray shows it and commands go to it: the main session, else the first.
+    pub lead: Option<K>,
+    /// Its microphone is the PC's end of the headset microphone: the main session's
+    /// if it has the right, else the first connected with the right; while it is in
+    /// use (a program records, or the headset streams it), it stays where it is.
+    pub mic: Option<K>,
+}
+
+impl<K> Roles<K> {
+    /// No session has any.
+    pub const NONE: Self = Self {
+        main: None,
+        lead: None,
+        mic: None,
+    };
+}
+
+/// The [`Roles`] of `sessions` (the headset's key and its line's rights, in the order
+/// the headsets first connected), where `was` are the roles before and `mic_busy`
+/// whether the microphone is in use.
+pub fn roles<K: Copy + PartialEq>(
+    sessions: &[(K, Access)],
+    was: Roles<K>,
+    mic_busy: bool,
+) -> Roles<K> {
+    let mains = || sessions.iter().filter(|(_, a)| a.is_main());
+    let main = mains()
+        .find(|(k, _)| Some(*k) == was.main)
+        .or_else(|| mains().next())
+        .map(|(k, _)| *k);
+    let lead = main.or_else(|| sessions.first().map(|(k, _)| *k));
+    let may_mic = |k: &K| {
+        sessions
+            .iter()
+            .any(|(key, a)| key == k && a.may(perms::MIC))
+    };
+    let kept = was.mic.filter(|k| mic_busy && may_mic(k));
+    let mic = kept.or_else(|| main.filter(may_mic)).or_else(|| {
+        sessions
+            .iter()
+            .find(|(_, a)| a.may(perms::MIC))
+            .map(|(k, _)| *k)
+    });
+    Roles { main, lead, mic }
+}
+
+/// The order headsets first connected in, by key: one connecting again (its session
+/// replaced) keeps its place, one that left loses it.
+#[derive(Debug, Default)]
+pub struct Arrivals<K>(Vec<K>);
+
+impl<K: Copy + PartialEq> Arrivals<K> {
+    /// Headset `key` has a session (again).
+    pub fn connected(&mut self, key: K) {
+        if !self.0.contains(&key) {
+            self.0.push(key);
+        }
+    }
+
+    /// Headset `key` has no session any more.
+    pub fn left(&mut self, key: K) {
+        self.0.retain(|k| *k != key);
+    }
+
+    /// The keys in the order they first connected.
+    pub fn keys(&self) -> impl Iterator<Item = &K> {
+        self.0.iter()
+    }
+}
 
 /// What becomes of a headset that asked to open a session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,8 +240,12 @@ pub enum Admit {
     Refuse,
 }
 
-/// Whether headset `key` may open a session while `live` have one.
-pub fn admit<'a, K: PartialEq + 'a>(live: impl IntoIterator<Item = &'a K>, key: &K) -> Admit {
+/// Whether headset `key` may open a session while `live` have one, `max` at most.
+pub fn admit<'a, K: PartialEq + 'a>(
+    live: impl IntoIterator<Item = &'a K>,
+    key: &K,
+    max: usize,
+) -> Admit {
     let mut count = 0;
     for k in live {
         if k == key {
@@ -165,7 +253,7 @@ pub fn admit<'a, K: PartialEq + 'a>(live: impl IntoIterator<Item = &'a K>, key: 
         }
         count += 1;
     }
-    if count < MAX_HEADSETS {
+    if count < max {
         Admit::Open
     } else {
         Admit::Refuse
@@ -277,9 +365,95 @@ mod tests {
     #[test]
     fn the_same_headset_replaces_its_session_another_is_refused() {
         let none: [u8; 0] = [];
-        assert_eq!(admit(&none, &1), Admit::Open);
-        assert_eq!(admit(&[1], &1), Admit::Replace);
-        assert_eq!(admit(&[1], &2), Admit::Refuse);
+        assert_eq!(admit(&none, &1, MAX_HEADSETS), Admit::Open);
+        assert_eq!(admit(&[1], &1, MAX_HEADSETS), Admit::Replace);
+        assert_eq!(admit(&[1], &2, MAX_HEADSETS), Admit::Refuse);
+        // With room for two, the second one opens; a third is refused.
+        assert_eq!(admit(&[1], &2, 2), Admit::Open);
+        assert_eq!(admit(&[1, 2], &2, 2), Admit::Replace);
+        assert_eq!(admit(&[1, 2], &3, 2), Admit::Refuse);
+    }
+
+    const GUEST: Access = Access {
+        role: prostir_proto::state::role::GUEST,
+        perms: perms::INPUT,
+    };
+    const GUEST_MIC: Access = Access {
+        role: prostir_proto::state::role::GUEST,
+        perms: perms::MIC,
+    };
+    const MAIN_NO_MIC: Access = Access {
+        role: prostir_proto::state::role::MAIN,
+        perms: perms::CHANGES,
+    };
+
+    fn was(main: Option<u8>, mic: Option<u8>) -> Roles<u8> {
+        Roles {
+            main,
+            lead: main,
+            mic,
+        }
+    }
+
+    /// One main session at a time: the first main one connected, kept while it lasts
+    /// (a main headset that connected later does not take it over).
+    #[test]
+    fn one_session_is_the_main_one() {
+        let none: [(u8, Access); 0] = [];
+        assert_eq!(roles(&none, Roles::NONE, false), Roles::NONE);
+        let all = [(1, GUEST), (2, Access::MAIN), (3, Access::MAIN)];
+        let r = roles(&all, Roles::NONE, false);
+        assert_eq!((r.main, r.lead, r.mic), (Some(2), Some(2), Some(2)));
+        let r = roles(&all, was(Some(3), Some(3)), false);
+        assert_eq!(r.main, Some(3), "the main one stays the main one");
+        // It left: the next main one.
+        let r = roles(
+            &[(1, GUEST), (2, Access::MAIN)],
+            was(Some(3), Some(3)),
+            false,
+        );
+        assert_eq!(r.main, Some(2));
+    }
+
+    /// Without a main session the first is shown in the tray and takes the commands;
+    /// the microphone is the main session's if it may, else the first's that may.
+    #[test]
+    fn the_tray_and_the_microphone_go_to_one_session() {
+        let r = roles(&[(1, GUEST), (2, GUEST_MIC)], Roles::NONE, false);
+        assert_eq!((r.main, r.lead, r.mic), (None, Some(1), Some(2)));
+        let r = roles(&[(1, GUEST_MIC), (2, MAIN_NO_MIC)], Roles::NONE, false);
+        assert_eq!((r.main, r.lead, r.mic), (Some(2), Some(2), Some(1)));
+        let r = roles(&[(1, GUEST), (2, MAIN_NO_MIC)], Roles::NONE, false);
+        assert_eq!(r.mic, None, "nobody may");
+    }
+
+    /// The microphone in use stays with its headset when a main one that may comes;
+    /// once it is not in use, it goes to the main one.
+    #[test]
+    fn the_microphone_in_use_stays_where_it_is() {
+        let both = [(1, GUEST_MIC), (2, Access::MAIN)];
+        let r = roles(&both, was(None, Some(1)), true);
+        assert_eq!((r.main, r.mic), (Some(2), Some(1)));
+        let r = roles(&both, was(Some(2), Some(1)), false);
+        assert_eq!(r.mic, Some(2));
+        // Gone, or without the right: it moves all the same.
+        let r = roles(&[(2, Access::MAIN)], was(Some(2), Some(1)), true);
+        assert_eq!(r.mic, Some(2));
+    }
+
+    /// A headset connecting again keeps its place among the others; one that left
+    /// comes back last.
+    #[test]
+    fn a_headset_back_keeps_its_place() {
+        let mut arrivals = Arrivals::default();
+        for key in [1, 2, 3] {
+            arrivals.connected(key);
+        }
+        arrivals.connected(1);
+        assert_eq!(arrivals.keys().copied().collect::<Vec<_>>(), [1, 2, 3]);
+        arrivals.left(1);
+        arrivals.connected(1);
+        assert_eq!(arrivals.keys().copied().collect::<Vec<_>>(), [2, 3, 1]);
     }
 
     #[test]
