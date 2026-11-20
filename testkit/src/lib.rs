@@ -4,6 +4,7 @@
 //! Used by the PC app's end-to-end tests (`host/tests/e2e`, against a PC app built
 //! with the fake desktop) and by `prostir-probe`, which checks a real PC by hand.
 
+pub mod find;
 mod headset;
 pub mod nal;
 

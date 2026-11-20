@@ -12,8 +12,9 @@ The source of truth is the code: [`proto/src/lib.rs`](proto/src/lib.rs) (message
 [`proto/src/wire.rs`](proto/src/wire.rs) (how values are encoded),
 [`proto/src/packet.rs`](proto/src/packet.rs) (packets),
 [`proto/src/handshake.rs`](proto/src/handshake.rs) (the version handshake on records),
-[`proto/src/link/tcp.rs`](proto/src/link/tcp.rs) (encryption) and
-[`proto/src/secure.rs`](proto/src/secure.rs) (keys and pairing).
+[`proto/src/link/tcp.rs`](proto/src/link/tcp.rs) (encryption),
+[`proto/src/secure.rs`](proto/src/secure.rs) (keys and pairing) and
+[`proto/src/discovery.rs`](proto/src/discovery.rs) (finding a PC).
 
 Version 2 (Prostir 0.2) is a clean break from version 1 (Prostir 0.1.x): only the
 version handshake is the same, so the two can tell the user which side to update
@@ -51,7 +52,7 @@ Contents:
 |---|---|
 | Connection | TCP, client connects to host |
 | Host TCP port | `47830` (`TCP_PORT`; the host's `--port` option changes it) |
-| Discovery | UDP broadcast to port `47831` (`DISCOVERY_PORT`) |
+| Discovery | UDP port `47831` (`DISCOVERY_PORT`): the headset asks, the PC answers; the PC's beacon until step 7 |
 | Sessions | One at a time |
 
 The connection is plain TCP carrying encrypted records (see [Security](#2-security)
@@ -65,9 +66,83 @@ and [Framing](#3-framing)). There are two ways to reach the host:
 
 ### Discovery
 
-Every second the host sends a UDP datagram (the *beacon*) from an ephemeral port to
-port `47831` at `255.255.255.255` and at the broadcast address of every IPv4 interface
-that is up and not loopback. The `--no-discovery` option turns this off.
+A headset finds PCs in two ways: the PC's **beacon** (until the headset asks instead,
+step 7 of 0.2.0) and **asking** (the query below). Both use UDP port `47831`
+(`DISCOVERY_PORT`).
+
+#### Asking
+
+The headset sends a query (`PRSQ`) to port `47831`: as a broadcast, and straight to the
+addresses of PCs it knows (an address typed in, or the last one it reached, a VPN
+address such as Tailscale or WireGuard too). A PC answers (`PRSA`) to the address and
+port the query came from, and only there. Nothing else is needed for a VPN: no UPnP,
+no port opened on a router. Source: [`proto/src/discovery.rs`](proto/src/discovery.rs).
+
+Query, at least 128 and at most 512 bytes:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 4 | `PRSQ` in ASCII |
+| 4 | 1 | version, `1` |
+| 5 | 16 | nonce, random, new for every query |
+| 21 | 1 | `count`, 0 to 32 |
+| 22 | 8 × `count` | a tag for each PC looked for |
+| . | 1 | `name_len`, 0 to 32 |
+| . | `name_len` | the headset's name, UTF-8; empty except while it looks for a PC to pair with |
+| . | . | zeros, up to 128 bytes at least |
+
+`tag = SHA-256("prostir-find" ‖ pc_key ‖ nonce)[0..8]`, where `pc_key` is the PC's
+static key (32 bytes, see [Static keys and identity](#static-keys-and-identity)): a
+headset makes one for each PC it trusts. A query of a newer version is read by the
+fields of version 1 (a newer version only adds after them).
+
+Answer, at most 97 bytes:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 4 | `PRSA` in ASCII |
+| 4 | 1 | version, `1` |
+| 5 | 16 | the query's nonce |
+| 21 | 8 | `SHA-256("prostir-here" ‖ pc_key ‖ nonce)[0..8]` |
+| 29 | 2 | the PC's TCP port, `u16` little-endian |
+| 31 | 1 | flags: `1` pairing open, `2` the PC answers every query |
+| 32 | 1 | `name_len`, 0 to 64 |
+| 33 | `name_len` | the PC's name, UTF-8 |
+
+The tag of an answer tells the headset which of the PCs it knows answered, before it
+connects.
+
+Whom a PC answers:
+
+- every query while it has no paired headset, or while its pairing window is open
+  ("Pair a new headset" in the tray, the settings window or `prostir ctl pair`, 3
+  minutes, closed early by a pairing that succeeds or by "Stop pairing");
+- otherwise only a query that carries its own tag. Someone listening does not learn
+  which PC is looked for (the nonce changes every time), and the PC does not learn
+  which other PCs the headset knows.
+
+Limits: a datagram that is not a whole query of 128 to 512 bytes is dropped unread
+(the host drops it in the kernel, with a socket filter); an answer is always smaller
+than the smallest query, so a forged sender address gets less than it sent and a PC
+cannot be used to amplify traffic; a PC sends at most 20 answers a second in all.
+
+Neither is encrypted: an answer is a hint where to connect, and trust comes from the
+handshake. Typing the PC's address and USB work whether the PC answers or not
+(pairing is protected by its code).
+
+**Implementation-defined**, the host: a query from a headset that is not its own,
+while the host does not answer it (paired, pairing closed), shows a notification on
+the PC, "New headset nearby. Pair?", with a button that opens the pairing window, at
+most once a minute. The headsets that asked recently (by name, or by address without
+a name) are the local API's `nearby`. A query from one of its own headsets lets a
+sleeping PC start ahead of the connection that follows.
+
+#### The beacon (until step 7)
+
+Every second while the PC program runs (not while it sleeps waiting for a headset), the
+host sends a UDP datagram (the *beacon*) from an ephemeral port to port `47831` at
+`255.255.255.255` and at the broadcast address of every IPv4 interface that is up and
+not loopback. The `--no-discovery` option turns the beacon and the answers off.
 
 Beacon layout:
 
@@ -247,8 +322,9 @@ For the timeouts in the session see [End of session](#end-of-session).
 
 Everything after the Noise handshake: every protocol message in both directions,
 including `Hello`, pairing, video, PC sound and the microphone. Not encrypted: the
-discovery beacon (magic, port, host name) and the Noise handshake messages themselves
-(which carry ephemeral keys in the clear and static keys encrypted, as Noise `XX` does).
+discovery beacon (magic, port, host name), the discovery queries and answers, and the
+Noise handshake messages themselves (which carry ephemeral keys in the clear and static
+keys encrypted, as Noise `XX` does).
 
 ## 3. Framing
 
