@@ -619,7 +619,8 @@ fn do_volume(sink: &SinkVolume, act: Option<Act>, displays: Option<&Displays>) {
     match act {
         Some(Act::Ask(asked)) => {
             if let Some(d) = displays {
-                debug!("volume: asking the headset for {}", asked.level);
+                // At most every 50 ms while a slider moves.
+                info!("volume: asking the headset for {}", asked.level);
                 d.router.send(HostMsg::VolumeAsk { asked });
             }
         }

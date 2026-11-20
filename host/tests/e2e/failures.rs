@@ -209,3 +209,49 @@ fn a_display_too_big_for_the_headset_fails_alone() {
     assert!(view.broken.is_empty(), "{:?}", view.broken);
     assert!(!pc.lines("is larger than the headset decodes").is_empty());
 }
+
+/// A request for a keyframe of an earlier generation of a stream is for frames long
+/// gone: the PC makes no keyframe for it. One for the generation it sends now gets one.
+#[test]
+fn a_keyframe_asked_for_an_old_generation_is_not_made() {
+    use prostir_proto::ClientMsg;
+    use prostir_proto::state::Gen;
+    // A moving screen, with no frame late (a late one would ask for a keyframe).
+    let moving = Options {
+        fps: 15,
+        ..Options::default()
+    };
+    let (_dir, _pc, _keys, mut headset) = session("old-generation", &moving);
+    let id = headset.view().order()[0];
+    // Past the keyframes of the start.
+    headset.take_for(Duration::from_secs(1)).unwrap();
+    let now = headset.view().streams[&id].generation;
+    let keyframes = |h: &prostir_testkit::FakeHeadset| h.view().streams[&id].keyframes;
+    let before = keyframes(&headset);
+    for old in [Gen(now.0 - 1), Gen(0)] {
+        headset
+            .send(&ClientMsg::RequestKeyframe {
+                id,
+                generation: old,
+            })
+            .unwrap();
+    }
+    headset.take_for(Duration::from_millis(1500)).unwrap();
+    assert_eq!(
+        keyframes(&headset),
+        before,
+        "no keyframe for an old generation"
+    );
+    assert_eq!(headset.view().streams[&id].generation, now);
+    headset
+        .send(&ClientMsg::RequestKeyframe {
+            id,
+            generation: now,
+        })
+        .unwrap();
+    headset
+        .wait(SOON, "a keyframe for the current one", |v| {
+            v.streams[&id].keyframes > before
+        })
+        .unwrap();
+}

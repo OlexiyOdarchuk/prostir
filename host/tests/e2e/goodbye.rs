@@ -69,7 +69,7 @@ fn another_development_build_gets_no_session() {
 #[test]
 fn commands_reach_the_headset_and_come_back() {
     use prostir_proto::request::{Asked, Command};
-    let (_dir, pc, _keys, mut headset) = crate::session("commands", &Options::default());
+    let (_dir, mut pc, _keys, mut headset) = crate::session("commands", &Options::default());
     assert_eq!(pc.command("recenter", SOON), "done");
     headset
         .wait(SOON, "the command", |v| {
@@ -93,6 +93,7 @@ fn commands_reach_the_headset_and_come_back() {
     });
     assert_eq!(answer, "the headset does not answer");
     headset.disconnect();
-    std::thread::sleep(std::time::Duration::from_secs(1));
+    // Once the PC saw the session end.
+    pc.wait_log(SOON, "headset disconnected");
     assert_eq!(pc.command("recenter", SOON), "no headset");
 }

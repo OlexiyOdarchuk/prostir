@@ -90,8 +90,9 @@ fn at_the_same_moment_the_headset_wins() {
     headset.stall(Duration::from_secs(1));
     pc.desktop("volume 90");
     pc.wait_log(SOON, "fake desktop: volume moved to 90");
-    // The PC looks at the device at least every 150 ms: its request is out by then.
-    std::thread::sleep(Duration::from_millis(400));
+    // The PC's request is on its way (the headset reads nothing yet) when the
+    // headset's own change goes.
+    pc.wait_log(SOON, "volume: asking the headset for 90");
     headset.press_volume(13).unwrap();
     wait_written(&pc, &mut headset, 13);
     headset.take_for(Duration::from_secs(1)).unwrap();
