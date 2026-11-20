@@ -40,6 +40,10 @@ pub const WINDOWS_MAX: usize = 3;
 /// are forgotten (a laptop that met many projectors would gather them for ever).
 pub const ABSENT_KEPT: usize = 8;
 
+/// While a display of the PC is connected, when it was seen is kept this often (in
+/// seconds), and when it goes and the app quits.
+const SEEN_EVERY: u64 = 3600;
+
 /// Now, in seconds since 1970, for when a display of the PC was last seen.
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
@@ -1171,7 +1175,12 @@ impl Displays {
                 continue;
             };
             let streaming = s.output.is_some();
-            if here == matches!(s.state, ScreenState::Absent) {
+            // Seen now: when it comes or goes, and every hour while connected (each
+            // change rewrites screens.txt).
+            let seen = self.physical_seen.get(&id).copied().unwrap_or(0);
+            if here == matches!(s.state, ScreenState::Absent)
+                || (here && now_secs().saturating_sub(seen) >= SEEN_EVERY)
+            {
                 self.physical_seen.insert(id, now_secs());
             }
             if !here {
@@ -1206,6 +1215,20 @@ impl Displays {
         }
         if changed {
             self.layout_changed();
+        }
+    }
+
+    /// The displays of the PC connected now were seen now (the app quits: what is
+    /// saved says when each was last seen).
+    pub fn note_connected(&mut self) {
+        let now = now_secs();
+        let connected: Vec<ScreenId> = self
+            .physical()
+            .filter(|s| !matches!(s.state, ScreenState::Absent))
+            .map(|s| s.id)
+            .collect();
+        for id in connected {
+            self.physical_seen.insert(id, now);
         }
     }
 

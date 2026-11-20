@@ -1100,6 +1100,10 @@ fn main() -> Result<()> {
         store.flush();
         if control.quit {
             info!("quitting");
+            if let Some(d) = displays.as_mut() {
+                d.note_connected();
+                keep_screens(&mut store, d, false);
+            }
             drop(displays);
             store.close();
             return Ok(());
