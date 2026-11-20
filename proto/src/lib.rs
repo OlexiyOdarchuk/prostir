@@ -29,8 +29,11 @@
 pub mod handshake;
 pub mod link;
 pub mod packet;
+pub mod request;
 pub mod secure;
+pub mod state;
 pub mod stats;
+pub mod volume;
 pub mod wire;
 
 use std::io::{self, Read, Write};
@@ -770,7 +773,7 @@ impl ClientMsg {
             let mut seen = Vec::with_capacity(len);
             for id in rows.iter().flat_map(LayoutRow::ids) {
                 if seen.contains(&id) {
-                    return Err(WireError::Repeated(id));
+                    return Err(WireError::Repeated(u32::from(id)));
                 }
                 seen.push(id);
             }

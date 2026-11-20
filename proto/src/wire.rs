@@ -34,7 +34,10 @@ pub enum WireError {
     /// A tag that no variant of `what` has.
     UnknownTag { what: &'static str, tag: u8 },
     /// An id listed twice where each may be listed once.
-    Repeated(u8),
+    Repeated(u32),
+    /// A value the format allows but the protocol does not (a size of nothing, a
+    /// level over 100 %, a reference to a display that is not listed).
+    Invalid(&'static str),
 }
 
 impl fmt::Display for WireError {
@@ -47,6 +50,7 @@ impl fmt::Display for WireError {
             Self::TooLong { len, max } => write!(f, "{len} items where at most {max} fit"),
             Self::UnknownTag { what, tag } => write!(f, "unknown {what} {tag}"),
             Self::Repeated(id) => write!(f, "{id} listed twice"),
+            Self::Invalid(what) => write!(f, "invalid value: {what}"),
         }
     }
 }
@@ -160,7 +164,7 @@ macro_rules! int {
     )*};
 }
 
-int!(u8, u16, u32, u64, i32);
+int!(u8, i8, u16, u32, u64, i32);
 
 impl Wire for bool {
     fn put(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
@@ -421,9 +425,9 @@ macro_rules! wire_enum {
 
         impl $name {
             /// The tag of every variant.
-            const TAGS: &'static [u8] = &[$($tag),*];
+            pub(crate) const TAGS: &'static [u8] = &[$($tag),*];
 
-            fn wire_tag(&self) -> u8 {
+            pub(crate) fn wire_tag(&self) -> u8 {
                 match self {
                     $( Self::$variant { .. } => $tag, )*
                 }
@@ -431,7 +435,7 @@ macro_rules! wire_enum {
 
             // An enum without fields in any variant writes nothing here.
             #[allow(unused_variables, clippy::ptr_arg)]
-            fn put_fields(&self, out: &mut Vec<u8>) -> Result<(), $crate::wire::WireError> {
+            pub(crate) fn put_fields(&self, out: &mut Vec<u8>) -> Result<(), $crate::wire::WireError> {
                 match self {
                     $(
                         Self::$variant $({ $($field),* })? => {
@@ -445,7 +449,7 @@ macro_rules! wire_enum {
             /// The variant with `tag`, its fields read from `r`; `None` for a tag no
             /// variant has.
             #[allow(unused_variables)]
-            fn get_fields(
+            pub(crate) fn get_fields(
                 tag: u8,
                 r: &mut $crate::wire::Reader<'_>,
             ) -> Result<Option<Self>, $crate::wire::WireError> {
