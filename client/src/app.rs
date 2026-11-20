@@ -22,8 +22,8 @@ use openxr as xr;
 use openxr::sys::Handle as _;
 use prostir_proto::request::{Asked, Command, Outcome, Primary, Request};
 use prostir_proto::state::{
-    self, Battery, DisplayId, DisplayKind, HeadsetCaps, HeadsetState, Mode, Prefs, Presence, ReqId,
-    caps,
+    self, Battery, DisplayId, DisplayKind, HeadsetCaps, HeadsetState, Mode, PcState, Prefs,
+    Presence, ReqId, caps,
 };
 use prostir_proto::{ClientMsg, Codec};
 
@@ -63,6 +63,14 @@ const POKE_PRESS: f32 = 0.008;
 const POKE_RELEASE: f32 = 0.025;
 /// A finger further behind the menu than this is not touching it (reaching past).
 const POKE_BEHIND: f32 = -0.06;
+
+/// A profile being switched to: its request, its places (none: laid out by its preset),
+/// and its monitors' numbers once the PC answered.
+struct ProfileSwitch {
+    req: ReqId,
+    places: Vec<Placement>,
+    ids: Option<Vec<ScreenId>>,
+}
 
 /// A monitor held with both hands: the distance between them sets its width.
 #[derive(Clone, Copy)]
@@ -368,10 +376,9 @@ struct Scene {
     pairing: Option<ui::PairingView>,
     /// A PC on the network that refuses the connection (a firewall).
     unreachable: Option<String>,
-    /// How the connected PC encodes, and what it can encode with.
-    pc: Option<state::Encoding>,
-    /// The connected PC's displays, as it last listed them in this session.
-    pc_displays: Option<state::Displays>,
+    /// The connected PC's state, as it last said it in this session: its displays,
+    /// encoding, sound, limits, what it can do.
+    pc: PcState,
     /// The number of the last request to the PC in this session.
     last_req: u32,
     /// Requests to the PC without an answer yet: which control asked, and when.
@@ -412,8 +419,6 @@ struct Scene {
     wrist: Option<Placement>,
     /// The monitor picked on the menu's map.
     selected: Option<ScreenId>,
-    /// The PC can move the mouse.
-    can_move_mouse: bool,
     /// The headset's battery (percent, charging), read once a minute.
     headset_battery: Option<(u8, bool)>,
     /// The monitor the sound comes from, as the PC says.
@@ -463,13 +468,8 @@ struct Scene {
     profiles_path: PathBuf,
     /// The profile last switched to, until something is changed by hand.
     active_profile: Option<usize>,
-    /// After switching to a profile without places (from before 0.2.0, or a starting
-    /// point), monitors come and go for a few seconds: lay them out by the preset
-    /// again on each change until then.
-    relayout_until: Option<Instant>,
-    /// A profile's places, by its monitors' order, until the PC says which numbers
-    /// they have now (its `Order`), and until when that may take.
-    pending_places: Option<(Vec<Placement>, Instant)>,
+    /// A profile being switched to, until its monitors stand where it says.
+    profile_switch: Option<ProfileSwitch>,
     /// The desk arrangement on disk; see `save_layout`.
     desk: layout::Desk,
     /// The stream size each desk placement was made for (see `fit_to_stream`). Not
@@ -481,10 +481,19 @@ struct Scene {
 impl Scene {
     /// What display `id` of the PC is, as its list says (`None`: not listed).
     fn kind(&self, id: ScreenId) -> Option<&DisplayKind> {
-        self.pc_displays
+        self.pc
+            .displays
             .as_ref()?
             .get(DisplayId(id))
             .map(|d| &d.kind)
+    }
+
+    /// The PC can move the mouse (for following the gaze).
+    fn can_move_mouse(&self) -> bool {
+        self.pc
+            .caps
+            .as_ref()
+            .is_some_and(|c| c.has(caps::pc::MOVE_MOUSE))
     }
 
     /// A virtual monitor (not a window panel, nor a display of the PC itself).
@@ -499,7 +508,8 @@ impl Scene {
 
     /// The display of the PC itself shown in the headset (the laptop screen), if one is.
     fn mirror_id(&self) -> Option<ScreenId> {
-        self.pc_displays
+        self.pc
+            .displays
             .as_ref()?
             .displays
             .iter()
@@ -510,7 +520,7 @@ impl Scene {
     /// The display of the PC itself the "laptop screen" switch shows or hides: the one
     /// shown, else the laptop's own panel, else the first one.
     fn physical_id(&self) -> Option<ScreenId> {
-        let displays = &self.pc_displays.as_ref()?.displays;
+        let displays = &self.pc.displays.as_ref()?.displays;
         let physical = || displays.iter().filter(|d| d.is_physical());
         self.mirror_id()
             .or_else(|| {
@@ -687,7 +697,7 @@ impl Scene {
     /// first start), else each next to the others (see `layout::place_new`), which
     /// stay where they are. The laptop screen goes under the primary monitor.
     fn place_missing(&mut self) {
-        if self.settings.cinema || self.places_pending() {
+        if self.settings.cinema || self.profile_switch.is_some() {
             return;
         }
         let sizes = self.quest_sizes();
@@ -729,13 +739,6 @@ impl Scene {
         }
     }
 
-    /// A profile's places wait for the PC's new numbers.
-    fn places_pending(&self) -> bool {
-        self.pending_places
-            .as_ref()
-            .is_some_and(|(_, until)| Instant::now() < *until)
-    }
-
     /// Turns cinema mode on or off. The one place that switches it: the desk layout is
     /// saved before the cinema view replaces it (follow mode may have moved it), and
     /// comes back from disk after, window panels staying where they are.
@@ -768,8 +771,52 @@ impl Scene {
         }
     }
 
+    /// A profile is being switched to: the monitors are not laid out one by one, nor
+    /// the desktop's arrangement sent, until it stands.
     fn relayout_pending(&self) -> bool {
-        self.relayout_until.is_some_and(|t| Instant::now() < t)
+        self.profile_switch.is_some()
+    }
+
+    /// The PC made a profile's monitors (`ids`, in the order of its sizes): they take
+    /// the profile's places, or, for a profile without places (from before 0.2.0, a
+    /// starting point, cinema), the layout of its preset once all of them stream.
+    fn profile_made(&mut self, ids: Vec<ScreenId>) {
+        let Some(switch) = &mut self.profile_switch else {
+            return;
+        };
+        if switch.places.len() == ids.len() && !self.settings.cinema {
+            for (id, p) in ids.iter().zip(switch.places.clone()) {
+                self.placements.insert(*id, p);
+                self.placed_for.remove(id);
+            }
+            self.profile_switch = None;
+            self.save_layout();
+            self.place_missing();
+            return;
+        }
+        switch.ids = Some(ids);
+        self.profile_streams();
+    }
+
+    /// A profile laid out by its preset, once every monitor it made streams (or could
+    /// not start: it keeps its place in the list).
+    fn profile_streams(&mut self) {
+        let settled = |id: &ScreenId| {
+            self.monitors.contains_key(id)
+                || self.pc.displays.as_ref().is_some_and(|d| {
+                    d.get(DisplayId(*id))
+                        .is_none_or(|d| matches!(d.state, state::DisplayState::Failed { .. }))
+                })
+        };
+        let ready = self
+            .profile_switch
+            .as_ref()
+            .and_then(|s| s.ids.as_ref())
+            .is_some_and(|ids| ids.iter().all(settled));
+        if ready {
+            self.profile_switch = None;
+            self.arrange_all();
+        }
     }
 
     /// Saves the arrangement as the desk layout. In cinema mode `placements` is the
@@ -994,7 +1041,7 @@ impl Scene {
     fn follow_gaze(&mut self) {
         let busy =
             self.wrist.is_some() || self.grabs.iter().any(Option::is_some) || self.settings.cinema;
-        if !self.settings.gaze_mouse || !self.can_move_mouse || self.feedback.is_none() || busy {
+        if !self.settings.gaze_mouse || !self.can_move_mouse() || self.feedback.is_none() || busy {
             self.gaze_on = None;
             return;
         }
@@ -1610,6 +1657,9 @@ impl Scene {
             .map(|(req, _)| *req)
             .collect();
         for req in late {
+            if self.profile_switch.as_ref().is_some_and(|s| s.req == req) {
+                self.profile_switch = None;
+            }
             if let Some((what, _)) = self.asks.remove(&req) {
                 self.ask_failed(what, ui::Failure::TimedOut, String::new());
             }
@@ -1685,8 +1735,9 @@ impl Scene {
             pairing: self.pairing.clone(),
             pair_offer: self.pair_offer.clone(),
             unreachable: self.unreachable.clone(),
-            pc: self.pc.clone(),
-            can_move_mouse: self.can_move_mouse,
+            pc: self.pc.encoding.clone(),
+            limits: self.pc.limits.clone(),
+            can_move_mouse: self.can_move_mouse(),
             monitors: self
                 .quest_sizes()
                 .into_iter()
@@ -2030,8 +2081,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         pairing: None,
         pair_offer: None,
         unreachable: None,
-        pc: None,
-        pc_displays: None,
+        pc: PcState::default(),
         last_req: 0,
         asks: std::collections::BTreeMap::new(),
         failed_asks: Vec::new(),
@@ -2053,7 +2103,6 @@ fn run(app: &AndroidApp) -> Result<()> {
         attach_for: None,
         wrist: None,
         selected: None,
-        can_move_mouse: false,
         headset_battery: crate::mic::battery(),
         sound_from: None,
         refresh_due: false,
@@ -2078,8 +2127,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         profiles: profiles::load(&profiles_path),
         profiles_path,
         active_profile: None,
-        relayout_until: None,
-        pending_places: None,
+        profile_switch: None,
         desk,
         placed_for: HashMap::new(),
         settings_path,
@@ -3311,16 +3359,12 @@ fn handle_net_event(
         }
         NetEvent::Hosts(hosts) => scene.found = hosts,
         NetEvent::Unreachable(name) => scene.unreachable = name,
-        NetEvent::Encoding(encoding) => scene.pc = Some(encoding),
-        NetEvent::Sound(sound) => scene.audio_wanted = sound.to_headset,
-        NetEvent::HostCaps(pc) => {
-            info!("the PC can: {:?}", pc.features);
-            scene.can_move_mouse = pc.has(caps::pc::MOVE_MOUSE);
-        }
+        NetEvent::Part(part) => part_came(scene, part),
         // Taken in the frame loop, where the menu's actions are done (see `take_command`).
         NetEvent::Command { .. } => {}
         NetEvent::Notice(text) => scene.show_toast(text),
         NetEvent::Reply { req, outcome } => match (scene.answered(req, &outcome), outcome) {
+            (Some(ui::Asked::Profile(_)), Outcome::Failed { .. }) => scene.profile_switch = None,
             (None, _) | (_, Outcome::Failed { .. }) => {}
             (_, Outcome::Saved { path }) => {
                 let saved = scene.lang().t("Знімок збережено:", "Screenshot saved:");
@@ -3330,13 +3374,17 @@ fn handle_net_event(
                 let f = |v: u16| f32::from(v) / 65535.0;
                 scene.finder = Some((id.0, Vec2::new(f(u), f(v)), Instant::now()));
             }
+            (Some(ui::Asked::Profile(_)), Outcome::Ids { ids }) => {
+                if scene.profile_switch.as_ref().is_some_and(|s| s.req == req) {
+                    scene.profile_made(ids.into_iter().map(|id| id.0).collect());
+                }
+            }
             (_, Outcome::Done | Outcome::Added { .. } | Outcome::Ids { .. }) => {}
         },
         NetEvent::Problem { error, detail } => {
             warn!("a problem on the PC (code {})", error.code());
             scene.show_error(detail);
         }
-        NetEvent::SoundFrom(id) => scene.sound_from = id.map(|id| id.0),
         NetEvent::Pairing { host, code } => {
             let failed = scene.pairing.as_ref().is_some_and(|p| p.failed);
             scene.pairing = Some(ui::PairingView {
@@ -3371,17 +3419,15 @@ fn handle_net_event(
             scene.offline_since = Some(Instant::now());
             scene.pairing = None;
             scene.host = None;
-            scene.pc = None;
             scene.feedback = None;
             // The next session's list is news, not displays removed.
             scene.order.clear();
-            scene.pc_displays = None;
+            scene.pc = PcState::default();
+            scene.profile_switch = None;
             if let Some(text) = disconnect_text(scene.lang(), why) {
                 scene.show_toast(text.into());
             }
         }
-        NetEvent::Focus(id) => scene.focus = id.map(|id| id.0),
-        NetEvent::Displays(displays) => displays_changed(scene, displays),
         NetEvent::HostError(text) => scene.show_error(text),
         NetEvent::StreamStart {
             id,
@@ -3448,7 +3494,7 @@ fn stream_shown(scene: &mut Scene, id: ScreenId) {
                 scene.place_window_panel(id);
             }
         }
-        _ if scene.relayout_pending() => scene.arrange_all(),
+        _ if scene.relayout_pending() => scene.profile_streams(),
         // A monitor the arrangement has no place for: next to the others, which
         // stay. One it knows stays where it is.
         _ if !scene.placements.contains_key(&id) => scene.place_missing(),
@@ -3460,10 +3506,12 @@ fn stream_shown(scene: &mut Scene, id: ScreenId) {
 /// The PC listed its displays anew: the one source of which there are. Within a
 /// session, a display that left the list is gone, and its place goes with it (a
 /// display of the PC itself keeps its place: it comes back where it was).
-fn displays_changed(scene: &mut Scene, displays: state::Displays) {
+fn displays_changed(scene: &mut Scene, before: Option<state::Displays>) {
+    let Some(displays) = scene.pc.displays.clone() else {
+        return;
+    };
     let ids: Vec<ScreenId> = displays.ids().map(|id| id.0).collect();
-    let gone: Vec<ScreenId> = scene
-        .pc_displays
+    let gone: Vec<ScreenId> = before
         .iter()
         .flat_map(|d| &d.displays)
         .filter(|d| !ids.contains(&d.id.0) && !d.is_physical())
@@ -3477,7 +3525,6 @@ fn displays_changed(scene: &mut Scene, displays: state::Displays) {
         .collect();
     let primary = displays.primary.map(|p| p.0);
     scene.mirror_wanted = displays.displays.iter().any(|d| d.is_shown_physical());
-    scene.pc_displays = Some(displays);
     for id in &gone {
         scene.placements.remove(id);
         scene.monitors.remove(id);
@@ -3490,28 +3537,13 @@ fn displays_changed(scene: &mut Scene, displays: state::Displays) {
     if primary != scene.primary {
         info!("primary display: {primary:?}");
         scene.primary = primary;
-        if scene.relayout_pending() {
-            scene.arrange_all();
-        }
     }
     scene.order = order;
-    // A profile's places on the numbers its monitors have now (the last list of the
-    // right length while the PC makes them counts).
-    if scene.places_pending()
-        && let Some((places, _)) = &scene.pending_places
-        && places.len() == scene.order.len()
-        && !scene.settings.cinema
-    {
-        for (id, p) in scene.order.clone().into_iter().zip(places.clone()) {
-            scene.placements.insert(id, p);
-            scene.placed_for.remove(&id);
-        }
-        scene.save_layout();
-    } else if scene.relayout_pending() {
-        scene.arrange_all();
-    } else if !gone.is_empty() {
+    if !gone.is_empty() {
         scene.save_layout();
     }
+    // A monitor of a profile being switched to that could not start.
+    scene.profile_streams();
     // Streams that came before the list said what they are.
     let waiting: Vec<ScreenId> = scene
         .monitors
@@ -3524,6 +3556,39 @@ fn displays_changed(scene: &mut Scene, displays: state::Displays) {
     }
     scene.place_missing();
     scene.build_cinema_view_if_due();
+}
+
+/// A part of the PC's state came: kept, and what follows from it done.
+fn part_came(scene: &mut Scene, part: prostir_proto::HostMsg) {
+    use prostir_proto::HostMsg as M;
+    let before = scene.pc.displays.clone();
+    let follow = match &part {
+        M::Displays { .. } => Some(true),
+        M::Sound { part } => {
+            scene.audio_wanted = part.to_headset;
+            None
+        }
+        M::Focus { part } => {
+            scene.focus = part.display.map(|id| id.0);
+            None
+        }
+        M::SoundFrom { part } => {
+            scene.sound_from = part.display.map(|id| id.0);
+            None
+        }
+        M::HostCaps { part } => {
+            info!("the PC can: {:?}", part.features);
+            None
+        }
+        _ => None,
+    };
+    // Checked by the network thread already: a part of the PC's state.
+    if let Err(e) = scene.pc.apply(part) {
+        warn!("a part of the PC's state: {e}");
+    }
+    if follow.is_some() {
+        displays_changed(scene, before);
+    }
 }
 
 /// The headset's settings the PC acts on, from `s`.
@@ -3980,7 +4045,6 @@ fn handle_action(
                 profiles::save(&scene.profiles_path, &scene.profiles);
             }
             let p = scene.profiles[i].clone();
-            scene.pending_places = None;
             let shown_physical = scene
                 .physical_id()
                 .filter(|_| p.mirror)
@@ -3988,7 +4052,7 @@ fn handle_action(
                 .into_iter()
                 .collect();
             scene.mirror_wanted = p.mirror;
-            scene.request(
+            let req = scene.request(
                 Request::SetDisplays {
                     modes: p.sizes.iter().map(|&(w, h)| Mode::new(w, h)).collect(),
                     primary: Some(Primary::Index { index: p.primary }),
@@ -3996,6 +4060,16 @@ fn handle_action(
                 },
                 ui::Asked::Profile(i),
             );
+            // Placed once the PC answers with its monitors' numbers.
+            scene.profile_switch = req.map(|req| ProfileSwitch {
+                req,
+                places: if p.settings.cinema {
+                    Vec::new()
+                } else {
+                    p.places.clone()
+                },
+                ids: None,
+            });
             let s = &mut scene.settings;
             s.preset = p.settings.preset;
             s.curve = p.settings.curve;
@@ -4005,16 +4079,6 @@ fn handle_action(
             scene.settings.save(settings_path);
             set_passthrough(scene, passthrough);
             scene.active_profile = Some(i);
-            let until = Instant::now() + Duration::from_secs(8);
-            if p.places.is_empty() || p.settings.cinema {
-                // From before places were kept: laid out by its preset.
-                scene.relayout_until = Some(until);
-                scene.arrange_all();
-            } else {
-                // Its own places, once the PC says which numbers the monitors have.
-                scene.relayout_until = None;
-                scene.pending_places = Some((p.places.clone(), until));
-            }
             // The monitors changing is the answer: the menu gets out of the way.
             scene.panel_open = false;
         }
@@ -4057,7 +4121,7 @@ fn handle_action(
         }
         Action::SetEncoding(change) => {
             // Shown at once; the PC confirms (or corrects) with its `Encoding`.
-            if let Some(pc) = &mut scene.pc {
+            if let Some(pc) = &mut scene.pc.encoding {
                 let w = &mut pc.wanted;
                 w.bitrate = change.bitrate.unwrap_or(w.bitrate);
                 w.codec = change.codec.or(w.codec);

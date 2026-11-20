@@ -15,9 +15,7 @@ use prostir_proto::link::{Closer, Link, PeerInfo, RecordReceiver, RecordSender};
 use prostir_proto::packet::Assembler;
 use prostir_proto::request::{Asked, Command, Outcome};
 use prostir_proto::secure::{self, Identity, Pairing, TrustStore, confirmation, tags_match};
-use prostir_proto::state::{
-    self, DisplayId, ErrorCode, Gen, HeadsetState, HostCaps, PcState, ReqId,
-};
+use prostir_proto::state::{self, DisplayId, ErrorCode, Gen, HeadsetState, PcState, ReqId};
 use prostir_proto::stats::{Gaps, Period};
 use prostir_proto::{ClientMsg, Codec, HeadsetGoodbye, HostMsg, PcGoodbye};
 
@@ -153,18 +151,9 @@ pub enum NetEvent {
     },
     /// PCs currently seen on the network (sent when the list changes).
     Hosts(Vec<FoundHost>),
-    /// The PC's displays: the one source of which there are.
-    Displays(state::Displays),
-    /// How the PC encodes.
-    Encoding(state::Encoding),
-    /// Where the PC's sound goes.
-    Sound(state::Sound),
-    /// What the PC can do.
-    HostCaps(HostCaps),
-    /// The display the mouse is on, if it is one of them.
-    Focus(Option<DisplayId>),
-    /// The display the sound comes from (`None`: not known).
-    SoundFrom(Option<DisplayId>),
+    /// A part of the PC's state (see `prostir_proto::state::PcState`), checked: the
+    /// snapshot's parts one by one, then each change.
+    Part(HostMsg),
     /// The answer to request `req`.
     Reply {
         req: ReqId,
@@ -1274,15 +1263,5 @@ fn run_session(
 
 /// Tells the app about a part of the PC's state.
 fn tell_part(events: &Sender<NetEvent>, msg: &HostMsg) {
-    let event = match msg.clone() {
-        HostMsg::Displays { part } => NetEvent::Displays(part),
-        HostMsg::Encoding { part } => NetEvent::Encoding(part),
-        HostMsg::Sound { part } => NetEvent::Sound(part),
-        HostMsg::HostCaps { part } => NetEvent::HostCaps(part),
-        HostMsg::Focus { part } => NetEvent::Focus(part.display),
-        HostMsg::SoundFrom { part } => NetEvent::SoundFrom(part.display),
-        // Not used by the app yet.
-        _ => return,
-    };
-    let _ = events.send(event);
+    let _ = events.send(NetEvent::Part(msg.clone()));
 }

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use fontdue::{Font, FontSettings, Metrics};
 use prostir_proto::Codec;
-use prostir_proto::state::{Encoding, ErrorCode};
+use prostir_proto::state::{Encoding, ErrorCode, Limits};
 use tiny_skia::{FillRule, Paint, Path, PathBuilder, Pixmap, Rect, Stroke, Transform};
 
 use crate::i18n::{Lang, Language};
@@ -18,9 +18,14 @@ pub const HEIGHT: u32 = 960;
 /// The small menu by the left wrist, in pixels.
 pub const WRIST_WIDTH: u32 = 512;
 pub const WRIST_HEIGHT: u32 = 512;
-pub use prostir_proto::MAX_MONITORS;
-/// Window panels at once.
-const MAX_WINDOWS: usize = 3;
+/// The sizes shown before the PC says its own.
+const STANDARD_SIZES: [(u32, u32); 5] = [
+    (1920, 1080),
+    (2560, 1440),
+    (3840, 2160),
+    (3440, 1440),
+    (1440, 2560),
+];
 
 static REGULAR: &[u8] = include_bytes!("../assets/NotoSans-Regular.ttf");
 static MEDIUM: &[u8] = include_bytes!("../assets/NotoSans-Medium.ttf");
@@ -121,6 +126,8 @@ pub struct UiState {
     pub mic_denied: bool,
     /// How the PC encodes and what it can encode with (while connected).
     pub pc: Option<Encoding>,
+    /// The monitors the PC makes for this headset (while connected).
+    pub limits: Option<Limits>,
     /// Window panels shown (detached PC windows).
     pub windows: Vec<MonitorEntry>,
     /// The PC can move the mouse (for following the gaze).
@@ -1834,16 +1841,25 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
         l.t("Додати монітор", "Add a monitor"),
     ));
     y += 18.0;
-    let full = s.monitors.len() >= MAX_MONITORS || s.host.is_none();
-    let sizes = [
-        (1920, 1080, "1920×1080"),
-        (2560, 1440, "2560×1440"),
-        (3840, 2160, "3840×2160"),
-        (3440, 1440, "3440×1440"),
-        (1440, 2560, "1440×2560"),
-    ];
+    // The sizes the PC offers (it says them when the headset connects), six at most.
+    let max = s.limits.as_ref().map(|l| usize::from(l.virtual_max));
+    let full = s.host.is_none() || max.is_none_or(|max| s.monitors.len() >= max);
+    let sizes: Vec<(u32, u32)> = match &s.limits {
+        Some(l) if !l.sizes.is_empty() => {
+            let mut sizes: Vec<(u32, u32)> = Vec::new();
+            for m in &l.sizes {
+                if !sizes.contains(&(m.w, m.h)) {
+                    sizes.push((m.w, m.h));
+                }
+            }
+            sizes.truncate(6);
+            sizes
+        }
+        _ => STANDARD_SIZES.to_vec(),
+    };
     let bw = (rw - 2.0 * 10.0) / 3.0;
-    for (i, (width, height, label)) in sizes.iter().enumerate() {
+    for (i, (width, height)) in sizes.iter().enumerate() {
+        let label = format!("{width}×{height}");
         let r = rect(
             rx + (i % 3) as f32 * (bw + 10.0),
             y + (i / 3) as f32 * 58.0,
@@ -1861,9 +1877,9 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
                 }),
             )
         };
-        items.push(button(r, label, style, action));
+        items.push(button(r, &label, style, action));
     }
-    y += 2.0 * 58.0 + 40.0;
+    y += sizes.len().div_ceil(3) as f32 * 58.0 + 40.0;
     // How the last "add" stands: waiting, or why it failed and the PC's detail.
     if let Some((note, failed)) = s.ask_note(Asked::AddMonitor) {
         let color = if failed { DANGER } else { MUTED };
@@ -1873,7 +1889,7 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
             y += 20.0;
         }
         y += 10.0;
-    } else if s.monitors.len() >= MAX_MONITORS {
+    } else if let Some(max) = max.filter(|max| s.monitors.len() >= *max) {
         items.push(text(
             rx,
             y - 22.0,
@@ -1881,7 +1897,7 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
             false,
             MUTED,
             &format!(
-                "{} {MAX_MONITORS} {}",
+                "{} {max} {}",
                 l.t("Максимум", "At most"),
                 l.t("моніторів", "monitors")
             ),
@@ -2601,7 +2617,10 @@ fn build_quick(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
     };
     let tw = (w - 2.0 * 12.0) / 3.0;
     let th = 140.0;
-    let full = s.windows.len() >= MAX_WINDOWS;
+    let full = s
+        .limits
+        .as_ref()
+        .is_none_or(|l| s.windows.len() >= usize::from(l.windows_max));
     let tiles: [(&str, String, bool, Option<Action>); 9] = [
         (
             l.t("Перед собою", "In front of me"),
@@ -3521,12 +3540,35 @@ fn fill(pixmap: &mut Pixmap, path: Option<Path>, [r, g, b, a]: [u8; 4]) {
 mod tests {
     use super::*;
 
+    /// What a PC with an H.265 decoder on the headset offers.
+    pub fn sample_limits() -> Limits {
+        let mode = prostir_proto::state::Mode::new;
+        Limits {
+            virtual_max: 6,
+            windows_max: 3,
+            physical_max: 1,
+            streams_max: 16,
+            min: (640, 480),
+            max: (5120, 2880),
+            sizes: vec![
+                mode(1920, 1080),
+                mode(2560, 1440),
+                mode(3840, 2160),
+                mode(3440, 1440),
+                mode(5120, 1440),
+                mode(1440, 2560),
+            ],
+            scales: vec![100, 125, 150],
+        }
+    }
+
     pub fn sample_state() -> UiState {
         UiState {
             pairing: None,
             unreachable: Some("workstation-with-a-long-name".into()),
             pair_offer: None,
             mic_denied: true,
+            limits: Some(sample_limits()),
             pc: Some(Encoding {
                 wanted: prostir_proto::state::Wanted {
                     bitrate: 30,
@@ -3620,6 +3662,34 @@ mod tests {
         assert!(p.render_if_dirty().is_some());
         p.hover(None);
         assert_eq!(p.hovered_action(), None);
+    }
+
+    /// The sizes to add are the PC's, and none can be added beyond its limit.
+    #[test]
+    fn sizes_come_from_the_pc() {
+        let adds = |s: &UiState| -> Vec<(String, bool)> {
+            Panel::new()
+                .build(s)
+                .into_iter()
+                .filter_map(|i| match i {
+                    Item::Button {
+                        label,
+                        action: a @ (Some(Action::Add { .. }) | None),
+                        ..
+                    } if label.contains('×') && !label.contains(' ') => Some((label, a.is_some())),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut s = sample_state();
+        s.tab = Tab::Monitors;
+        let offered = adds(&s);
+        assert!(offered.contains(&("5120×1440".into(), true)), "{offered:?}");
+        assert_eq!(offered.len(), 6);
+        s.limits.as_mut().unwrap().virtual_max = s.monitors.len() as u8;
+        assert!(adds(&s).iter().all(|(_, on)| !on), "at the PC's limit");
+        s.limits = None;
+        assert!(adds(&s).iter().all(|(_, on)| !on), "before the PC said");
     }
 
     /// Every page and state, in both languages, without text that does not fit.

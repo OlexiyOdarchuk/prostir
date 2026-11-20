@@ -51,6 +51,26 @@ fn main() {
         } else {
             Vec::new()
         },
+        limits: Some(prostir_proto::state::Limits {
+            virtual_max: 6,
+            windows_max: 3,
+            physical_max: 1,
+            streams_max: 16,
+            min: (640, 480),
+            max: (5120, 2880),
+            sizes: [
+                (1920, 1080),
+                (2560, 1440),
+                (3840, 2160),
+                (3440, 1440),
+                (5120, 1440),
+                (1440, 2560),
+            ]
+            .into_iter()
+            .map(|(w, h)| prostir_proto::state::Mode::new(w, h))
+            .collect(),
+            scales: vec![100, 125, 150],
+        }),
         pc: Some(prostir_proto::state::Encoding {
             wanted: prostir_proto::state::Wanted {
                 bitrate: 30,
