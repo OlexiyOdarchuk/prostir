@@ -225,8 +225,37 @@ fn percent(tk: &Tk, n: impl Into<Arg>) -> String {
     tk.f("percent", &[("n", n.into())])
 }
 
+/// `1920 × 1080`; nothing for a size not known (a display of the PC not seen yet).
 fn size(tk: &Tk, m: &crate::api::Mode) -> String {
+    if m.w == 0 || m.h == 0 {
+        return String::new();
+    }
     tk.f("mon-size", &[("w", m.w.into()), ("h", m.h.into())])
+}
+
+/// `1920 × 1080, 125 %`; nothing for a size not known.
+fn size_scaled(tk: &Tk, m: &crate::api::Mode) -> String {
+    if m.w == 0 || m.h == 0 {
+        return String::new();
+    }
+    tk.f(
+        "mon-size-scaled",
+        &[
+            ("w", m.w.into()),
+            ("h", m.h.into()),
+            ("scale", m.scale.into()),
+        ],
+    )
+}
+
+/// `text` as a sentence: a full stop after it unless it ends in one already.
+fn sentence(text: &str) -> String {
+    let text = text.trim();
+    if text.is_empty() || text.ends_with(['.', '!', '?', '…']) {
+        text.to_owned()
+    } else {
+        format!("{text}.")
+    }
 }
 
 /// How a display is named to a person.
@@ -296,7 +325,12 @@ fn overview(ui: &mut Ui, v: &mut View, s: &State) {
                     if let Some(d) = failed {
                         hero(ui, tk, Some(p.danger), &tk.t("ov-failed-title"));
                         ui.add_space(6.0);
-                        let reason = d.failure.as_ref().map_or("", |f| f.text.trim());
+                        // A sentence of its own before "The other monitors work."
+                        let reason = d
+                            .failure
+                            .as_ref()
+                            .map_or(String::new(), |f| sentence(&f.text));
+                        let reason = reason.as_str();
                         let id = if reason.is_empty() {
                             "ov-failed-no-reason"
                         } else {
@@ -436,7 +470,8 @@ fn overview(ui: &mut Ui, v: &mut View, s: &State) {
                 _ => (p.ok, "state-streaming"),
             };
             let desc = size(tk, &d.mode);
-            w::row(ui, tk, &display_name(tk, d), Some(&desc), |ui| {
+            let desc = (!desc.is_empty()).then_some(desc);
+            w::row(ui, tk, &display_name(tk, d), desc.as_deref(), |ui| {
                 text(ui, tk.t(state), tk.body(), p.text);
                 let (r, _) = ui.allocate_exact_size(vec2(12.0, 20.0), Sense::hover());
                 w::dot(ui, tk, r.center(), c);
@@ -491,9 +526,10 @@ fn tiles(tk: &Tk, s: &State, pending: Option<(u32, i32, i32, Option<u32>)>) -> V
     s.displays
         .iter()
         .filter_map(|d| {
+            // Every display on the desktop: one kept for the next headset is not, nor
+            // one of the PC that is not connected (neither has a place there).
             let r = d.desk?;
-            let elsewhere = matches!(d.state, DisplayState::Failed | DisplayState::Kept);
-            if elsewhere || r.w == 0 || r.h == 0 {
+            if d.state == DisplayState::Kept || r.w == 0 || r.h == 0 {
                 return None;
             }
             let mut rect = snap::Rect {
@@ -513,7 +549,9 @@ fn tiles(tk: &Tk, s: &State, pending: Option<(u32, i32, i32, Option<u32>)>) -> V
                 size: size(tk, &d.mode),
                 rect,
                 pc: d.kind == DisplayKind::Physical,
-                shown: d.kind != DisplayKind::Physical || d.shown,
+                // Dimmed: hidden from the headset, or not streaming to it.
+                shown: (d.kind != DisplayKind::Physical || d.shown)
+                    && d.state != DisplayState::Failed,
                 main: s.primary == Some(d.id),
             })
         })
@@ -629,15 +667,10 @@ fn selected_monitor(ui: &mut Ui, v: &mut View, s: &State) {
         name = format!("{name} ({})", d.output);
     }
     text(ui, name, tk.heading(), p.text);
-    let line = tk.f(
-        "mon-size-scaled",
-        &[
-            ("w", d.mode.w.into()),
-            ("h", d.mode.h.into()),
-            ("scale", d.mode.scale.into()),
-        ],
-    );
-    text(ui, line, tk.small(), p.text_muted);
+    let line = size_scaled(tk, &d.mode);
+    if !line.is_empty() {
+        text(ui, line, tk.small(), p.text_muted);
+    }
     if let (DisplayState::Failed, Some(f)) = (d.state, &d.failure) {
         ui.add_space(tk.th.shape.spacing);
         w::status(
@@ -847,14 +880,7 @@ fn kept_monitors(ui: &mut Ui, v: &mut View, s: &State) {
         text(ui, tk.t("mon-kept-desc"), tk.small(), p.text_muted);
         for d in kept {
             w::divider(ui, tk);
-            let desc = tk.f(
-                "mon-size-scaled",
-                &[
-                    ("w", d.mode.w.into()),
-                    ("h", d.mode.h.into()),
-                    ("scale", d.mode.scale.into()),
-                ],
-            );
+            let desc = size_scaled(tk, &d.mode);
             w::row(ui, tk, &display_name(tk, d), Some(&desc), |ui| {
                 let named = tk.f("mon-remove-named", &[("name", (&d.name).into())]);
                 if w::button_named(ui, tk, &tk.t("mon-remove"), &named, Kind::Danger, true)

@@ -478,3 +478,105 @@ fn a_move_holds_until_the_state_with_it_is_in() {
     // The answer came with the state that has the move: nothing is held any more.
     assert_eq!(h.state().ui.pending_place, None);
 }
+
+/// Three monitors streaming and a monitor of the PC hidden from the headset, with the
+/// laptop's panel not connected: the map has all four on the desktop, the hidden one
+/// with its size, and no display says a size of 0 × 0.
+#[test]
+fn the_map_has_every_display_on_the_desktop() {
+    use prostir_settings::api::{DeskRect, Display, DisplayKind, DisplayState, Mode};
+    let monitor = |id: u32, name: &str, x: i32| Display {
+        id,
+        kind: DisplayKind::Virtual,
+        name: name.into(),
+        output: format!("Virtual-{name}"),
+        shown: true,
+        mode: Mode {
+            w: 2560,
+            h: 1440,
+            scale: 100,
+        },
+        desk: Some(DeskRect {
+            x,
+            y: 560,
+            w: 2560,
+            h: 1440,
+        }),
+        state: DisplayState::Running,
+        ..Display::default()
+    };
+    let mock = Mock::connected().edit(|s| {
+        s.displays = vec![
+            monitor(1, "Prostir-4", 0),
+            monitor(2, "Prostir-2", 2560),
+            monitor(3, "Prostir-1", 5120),
+            Display {
+                id: 117,
+                kind: DisplayKind::Physical,
+                name: "HDMI-A-1".into(),
+                output: "HDMI-A-1".into(),
+                shown: false,
+                mode: Mode {
+                    w: 1920,
+                    h: 1080,
+                    scale: 100,
+                },
+                desk: Some(DeskRect {
+                    x: 2560,
+                    y: 2000,
+                    w: 1920,
+                    h: 1080,
+                }),
+                state: DisplayState::Running,
+                ..Display::default()
+            },
+            Display {
+                id: 100,
+                kind: DisplayKind::Physical,
+                name: "eDP-1".into(),
+                output: "eDP-1".into(),
+                builtin: true,
+                shown: true,
+                mode: Mode {
+                    w: 0,
+                    h: 0,
+                    scale: 100,
+                },
+                state: DisplayState::Absent,
+                ..Display::default()
+            },
+        ];
+        s.primary = Some(2);
+    });
+    let (mut h, _handle) = window(mock, Setup::default());
+    open(&mut h, Page::Monitors);
+    for name in ["Prostir-4", "Prostir-2", "Prostir-1", "HDMI-A-1"] {
+        h.get_by_role_and_label(Role::Button, name);
+    }
+    assert!(h.query_by_label_contains("0 × 0").is_none());
+    h.get_by_role_and_label(Role::Button, "HDMI-A-1").focus();
+    h.run_steps(2);
+    h.get_by_label_contains("1920 × 1080");
+    open(&mut h, Page::Overview);
+    assert!(h.query_by_label_contains("0 × 0").is_none());
+    assert!(h.query_by_label("Монітор не додано").is_none());
+}
+
+/// A monitor that could not be made: the overview names it once, its reason a
+/// sentence of its own before the rest.
+#[test]
+fn a_failed_monitor_is_named_once() {
+    let mock = Mock::failed_monitor().edit(|s| {
+        let d = s
+            .displays
+            .iter_mut()
+            .find(|d| d.name == "Prostir-4")
+            .unwrap();
+        d.failure.as_mut().unwrap().text = "2560x1440 більше, ніж шолом декодує в H265".into();
+    });
+    let (mut h, _handle) = window(mock, Setup::default());
+    open(&mut h, Page::Overview);
+    h.get_by_label(
+        "Prostir-4: 2560x1440 більше, ніж шолом декодує в H265. Решта моніторів працює.",
+    );
+}
