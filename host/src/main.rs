@@ -173,7 +173,8 @@ struct Brain {
     /// For the sessions' readers.
     events: EventSink,
     displays: Option<Displays>,
-    /// The sessions, by the headset's key: one each (see `brain::admit`).
+    /// The sessions, by the headset's key: one each, and one in all for now (see
+    /// `brain::MAX_HEADSETS` for what still assumes a single headset).
     sessions: BTreeMap<[u8; 32], Session>,
     /// Sessions that said goodbye, until their headset closes or their moment ends.
     closing: Vec<Closing>,

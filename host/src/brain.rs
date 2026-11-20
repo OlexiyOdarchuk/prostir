@@ -124,7 +124,24 @@ impl Phase {
     }
 }
 
-/// How many headsets may have a session at once (step 11 of 0.2.0 lifts it).
+/// How many headsets may have a session at once.
+///
+/// Accepting, admitting and keeping sessions (by the headset's key, each with its own
+/// number, reader and writer) already work for more than one. Raising this is not
+/// enough, though: these still assume a single headset, and are the next sub-step
+/// (step 11 of 0.2.0 needs them):
+/// - `displays::Router` has one outbox: `attach` replaces the headset it sends to,
+///   `detach` stops sending to anyone, and `publish` takes one headset's list;
+/// - `Session::start` fits the codec of every stream to this headset
+///   (`Displays::fit_codec`), stops what is too big for it (`stop_too_big`), and
+///   starts every stream over (`headset_connected`, which also clears "taken off");
+/// - `Session::finish` pauses every encoder (`set_streaming(false)`) and detaches the
+///   router for all, whichever headset left;
+/// - worn or not, and so "taken off" (`Displays::set_worn`, `taken_off_for`), the PC's
+///   end of the microphone (`set_mic`) and its pause are one for the desktop;
+/// - the tray's `Control.via`, `no_limits`, `mic_denied` and battery show one headset,
+///   and a session's end clears them for all;
+/// - commands from the tray and the test hook go to one session (the main one).
 pub const MAX_HEADSETS: usize = 1;
 
 /// What becomes of a headset that asked to open a session.
