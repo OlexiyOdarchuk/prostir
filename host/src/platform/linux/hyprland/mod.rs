@@ -159,11 +159,17 @@ fn geometries() -> Outputs {
                 h,
                 priority: None,
                 enabled: !m.disabled,
-                is_virtual: named_virtual(&m.name),
+                is_virtual: is_virtual(&m.name),
             };
             (OutputKey::new(m.name), g)
         })
         .collect()
+}
+
+/// Whether Hyprland's output `name` is virtual: ours, or another tool's headless one
+/// (`HEADLESS-N`, from Sunshine or wayvnc), which the layout leaves where it is.
+fn is_virtual(name: &str) -> bool {
+    named_virtual(name) || name.starts_with("HEADLESS-")
 }
 
 /// The display to show by default: an external monitor if one is on (the one in front
@@ -180,8 +186,7 @@ fn pick_physical(monitors: &[Monitor], lid_open: bool) -> Option<String> {
 fn real(monitors: &[Monitor], lid_open: bool) -> impl Iterator<Item = &Monitor> {
     monitors
         .iter()
-        // HEADLESS-N: virtual outputs of other tools (Sunshine, wayvnc), not displays.
-        .filter(|m| !m.disabled && !m.name.starts_with(PREFIX) && !m.name.starts_with("HEADLESS-"))
+        .filter(|m| !m.disabled && !is_virtual(&m.name))
         .filter(move |m| lid_open || !is_panel(&m.name))
 }
 
@@ -784,6 +789,14 @@ mod tests {
         "refreshRate":120.00000,"x":0,"y":0,"scale":2.0,"focused":false,"disabled":false},
         {"id":1,"name":"Prostir-1","width":2560,"height":1440,"refreshRate":60.0,
         "x":1440,"y":0,"scale":1.0,"focused":true,"disabled":false}]"#;
+
+    #[test]
+    fn other_tools_headless_outputs_are_virtual() {
+        assert!(is_virtual("HEADLESS-2"));
+        assert!(is_virtual(&output_name(1)));
+        assert!(!is_virtual("eDP-1"));
+        assert!(!is_virtual("HDMI-A-1"));
+    }
 
     #[test]
     fn reads_monitors() {
