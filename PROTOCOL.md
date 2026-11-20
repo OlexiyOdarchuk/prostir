@@ -946,7 +946,10 @@ from the free lanes `2` to `31`, so they never overtake a frame of the old
 configuration on its way. Video frames still waiting on the host are discarded when
 `StreamStart` or `StreamEnd` is queued, so no frame of the old configuration follows.
 
-The first `Frame` of a generation is a keyframe, and `seq` counts its frames from 0.
+The first `Frame` of a generation is a keyframe, and `seq` counts its frames from 0. A
+keyframe that a newer one replaced on the host is not sent (see
+[When frames are late](#when-frames-are-late)), so the first frame to arrive may have a
+higher `seq`; numbers only go up.
 
 **Lanes are not ordered with each other.** `Displays` goes in the control lane, a
 stream in its own, so the host holds a `StreamStart` back (and drops the frames before

@@ -283,8 +283,9 @@ impl View {
                 if s.last_seq.is_none() {
                     self.arrivals.push(Arrival::FirstFrame(id, generation));
                 }
-                if s.last_seq.is_some_and(|last| seq <= last) || (s.last_seq.is_none() && seq != 0)
-                {
+                // Numbers only go up; the first to come may be above 0 where a newer
+                // keyframe replaced the first on the PC.
+                if s.last_seq.is_some_and(|last| seq <= last) {
                     self.broken
                         .push(format!("frame {seq} of {id} out of order"));
                 }

@@ -282,7 +282,10 @@ pub mod audio {
             }
         }
 
+        /// As slow as asking the real sound system (`pactl` takes a process start),
+        /// so a test notices when it is asked too often.
         pub fn recording(&self) -> bool {
+            std::thread::sleep(std::time::Duration::from_millis(20));
             RECORDING.load(Ordering::Relaxed)
         }
     }

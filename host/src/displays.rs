@@ -102,6 +102,8 @@ struct StreamSlot {
     skipped: u32,
     /// Frames came before the headset had its display in the list, and went nowhere.
     held: bool,
+    /// When the encoder started, for the log of how long its first picture took.
+    since: Instant,
 }
 
 impl StreamSlot {
@@ -132,6 +134,7 @@ impl StreamSlot {
             shown: Histogram::default(),
             skipped: 0,
             held: false,
+            since: Instant::now(),
         }
     }
 }
@@ -429,6 +432,12 @@ impl Router {
                         *tx = None;
                         return false;
                     }
+                    info!(
+                        "{}: stream {w}x{h} starts in the headset ({:?}), {} ms after its encoder",
+                        slot.name,
+                        slot.generation,
+                        slot.since.elapsed().as_millis()
+                    );
                     slot.announced = true;
                     slot.known = true;
                 }
@@ -506,6 +515,10 @@ pub struct Displays {
     mic_wanted: bool,
     /// Why the headset microphone could not be made on the PC, while it cannot.
     mic_failed: Option<String>,
+    /// A program on the PC records from the headset microphone, as last looked at
+    /// (see [`Displays::tick`]): asking the sound system takes a process start, too
+    /// slow for every pass of the session loop.
+    recording: bool,
     /// What the PC can encode with (see `encoder::available`), found once.
     choices: Vec<(Codec, bool)>,
     /// Connected and worn (encoders running).
@@ -554,6 +567,7 @@ impl Displays {
             mic_retry: Backoff::default(),
             mic_wanted: false,
             mic_failed: None,
+            recording: false,
             choices: crate::encoder::available(),
             streaming: true,
             taken_off_at: None,
@@ -804,6 +818,7 @@ impl Displays {
     pub fn tick(&mut self, new_id: &mut dyn FnMut() -> ScreenId) {
         self.router.report();
         self.sync_audio();
+        self.recording = self.mic.as_ref().is_some_and(MicIn::recording);
         self.check_sizes();
         self.check_primary();
         self.check_window_panels();
@@ -1186,9 +1201,10 @@ impl Displays {
         }
     }
 
-    /// A program on the PC records from the headset's microphone now.
+    /// A program on the PC records from the headset's microphone, as last looked at
+    /// (about twice a second).
     pub fn recording(&self) -> bool {
-        self.mic.as_ref().is_some_and(MicIn::recording)
+        self.recording && self.mic.is_some()
     }
 
     /// The codec the streams are in now.
@@ -2494,6 +2510,50 @@ mod tests {
         router.add_stream(s1, Codec::H265, "test".into(), false);
         router.remove_stream(s1);
         assert!(sent(&outbox).is_empty());
+    }
+
+    /// "Encoded → shown" is the time from a frame queued to the headset saying it
+    /// showed it: one sample a report, for the frame of the current generation it
+    /// names, and the frames before it are done too.
+    #[test]
+    fn a_shown_frame_is_timed_from_when_it_was_sent() {
+        let router = Router::new();
+        let outbox = Arc::new(Outbox::default());
+        router.attach(outbox.clone());
+        let s = ScreenId::from_wire(state::DisplayId(3));
+        router.publish(&BTreeSet::from([s]));
+        router.add_stream(s, Codec::H264, "test".into(), false);
+        keyframe(&router, s);
+        for _ in 0..3 {
+            router.on_event(
+                s,
+                EncoderEvent::Frame {
+                    pts_us: 0,
+                    keyframe: false,
+                    data: vec![0],
+                },
+            );
+        }
+        let generation = match sent(&outbox)[0] {
+            HostMsg::StreamStart { generation, .. } => generation,
+            ref other => panic!("{other:?}"),
+        };
+        let shown = |router: &Router| {
+            let inner = router.inner.lock().unwrap();
+            let slot = &inner.streams[&s];
+            (slot.shown.count(), slot.shown.max(), slot.sent.len())
+        };
+        // Another generation says nothing.
+        router.frame_shown(s, Gen(generation.0 + 1), 1);
+        assert_eq!(shown(&router).0, 0);
+        router.frame_shown(s, generation, 2);
+        let (count, max, waiting) = shown(&router);
+        assert_eq!(count, 1);
+        assert!(max < Duration::from_secs(1), "{max:?}");
+        assert_eq!(waiting, 1, "only the frame after it is still out");
+        // Nor does a frame never sent.
+        router.frame_shown(s, generation, 99);
+        assert_eq!(shown(&router).0, 1);
     }
 
     /// A stream starts only once the headset has its display in the list: before,

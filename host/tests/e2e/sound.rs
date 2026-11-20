@@ -4,6 +4,7 @@
 use std::time::{Duration, Instant};
 
 use prostir_proto::ClientMsg;
+use prostir_proto::request::{Outcome, Request};
 use prostir_proto::state::{UpKind, UpState, permission};
 use prostir_testkit::{FIRST_VOLUME, FakeHeadset, quest_step};
 
@@ -129,4 +130,27 @@ fn the_microphone_streams_while_a_program_records() {
     };
     headset.send(&ClientMsg::UpState { part: denied }).unwrap();
     pc.wait_log(SOON, "the headset's microphone has no permission");
+}
+
+/// The PC keeps up with the headset however many small messages it sends: with three
+/// seconds of microphone sound arriving at once (and a sound system as slow to ask as
+/// the real one), a request after them is answered at once, not after the PC worked
+/// through the pile one pass at a time.
+#[test]
+fn a_request_is_answered_at_once_while_the_microphone_streams() {
+    let (_dir, pc, _keys, mut headset) = session("busy", &Options::default());
+    pc.desktop("record on");
+    headset
+        .wait(SOON, "the microphone wanted", |v| {
+            v.pc.up_wanted.get(&UpKind::Mic).is_some_and(|u| u.on)
+        })
+        .unwrap();
+    headset.send_mic(300).unwrap();
+    let asked = Instant::now();
+    let req = headset
+        .request(Request::SetSound { to_headset: true })
+        .unwrap();
+    assert_eq!(headset.reply(req, SOON).unwrap(), Outcome::Done);
+    let took = asked.elapsed();
+    assert!(took < Duration::from_secs(1), "answered after {took:?}");
 }

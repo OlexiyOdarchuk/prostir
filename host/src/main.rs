@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::io::ErrorKind;
 use std::net::{Ipv4Addr, TcpListener, UdpSocket};
 use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -373,9 +373,11 @@ fn serve_client(
             })?
     };
 
-    let (msg_tx, msg_rx) = mpsc::channel::<std::io::Result<ClientMsg>>();
+    // Each message with when it came, for the log of how long it waited.
+    let (msg_tx, msg_rx) = mpsc::channel::<(Instant, std::io::Result<ClientMsg>)>();
     {
         let outbox = outbox.clone();
+        let router = displays.router.clone();
         receiver.set_idle_limit(Some(SILENCE));
         std::thread::Builder::new()
             .name("net-reader".into())
@@ -393,10 +395,20 @@ fn serve_client(
                             outbox.pong(seq);
                             continue;
                         }
+                        // Also here: how long a frame took to show is the headset's
+                        // and the network's time, not the session loop's.
+                        Ok(ClientMsg::FrameShown {
+                            id,
+                            generation,
+                            seq,
+                        }) => {
+                            router.frame_shown(ScreenId::from_wire(id), generation, seq);
+                            continue;
+                        }
                         _ => {}
                     }
                     let stop = msg.is_err();
-                    if msg_tx.send(msg).is_err() || stop {
+                    if msg_tx.send((Instant::now(), msg)).is_err() || stop {
                         break;
                     }
                 }
@@ -441,12 +453,22 @@ fn serve_client(
     let mut focus = None;
     let mut next_focus = Instant::now();
     let (result, goodbye) = loop {
-        // What changed in the last pass: the desktop laid out once, the headset told,
-        // then the replies, and the files written, off this thread.
+        // What changed in the last pass: the headset told, then the replies; the
+        // desktop laid out once (which can take the desktop a while: the headset knows
+        // already) and told; the files written, off this thread.
+        let pass = Instant::now();
+        session.publish(displays, store, focus, sound_from, shares_volume);
         displays.place();
         session.volume_due(displays);
         session.publish(displays, store, focus, sound_from, shares_volume);
         store.flush();
+        let busy = pass.elapsed();
+        if busy >= BUSY {
+            info!(
+                "the session loop was busy for {} ms telling the headset and laying out the desktop",
+                busy.as_millis()
+            );
+        }
         if Instant::now() >= next_focus {
             next_focus = Instant::now() + Duration::from_millis(150);
             focus = active_output
@@ -490,23 +512,42 @@ fn serve_client(
             .min(next_focus)
             .min(session.volume_at().unwrap_or(next_tick))
             .saturating_duration_since(Instant::now());
-        match msg_rx.recv_timeout(wait) {
-            Ok(Ok(ClientMsg::Goodbye { reason })) => {
-                info!("{}", headset_left(reason));
-                break (Ok(()), None);
+        // Every message waiting is taken before the next pass, so what a pass costs
+        // never adds up behind a stream of small messages (the microphone sends a
+        // hundred a second); for a short while at most, so the housekeeping runs.
+        let mut next = msg_rx.recv_timeout(wait);
+        let until = Instant::now() + TAKE_AT_ONCE;
+        let ended = loop {
+            match next {
+                Ok((_, Ok(ClientMsg::Goodbye { reason }))) => {
+                    info!("{}", headset_left(reason));
+                    break Some((Ok(()), None));
+                }
+                Ok((came, Ok(msg))) => session.handle(msg, came, displays, control, store),
+                Ok((_, Err(e))) if e.kind() == ErrorKind::UnexpectedEof => {
+                    break Some((Ok(()), None));
+                }
+                Ok((_, Err(e))) if e.kind() == ErrorKind::TimedOut => {
+                    let silence = anyhow::anyhow!(
+                        "silence: nothing from the headset for {} s",
+                        SILENCE.as_secs()
+                    );
+                    break Some((Err(silence), None));
+                }
+                Ok((_, Err(e))) => break Some((Err(e.into()), None)),
+                Err(RecvTimeoutError::Timeout) => break None,
+                Err(RecvTimeoutError::Disconnected) => break Some((Ok(()), None)),
             }
-            Ok(Ok(msg)) => session.handle(msg, displays, control, store),
-            Ok(Err(e)) if e.kind() == ErrorKind::UnexpectedEof => break (Ok(()), None),
-            Ok(Err(e)) if e.kind() == ErrorKind::TimedOut => {
-                let silence = anyhow::anyhow!(
-                    "silence: nothing from the headset for {} s",
-                    SILENCE.as_secs()
-                );
-                break (Err(silence), None);
+            if Instant::now() >= until {
+                break None;
             }
-            Ok(Err(e)) => break (Err(e.into()), None),
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => break (Ok(()), None),
+            next = msg_rx.try_recv().map_err(|e| match e {
+                TryRecvError::Empty => RecvTimeoutError::Timeout,
+                TryRecvError::Disconnected => RecvTimeoutError::Disconnected,
+            });
+        };
+        if let Some(ended) = ended {
+            break ended;
         }
     };
     displays.set_streaming(false);
@@ -521,7 +562,7 @@ fn serve_client(
             // read and dropped, so a reset cannot throw the goodbye away.
             let until = Instant::now() + GOODBYE_WAIT;
             while let Some(left) = until.checked_duration_since(Instant::now()) {
-                if !matches!(msg_rx.recv_timeout(left), Ok(Ok(_))) {
+                if !matches!(msg_rx.recv_timeout(left), Ok((_, Ok(_)))) {
                     break;
                 }
             }
@@ -553,6 +594,13 @@ struct Session {
     /// Up streams the headset started: by number, what each carries.
     ups: BTreeMap<u8, UpKind>,
 }
+
+/// Messages from the headset handled one after the other before the next pass of the
+/// session loop, at most for this long.
+const TAKE_AT_ONCE: Duration = Duration::from_millis(50);
+/// A pass of the session loop that takes this long is written in the log: the headset
+/// waits for it.
+const BUSY: Duration = Duration::from_millis(150);
 
 /// A command the headset does not answer within this is given up (a late answer is
 /// let go).
@@ -756,6 +804,7 @@ impl Session {
     fn handle(
         &mut self,
         msg: ClientMsg,
+        came: Instant,
         displays: &mut Displays,
         control: &mut Control,
         store: &mut Store,
@@ -799,16 +848,9 @@ impl Session {
                     displays.keyframe_asked(id);
                 }
             }
-            ClientMsg::FrameShown {
-                id,
-                generation,
-                seq,
-            } => {
-                displays
-                    .router
-                    .frame_shown(ScreenId::from_wire(id), generation, seq);
-            }
             ClientMsg::Request { req, asked } => {
+                let started = Instant::now();
+                let what = format!("{asked:?}");
                 let outcome = match asked {
                     Asked::Known(request) => {
                         let limits = self.publisher.limits(displays);
@@ -827,6 +869,12 @@ impl Session {
                 if let Outcome::Failed { detail, .. } = &outcome {
                     warn!("request {}: {detail}", req.0);
                 }
+                info!(
+                    "request {} ({what}): waited {} ms, done in {} ms",
+                    req.0,
+                    (started - came).as_millis(),
+                    started.elapsed().as_millis()
+                );
                 self.replies.push(HostMsg::Reply { req, outcome });
                 control.show(Some(displays), store);
             }
