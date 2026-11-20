@@ -3,7 +3,8 @@ pkgname=prostir
 pkgver=@VERSION@
 pkgrel=1
 pkgdesc="Extra KDE Plasma 6 and Hyprland monitors in a Meta Quest 3 or 3S headset (PC part, built from source)"
-arch=('x86_64')
+# aarch64 (Arch Linux ARM, Asahi) is experimental and untested.
+arch=('x86_64' 'aarch64')
 url="https://prostir.ishawyha.dev"
 license=('GPL-3.0-or-later')
 # gst-plugin-va: the VA-API encoders (vah264enc, vah265enc, vapostproc).
