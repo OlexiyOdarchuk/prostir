@@ -506,11 +506,6 @@ impl Session {
         Ok(session)
     }
 
-    /// This headset's session is the main one (its arrangement is the desktop's).
-    pub fn is_main(&self) -> bool {
-        self.standing.main
-    }
-
     /// The headset's own "No limits".
     pub fn no_limits(&self) -> bool {
         self.publisher.prefs().no_limits
@@ -524,6 +519,11 @@ impl Session {
             .up
             .get(&UpKind::Mic)
             .is_some_and(|m| m.switch)
+    }
+
+    /// The headset streams its microphone now.
+    pub fn mic_streams(&self) -> bool {
+        self.ups.values().any(|(kind, _)| *kind == UpKind::Mic)
     }
 
     /// What the headset can do.

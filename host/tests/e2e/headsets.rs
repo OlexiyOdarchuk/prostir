@@ -17,31 +17,25 @@ use crate::{SOON, START, connect, worn};
 
 /// Two headsets the PC trusts, `first` and `second`, and the PC with two small
 /// monitors, which takes two headsets at once; `settings` is more of its
-/// `settings.txt`, with `{second}` for the second one's key. A third headset is
+/// `settings.txt`, with `{first}` and `{second}` for their keys. A third headset is
 /// paired too.
 fn two_headsets(name: &str, options: Options, settings: &str) -> (TestDir, Pc, Keys, Keys) {
     let dir = TestDir::new(name);
-    dir.save_screens(
-        "next 200
-row
-screen 0 640x360
-screen 1 480x272
-",
-    );
+    dir.save_screens("next 200\nrow\nscreen 0 640x360\nscreen 1 480x272\n");
     let first = dir.pair();
     let second = dir.pair_headset("second-headset");
     dir.pair_headset("third-headset");
-    let key: String = second
-        .identity
-        .public
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    dir.save_settings(&format!(
-        "mirror off
-{}",
-        settings.replace("{second}", &key)
-    ));
+    let hex = |keys: &Keys| -> String {
+        keys.identity
+            .public
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    };
+    let settings = settings
+        .replace("{first}", &hex(&first))
+        .replace("{second}", &hex(&second));
+    dir.save_settings(&format!("mirror off\n{settings}"));
     let options = Options {
         headsets: 2,
         ..options
@@ -397,4 +391,66 @@ fn a_headset_that_takes_fewer_streams_fails_only_for_itself() {
         "{:?}",
         second.view().broken
     );
+}
+
+/// Without a main headset the first connected takes the commands, and keeps them
+/// when it connects again (its old session replaced) after the second one.
+#[test]
+fn a_headset_back_keeps_its_place() {
+    let (_dir, pc, mut a, mut b) = two_headsets(
+        "keeps-place",
+        Options::default(),
+        "access {first} guest input\naccess {second} guest input\n",
+    );
+    let first = showing(&pc, &mut a);
+    let mut second = showing(&pc, &mut b);
+    // Its Wi-Fi went away, and it came back before the PC noticed.
+    first.stall(Duration::from_secs(60));
+    let mut back = showing(&pc, &mut a);
+    assert_eq!(pc.command("recenter", SOON), "done");
+    back.take_for(Duration::from_millis(500)).unwrap();
+    second.take_for(Duration::from_millis(500)).unwrap();
+    assert_eq!(back.view().commands.len(), 1, "the first one still");
+    assert!(second.view().commands.is_empty());
+}
+
+/// The microphone of a guest that a program records from stays the PC's while the
+/// main headset connects; once nothing records, it is the main headset's.
+#[test]
+fn the_microphone_in_use_does_not_move() {
+    let (_dir, mut pc, mut a, mut b) = two_headsets(
+        "mic-stays",
+        Options::default(),
+        "access {first} guest mic\n",
+    );
+    let mut guest = showing(&pc, &mut a);
+    let wanted = |h: &FakeHeadset| {
+        h.view()
+            .pc
+            .up_wanted
+            .get(&UpKind::Mic)
+            .is_some_and(|u| u.on)
+    };
+    pc.desktop("record on");
+    guest
+        .wait(SOON, "the microphone wanted", |v| {
+            v.pc.up_wanted.get(&UpKind::Mic).is_some_and(|u| u.on)
+        })
+        .unwrap();
+    let mut main = showing(&pc, &mut b);
+    assert!(main.view().pc.access.unwrap().is_main());
+    main.take_for(Duration::from_secs(1)).unwrap();
+    guest.take_for(Duration::from_millis(100)).unwrap();
+    assert!(wanted(&guest), "still the guest's");
+    assert!(!wanted(&main));
+    assert_eq!(pc.count_log("follows another headset"), 0);
+    pc.desktop("record off");
+    pc.wait_log(SOON, "follows another headset");
+    pc.desktop("record on");
+    main.wait(SOON, "the microphone wanted", |v| {
+        v.pc.up_wanted.get(&UpKind::Mic).is_some_and(|u| u.on)
+    })
+    .unwrap();
+    guest.take_for(Duration::from_secs(1)).unwrap();
+    assert!(!wanted(&guest), "not the guest's any more");
 }

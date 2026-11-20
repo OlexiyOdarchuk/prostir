@@ -184,8 +184,10 @@ struct Brain {
     displays: Option<Displays>,
     /// The sessions, by the headset's key: one each, at most `brain::max_headsets()`.
     sessions: BTreeMap<[u8; 32], Session>,
-    /// The headset whose session is the main one (see `brain::roles`).
-    main: Option<[u8; 32]>,
+    /// Which headsets' sessions have the jobs only one can have (see `brain::roles`).
+    roles: brain::Roles<[u8; 32]>,
+    /// The order the headsets with a session first connected in.
+    arrivals: brain::Arrivals<[u8; 32]>,
     /// Sessions that said goodbye, until their headset closes or their moment ends.
     closing: Vec<Closing>,
     phase: Phase,
@@ -353,9 +355,9 @@ impl Brain {
             }
         }
         // What the new session has of the jobs only one headset can have.
-        let mut order = self.in_order();
-        order.push((key, self.store.wanted().access_of(&key)));
-        let roles = brain::roles(&order, self.main);
+        self.arrivals.connected(key);
+        let order = self.in_order(Some((key, self.store.wanted().access_of(&key))));
+        let roles = brain::roles(&order, self.roles, self.mic_busy());
         let standing = Standing {
             main: roles.main == Some(key),
             mic: roles.mic == Some(key),
@@ -385,6 +387,7 @@ impl Brain {
             }
             Err(e) => {
                 warn!("session ended: {e:#}");
+                self.arrivals.left(key);
                 if self.sessions.is_empty() {
                     self.after_the_last_session(false);
                 } else {
@@ -394,19 +397,37 @@ impl Brain {
         }
     }
 
-    /// The headsets' keys and the rights of their lines, in the order they connected.
-    fn in_order(&self) -> Vec<([u8; 32], prostir_proto::state::Access)> {
-        let mut order: Vec<_> = self.sessions.iter().collect();
-        order.sort_by_key(|(_, s)| s.id);
-        order
-            .into_iter()
-            .map(|(key, s)| (*key, s.configured))
+    /// The keys of the headsets with a session and the rights of their lines, in the
+    /// order they first connected; with `opening`, one whose session opens now.
+    fn in_order(
+        &self,
+        opening: Option<([u8; 32], prostir_proto::state::Access)>,
+    ) -> Vec<([u8; 32], prostir_proto::state::Access)> {
+        self.arrivals
+            .keys()
+            .filter_map(|key| match (self.sessions.get(key), opening) {
+                (_, Some((k, access))) if k == *key => Some((k, access)),
+                (Some(s), _) => Some((*key, s.configured)),
+                (None, _) => None,
+            })
             .collect()
+    }
+
+    /// The PC's end of the headset microphone is in use: a program records from it,
+    /// or the headset whose microphone it is streams it.
+    fn mic_busy(&self) -> bool {
+        self.displays.as_ref().is_some_and(Displays::recording)
+            || self
+                .roles
+                .mic
+                .and_then(|key| self.sessions.get(&key))
+                .is_some_and(Session::mic_streams)
     }
 
     /// "No limits" of the main headset, which the PC's limits follow.
     fn main_no_limits(&self) -> bool {
-        self.main
+        self.roles
+            .main
             .and_then(|key| self.sessions.get(&key))
             .is_some_and(Session::no_limits)
     }
@@ -416,8 +437,11 @@ impl Brain {
     /// is worn, with a fresh picture for one put on again), and the PC's end of the
     /// microphone (the switch of the headset whose microphone it takes).
     fn headsets_changed(&mut self) {
-        let roles = brain::roles(&self.in_order(), self.main);
-        self.main = roles.main;
+        let roles = brain::roles(&self.in_order(None), self.roles, self.mic_busy());
+        if roles.mic != self.roles.mic && self.roles.mic.is_some() {
+            info!("the PC's end of the headset microphone follows another headset now");
+        }
+        self.roles = roles;
         let no_limits = self.main_no_limits();
         let Some(displays) = self.displays.as_mut() else {
             return;
@@ -445,13 +469,11 @@ impl Brain {
     /// (the main one, else the first), with its microphone as the PC takes it, and
     /// how many others there are.
     fn show(&mut self) {
-        let mut order: Vec<&Session> = self.sessions.values().collect();
-        order.sort_by_key(|s| s.id);
-        let lead = order
-            .iter()
-            .find(|s| s.is_main())
-            .or_else(|| order.first())
-            .map(|s| s.tray_line())
+        let lead = self
+            .roles
+            .lead
+            .and_then(|key| self.sessions.get(&key))
+            .map(Session::tray_line)
             .unwrap_or_default();
         let others = self.sessions.len().saturating_sub(1);
         self.control
@@ -460,13 +482,8 @@ impl Brain {
 
     /// The session commands for the headset go to: the main one, else the first.
     fn lead_mut(&mut self) -> Option<&mut Session> {
-        let main = self.main;
-        let first = self.sessions.values().map(|s| s.id).min();
-        let lead = main
-            .and_then(|key| self.sessions.get(&key))
-            .map(|s| s.id)
-            .or(first)?;
-        self.sessions.values_mut().find(|s| s.id == lead)
+        let lead = self.roles.lead?;
+        self.sessions.get_mut(&lead)
     }
 
     /// Ends the session of headset `key`: with `goodbye`, saying why. The other
@@ -476,6 +493,7 @@ impl Brain {
         else {
             return;
         };
+        self.arrivals.left(key);
         let taken_off = session.taken_off_for().is_some();
         if let Some(closing) = session.finish(goodbye, displays) {
             self.closing.push(closing);
@@ -500,7 +518,7 @@ impl Brain {
     /// or they broke.
     fn after_the_last_session(&mut self, taken_off: bool) {
         self.control.no_headset();
-        self.main = None;
+        self.roles = brain::Roles::NONE;
         let how = match &self.displays {
             Some(_) if taken_off => {
                 info!("removing virtual monitors until the headset is worn again");
@@ -641,6 +659,8 @@ impl Brain {
         // A display of the PC seen for the first time is kept.
         keep_screens(&mut self.store, displays, false);
         let healthy = displays.healthy();
+        // The microphone may be free to go to the main headset now.
+        self.headsets_changed();
         self.show();
         // Each headset off the head for long enough counts as gone; the others go on.
         let taken_off: Vec<[u8; 32]> = self
@@ -821,7 +841,8 @@ fn main() -> Result<()> {
         events,
         displays: None,
         sessions: BTreeMap::new(),
-        main: None,
+        roles: brain::Roles::NONE,
+        arrivals: brain::Arrivals::default(),
         closing: Vec::new(),
         phase: Phase::Idle,
         last_id: 0,
