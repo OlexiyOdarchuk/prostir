@@ -71,8 +71,9 @@
   displays, for when the headset copes with more than the safe six.
 - Switching to a profile puts its monitors in their places as soon as the PC has made
   them, instead of watching for up to 8 s.
-- A monitor you remove leaves the view at once; it comes back if the PC cannot remove
-  it.
+- A monitor you add shows at once where it will appear, as a frame saying it is being
+  added, and its picture takes that place; a monitor you remove leaves the view at
+  once, and comes back if the PC cannot remove it.
 - When something the headset asked for does not happen, the menu says why next to the
   control that asked, in the headset's language (for example "The limit is reached" or
   "No active window on the PC"), with the PC's own detail under it. A request the PC

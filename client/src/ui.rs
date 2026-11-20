@@ -1465,6 +1465,40 @@ impl Panel {
         p.take()
     }
 
+    /// Where a monitor being added will appear, `width`×`height` (its own shape): a
+    /// faint frame with `label` in the middle, until its picture comes.
+    /// Premultiplied RGBA.
+    pub fn placeholder_image(&mut self, label: &str, width: u32, height: u32) -> Vec<u8> {
+        let mut p = Pixmap::new(width, height).expect("placeholder size");
+        let (w, h) = (width as f32, height as f32);
+        let edge = (w.min(h) * 0.02).max(4.0);
+        fill(
+            &mut p,
+            rounded(rect(0.0, 0.0, w, h), edge * 3.0),
+            [120, 160, 255, 150],
+        );
+        fill(
+            &mut p,
+            rounded(rect(edge, edge, w - 2.0 * edge, h - 2.0 * edge), edge * 2.0),
+            [16, 18, 24, 170],
+        );
+        let mut size = h * 0.12;
+        while size > 12.0 && self.text_width(label, size, true) > w * 0.8 {
+            size -= 2.0;
+        }
+        let tw = self.text_width(label, size, true);
+        self.draw_text(
+            &mut p,
+            (w - tw) / 2.0,
+            h / 2.0 + size * 0.36,
+            size,
+            true,
+            TEXT,
+            label,
+        );
+        p.take()
+    }
+
     /// A short message on a dark pill, `width`×`height`, for a toast layer: one
     /// line, or two when long (the end cut off with "…" if even that is not enough).
     /// Premultiplied RGBA.
@@ -3710,6 +3744,20 @@ mod tests {
             }
         }
         assert!(seen_labels, "the labels are shown");
+    }
+
+    /// The placeholder of a monitor being added is drawn at the monitor's own shape,
+    /// wide or tall.
+    #[test]
+    fn a_placeholder_takes_the_shape_of_its_monitor() {
+        let mut p = Panel::new();
+        for (w, h) in [(1024, 288), (1024, 576), (576, 1024)] {
+            let image = p.placeholder_image("Adding a monitor…", w, h);
+            assert_eq!(image.len(), (w * h * 4) as usize);
+            // The middle is drawn (the text), the corner is not.
+            assert!(image.iter().any(|b| *b != 0));
+            assert_eq!(&image[..4], &[0, 0, 0, 0], "a rounded corner");
+        }
     }
 
     #[test]

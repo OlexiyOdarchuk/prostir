@@ -65,6 +65,25 @@ const POKE_RELEASE: f32 = 0.025;
 /// A finger further behind the menu than this is not touching it (reaching past).
 const POKE_BEHIND: f32 = -0.06;
 
+/// A monitor being added: where it will appear (shown at once as a placeholder),
+/// its size, its request, and its number once the PC made it.
+struct Adding {
+    req: ReqId,
+    place: Placement,
+    size: (u32, u32),
+    id: Option<ScreenId>,
+    since: Instant,
+}
+
+/// A placeholder that waited this long for its monitor goes (the monitor may not
+/// start; it then stands failed in the list, and the menu says why).
+const PLACEHOLDER_FOR: Duration = Duration::from_secs(15);
+/// The number the placeholder is placed under: never a display's.
+const PLACEHOLDER_ID: ScreenId = ScreenId::MAX;
+/// Width of the placeholder's picture, in pixels (its height follows the monitor's
+/// shape).
+const PLACEHOLDER_PX: u32 = 1024;
+
 /// A monitor held with both hands: the distance between them sets its width.
 #[derive(Clone, Copy)]
 struct Scaling {
@@ -457,6 +476,8 @@ struct Scene {
     active_profile: Option<usize>,
     /// A profile being switched to, until its monitors stand where it says.
     profile_switch: Option<ProfileSwitch>,
+    /// A monitor being added, shown as a placeholder where it will appear.
+    adding: Option<Adding>,
     /// The desk arrangement on disk; see `save_layout`.
     desk: layout::Desk,
     /// The stream size each desk placement was made for (see `fit_to_stream`). Not
@@ -700,16 +721,11 @@ impl Scene {
             if self.placements.contains_key(&m.0) {
                 continue;
             }
-            let at = layout::place_new(
-                &self.placements,
-                &self.layout_sizes(),
-                m,
-                self.center,
-                self.settings.preset,
-                self.head.1,
-                &self.sent_rows(),
-                self.radius,
-            );
+            // Where its placeholder stood, for the monitor being added.
+            let at = match &self.adding {
+                Some(a) if a.id == Some(m.0) => a.place,
+                _ => self.place_for_new(m),
+            };
             info!("monitor {} placed next to the others", m.0);
             self.placements.insert(m.0, at);
             placed = true;
@@ -723,6 +739,48 @@ impl Scene {
         }
         if placed {
             self.save_layout();
+        }
+    }
+
+    /// Where a new monitor `m` (id, pixel size) goes next to the others.
+    fn place_for_new(&self, m: (ScreenId, u32, u32)) -> Placement {
+        let mut sizes = self.layout_sizes();
+        if !sizes.iter().any(|s| s.0 == m.0) {
+            sizes.push(m);
+        }
+        layout::place_new(
+            &self.placements,
+            &sizes,
+            m,
+            self.center,
+            self.settings.preset,
+            self.head.1,
+            &self.sent_rows(),
+            self.radius,
+        )
+    }
+
+    /// The placeholder of a monitor being added goes once its picture is there, it
+    /// failed, the connection ended, or it waited too long.
+    fn adding_due(&mut self) {
+        let Some(a) = &self.adding else {
+            return;
+        };
+        let failed = a.id.is_some_and(|id| {
+            self.pc.displays.as_ref().is_some_and(|d| {
+                d.get(DisplayId(id))
+                    .is_none_or(|d| matches!(d.state, state::DisplayState::Failed { .. }))
+            })
+        });
+        let shown = a.id.is_some_and(|id| self.monitors.contains_key(&id));
+        let asked = self.asks.waits(ui::Asked::AddMonitor) || a.id.is_some();
+        if shown
+            || failed
+            || !asked
+            || self.feedback.is_none()
+            || a.since.elapsed() >= PLACEHOLDER_FOR
+        {
+            self.adding = None;
         }
     }
 
@@ -1985,6 +2043,9 @@ fn run(app: &AndroidApp) -> Result<()> {
     let mut attach_layer = ImageLayer::new(&session, format, ATTACH_PX.0, ATTACH_PX.1, false)?;
     // What the "Attach" texture shows now: language and lit (pointed at).
     let mut attach_drawn: Option<(Lang, bool)> = None;
+    // The placeholder of a monitor being added: its layer, made for a size and
+    // language.
+    let mut placeholder: Option<(ImageLayer, (u32, u32), Lang)> = None;
     cursor_layer.upload(&gl, &ui::cursor_image(CURSOR_PX))?;
     let mut button_hovered = false;
     // The left hand's menu gesture as last seen, to act once per gesture.
@@ -2129,6 +2190,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         profiles_path,
         active_profile: None,
         profile_switch: None,
+        adding: None,
         desk,
         placed_for: HashMap::new(),
         settings_path,
@@ -2405,6 +2467,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         }
         scene.place_button();
         scene.expire_asks();
+        scene.adding_due();
         // The system may let the app record now, or not any more.
         if crate::mic::permission() != scene.mic_permission {
             scene.mic_changed();
@@ -2839,6 +2902,17 @@ fn run(app: &AndroidApp) -> Result<()> {
                 attach_drawn = Some(want);
             }
         }
+        if let Some(a) = &scene.adding {
+            let want = (a.size, scene.lang());
+            if placeholder.as_ref().is_none_or(|p| (p.1, p.2) != want) {
+                let (w, h) = a.size;
+                let px_h = (PLACEHOLDER_PX * h / w.max(1)).clamp(64, 4 * PLACEHOLDER_PX);
+                let mut layer = ImageLayer::new(&session, format, PLACEHOLDER_PX, px_h, true)?;
+                let label = scene.lang().t("Монітор додається…", "Adding a monitor…");
+                layer.upload(&gl, &panel.placeholder_image(label, PLACEHOLDER_PX, px_h))?;
+                placeholder = Some((layer, a.size, scene.lang()));
+            }
+        }
         if scene.wrist.is_some()
             && let Some(pixels) = wrist_panel.render_if_dirty()
         {
@@ -3247,6 +3321,12 @@ fn run(app: &AndroidApp) -> Result<()> {
         layers.extend(keyboard_layer.iter().map(as_layer));
         layers.extend(cylinders.iter().map(as_layer));
         layers.extend(quads.iter().map(as_layer));
+        let placeholder_quad = scene.adding.as_ref().and_then(|a| {
+            let (layer, _, _) = placeholder.as_ref()?;
+            let height = a.place.width * a.size.1 as f32 / a.size.0.max(1) as f32;
+            Some(layer.quad(&local, posef(&a.place), a.place.width, height))
+        });
+        layers.extend(placeholder_quad.iter().map(as_layer));
         layers.extend(button.iter().map(as_layer));
         layers.extend(panel_quad.iter().map(as_layer));
         let toast_quad = scene.toast.as_ref().and_then(|t| t.2).map(|p| {
@@ -3380,6 +3460,13 @@ fn handle_net_event(
             (Some(ui::Asked::Profile(_)), Outcome::Ids { ids }) => {
                 if scene.profile_switch.as_ref().is_some_and(|s| s.req == req) {
                     scene.profile_made(ids.into_iter().map(|id| id.0).collect());
+                }
+            }
+            (Some(ui::Asked::AddMonitor), Outcome::Added { id }) => {
+                if let Some(a) = &mut scene.adding
+                    && a.req == req
+                {
+                    a.id = Some(id.0);
                 }
             }
             (_, Outcome::Done | Outcome::Added { .. } | Outcome::Ids { .. }) => {}
@@ -3752,12 +3839,21 @@ fn handle_action(
     }
     match action {
         Action::Add { width, height } => {
-            scene.request(
+            let req = scene.request(
                 Request::AddDisplay {
                     mode: Mode::new(width, height),
                 },
                 ui::Asked::AddMonitor,
             );
+            // Shown at once where it will appear; the monitor takes that place once
+            // its picture comes (not in cinema, where new monitors are not placed).
+            scene.adding = req.filter(|_| !scene.settings.cinema).map(|req| Adding {
+                req,
+                place: scene.place_for_new((PLACEHOLDER_ID, width, height)),
+                size: (width, height),
+                id: None,
+                since: Instant::now(),
+            });
         }
         Action::Remove(id) => {
             let confirmed = scene
