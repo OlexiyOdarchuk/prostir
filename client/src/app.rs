@@ -32,6 +32,7 @@ use crate::input::Controls;
 use crate::layout::{self, Cylinder, Grab, Held, Hit, Placement, Ray, ScreenId};
 use crate::net::{Feedback, NetEvent};
 use crate::overlay::{self, Overlay, Sphere};
+use crate::pending::{self, Asks, Made, ProfileSwitch};
 use crate::profiles::{self, Profile};
 use crate::settings::{Background, HandMode, Settings};
 use crate::ui::{self, Action, MonitorEntry, Panel, Tab, UiState};
@@ -50,8 +51,6 @@ const TOAST_WIDTH: f32 = 0.46;
 /// How long a toast stays.
 const TOAST_FOR: Duration = Duration::from_secs(4);
 const ERROR_SHOWN_FOR: Duration = Duration::from_secs(8);
-/// A request without an answer for this long counts as failed (a late answer is let go).
-const ANSWER_WITHIN: Duration = Duration::from_secs(30);
 const CONFIRM_FOR: Duration = Duration::from_secs(4);
 /// How long a pinch must be held on a monitor before it starts dragging it.
 const HOLD_TO_DRAG: Duration = Duration::from_millis(300);
@@ -65,14 +64,6 @@ const POKE_PRESS: f32 = 0.008;
 const POKE_RELEASE: f32 = 0.025;
 /// A finger further behind the menu than this is not touching it (reaching past).
 const POKE_BEHIND: f32 = -0.06;
-
-/// A profile being switched to: its request, its places (none: laid out by its preset),
-/// and its monitors' numbers once the PC answered.
-struct ProfileSwitch {
-    req: ReqId,
-    places: Vec<Placement>,
-    ids: Option<Vec<ScreenId>>,
-}
 
 /// A monitor held with both hands: the distance between them sets its width.
 #[derive(Clone, Copy)]
@@ -381,15 +372,9 @@ struct Scene {
     /// The connected PC's state, as it last said it in this session: its displays,
     /// encoding, sound, limits, what it can do.
     pc: PcState,
-    /// The number of the last request to the PC in this session.
-    last_req: u32,
-    /// Requests to the PC without an answer yet: which control asked, and when.
-    asks: std::collections::BTreeMap<ReqId, (ui::Asked, Instant)>,
-    /// Requests that failed lately: the control, why, the PC's detail, and when.
-    failed_asks: Vec<(ui::Asked, ui::Failure, String, Instant)>,
-    /// Commands of the PC answered once the PC answered a request of their own (a
-    /// profile is in place when the PC made its monitors): request → command.
-    command_after: std::collections::BTreeMap<ReqId, ReqId>,
+    /// The menu's requests to the PC in this session: waiting, failed lately, and
+    /// the PC's commands waiting for one of them (see `pending`).
+    asks: Asks,
     /// The microphone permission the PC was last told.
     mic_permission: u8,
     /// An unknown PC waiting for "Pair" or "Not now" (survives the disconnect that
@@ -786,36 +771,39 @@ impl Scene {
         let Some(switch) = &mut self.profile_switch else {
             return;
         };
-        if switch.places.len() == ids.len() && !self.settings.cinema {
-            for (id, p) in ids.iter().zip(switch.places.clone()) {
-                self.placements.insert(*id, p);
-                self.placed_for.remove(id);
-            }
-            self.profile_switch = None;
-            self.save_layout();
-            self.place_missing();
-            return;
+        if self.settings.cinema {
+            switch.places.clear();
         }
-        switch.ids = Some(ids);
-        self.profile_streams();
+        match switch.made(ids, Instant::now()) {
+            Made::Places(places) => {
+                for (id, p) in places {
+                    self.placements.insert(id, p);
+                    self.placed_for.remove(&id);
+                }
+                self.profile_switch = None;
+                self.save_layout();
+                self.place_missing();
+            }
+            Made::Wait => self.profile_streams(),
+        }
     }
 
     /// A profile laid out by its preset, once every monitor it made streams (or could
-    /// not start: it keeps its place in the list).
+    /// not start: it keeps its place in the list), or once it waited long enough
+    /// (`pending::PROFILE_STANDS_WITHIN`), with what streams then.
     fn profile_streams(&mut self) {
-        let settled = |id: &ScreenId| {
-            self.monitors.contains_key(id)
+        let settled = |id: ScreenId| {
+            self.monitors.contains_key(&id)
                 || self.pc.displays.as_ref().is_some_and(|d| {
-                    d.get(DisplayId(*id))
+                    d.get(DisplayId(id))
                         .is_none_or(|d| matches!(d.state, state::DisplayState::Failed { .. }))
                 })
         };
-        let ready = self
+        let stands = self
             .profile_switch
             .as_ref()
-            .and_then(|s| s.ids.as_ref())
-            .is_some_and(|ids| ids.iter().all(settled));
-        if ready {
+            .is_some_and(|s| s.stands(Instant::now(), settled));
+        if stands {
             self.profile_switch = None;
             self.arrange_all();
         }
@@ -1598,16 +1586,13 @@ impl Scene {
     /// nothing is sent (and nothing kept to send later: repeating "add a monitor"
     /// after reconnecting could add two).
     fn request(&mut self, asked: Request, what: ui::Asked) -> Option<ReqId> {
-        self.failed_asks.retain(|f| f.0 != what);
         if self.feedback.is_none() {
             self.ask_failed(what, ui::Failure::NotConnected, String::new());
             return None;
         }
-        self.last_req += 1;
-        let req = ReqId(self.last_req);
+        let req = self.asks.ask(what, Instant::now());
         info!("request {}: {asked:?}", req.0);
         self.send(ClientMsg::request(req, asked));
-        self.asks.insert(req, (what, Instant::now()));
         Some(req)
     }
 
@@ -1620,41 +1605,33 @@ impl Scene {
     /// Monitor `id` was asked to go and the PC has not answered yet: it is not shown
     /// meanwhile.
     fn being_removed(&self, id: ScreenId) -> bool {
-        self.asks
-            .values()
-            .any(|(what, _)| *what == ui::Asked::Remove(id))
+        self.asks.waits(ui::Asked::Remove(id))
     }
 
     /// Request `req` was answered: which control asked it, `None` for one this side
     /// does not wait for (answered after it gave up on it).
     fn answered(&mut self, req: ReqId, outcome: &Outcome) -> Option<ui::Asked> {
+        let answered = self.asks.answered(req, outcome, Instant::now());
         // A command of the PC that waited for this answer gets it, with the same code.
-        if let Some(command) = self.command_after.remove(&req) {
-            let outcome = match outcome {
-                Outcome::Failed { .. } => outcome.clone(),
-                _ => Outcome::Done,
-            };
+        if let Some((command, outcome)) = answered.command {
             self.send(ClientMsg::Reply {
                 req: command,
                 outcome,
             });
         }
-        let Some((what, asked_at)) = self.asks.remove(&req) else {
+        let Some(what) = answered.what else {
             info!(
                 "an answer to request {}, which nothing waits for (no answer within {} s)",
                 req.0,
-                ANSWER_WITHIN.as_secs()
+                pending::ANSWER_WITHIN.as_secs()
             );
             return None;
         };
-        info!(
-            "request {} answered in {} ms",
-            req.0,
-            asked_at.elapsed().as_millis()
-        );
+        let took = answered.took.unwrap_or_default().as_millis();
+        info!("request {} answered in {took} ms", req.0);
         if let Outcome::Failed { error, detail } = outcome {
             warn!("request {} failed (code {})", req.0, error.code());
-            self.ask_failed(what, ui::Failure::Pc(*error), detail.clone());
+            self.tell_failure(what, ui::Failure::Pc(*error), detail);
         }
         Some(what)
     }
@@ -1663,52 +1640,43 @@ impl Scene {
     /// does not show while it works (a profile closes the menu, the palm menu finds the
     /// mouse) says it with a short message.
     fn ask_failed(&mut self, what: ui::Asked, why: ui::Failure, detail: String) {
+        self.tell_failure(what, why, &detail);
+        self.asks.failed(what, why, detail, Instant::now());
+    }
+
+    /// A control the menu does not show while it works (a profile closes the menu,
+    /// the palm menu finds the mouse) says its failure with a short message.
+    fn tell_failure(&mut self, what: ui::Asked, why: ui::Failure, detail: &str) {
         if matches!(what, ui::Asked::Profile(_) | ui::Asked::FindMouse) {
             let text = why
                 .text(self.lang())
-                .map_or_else(|| detail.clone(), str::to_owned);
+                .map_or_else(|| detail.to_owned(), str::to_owned);
             self.show_toast(text);
         }
-        self.failed_asks.push((what, why, detail, Instant::now()));
     }
 
     /// Requests without an answer for 30 s count as failed (a late answer is let go),
-    /// and failures are shown for a while.
+    /// and failures are shown for a while; a profile switch waited for long enough is
+    /// laid out with what streams.
     fn expire_asks(&mut self) {
-        let late: Vec<ReqId> = self
-            .asks
-            .iter()
-            .filter(|(_, (_, at))| at.elapsed() >= ANSWER_WITHIN)
-            .map(|(req, _)| *req)
-            .collect();
-        for req in late {
+        for (req, what) in self.asks.expire(Instant::now()) {
             if self.profile_switch.as_ref().is_some_and(|s| s.req == req) {
                 self.profile_switch = None;
             }
-            if let Some((what, _)) = self.asks.remove(&req) {
-                self.ask_failed(what, ui::Failure::TimedOut, String::new());
-            }
+            self.tell_failure(what, ui::Failure::TimedOut, "");
         }
-        self.failed_asks.retain(|f| f.3.elapsed() < ERROR_SHOWN_FOR);
+        if self
+            .profile_switch
+            .as_ref()
+            .is_some_and(|s| s.ids.is_some())
+        {
+            self.profile_streams();
+        }
     }
 
     /// How each control's request stands, for the menu.
     fn ask_views(&self) -> Vec<ui::AskView> {
-        let failed = self
-            .failed_asks
-            .iter()
-            .map(|(what, why, detail, _)| ui::AskView {
-                what: *what,
-                state: ui::AskState::Failed {
-                    why: *why,
-                    detail: detail.clone(),
-                },
-            });
-        let waiting = self.asks.values().map(|(what, _)| ui::AskView {
-            what: *what,
-            state: ui::AskState::Waiting,
-        });
-        failed.chain(waiting).collect()
+        self.asks.views()
     }
 
     fn send(&mut self, msg: ClientMsg) {
@@ -2110,10 +2078,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         pair_offer: None,
         unreachable: None,
         pc: PcState::default(),
-        last_req: 0,
-        asks: std::collections::BTreeMap::new(),
-        failed_asks: Vec::new(),
-        command_after: std::collections::BTreeMap::new(),
+        asks: Asks::default(),
         mic_permission: crate::mic::permission(),
         steering,
         offline_since: Some(Instant::now()),
@@ -3367,7 +3332,7 @@ fn handle_net_event(
                 }
             }));
             scene.feedback = Some(feedback);
-            scene.last_req = 0;
+            scene.asks.new_session();
             scene.sent_layout = None;
             scene.update_needed = None;
             // Whether the system lets the app record (the PC shows when it does not).
@@ -3451,11 +3416,9 @@ fn handle_net_event(
             scene.update_needed = Some((pc_newer, pc_app));
         }
         NetEvent::Disconnected { why } => {
-            // Commands of that PC are over with it.
-            scene.command_after.clear();
-            // What waited for an answer gets none.
-            for (what, _) in std::mem::take(&mut scene.asks).into_values() {
-                scene.ask_failed(what, ui::Failure::Disconnected, String::new());
+            // What waited for an answer gets none, nor do the commands of that PC.
+            for what in scene.asks.disconnected(Instant::now()) {
+                scene.tell_failure(what, ui::Failure::Disconnected, "");
             }
             scene.offline_since = Some(Instant::now());
             scene.pairing = None;
@@ -3714,11 +3677,11 @@ fn take_command(
             Outcome::Done
         }
         Does::Profile(i) => {
-            let before = scene.last_req;
+            let before = scene.asks.last();
             handle_action(scene, Action::ApplyProfile(i), passthrough, controls);
-            if scene.last_req > before {
+            if scene.asks.last() > before {
                 // Answered with the PC's answer to the profile's monitors.
-                scene.command_after.insert(ReqId(scene.last_req), req);
+                scene.asks.answer_command_after(scene.asks.last(), req);
                 return;
             }
             Outcome::failed(ErrorCode::OTHER, "no connection")
@@ -4058,14 +4021,13 @@ fn handle_action(
                 ui::Asked::Profile(i),
             );
             // Placed once the PC answers with its monitors' numbers.
-            scene.profile_switch = req.map(|req| ProfileSwitch {
-                req,
-                places: if p.settings.cinema {
+            scene.profile_switch = req.map(|req| {
+                let places = if p.settings.cinema {
                     Vec::new()
                 } else {
                     p.places.clone()
-                },
-                ids: None,
+                };
+                ProfileSwitch::new(req, places)
             });
             let s = &mut scene.settings;
             s.preset = p.settings.preset;

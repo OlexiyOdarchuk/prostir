@@ -13,6 +13,7 @@ pub mod commands;
 pub mod i18n;
 pub mod layout;
 pub mod outbox;
+pub mod pending;
 pub mod profiles;
 pub mod settings;
 pub mod ui;
