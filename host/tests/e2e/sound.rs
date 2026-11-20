@@ -33,18 +33,22 @@ fn wait_written(pc: &Pc, headset: &mut FakeHeadset, level: u8) {
     }
 }
 
-/// Takes what the PC sends until it put the headset's level on its new sound device.
-/// The device's first level is the headset's whatever it says: a slider moved before
-/// would be put back, not asked about. The device is set at start too, before the
-/// session follows it, so the level alone does not tell.
+/// Takes what the PC sends until the session took the headset's new sound device in:
+/// its first level is the headset's whatever it says, so a slider moved before would
+/// be put back, not asked about. The device is set at start too, before the session
+/// follows it, so the level alone does not tell. Read before the PC set it, the device
+/// needs nothing more; else the PC puts the headset's level on it, and that is waited
+/// for too.
 fn wait_first_volume(pc: &mut Pc, headset: &mut FakeHeadset) {
     const NEW_DEVICE: &str = "volume: a new device for the headset";
     const SET: &str = "fake desktop: volume set to";
-    pc.wait_log(SOON, NEW_DEVICE);
-    let log = pc.lines("");
-    let new_device = log.iter().position(|l| l.contains(NEW_DEVICE)).unwrap();
-    let before = log[..new_device].iter().filter(|l| l.contains(SET)).count();
-    pc.wait_log_after(SOON, SET, before);
+    let line = pc.wait_log(SOON, NEW_DEVICE);
+    if line.contains("it takes the headset's") {
+        let log = pc.lines("");
+        let new_device = log.iter().position(|l| l.contains(NEW_DEVICE)).unwrap();
+        let before = log[..new_device].iter().filter(|l| l.contains(SET)).count();
+        pc.wait_log_after(SOON, SET, before);
+    }
     wait_written(pc, headset, FIRST_VOLUME);
 }
 

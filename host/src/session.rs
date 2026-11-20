@@ -792,6 +792,9 @@ impl Session {
             return;
         };
         if sink.outdated(writes) {
+            if new_device {
+                info!("volume: a new device for the headset, read before the PC set it");
+            }
             return;
         }
         if new_device {
