@@ -79,7 +79,7 @@ impl Brain {
                 let text = t("Шолом не підключено", "No headset is connected");
                 return self.answer(reply, CtlReply::failed(ApiError::NotConnected, text));
             }
-            if self.main.is_none() {
+            if self.roles.main.is_none() {
                 let text = t(
                     "Команди з ПК виконує лише головний шолом, а підключено гостя",
                     "Commands from the PC go to the main headset; a guest is connected",
@@ -259,6 +259,7 @@ impl Brain {
             return CtlReply::failed(ApiError::Other, "no monitors");
         };
         let lead = self
+            .roles
             .main
             .and_then(|key| self.sessions.get(&key))
             .or_else(|| self.sessions.values().min_by_key(|s| s.id));
@@ -496,6 +497,7 @@ impl Brain {
         let mut order: Vec<_> = self.sessions.iter().collect();
         order.sort_by_key(|(_, s)| s.id);
         let lead = self
+            .roles
             .main
             .and_then(|key| self.sessions.get(&key))
             .or_else(|| order.first().map(|(_, s)| *s));

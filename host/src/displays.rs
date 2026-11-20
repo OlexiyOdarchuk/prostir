@@ -75,6 +75,9 @@ impl Backoff {
     }
 }
 
+/// A headset that waited this long for a fresh picture of a stream that sent nothing
+/// meanwhile gets it from the stream starting over.
+const STARVED: Duration = Duration::from_secs(3);
 /// Between sessions, how often a layout waiting for the desktop to list new outputs
 /// looks again.
 const LISTING_LOOK: Duration = Duration::from_millis(500);
@@ -484,6 +487,15 @@ impl Displays {
         self.check_primary();
         self.check_window_panels();
         self.stop_too_big();
+        // A fresh picture asked of a stream that then stood still never came.
+        for id in self.router.starved(STARVED) {
+            if self.streaming
+                && let Some(e) = self.screens.get(&id).and_then(|s| s.stream.as_ref())
+            {
+                info!("{id}: no fresh picture came for a headset: starting its stream over");
+                e.set_paused(false);
+            }
+        }
         self.sync_physical(new_id);
     }
 
@@ -1028,36 +1040,56 @@ impl Displays {
     /// one in a codec some headset does not decode (a choice saved with another
     /// headset) starts over in H.264, which every headset decodes. The choice stays
     /// saved, and the streams go back to it once every headset decodes it again.
-    pub fn fit_codec<'a>(&mut self, headsets: impl IntoIterator<Item = &'a state::HeadsetCaps>) {
-        let headsets: Vec<&state::HeadsetCaps> = headsets.into_iter().collect();
-        let decoded = |c: Codec| c == Codec::H264 || headsets.iter().all(|h| h.decodes(c));
-        let (codec, software) = self.encoding_now();
-        if !decoded(codec) {
+    pub fn fit_codec(&mut self, headsets: &[state::HeadsetCaps]) {
+        if headsets.is_empty() {
+            return;
+        }
+        // The one chosen where it was put aside for a headset, else what encodes now.
+        let base = if self.fitted_down {
+            (self.settings.codec, self.settings.software)
+        } else {
+            self.encoding_now()
+        };
+        if let Err(e) = self.encode_for(base.0, base.1, headsets) {
+            warn!("{e:#}");
+        }
+    }
+
+    /// The codec the streams go in when `codec` is chosen and the headsets with a
+    /// session are `headsets`: it, where every one of them decodes it, else H.264.
+    pub fn codec_for(codec: Codec, headsets: &[state::HeadsetCaps]) -> Codec {
+        if codec == Codec::H264 || headsets.iter().all(|h| h.decodes(codec)) {
+            codec
+        } else {
+            Codec::H264
+        }
+    }
+
+    /// Encodes `codec` (on the CPU with `software`) as far as `headsets` decode it
+    /// (see [`Displays::codec_for`]), with one switch at most; the choice stays
+    /// `codec`, and the streams go back to it once every headset decodes it.
+    pub fn encode_for(
+        &mut self,
+        codec: Codec,
+        software: bool,
+        headsets: &[state::HeadsetCaps],
+    ) -> Result<()> {
+        let fits = Self::codec_for(codec, headsets);
+        let now = self.encoding_now().0;
+        if fits != codec && now != fits {
             info!("a headset does not decode {codec:?}: streaming H.264");
-            match self.encode_with(Codec::H264, software) {
-                Ok(()) => self.fitted_down = true,
-                Err(e) => warn!("{e:#}"),
-            }
-            return;
+        } else if self.fitted_down && fits == codec && now != fits {
+            info!("every headset decodes {codec:?}: streaming it again");
         }
-        let wanted = (self.settings.codec, self.settings.software);
-        if !self.fitted_down || headsets.is_empty() || !decoded(wanted.0) {
-            return;
-        }
-        self.fitted_down = false;
-        let would = crate::encoder::pick(wanted.0, wanted.1).map(|(_, c)| c);
-        if would.is_ok_and(|c| c != codec) {
-            info!("every headset decodes {:?}: streaming it again", wanted.0);
-            if let Err(e) = self.encode_with(wanted.0, wanted.1) {
-                warn!("{e:#}");
-            }
-        }
+        self.fitted_down = fits != codec;
+        self.encode_with(fits, software)
     }
 
     /// Every screen as the headset that can do what `headset` says is told about it
     /// (`Displays`): in the order of the rows, then those the rows leave out; window
     /// panels and the PC's own displays only for a headset that shows them; one
-    /// streaming larger than it decodes failed for it. Texts are cut to fit.
+    /// streaming larger than it decodes, or beyond the streams it takes at once,
+    /// failed for it. Texts are cut to fit.
     pub fn displays_part(&self, headset: &state::HeadsetCaps) -> state::Displays {
         use prostir_proto::state::{
             DeskRect, Display, DisplayKind, DisplayState, Mode, caps, clip,
@@ -1080,6 +1112,11 @@ impl Displays {
             ScreenKind::Window { .. } => headset.has(caps::headset::WINDOWS),
             ScreenKind::Physical { .. } => headset.has(caps::headset::PHYSICAL),
         };
+        // Streams this headset takes at once: those after it, in the order of the
+        // list, stand failed for it alone.
+        let streams_max = streams_max(headset);
+        let mut streams = 0;
+        let several = self.router.receivers() > 1;
         let displays = order
             .into_iter()
             .filter_map(|id| self.screens.get(&id))
@@ -1120,18 +1157,45 @@ impl Displays {
                     .router
                     .stream_format(s.id)
                     .filter(|((w, h), codec)| !headset.fits(*codec, *w, *h));
+                // Its size not known yet: starting still for a headset it might not fit
+                // (as made, larger than it decodes; a display of the PC, as large as
+                // it is, while several headsets watch).
+                let pending = self.router.stream_format(s.id).is_none()
+                    && s.kind.spec().map_or(several, |m| {
+                        !headset.fits(self.cfg.codec, m.width, m.height)
+                    });
                 let state = match (&s.state, too_big) {
                     (ScreenState::Running, Some((size, codec))) => DisplayState::Failed {
                         error: state::ErrorCode::BAD_SIZE,
                         detail: clip(&too_big_why(&s.name(), size, codec), state::MAX_DETAIL),
                     },
                     (ScreenState::Starting, _) => DisplayState::Starting,
+                    (ScreenState::Running, None) if pending => DisplayState::Starting,
                     (ScreenState::Running, None) => DisplayState::Running,
                     (ScreenState::Failed { error, why }, _) => DisplayState::Failed {
                         error: *error,
                         detail: clip(why, state::MAX_DETAIL),
                     },
                     (ScreenState::Absent, _) => DisplayState::Absent,
+                };
+                let streams_here = matches!(state, DisplayState::Running | DisplayState::Starting)
+                    && (!s.is_physical() || s.is_shown_physical());
+                let state = if streams_here && streams >= streams_max {
+                    let why = format!(
+                        "{}: {} ({streams_max})",
+                        s.name(),
+                        t(
+                            "більше потоків, ніж шолом бере",
+                            "more streams than the headset takes"
+                        )
+                    );
+                    DisplayState::Failed {
+                        error: state::ErrorCode::LIMIT,
+                        detail: clip(&why, state::MAX_DETAIL),
+                    }
+                } else {
+                    streams += usize::from(streams_here);
+                    state
                 };
                 Display {
                     id: s.id.wire(),
@@ -1285,7 +1349,13 @@ impl Displays {
         let before = self.cfg.clone();
         self.cfg.backend = backend;
         self.cfg.codec = codec;
-        let ids: Vec<ScreenId> = self.monitors().map(|s| s.id).collect();
+        // Monitors and window panels (their windows stay on them).
+        let ids: Vec<ScreenId> = self
+            .screens
+            .values()
+            .filter(|s| s.is_virtual() || s.is_window())
+            .map(|s| s.id)
+            .collect();
         for (i, &id) in ids.iter().enumerate() {
             let Err(e) = self.restart_monitor(id, Some(&before)) else {
                 continue;
@@ -1302,9 +1372,7 @@ impl Displays {
             }
             return Err(e);
         }
-        // Window panels are made again when wanted; the PC's displays start again by
-        // themselves, right away.
-        self.close_window_panels();
+        // The PC's displays start again by themselves, right away.
         let physical: Vec<ScreenId> = self.physical().map(|s| s.id).collect();
         for id in physical {
             self.stop_physical(id);
@@ -1364,6 +1432,15 @@ impl Displays {
                 }
                 self.layout_changed();
             }
+            // A window panel closes, its window back where it was.
+            None if self.screens.get(&id).is_some_and(Screen::is_window) => {
+                error!("{id}: no stream; the window panel closes");
+                self.router.remove_stream(id);
+                if let Some(screen) = self.screens.get_mut(&id) {
+                    screen.output = Some(output);
+                }
+                self.close_panel(id, true);
+            }
             // It keeps its place, and is tried again at the next session.
             None => {
                 error!("{id}: no stream; trying again at the next session");
@@ -1421,10 +1498,12 @@ impl Displays {
         self.retry_too_big();
         self.retry_failed();
         // Paused ones (kept from before) start over as `set_streaming` resumes them;
-        // running ones (just made) are resumed here, which starts them over too.
+        // running ones (just made, or streaming to other headsets) get a fresh
+        // picture here.
         if self.streaming {
-            for (_, e) in self.encoders() {
-                e.set_paused(false);
+            let ids: Vec<ScreenId> = self.encoders().map(|(id, _)| id).collect();
+            for id in ids {
+                self.fresh_picture(id);
             }
         }
         self.set_streaming(true);
@@ -2138,10 +2217,21 @@ impl Displays {
 
     /// A fresh picture of screen `id` as a keyframe, though nothing on it moves: the
     /// headset missed what it sent before.
+    ///
+    /// A stream whose picture moves and that goes to another headset already sends a
+    /// keyframe with its next frame, so that headset sees no hiccup; any other starts
+    /// over to send its picture (and should a moving one stop, `tick` starts it over all the same, see
+    /// [`Router::starved`]).
     pub fn fresh_picture(&self, id: ScreenId) {
-        if self.streaming
-            && let Some(e) = self.screens.get(&id).and_then(|s| s.stream.as_ref())
-        {
+        if !self.streaming {
+            return;
+        }
+        let Some(e) = self.screens.get(&id).and_then(|s| s.stream.as_ref()) else {
+            return;
+        };
+        if self.router.live(id) {
+            e.force_keyframe();
+        } else {
             e.set_paused(false);
         }
     }
@@ -2248,6 +2338,17 @@ impl Displays {
             primary: self.primary,
         })
     }
+}
+
+/// Streams at once at most: a lane each (`2..32`).
+pub const STREAMS_MAX: u8 = 30;
+
+/// How many streams a headset that can do what `headset` says takes at once.
+pub fn streams_max(headset: &state::HeadsetCaps) -> usize {
+    usize::from(match headset.streams_max {
+        0 => STREAMS_MAX,
+        n => n.min(STREAMS_MAX),
+    })
 }
 
 /// Why display `name` does not stream to a headset: its picture of `w`x`h` is larger
@@ -2455,6 +2556,35 @@ fn rows_in_step<K: Copy + PartialEq>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The streams go in the codec chosen only where every headset decodes it, and in
+    /// H.264 otherwise; without a headset, as chosen.
+    #[test]
+    fn the_codec_is_one_every_headset_decodes() {
+        let decoder = |codec| state::Decoder {
+            codec,
+            max_w: 4096,
+            max_h: 4096,
+        };
+        let both = state::HeadsetCaps {
+            decoders: vec![decoder(0), decoder(1)],
+            ..state::HeadsetCaps::default()
+        };
+        let h264 = state::HeadsetCaps {
+            decoders: vec![decoder(0)],
+            ..state::HeadsetCaps::default()
+        };
+        assert_eq!(Displays::codec_for(Codec::H265, &[]), Codec::H265);
+        assert_eq!(
+            Displays::codec_for(Codec::H265, std::slice::from_ref(&both)),
+            Codec::H265
+        );
+        assert_eq!(
+            Displays::codec_for(Codec::H265, &[both.clone(), h264.clone()]),
+            Codec::H264
+        );
+        assert_eq!(Displays::codec_for(Codec::H264, &[both, h264]), Codec::H264);
+    }
 
     /// On a desktop whose primary output is always at (0, 0), the plan moves with it.
     #[test]

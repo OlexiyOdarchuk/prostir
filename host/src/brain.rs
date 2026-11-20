@@ -161,16 +161,31 @@ pub struct Roles<K> {
     /// The tray shows it and commands go to it: the main session, else the first.
     pub lead: Option<K>,
     /// Its microphone is the PC's end of the headset microphone: the main session's
-    /// if it has the right, else the first connected with the right.
+    /// if it has the right, else the first connected with the right; while it is in
+    /// use (a program records, or the headset streams it), it stays where it is.
     pub mic: Option<K>,
 }
 
+impl<K> Roles<K> {
+    /// No session has any.
+    pub const NONE: Self = Self {
+        main: None,
+        lead: None,
+        mic: None,
+    };
+}
+
 /// The [`Roles`] of `sessions` (the headset's key and its line's rights, in the order
-/// they connected), where `was_main` was the main one before.
-pub fn roles<K: Copy + PartialEq>(sessions: &[(K, Access)], was_main: Option<K>) -> Roles<K> {
+/// the headsets first connected), where `was` are the roles before and `mic_busy`
+/// whether the microphone is in use.
+pub fn roles<K: Copy + PartialEq>(
+    sessions: &[(K, Access)],
+    was: Roles<K>,
+    mic_busy: bool,
+) -> Roles<K> {
     let mains = || sessions.iter().filter(|(_, a)| a.is_main());
     let main = mains()
-        .find(|(k, _)| Some(*k) == was_main)
+        .find(|(k, _)| Some(*k) == was.main)
         .or_else(|| mains().next())
         .map(|(k, _)| *k);
     let lead = main.or_else(|| sessions.first().map(|(k, _)| *k));
@@ -179,13 +194,38 @@ pub fn roles<K: Copy + PartialEq>(sessions: &[(K, Access)], was_main: Option<K>)
             .iter()
             .any(|(key, a)| key == k && a.may(perms::MIC))
     };
-    let mic = main.filter(may_mic).or_else(|| {
+    let kept = was.mic.filter(|k| mic_busy && may_mic(k));
+    let mic = kept.or_else(|| main.filter(may_mic)).or_else(|| {
         sessions
             .iter()
             .find(|(_, a)| a.may(perms::MIC))
             .map(|(k, _)| *k)
     });
     Roles { main, lead, mic }
+}
+
+/// The order headsets first connected in, by key: one connecting again (its session
+/// replaced) keeps its place, one that left loses it.
+#[derive(Debug, Default)]
+pub struct Arrivals<K>(Vec<K>);
+
+impl<K: Copy + PartialEq> Arrivals<K> {
+    /// Headset `key` has a session (again).
+    pub fn connected(&mut self, key: K) {
+        if !self.0.contains(&key) {
+            self.0.push(key);
+        }
+    }
+
+    /// Headset `key` has no session any more.
+    pub fn left(&mut self, key: K) {
+        self.0.retain(|k| *k != key);
+    }
+
+    /// The keys in the order they first connected.
+    pub fn keys(&self) -> impl Iterator<Item = &K> {
+        self.0.iter()
+    }
 }
 
 /// What becomes of a headset that asked to open a session.
@@ -347,25 +387,31 @@ mod tests {
         perms: perms::CHANGES,
     };
 
+    fn was(main: Option<u8>, mic: Option<u8>) -> Roles<u8> {
+        Roles {
+            main,
+            lead: main,
+            mic,
+        }
+    }
+
     /// One main session at a time: the first main one connected, kept while it lasts
     /// (a main headset that connected later does not take it over).
     #[test]
     fn one_session_is_the_main_one() {
         let none: [(u8, Access); 0] = [];
-        assert_eq!(
-            roles(&none, None),
-            Roles {
-                main: None,
-                lead: None,
-                mic: None
-            }
-        );
-        let r = roles(&[(1, GUEST), (2, Access::MAIN), (3, Access::MAIN)], None);
+        assert_eq!(roles(&none, Roles::NONE, false), Roles::NONE);
+        let all = [(1, GUEST), (2, Access::MAIN), (3, Access::MAIN)];
+        let r = roles(&all, Roles::NONE, false);
         assert_eq!((r.main, r.lead, r.mic), (Some(2), Some(2), Some(2)));
-        let r = roles(&[(1, GUEST), (2, Access::MAIN), (3, Access::MAIN)], Some(3));
+        let r = roles(&all, was(Some(3), Some(3)), false);
         assert_eq!(r.main, Some(3), "the main one stays the main one");
         // It left: the next main one.
-        let r = roles(&[(1, GUEST), (2, Access::MAIN)], Some(3));
+        let r = roles(
+            &[(1, GUEST), (2, Access::MAIN)],
+            was(Some(3), Some(3)),
+            false,
+        );
         assert_eq!(r.main, Some(2));
     }
 
@@ -373,12 +419,41 @@ mod tests {
     /// the microphone is the main session's if it may, else the first's that may.
     #[test]
     fn the_tray_and_the_microphone_go_to_one_session() {
-        let r = roles(&[(1, GUEST), (2, GUEST_MIC)], None);
+        let r = roles(&[(1, GUEST), (2, GUEST_MIC)], Roles::NONE, false);
         assert_eq!((r.main, r.lead, r.mic), (None, Some(1), Some(2)));
-        let r = roles(&[(1, GUEST_MIC), (2, MAIN_NO_MIC)], None);
+        let r = roles(&[(1, GUEST_MIC), (2, MAIN_NO_MIC)], Roles::NONE, false);
         assert_eq!((r.main, r.lead, r.mic), (Some(2), Some(2), Some(1)));
-        let r = roles(&[(1, GUEST), (2, MAIN_NO_MIC)], None);
+        let r = roles(&[(1, GUEST), (2, MAIN_NO_MIC)], Roles::NONE, false);
         assert_eq!(r.mic, None, "nobody may");
+    }
+
+    /// The microphone in use stays with its headset when a main one that may comes;
+    /// once it is not in use, it goes to the main one.
+    #[test]
+    fn the_microphone_in_use_stays_where_it_is() {
+        let both = [(1, GUEST_MIC), (2, Access::MAIN)];
+        let r = roles(&both, was(None, Some(1)), true);
+        assert_eq!((r.main, r.mic), (Some(2), Some(1)));
+        let r = roles(&both, was(Some(2), Some(1)), false);
+        assert_eq!(r.mic, Some(2));
+        // Gone, or without the right: it moves all the same.
+        let r = roles(&[(2, Access::MAIN)], was(Some(2), Some(1)), true);
+        assert_eq!(r.mic, Some(2));
+    }
+
+    /// A headset connecting again keeps its place among the others; one that left
+    /// comes back last.
+    #[test]
+    fn a_headset_back_keeps_its_place() {
+        let mut arrivals = Arrivals::default();
+        for key in [1, 2, 3] {
+            arrivals.connected(key);
+        }
+        arrivals.connected(1);
+        assert_eq!(arrivals.keys().copied().collect::<Vec<_>>(), [1, 2, 3]);
+        arrivals.left(1);
+        arrivals.connected(1);
+        assert_eq!(arrivals.keys().copied().collect::<Vec<_>>(), [2, 3, 1]);
     }
 
     #[test]

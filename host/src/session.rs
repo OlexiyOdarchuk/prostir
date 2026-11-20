@@ -414,7 +414,9 @@ impl Session {
             ..standing
         };
         let mut publisher = publish::Publisher::new(headset, access_in(configured, main));
-        displays.fit_codec(others.iter().chain([publisher.caps()]));
+        let mut headsets = others.to_vec();
+        headsets.push(publisher.caps().clone());
+        displays.fit_codec(&headsets);
         let outbox = Arc::new(outbox::Outbox::default());
         // The session opens now that it can be served: the monitors exist, and the
         // writer (which also pings) starts below. The headset counts silence from
@@ -458,7 +460,7 @@ impl Session {
         // the snapshot, before anything of them could go.
         displays.stop_too_big();
         // The streams the snapshot listed may start (each starts over just below).
-        let listed = publisher.listed().map(ScreenId::from_wire).collect();
+        let listed = publisher.streamable().map(ScreenId::from_wire).collect();
         displays.router.publish(id, &listed);
         displays.headset_connected();
         let mut session = Session {
@@ -488,19 +490,17 @@ impl Session {
         if session.publisher.caps().has(caps::headset::VOLUME) {
             session.volume = sink.map(|sink| (sink, PcVolume::default()));
         }
+        // The first headset brings its level to the PC; one that comes while others
+        // listen takes the PC's instead, so their sound does not jump.
         let opened_with = session.publisher.headset.volume;
-        if let Some(v) = opened_with {
-            session.volume_from_headset(v);
+        match opened_with {
+            Some(v) if others.is_empty() => session.volume_from_headset(v),
+            _ => session.take_pc_volume(),
         }
         session.headset_changed(displays);
         session.publish(displays, store, None);
         crate::usage::headset_connected(store.wanted().count);
         Ok(session)
-    }
-
-    /// This headset's session is the main one (its arrangement is the desktop's).
-    pub fn is_main(&self) -> bool {
-        self.standing.main
     }
 
     /// The headset's own "No limits".
@@ -516,6 +516,11 @@ impl Session {
             .up
             .get(&UpKind::Mic)
             .is_some_and(|m| m.switch)
+    }
+
+    /// The headset streams its microphone now.
+    pub fn mic_streams(&self) -> bool {
+        self.ups.values().any(|(kind, _)| *kind == UpKind::Mic)
     }
 
     /// What the headset can do.
@@ -627,8 +632,20 @@ impl Session {
         self.volume = sink
             .filter(|_| self.publisher.caps().has(caps::headset::VOLUME))
             .map(|sink| (sink, PcVolume::default()));
-        if let Some(v) = self.publisher.headset.volume {
-            self.volume_from_headset(v);
+        // The PC's sound does not jump to this headset's level: the headset is asked
+        // to take the PC's.
+        self.take_pc_volume();
+    }
+
+    /// The headset is asked to take the level the PC's device has now, where the PC
+    /// knows it (the device does not move).
+    fn take_pc_volume(&mut self) {
+        let Some((sink, pc)) = &mut self.volume else {
+            return;
+        };
+        if let Some((level, muted)) = sink.level() {
+            let act = pc.device(level, muted, Instant::now());
+            do_volume(sink, act, &self.outbox);
         }
     }
 
@@ -783,7 +800,11 @@ impl Session {
         for msg in self.publisher.changed(&sources) {
             self.outbox.control(msg);
         }
-        let listed = self.publisher.listed().map(ScreenId::from_wire).collect();
+        let listed = self
+            .publisher
+            .streamable()
+            .map(ScreenId::from_wire)
+            .collect();
         for id in displays.router.publish(self.id, &listed) {
             displays.fresh_picture(id);
         }

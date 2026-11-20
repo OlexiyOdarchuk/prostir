@@ -371,6 +371,15 @@ impl Outbox {
         self.lock().round_trip.take()
     }
 
+    /// Whether a keyframe of stream `id` still waits to be sent.
+    pub fn keyframe_waiting(&self, id: DisplayId) -> bool {
+        self.lock().streams.get(&id).is_some_and(|q| {
+            q.items
+                .iter()
+                .any(|i| matches!(i, Item::Frame(f) if f.keyframe))
+        })
+    }
+
     /// Streams that lost frames since the last call.
     pub fn take_dropped(&self) -> BTreeSet<DisplayId> {
         std::mem::take(&mut self.lock().dropped)

@@ -440,6 +440,7 @@ fn watch_commands() {
 fn command(line: &str) -> Result<()> {
     let words: Vec<&str> = line.split_whitespace().collect();
     let device = |level: u8, muted: bool| {
+        *super::audio::LEVEL.lock().unwrap() = Some((level, muted));
         if let Some(tx) = super::audio::VOLUME.lock().unwrap().as_ref() {
             let _ = tx.send((level, muted, std::time::Instant::now()));
         }

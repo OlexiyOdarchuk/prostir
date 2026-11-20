@@ -880,7 +880,7 @@ and is known by the EDID from then on.
 | 3 | `SetDisplays` | `modes:list<Mode>(max 32), primary:opt<Primary>, shown_physical:list<DisplayId>(max 32)` | `Ids`, in the order of `modes` | changes | `LIMIT`, `BAD_SIZE`, `UNKNOWN_DISPLAY` |
 | 4 | `SetPrimary` | `id:DisplayId` | `Done` | changes | `UNKNOWN_DISPLAY` |
 | 5 | `ShowPhysical` | `id:DisplayId, shown:bool` | `Done` | changes | `UNKNOWN_DISPLAY`, `LIMIT`, `CAPTURE` |
-| 6 | `SetEncoding` | `bitrate:opt<u16>, codec:opt<Codec>, software:opt<bool>, sharp:opt<bool>` (none: as it is) | `Done` (what came of it is in `Encoding`) | changes | `ENCODER`, `BAD_ARGUMENT`, `BAD_SIZE` (a display streaming now would be larger than the headset decodes in the new codec: nothing changes) |
+| 6 | `SetEncoding` | `bitrate:opt<u16>, codec:opt<Codec>, software:opt<bool>, sharp:opt<bool>` (none: as it is) | `Done` (what came of it is in `Encoding`: a codec another headset with a session does not decode stays chosen, in `wanted`, while the host encodes H.264, in `using`, until every headset decodes it) | changes | `ENCODER`, `BAD_ARGUMENT`, `BAD_SIZE` (a display streaming now would be larger than the headset decodes in the new codec: nothing changes) |
 | 7 | `SetSound` | `to_headset:bool` | `Done` | changes | `SOUND` |
 | 9 | `DetachWindow` | | `Added` | changes, private | `NO_WINDOW`, `LIMIT` |
 | 10 | `WindowHere` | `id:DisplayId` | `Done` | input | `NO_WINDOW`, `UNKNOWN_DISPLAY` |
@@ -984,7 +984,11 @@ host) shows nothing of that display and goes on with the others.
 
 At most `Limits.streams_max` streams go at once (30 at most: a lane each; never more
 than the headset's `HeadsetCaps.streams_max`): a request that would make more displays
-stream (a monitor, a window panel, a display of the PC shown) fails `LIMIT`. A display
+stream (a monitor, a window panel, a display of the PC shown) fails `LIMIT`. Displays
+that stream beyond what a headset takes (more made by another headset, or kept from
+one that takes more) stand `Failed{LIMIT}` in that headset's `Displays`, in the order
+of the list, with no `StreamStart` for it; they stream to it once fewer are ahead of
+them. A display
 whose stream cannot start (its output or encoder fails) stands in `Displays` as
 `Failed`, without a `StreamStart`, keeps its place and is tried again; a display
 removed leaves `Displays`, and its `StreamEnd` and the `Displays` without it may come

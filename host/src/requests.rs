@@ -195,9 +195,13 @@ fn carry_out(
             let bitrate = bitrate.map_or(now.bitrate, |b| u32::from(b).clamp(5, 100));
             let codec = codec.unwrap_or(now.codec);
             let software = software.unwrap_or(now.software);
-            // Nothing changes while a display streaming now would be too big for the
-            // headset in what the PC would encode with.
-            let (_, would) = crate::encoder::pick(codec, software).context(UserError::Encoder)?;
+            // What the PC would encode with: the codec chosen where every headset with
+            // a session decodes it, else H.264 (the choice stays saved). Nothing
+            // changes while a display streaming now would be too big for the headset
+            // in it.
+            let headsets = displays.router.headsets();
+            let fits = Displays::codec_for(codec, &headsets);
+            let (_, would) = crate::encoder::pick(fits, software).context(UserError::Encoder)?;
             if would != displays.codec()
                 && let Some((w, h)) = displays.too_big_for(would, asker.caps)
             {
@@ -206,10 +210,7 @@ fn carry_out(
             store.set_encoding(bitrate, sharp.unwrap_or(now.sharp), codec, software);
             // Quality and clearer text apply even when the codec cannot change.
             displays.apply(&store.wanted());
-            let result = displays.encode_with(codec, software);
-            // In a codec every headset decodes (this one among them).
-            let headsets = displays.router.headsets();
-            displays.fit_codec(&headsets);
+            let result = displays.encode_for(codec, software, &headsets);
             // A monitor whose stream could not start again is gone.
             keep_screens(store, displays, false);
             result?;
