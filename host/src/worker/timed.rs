@@ -2,7 +2,8 @@
 //! of its own and waited for at most so long. One that runs out of time goes on
 //! there; what it returns late is dropped there, so nothing it made stays.
 
-use std::sync::mpsc;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use log::warn;
@@ -50,12 +51,107 @@ pub fn call<T: Send + 'static>(
     })
 }
 
+/// Calls left behind (see [`call_counted`]), by kind: how many still run, and how
+/// many times each kind was left behind at all.
+pub struct Behind<K> {
+    counts: Mutex<(BTreeMap<K, u32>, BTreeMap<K, u32>)>,
+}
+
+impl<K> Default for Behind<K> {
+    fn default() -> Self {
+        Self {
+            counts: Mutex::new((BTreeMap::new(), BTreeMap::new())),
+        }
+    }
+}
+
+impl<K: Ord + Copy> Behind<K> {
+    /// Those of each kind left behind that still run.
+    pub fn running(&self) -> BTreeMap<K, u32> {
+        self.counts.lock().unwrap().0.clone()
+    }
+
+    /// All left behind that still run.
+    pub fn total(&self) -> u32 {
+        self.counts.lock().unwrap().0.values().sum()
+    }
+
+    /// How many times a call of `kind` was left behind.
+    pub fn hangs(&self, kind: K) -> u32 {
+        self.counts
+            .lock()
+            .unwrap()
+            .1
+            .get(&kind)
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+/// As [`call`], counting a call of `kind` left behind in `behind` until it ends.
+pub fn call_counted<K: Ord + Copy + Send + 'static, T: Send + 'static>(
+    behind: &Arc<Behind<K>>,
+    kind: K,
+    name: &str,
+    what: &str,
+    limit: Duration,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, TimedOut> {
+    // 0: under way, 1: left behind (counted), 2: ended.
+    let state = Arc::new(Mutex::new(0u8));
+    let (ended, counts) = (state.clone(), behind.clone());
+    let result = call(name, what, limit, move || {
+        let out = f();
+        let mut state = ended.lock().unwrap();
+        if *state == 1
+            && let Some(n) = counts.counts.lock().unwrap().0.get_mut(&kind)
+        {
+            *n = n.saturating_sub(1);
+        }
+        *state = 2;
+        out
+    });
+    if result.is_err() {
+        let mut state = state.lock().unwrap();
+        if *state == 0 {
+            *state = 1;
+            let mut counts = behind.counts.lock().unwrap();
+            *counts.0.entry(kind).or_insert(0) += 1;
+            *counts.1.entry(kind).or_insert(0) += 1;
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Instant;
+
+    /// A call left behind counts while it runs, and the times its kind hung stay.
+    #[test]
+    fn calls_left_behind_are_counted_while_they_run() {
+        let behind: Arc<Behind<u8>> = Arc::default();
+        let quick = call_counted(&behind, 1, "t", "quick", Duration::from_secs(5), || 7);
+        assert_eq!(quick, Ok(7));
+        assert_eq!((behind.total(), behind.hangs(1)), (0, 0));
+        let slow = call_counted(&behind, 1, "t", "slow", Duration::from_millis(30), || {
+            std::thread::sleep(Duration::from_millis(300));
+        });
+        assert!(slow.is_err());
+        assert_eq!(behind.running().get(&1), Some(&1));
+        assert_eq!(
+            (behind.total(), behind.hangs(1), behind.hangs(2)),
+            (1, 1, 0)
+        );
+        let until = Instant::now() + Duration::from_secs(5);
+        while behind.total() > 0 {
+            assert!(Instant::now() < until, "it ended");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(behind.hangs(1), 1, "remembered");
+    }
 
     #[test]
     fn a_call_in_time_gives_its_result() {

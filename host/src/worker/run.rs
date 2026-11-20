@@ -35,6 +35,10 @@ use crate::screen::{ScreenId, SizeAction, SizeGuard};
 /// without it.
 const ENCODER_START: Duration = Duration::from_secs(10);
 const ENCODER_STOP: Duration = Duration::from_secs(5);
+/// An encoder (by kind) left behind this many times is not used any more.
+const HANGS_OF_A_KIND: u32 = 3;
+/// With this many encoders left behind and still running, no more are started.
+const BEHIND_AT_MOST: u32 = 6;
 /// How long a display of the PC whose stream stopped (or did not start) rests before
 /// it is shown again.
 const PHYSICAL_REST: Duration = Duration::from_secs(2);
@@ -237,6 +241,8 @@ pub struct Worker {
     wallpapers_due: bool,
     /// How many things handed over the worker took so far.
     taken: u64,
+    /// Encoders left behind (a start, stop or pause that ran out of time), by kind.
+    behind: Arc<timed::Behind<Kind>>,
     /// Panels it made (or tried to) for these jobs: each is made once.
     detached: std::collections::BTreeSet<JobId>,
     /// The desktop is to be laid out again.
@@ -313,6 +319,7 @@ impl Worker {
             wallpapers_due: false,
             taken: 0,
             detached: std::collections::BTreeSet::new(),
+            behind: Arc::default(),
             layout_due: false,
             applied: (Vec::new(), Vec::new()),
             layout_waits: false,
@@ -515,7 +522,7 @@ impl Worker {
                 if let Some(slot) = self.slots.get_mut(&id) {
                     let encoder = slot.encoder.take();
                     slot.started_for = None;
-                    stop_encoder(encoder, &slot.name);
+                    stop_encoder(encoder, &slot.name, &self.shared.steps, &self.behind);
                 }
                 self.shared.router.remove_stream(id);
                 self.layout_due = true;
@@ -567,8 +574,14 @@ impl Worker {
         if slot.key().is_some() && slot.key() == self.primary_made.as_ref() {
             self.primary_made = None;
         }
-        stop_encoder(slot.encoder.take(), &slot.name);
+        stop_encoder(
+            slot.encoder.take(),
+            &slot.name,
+            &self.shared.steps,
+            &self.behind,
+        );
         self.shared.router.remove_stream(id);
+        self.begin(format!("removing the output of {}", slot.name));
         drop(slot);
         self.layout_due = true;
     }
@@ -635,7 +648,12 @@ impl Worker {
     fn failed(&mut self, id: ScreenId, attempt: u32, e: &anyhow::Error) {
         if let Some(slot) = self.slots.get_mut(&id) {
             if slot.is_physical() {
-                stop_encoder(slot.encoder.take(), &slot.name);
+                stop_encoder(
+                    slot.encoder.take(),
+                    &slot.name,
+                    &self.shared.steps,
+                    &self.behind,
+                );
                 slot.output = None;
                 slot.rest_until = Some(Instant::now() + PHYSICAL_REST);
             } else {
@@ -753,7 +771,7 @@ impl Worker {
         }
         let encoder = slot.encoder.take();
         slot.started_for = None;
-        stop_encoder(encoder, &slot.name);
+        stop_encoder(encoder, &slot.name, &self.shared.steps, &self.behind);
         self.start(id, before);
     }
 
@@ -770,10 +788,20 @@ impl Worker {
             slot.name
         );
         let retired = encoder.retired.clone();
-        match timed::call("encoder-pause", &what, ENCODER_STOP, move || {
-            encoder.set_paused(paused);
-            encoder
-        }) {
+        let kind = encoder.kind();
+        self.shared.steps.begin(what.clone());
+        let done = timed::call_counted(
+            &self.behind,
+            kind,
+            "encoder-pause",
+            &what,
+            ENCODER_STOP,
+            move || {
+                encoder.set_paused(paused);
+                encoder
+            },
+        );
+        match done {
             Ok(encoder) => slot.encoder = Some(encoder),
             // Left behind: started anew at the next step.
             Err(_) => {
@@ -797,6 +825,16 @@ impl Worker {
         output: &mut dyn Output,
         cfg: &EncoderConfig,
     ) -> Result<Running> {
+        let behind = self.behind.total();
+        if behind >= BEHIND_AT_MOST {
+            bail!(
+                "{behind} {}",
+                t(
+                    "кодувальників не відповідають: нових не запускаю",
+                    "encoders do not respond: no more are started"
+                )
+            );
+        }
         let source = output.source();
         let wanted = Asked {
             codec: cfg.codec,
@@ -817,11 +855,25 @@ impl Worker {
             else {
                 break ranked;
             };
+            let kind = (choice.backend, choice.adapter);
+            let hangs = self.behind.hangs(kind);
+            if hangs >= HANGS_OF_A_KIND {
+                let why = format!(
+                    "{} {hangs}",
+                    t("не відповідав разів:", "did not respond, times:")
+                );
+                tried.push((choice, why));
+                continue;
+            }
             let cfg = EncoderConfig {
                 backend: choice.backend,
                 codec: choice.codec,
                 ..cfg.clone()
             };
+            // A step of its own: within its time limit, never "not responding".
+            self.shared
+                .steps
+                .begin(format!("starting the encoder of {name} ({choice})"));
             self.shared
                 .router
                 .add_stream(id, choice.codec, name.to_owned(), physical);
@@ -831,7 +883,9 @@ impl Worker {
             // let go.
             let retired = Arc::new(AtomicBool::new(false));
             let late = retired.clone();
-            let started = timed::call(
+            let started = timed::call_counted(
+                &self.behind,
+                kind,
                 "encoder-start",
                 &format!("starting the encoder of {name}"),
                 ENCODER_START,
@@ -856,13 +910,19 @@ impl Worker {
                         why: text.clone(),
                         resumed: false,
                     };
-                    let next = crate::encoder::catalog().did_not_open(
-                        (choice.backend, choice.adapter),
-                        choice.codec,
-                        id,
-                        &failure,
-                        held((choice.backend, choice.adapter)),
-                    );
+                    // While encoders are left behind, the sessions held are not known:
+                    // no limit is learned.
+                    let next = if self.behind.total() == 0 {
+                        crate::encoder::catalog().did_not_open(
+                            kind,
+                            choice.codec,
+                            id,
+                            &failure,
+                            held(kind),
+                        )
+                    } else {
+                        Next::Another
+                    };
                     if next == Next::Again && !again {
                         again = true;
                     } else {
@@ -908,7 +968,8 @@ impl Worker {
     /// Sessions each encoder holds now, those of the screens `except` left out: every
     /// stream that opened, or is opening (it runs, and has not said it did not open).
     fn running_encoders(&self, except: &[ScreenId]) -> BTreeMap<Kind, u32> {
-        let mut running = BTreeMap::new();
+        // Those left behind may still hold their sessions.
+        let mut running = self.behind.running();
         for (_, s) in self.slots.iter().filter(|(id, _)| !except.contains(id)) {
             if let Some(e) = s.encoder.as_ref().filter(|e| e.opened() || !e.is_paused()) {
                 *running.entry(e.kind()).or_insert(0) += 1;
@@ -1084,7 +1145,12 @@ impl Worker {
         if let Some(output) = slot.output.as_mut() {
             output.detach();
         }
-        stop_encoder(slot.encoder.take(), &slot.name);
+        stop_encoder(
+            slot.encoder.take(),
+            &slot.name,
+            &self.shared.steps,
+            &self.behind,
+        );
         slot.started_for = None;
         self.start(id, None);
     }
@@ -1096,9 +1162,15 @@ impl Worker {
             return;
         };
         let guard = std::mem::take(&mut slot.size_guard);
-        stop_encoder(slot.encoder.take(), &slot.name);
+        stop_encoder(
+            slot.encoder.take(),
+            &slot.name,
+            &self.shared.steps,
+            &self.behind,
+        );
         slot.started_for = None;
         drop(slot.output.take());
+        self.begin(format!("making the output of {id} again"));
         self.make(id);
         if let Some(slot) = self.slots.get_mut(&id) {
             slot.size_guard = guard;
@@ -1144,7 +1216,12 @@ impl Worker {
                 "the stream of {} stopped, starting it again shortly",
                 slot.name
             );
-            stop_encoder(slot.encoder.take(), &slot.name);
+            stop_encoder(
+                slot.encoder.take(),
+                &slot.name,
+                &self.shared.steps,
+                &self.behind,
+            );
             slot.started_for = None;
             drop(slot.output.take());
             slot.rest_until = Some(Instant::now() + PHYSICAL_REST);
@@ -1167,8 +1244,14 @@ impl Worker {
             };
             let (kind, codec) = (encoder.kind(), encoder.codec());
             let open = self.running_encoders(&ids).get(&kind).copied().unwrap_or(0);
-            crate::encoder::catalog().did_not_open(kind, codec, id, &failure, open);
+            // While encoders are left behind, the sessions held are not known.
+            if self.behind.total() == 0 {
+                crate::encoder::catalog().did_not_open(kind, codec, id, &failure, open);
+            }
             self.restart_same(id);
+        }
+        if self.behind.total() > 0 {
+            return;
         }
         // Encoders seen holding more sessions than a limit says: it rises.
         let mut opened: BTreeMap<Kind, u32> = BTreeMap::new();
@@ -1237,6 +1320,7 @@ impl Worker {
         }
         self.primary_checked = Instant::now();
         if let Some(key) = self.primary_key() {
+            self.begin("keeping the primary output ours");
             self.desktop.keep_primary(&key);
         }
     }
@@ -1253,6 +1337,7 @@ impl Worker {
             .filter(|s| s.is_panel())
             .filter_map(|s| s.key().cloned())
             .collect();
+        self.begin("looking whether the panels' windows are there");
         let vacated = match self.desktop.windows() {
             Some(w) => w.vacated(&keys),
             None => Vec::new(),
@@ -1629,6 +1714,8 @@ impl Worker {
         for (_, x, y) in &mut positions {
             (*x, *y) = (*x - dx, *y - dy);
         }
+        // A step of its own after looking at the outputs.
+        self.begin("placing the outputs");
         self.desktop
             .place(&DeskPlan { positions, primary }, &geometries)?;
         let on_desk = plan
@@ -1671,14 +1758,24 @@ impl Worker {
     }
 }
 
-/// Stops `encoder` (of output `name`), waiting for that a while at most; nothing of it
-/// reaches the headsets from now on.
-fn stop_encoder(encoder: Option<Running>, name: &str) {
+/// Stops `encoder` (of output `name`) as a step of its own (see `steps`), waiting for
+/// that a while at most (one left behind counts in `behind`); nothing of it reaches
+/// the headsets from now on.
+fn stop_encoder(
+    encoder: Option<Running>,
+    name: &str,
+    steps: &Steps,
+    behind: &Arc<timed::Behind<Kind>>,
+) {
     let Some(Running { encoder, retired }) = encoder else {
         return;
     };
     retired.store(true, Ordering::Relaxed);
-    let _ = timed::call(
+    steps.begin(format!("stopping the encoder of {name}"));
+    let kind = encoder.kind();
+    let _ = timed::call_counted(
+        behind,
+        kind,
         "encoder-stop",
         &format!("stopping the encoder of {name}"),
         ENCODER_STOP,

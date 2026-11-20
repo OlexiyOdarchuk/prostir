@@ -239,3 +239,61 @@ fn a_request_given_up_is_not_done_later() {
     assert_eq!(pc.count_log("looking where the mouse is"), 0, "done late");
     assert!(!headset.view().closed);
 }
+
+/// An encoder that keeps hanging (three stops left behind here) is not used any more:
+/// the next monitor stands failed, saying why, instead of piling up hung encoders.
+/// Each stop is a step of its own, so the desktop never counts as not responding.
+#[test]
+fn an_encoder_that_keeps_hanging_is_not_used_any_more() {
+    let (_dir, mut pc, _keys, mut headset) = session("desk-encoder-hangs", &Options::default());
+    let mut ids = headset.view().order();
+    for _ in 0..2 {
+        let added = ask_at_once(
+            &mut headset,
+            Request::AddDisplay {
+                mode: Mode::new(320, 240),
+            },
+        );
+        let Outcome::Added { id } = added else {
+            panic!("added, not {added:?}")
+        };
+        ids.push(id);
+    }
+    headset
+        .wait(SOON, "four monitors showing", |v| {
+            ids.iter()
+                .all(|id| v.streams.get(id).is_some_and(|s| s.has_picture()))
+        })
+        .unwrap();
+    pc.desktop("hang encoder-stop 30\nhang encoder-stop 30\nhang encoder-stop 30");
+    pc.wait_log(SOON, "the next encoder-stop hangs for 30 s");
+    for id in &ids[1..] {
+        let done = ask_at_once(&mut headset, Request::RemoveDisplay { id: *id });
+        assert_eq!(done, Outcome::Done);
+    }
+    let left = pc.count_log("going on without it");
+    pc.wait_log_after(Duration::from_secs(20), "going on without it", left + 2);
+    let added = ask_at_once(
+        &mut headset,
+        Request::AddDisplay {
+            mode: Mode::new(320, 240),
+        },
+    );
+    let Outcome::Added { id } = added else {
+        panic!("added, not {added:?}")
+    };
+    headset
+        .wait(SOON, "the new monitor failed", |v| {
+            v.display(id)
+                .is_some_and(|d| matches!(d.state, DisplayState::Failed { .. }))
+        })
+        .unwrap();
+    let state = headset.view().display(id).unwrap().state.clone();
+    let DisplayState::Failed { error, detail } = state else {
+        unreachable!()
+    };
+    assert_eq!(error.known(), ErrorCode::ENCODER, "{detail}");
+    assert!(detail.contains("did not respond"), "{detail}");
+    assert_eq!(pc.count_log("does not respond:"), 0);
+    assert!(!headset.view().closed);
+}

@@ -9,10 +9,13 @@ use crate::platform::linux::named_virtual;
 use crate::platform::{Geometry, OutputKey, Outputs, run};
 
 /// KScreen answers a question within a second.
-const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+const QUERY_TIMEOUT: Duration = Duration::from_secs(4);
 /// Applying a layout waits for KWin to reconfigure its outputs, which on a busy
 /// desktop (outputs just made, a mode change on the panel) takes longer.
-const APPLY_TIMEOUT: Duration = Duration::from_secs(15);
+const APPLY_TIMEOUT: Duration = Duration::from_secs(8);
+/// All tries of one change together take at most this, below the 15 s after which the
+/// desktop counts as not responding (`worker/watch.rs`), with a query before it.
+const APPLY_WITHIN: Duration = Duration::from_secs(9);
 
 fn kscreen_doctor(
     args: &[impl AsRef<std::ffi::OsStr>],
@@ -131,8 +134,13 @@ pub fn apply(settings: &[String]) -> anyhow::Result<()> {
         return Ok(());
     }
     let mut last = String::new();
+    let until = std::time::Instant::now() + APPLY_WITHIN;
     for _ in 0..10 {
-        match kscreen_doctor(settings, APPLY_TIMEOUT) {
+        let left = until.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        match kscreen_doctor(settings, APPLY_TIMEOUT.min(left)) {
             Ok(out) if out.status.success() => {
                 info!("KDE layout: {}", settings.join(" "));
                 return Ok(());
@@ -155,8 +163,13 @@ pub fn apply(settings: &[String]) -> anyhow::Result<()> {
 pub fn set(output: &str, setting: &str) {
     let arg = format!("output.{output}.{setting}");
     let mut last = String::new();
+    let until = std::time::Instant::now() + APPLY_WITHIN;
     for _ in 0..10 {
-        match kscreen_doctor(&[&arg], APPLY_TIMEOUT) {
+        let left = until.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        match kscreen_doctor(&[&arg], APPLY_TIMEOUT.min(left)) {
             Ok(out) if out.status.success() => {
                 info!("{output}: {setting}");
                 return;
