@@ -120,7 +120,7 @@ The same as project meta (Meta tab of the project), to paste in place of its
 
 ### Rust
 
-`rust-version` in `Cargo.toml` says 1.90, but the crates in `Cargo.lock` need more:
+`rust-version` in `Cargo.toml` is 1.96, because the crates in `Cargo.lock` need it:
 for v0.1.3, the gstreamer crates need 1.92 and `kstring` 2.0.5 (a gstreamer
 dependency) needs 1.96. `make-sources.sh` therefore works out the newest
 `rust-version` among the crates the PC part is built from and writes it into the
@@ -190,6 +190,9 @@ The project `home:iShawyha:prostir` exists. In its web UI:
    the XML above and save. In the Repositories tab instead, a repository added from
    the list of distributions gets the `standard` or `universe` path; edit it to the
    one in the table.
+   Then in the Project Config tab add `Prefer: libunwind-dev`: on Debian 13 two
+   packages provide `libunwind-dev` (which `libgstreamer1.0-dev` needs), and without
+   a preference the build stays unresolvable ("have choice for libunwind-dev").
 2. **Package.** Create a package named `prostir` (Create Package). Add the file
    `_service` from this folder to it (Add File, or `osc add _service && osc commit`).
    That is the only file the package keeps. The first service run fails until a
