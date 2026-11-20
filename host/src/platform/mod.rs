@@ -31,10 +31,10 @@
 //!   `set_pairing`; the tray menu also turns autostart on and off.
 //! - `dialogs`: `ask_code` (the pairing code typed on the PC), `notify` and
 //!   `notify_and_wait` (desktop notifications).
-//! - System: `config_home`, `single_instance`, `clean_up_after_crash`, `give_memory_back`, `hostname`, `broadcast_addresses`,
-//!   `run` (a program run to the end, stopped if it hangs). The private runtime dir
-//!   stays inside the platform.
-//! - `on_usb_arrival`: a USB device plugged in (for `adb reverse`).
+//! - System: `config_home`, `single_instance`, `clean_up_after_crash`, `give_memory_back`, `hostname`, `broadcast_addresses`.
+//!   The private runtime dir, and running a program with a time limit, stay inside
+//!   the platform.
+//! - `keep_adb_reverse`: a headset on USB reaches the PC through 127.0.0.1.
 //!
 //! The network belongs to the operating system, not to the desktop: `net.rs` holds
 //! it for every desktop, the fake one too, with a part for each operating system. So
