@@ -5,7 +5,7 @@ use std::io;
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -58,8 +58,19 @@ impl Limiter {
             .filter(|d| !d.is_zero())
     }
 
-    fn failed(&mut self) {
+    /// An attempt starts: it counts as a wrong code until it succeeds, so one that
+    /// never ends (a connection dropped half way) is not free.
+    fn begin(&mut self) {
         self.failures += 1;
+        self.pause();
+    }
+
+    /// The attempt did not succeed: the pause (if any) runs from now.
+    fn failed(&mut self) {
+        self.pause();
+    }
+
+    fn pause(&mut self) {
         if self.failures > FREE_FAILURES {
             let step = (self.failures - FREE_FAILURES - 1).min(5);
             let wait = Duration::from_secs((30u64 << step).min(900));
@@ -129,6 +140,11 @@ impl Drop for TrayCode<'_> {
         self.hide();
     }
 }
+
+/// Held while a headset pairs: one pairing at a time, so the wrong codes counted
+/// before each attempt hold for every connection (several at once would each pass
+/// the check before any had failed).
+static PAIRING: Mutex<()> = Mutex::new(());
 
 /// The code shown on the PC: one per pairing window, not one per attempt.
 static PC_CODE: Mutex<Option<(String, Instant)>> = Mutex::new(None);
@@ -374,6 +390,26 @@ fn accept_within(
                         wait.as_secs()
                     );
                 }
+                let _pairing = match PAIRING.try_lock() {
+                    Ok(guard) => guard,
+                    Err(TryLockError::Poisoned(e)) => e.into_inner(),
+                    Err(TryLockError::WouldBlock) => {
+                        info!("another headset is pairing: this one is told to wait");
+                        refuse(
+                            &mut conn,
+                            t(
+                                "Інший шолом саме сполучається з цим ПК. Спробуйте за хвилину.",
+                                "Another headset is pairing with this PC right now. Try again in a minute.",
+                            ),
+                        )?;
+                        // Its half of the exchange came with the request.
+                        if headset_shows {
+                            let _ = conn.recv();
+                        }
+                        continue;
+                    }
+                };
+                LIMITER.lock().unwrap().begin();
                 // The user needs time to read and type the code.
                 conn.set_idle_limit(PAIRING_TIME);
                 deadline.extend(PAIRING_TIME);
@@ -402,9 +438,9 @@ fn accept_within(
                 if headset_shows && matches!(paired, Ok(None)) {
                     let _ = conn.recv();
                 }
-                // Every attempt that did not succeed counts towards the slowdown: a
-                // cancelled dialog or a broken exchange too, so a peer cannot keep
-                // the PC showing dialogs and codes for free.
+                // Every attempt that did not succeed counted towards the slowdown (from
+                // its start): a cancelled dialog or a broken exchange too, so a peer
+                // cannot keep the PC showing dialogs and codes for free.
                 let paired = match paired {
                     Ok(p) => p,
                     Err(e) => {
@@ -987,16 +1023,21 @@ mod tests {
             warned: true, // no notification from tests
         };
         for _ in 0..FREE_FAILURES {
+            l.begin();
             l.failed();
             assert!(l.wait().is_none());
         }
-        l.failed();
+        // Counted from its start: the pause holds while it runs.
+        l.begin();
         let first = l.wait().expect("a pause after the free ones");
         assert!(first > Duration::from_secs(25) && first <= Duration::from_secs(30));
+        // Its end does not count it again.
         l.failed();
+        assert!(l.wait().unwrap() <= Duration::from_secs(30));
+        l.begin();
         assert!(l.wait().unwrap() > first);
         for _ in 0..20 {
-            l.failed();
+            l.begin();
         }
         assert!(l.wait().unwrap() <= Duration::from_secs(900));
         l.succeeded();

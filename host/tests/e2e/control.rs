@@ -232,3 +232,66 @@ fn a_linger_too_long_to_reckon_keeps_the_monitors() {
     );
     assert_eq!(pc.count_log("panicked"), 0);
 }
+
+/// Eight strangers asking to pair at once: one gets the dialog, the others are told
+/// another headset is pairing, so the wrong codes counted before each attempt hold
+/// for all of them. After three wrong codes pairing pauses, as with one at a time.
+#[test]
+fn strangers_pairing_at_once_get_one_dialog_and_the_pause() {
+    let dir = TestDir::new("pairing-crowd");
+    dir.save_monitors(TWO_MONITORS);
+    let pc = Pc::start(
+        &dir,
+        &Options {
+            typed_code: Some("000000".into()),
+            typed_code_delay: Duration::from_secs(2),
+            ..Options::default()
+        },
+    );
+    let wrong = || -> Result<FakeHeadset, ConnectError> {
+        // A key of its own each time: strangers, not one headset trying again.
+        let mut keys = dir.keys_of(&format!("stranger-{}", rand_name()));
+        FakeHeadset::connect(pc.addr, &mut keys, Some(&mut || "111111".into()))
+    };
+    let said = |r: Result<FakeHeadset, ConnectError>| match r {
+        Err(ConnectError::PairingFailed(why)) => why,
+        Err(e) => panic!("expected a failed pairing, got {e}"),
+        Ok(_) => panic!("a wrong code paired"),
+    };
+    let crowd: Vec<String> = std::thread::scope(|s| {
+        let tries: Vec<_> = (0..8).map(|_| s.spawn(|| said(wrong()))).collect();
+        tries.into_iter().map(|t| t.join().unwrap()).collect()
+    });
+    assert_eq!(pc.lines("types the code in").len(), 1, "{crowd:?}");
+    let busy = crowd
+        .iter()
+        .filter(|why| why.contains("Another headset is pairing"))
+        .count();
+    assert_eq!(busy, 7, "{crowd:?}");
+    assert_eq!(
+        crowd
+            .iter()
+            .filter(|why| why.contains("did not match"))
+            .count(),
+        1,
+        "{crowd:?}"
+    );
+    // Two more wrong codes are free (three in all), the fourth starts the pause.
+    for _ in 0..3 {
+        assert!(said(wrong()).contains("did not match"));
+    }
+    let paused = said(wrong());
+    assert!(paused.contains("Too many wrong codes"), "{paused}");
+    assert_eq!(
+        pc.lines("types the code in").len(),
+        4,
+        "no dialog while paused"
+    );
+}
+
+/// A name no other call of this test run gives.
+fn rand_name() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
