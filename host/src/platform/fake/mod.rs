@@ -131,6 +131,89 @@ pub fn run(cmd: &mut Command, _timeout: Duration) -> std::io::Result<std::proces
     ))
 }
 
+/// Calls `on_text` with what a test writes to `$XDG_RUNTIME_DIR/NAME`, on a thread
+/// that sleeps in the kernel until a file there is written (inotify), and removes the
+/// file once read. `on_text` returns `false` to stop. Whether the thread started.
+fn watch_file(name: &'static str, on_text: impl Fn(String) -> bool + Send + 'static) -> bool {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) else {
+        return false;
+    };
+    let path = dir.join(name);
+    let Ok(dir_c) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: a plain system call; the descriptor it returns is owned right below.
+    let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC) };
+    if fd < 0 {
+        log::warn!("fake desktop: no inotify for {name}");
+        return false;
+    }
+    // SAFETY: `fd` is a new descriptor nothing else owns.
+    let inotify = unsafe { OwnedFd::from_raw_fd(fd) };
+    // SAFETY: a valid descriptor and a NUL-terminated path.
+    let watch = unsafe {
+        libc::inotify_add_watch(
+            inotify.as_raw_fd(),
+            dir_c.as_ptr(),
+            libc::IN_CLOSE_WRITE | libc::IN_MOVED_TO,
+        )
+    };
+    if watch < 0 {
+        log::warn!("fake desktop: cannot watch {}", dir.display());
+        return false;
+    }
+    let take = move |path: &std::path::Path| {
+        let text = std::fs::read_to_string(path).ok()?;
+        let _ = std::fs::remove_file(path);
+        Some(text)
+    };
+    std::thread::Builder::new()
+        .name(name.into())
+        .spawn(move || {
+            // Written before the watch began.
+            if let Some(text) = take(&path)
+                && !on_text(text)
+            {
+                return;
+            }
+            let mut buf = [0u8; 4096];
+            loop {
+                // SAFETY: reads into a buffer of the length given.
+                let n =
+                    unsafe { libc::read(inotify.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
+                if n < 0 {
+                    if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    return;
+                }
+                // Each event: wd (4 bytes), mask (4), cookie (4), len (4), then a name
+                // of `len` bytes padded with NULs.
+                let mut named = false;
+                let mut at = 0;
+                let n = n as usize;
+                while at + 16 <= n {
+                    let len =
+                        u32::from_ne_bytes(buf[at + 12..at + 16].try_into().unwrap()) as usize;
+                    let raw = &buf[at + 16..(at + 16 + len).min(n)];
+                    let event_name = raw.split(|b| *b == 0).next().unwrap_or_default();
+                    named |= event_name == name.as_bytes();
+                    at += 16 + len;
+                }
+                if named
+                    && let Some(text) = take(&path)
+                    && !on_text(text)
+                {
+                    return;
+                }
+            }
+        })
+        .is_ok()
+}
+
 /// No windows and no mouse.
 pub mod windows {
     use std::path::PathBuf;
@@ -352,55 +435,43 @@ pub mod notifications {
 
 /// A tray without an icon: a test "clicks" its items by writing their names, one a
 /// line, to `$XDG_RUNTIME_DIR/fake-tray` (`forget`, `recenter`, `quit`, `sharp on`,
-/// `sharp off`, `quality 15`, `quality 50`), which is read and removed a few times a
-/// second.
+/// `sharp off`, `quality 15`, `quality 50`), which is read and removed once written.
 pub mod tray {
-    use std::path::PathBuf;
     use std::sync::mpsc::Sender;
-    use std::time::Duration;
 
     use crate::platform::{TrayCommand, TrayStatus};
 
     pub struct Handle;
 
     pub fn spawn(commands: Sender<TrayCommand>) -> Option<Handle> {
-        let path = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR")?).join("fake-tray");
-        let watched = std::thread::Builder::new()
-            .name("fake-tray".into())
-            .spawn(move || {
-                loop {
-                    std::thread::sleep(Duration::from_millis(100));
-                    let Ok(text) = std::fs::read_to_string(&path) else {
+        super::watch_file("fake-tray", move |text| {
+            for item in text.lines() {
+                let command = match item.trim() {
+                    "forget" => TrayCommand::ForgetHeadsets,
+                    "recenter" => TrayCommand::Headset {
+                        asked: prostir_proto::request::Asked::Known(
+                            prostir_proto::request::Command::Recenter,
+                        ),
+                        reply: None,
+                    },
+                    "quit" => TrayCommand::Quit,
+                    "sharp on" => TrayCommand::SetSharp(true),
+                    "sharp off" => TrayCommand::SetSharp(false),
+                    "quality 15" => TrayCommand::SetBitrate(15),
+                    "quality 50" => TrayCommand::SetBitrate(50),
+                    other => {
+                        log::warn!("fake tray: no item {other:?}");
                         continue;
-                    };
-                    let _ = std::fs::remove_file(&path);
-                    for item in text.lines() {
-                        let command = match item.trim() {
-                            "forget" => TrayCommand::ForgetHeadsets,
-                            "recenter" => TrayCommand::Headset {
-                                asked: prostir_proto::request::Asked::Known(
-                                    prostir_proto::request::Command::Recenter,
-                                ),
-                                reply: None,
-                            },
-                            "quit" => TrayCommand::Quit,
-                            "sharp on" => TrayCommand::SetSharp(true),
-                            "sharp off" => TrayCommand::SetSharp(false),
-                            "quality 15" => TrayCommand::SetBitrate(15),
-                            "quality 50" => TrayCommand::SetBitrate(50),
-                            other => {
-                                log::warn!("fake tray: no item {other:?}");
-                                continue;
-                            }
-                        };
-                        log::info!("fake tray: {item}");
-                        if commands.send(command).is_err() {
-                            return;
-                        }
                     }
+                };
+                log::info!("fake tray: {item}");
+                if commands.send(command).is_err() {
+                    return false;
                 }
-            });
-        watched.ok().map(|_| Handle)
+            }
+            true
+        })
+        .then_some(Handle)
     }
 
     pub fn set_status(_handle: Option<&Handle>, _status: TrayStatus) {}

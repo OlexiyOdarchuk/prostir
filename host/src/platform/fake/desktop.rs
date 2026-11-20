@@ -2,7 +2,7 @@
 //! (see `screen.rs`) the encoder reads like a KWin output.
 //!
 //! Other programs act on the desktop through `$XDG_RUNTIME_DIR/fake-desktop`, read and
-//! removed a few times a second, one command a line:
+//! removed once written, one command a line:
 //! - `resize Fake-2 320x240`: another program's stream of the output makes it that
 //!   size, as sharing a monitor in Discord does on KDE; starting Prostir's own stream
 //!   over puts its size back;
@@ -18,7 +18,6 @@
 //! by `;` (an empty EDID: the display says nothing), all plugged in at the start.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Once};
 use std::thread::JoinHandle;
@@ -395,28 +394,16 @@ impl OutputBackend for FakeOutput {
 /// Carries out what other programs do on the desktop, as the test writes it to
 /// `$XDG_RUNTIME_DIR/fake-desktop` (see the top of this file).
 fn watch_commands() {
-    let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") else {
-        return;
-    };
-    let path = PathBuf::from(dir).join("fake-desktop");
-    let watched = std::thread::Builder::new()
-        .name("fake-desktop".into())
-        .spawn(move || {
-            loop {
-                std::thread::sleep(Duration::from_millis(100));
-                let Ok(text) = std::fs::read_to_string(&path) else {
-                    continue;
-                };
-                let _ = std::fs::remove_file(&path);
-                for line in text.lines() {
-                    if let Err(e) = command(line.trim()) {
-                        warn!("fake desktop: {line:?}: {e:#}");
-                    }
-                }
+    let watched = super::watch_file("fake-desktop", |text| {
+        for line in text.lines() {
+            if let Err(e) = command(line.trim()) {
+                warn!("fake desktop: {line:?}: {e:#}");
             }
-        });
-    if let Err(e) = watched {
-        warn!("fake desktop: no commands: {e}");
+        }
+        true
+    });
+    if !watched {
+        warn!("fake desktop: no commands");
     }
 }
 
