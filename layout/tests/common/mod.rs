@@ -767,9 +767,9 @@ pub struct Continuity {
     pub stack_error: f64,
     /// The pair with the largest side error.
     pub side_worst: Option<(u8, u8, f64)>,
-    /// The largest of these errors over what noise allows there (`desk::noise` of the
-    /// shorter edge along the seam, plus a pixel): at most 1 where the plan reproduces
-    /// the seam as seen.
+    /// The largest of these errors over what is lined up there (`desk::step` of the
+    /// shorter edge along a seam in a row, `desk::noise` between rows, plus a pixel): at
+    /// most 1 where the plan reproduces the seam as seen.
     pub side_ratio: f64,
     pub stack_ratio: f64,
     /// The largest jump anywhere along a seam where the mouse crosses: pixels of the
@@ -844,7 +844,7 @@ pub fn continuity(scene: &Scene, plan: &[Spot<u8>], gap: f64, seam: f64) -> Cont
                             c.side_error = px;
                             c.side_worst = Some((t.a, t.b, px));
                         }
-                        let allowed = f64::from(desk::noise(a.h.min(b.h)) + 1);
+                        let allowed = f64::from(desk::step(a.h.min(b.h)) + 1);
                         c.side_ratio = c.side_ratio.max(px / allowed);
                     }
                     Side::Above | Side::Below => {

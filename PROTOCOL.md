@@ -1100,8 +1100,9 @@ shows what the PC desktop will be. The rows and the plan follow what the eyes se
   share a quarter, so a hand's tremor never moves a display from one row to another.
 - Displays stand on the desktop as they are seen along the edges they share: offset
   as seen, so the mouse and a dragged window cross where the displays meet, sideways
-  and up or down. A difference within 3 % of the shorter edge is a hand's and is lined
-  up; a larger one is kept, cut back only so that neighbours share at least 200 px.
+  and up or down. A step between neighbours in a row within 10 % of the shorter edge
+  is a hand's and is lined up (across, between rows, within 3 %); a larger one is kept,
+  cut back only so that neighbours share at least 200 px.
 - A changed arrangement is sent only when it has held for 0.8 s and nothing is being
   moved; a plan that fits what is seen as well as a new one, give or take a hand's
   tremor, is kept.
@@ -1130,7 +1131,7 @@ the client uses too to plan the desktop it sends and shows on its map.)
      overlapping, rows in order and side by side, every display in reach of the mouse),
      it is taken as it is.
    - Otherwise the row with the primary display goes side by side from `0,0`, each
-     display offset from its left neighbour as its rectangle is (within 3 % lined up,
+     display offset from its left neighbour as its rectangle is (within 10 % lined up,
      sharing at least 200 px); every other row, outwards from it, is cut where another
      row's display stands between two of its displays, and each piece rests on what is
      placed where its rectangles meet it. A plan worked out this way replaces the one

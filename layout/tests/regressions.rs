@@ -288,3 +288,82 @@ fn the_staircase_of_22_04_becomes_rows() {
         describe_plan(&plan)
     );
 }
+
+/// 2026-11-20 03:11 in the headset: six monitors in two rows (wire ids; n is
+/// Virtual-Prostir-(n+1)), 2560 | 2560 | 2560 over 2560 | 1440x2560 primary | 2560, the
+/// laptop screen under the primary. The owner lifted the upper left one by hand in three
+/// tries, 388, 331 and 100 px off its neighbour (the last 4.9 cm too high), and the PC
+/// got a top row off one line (Prostir-3 at 0,0, the other two at y 100) and the lower
+/// row 100 px under Prostir-3, so the mouse could not go down from it (with a 3 %
+/// tolerance this scene gives that layout to 2 px). A step a hand leaves is lined up:
+/// the top row on one line, the lower row touching every monitor over it.
+#[test]
+fn a_row_left_a_little_crooked_by_hand_is_one_line() {
+    let px = |id: u8| {
+        if id == 1 {
+            PixelSize::new(1440, 2560)
+        } else {
+            PixelSize::new(2560, 1440)
+        }
+    };
+    let monitors: Vec<(u8, PixelSize)> = [2u8, 5, 4, 3, 1, 0]
+        .iter()
+        .map(|&id| (id, px(id)))
+        .collect();
+    let lid = (MIRROR, PixelSize::new(1800, 1125));
+    let placed = circle::arrange(
+        Preset::Arc,
+        &monitors,
+        Some(1),
+        Some(lid),
+        None,
+        &Limits::default(),
+    );
+    let mut scene = Scene {
+        monitors: monitors
+            .iter()
+            .chain([lid].iter())
+            .map(|&(id, px)| Monitor {
+                id,
+                px,
+                placement: placed[&id],
+            })
+            .collect(),
+        frame: Frame::upright(Vec3::ZERO, 0.0),
+        main: Some(1),
+    };
+    // The hand: the upper left one 4.9 cm too high (100 px of it), the lower row with
+    // the laptop screen 2.3 cm to the left.
+    scene.get_mut(2).unwrap().placement.position.y += 0.049;
+    for id in [3, 1, 0, MIRROR] {
+        let p = &mut scene.get_mut(id).unwrap().placement;
+        let turn = glam::Quat::from_rotation_y(0.023 / 1.043);
+        p.position = turn * p.position;
+        p.rotation = (turn * p.rotation).normalize();
+    }
+    let (rows, plan) = pipeline(&scene);
+    assert_eq!(
+        rows,
+        vec![vec![2, 5, 4], vec![3, 1, 0], vec![MIRROR]],
+        "{}",
+        describe_plan(&plan)
+    );
+    no_overlap(&plan).unwrap();
+    connected(&plan).unwrap();
+    let s = |id: u8| spot(&plan, id).unwrap();
+    // One line.
+    assert!(
+        s(2).y == s(5).y && s(5).y == s(4).y,
+        "{}",
+        describe_plan(&plan)
+    );
+    // Every monitor of the top row has the lower row right under it.
+    for (up, down) in [(2u8, 3u8), (5, 1), (4, 0)] {
+        assert_eq!(
+            s(down).crossing(&s(up)),
+            Some(Side::Above),
+            "{up} over {down}: {}",
+            describe_plan(&plan)
+        );
+    }
+}

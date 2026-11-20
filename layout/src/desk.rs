@@ -11,11 +11,11 @@
 //!
 //! - Within a row, monitors go side by side, left to right as seen. Each is offset up
 //!   or down from its left neighbour exactly as seen: a monitor hung a third of its
-//!   height higher is a third higher on the desktop. Only a difference within
-//!   [`NOISE`] of lining up (tops, middles or bottoms) is taken as a hand's noise and
-//!   lined up, so a row placed by hand is straight, while an offset made on purpose
-//!   stays. Neighbours always share at least [`need`] of their edge: an offset so large
-//!   that less would be left is cut back to that.
+//!   height higher is a third higher on the desktop. Only a step within [`STEP`] of
+//!   lining up (tops, middles or bottoms) is taken as what a hand leaves and lined up,
+//!   so a row placed by hand is straight, while an offset made on purpose stays.
+//!   Neighbours always share at least [`need`] of their edge: an offset so large that
+//!   less would be left is cut back to that.
 //! - The row with the main monitor starts at `0,0`. Every other row, outwards from it,
 //!   is cut where another row's monitor stands between two of its monitors as seen (a
 //!   portrait one reaching up from the row below), and each piece is put across where
@@ -42,6 +42,17 @@ pub const REACH: i32 = 200;
 /// default size (0.70 m high), above a hand's tremor and the magnet's own precision,
 /// and well under any offset made on purpose (see `plans/layout-math.md`).
 pub const NOISE: f64 = 0.03;
+/// A step between two neighbours in a row this small, as a fraction of the shorter of
+/// the two, is what a hand leaves: the row is lined up there. A tenth is 7 cm on a
+/// 1440-pixel-high monitor at the default size (0.70 m high, 144 px). Placed by hand in
+/// the headset a monitor ends up a few centimetres off, and further as seen when it is
+/// pulled nearer or pushed further than its neighbour above or below the eyes (10 cm of
+/// depth at 0.8 m over the eyes is a step of about 150 px): on 2026-11-20 the owner,
+/// lifting a monitor level with its neighbour, got within 100 px (7 %) and no closer.
+/// An offset made on purpose is a sixth of the height or more (240 px), well beyond.
+/// Between rows (where a monitor stands across the row next to it) [`NOISE`] still
+/// holds: there the plan follows what is seen as closely as it can.
+pub const STEP: f64 = 0.10;
 /// Two monitors are seen touching when the gap between their facing edges is at most
 /// this fraction of the first one's size across it (5 %: 6 cm between two monitors 1.25
 /// m wide), or they overlap.
@@ -251,6 +262,11 @@ pub fn noise(len: i32) -> i32 {
     (NOISE * f64::from(len.max(0))).floor() as i32
 }
 
+/// [`STEP`] of `len` pixels, rounded down.
+pub fn step(len: i32) -> i32 {
+    (STEP * f64::from(len.max(0))).floor() as i32
+}
+
 /// `value` lined up with the nearest of `options` within `tolerance` pixels, else
 /// rounded. Half a pixel more is allowed, so a value already rounded snaps exactly as
 /// the unrounded one did.
@@ -265,7 +281,7 @@ fn snap(value: f64, options: &[i32], tolerance: i32) -> i32 {
 }
 
 /// How far down from `a`'s top `b`'s top goes, `b` next to `a` in a row: as seen,
-/// lined up with `a`'s middle, top or bottom when within noise, sharing at least
+/// lined up with `a`'s middle, top or bottom when within [`STEP`], sharing at least
 /// [`need`]. Unknown: `fallback` (middles lined up in a row, tops for the laptop screen
 /// and other displays).
 fn side_offset(rel: Option<Relation>, ha: i32, hb: i32, fallback: Lining) -> i32 {
@@ -274,7 +290,7 @@ fn side_offset(rel: Option<Relation>, ha: i32, hb: i32, fallback: Lining) -> i32
     let enough = need(ha, hb);
     let (lo, hi) = (enough - hb, ha - enough);
     let offset = match rel {
-        Some(r) if r.offset.is_finite() => snap(r.offset, &options, noise(ha.min(hb))),
+        Some(r) if r.offset.is_finite() => snap(r.offset, &options, step(ha.min(hb))),
         _ => match fallback {
             Lining::Middle => middle,
             Lining::Top => 0,

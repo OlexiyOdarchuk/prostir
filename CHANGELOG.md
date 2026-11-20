@@ -44,7 +44,8 @@
 - The PC desktop matches the headset in every direction: the mouse, and a window you
   drag across, go from one monitor to the next where the two meet in the headset,
   sideways and up or down. A monitor you hung higher on purpose is just as much higher
-  on the desktop; a small difference left by the hand is lined up. Neighbours always
+  on the desktop; a step the hand leaves between neighbours in a row, up to a tenth of
+  the monitor's height (7 cm on a 1440-pixel one), is lined up. Neighbours always
   share enough of an edge for the mouse to cross, and the desktop no longer spreads out
   into a staircase. The map in the menu shows exactly the desktop the PC makes.
 - A monitor whose picture cannot start on the PC keeps its place and is tried again at

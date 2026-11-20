@@ -5,7 +5,7 @@ mod common;
 
 use common::*;
 use prostir_layout::circle::{self, ARC, Limits, MAX_RADIUS, Preset, RADIUS};
-use prostir_layout::desk::{self, Desk, NOISE, Size, View};
+use prostir_layout::desk::{self, Desk, STEP, Size, View};
 use prostir_layout::rows::{JOIN, rows_of};
 use prostir_layout::space::{Frame, Monitor, PixelSize, Side, covers};
 
@@ -379,8 +379,8 @@ fn the_circle_rows_are_the_rows_seen() {
     }
 }
 
-/// The noise rule: a difference within NOISE of lining up is lined up, one beyond it is
-/// kept exactly.
+/// The step rule: a step within STEP of lining up is lined up, one beyond it is kept
+/// exactly.
 #[test]
 fn noise_is_lined_up_and_offsets_are_kept() {
     let size = |_| Some(Size { w: 2560, h: 1440 });
@@ -414,12 +414,12 @@ fn noise_is_lined_up_and_offsets_are_kept() {
         main: Some(0),
         ..Desk::default()
     };
-    let limit = (NOISE * 1440.0).floor();
+    let limit = (STEP * 1440.0).floor();
     for dy in [0.0, 10.0, limit, -limit] {
         let p = desk::plan(&desk, size, &boxes(dy));
         assert_eq!(spot(&p, 0).unwrap().y, spot(&p, 1).unwrap().y, "{dy}");
     }
-    for dy in [limit + 1.0, 100.0, 480.0, -480.0, 1000.0] {
+    for dy in [limit + 1.0, 240.0, 480.0, -480.0, 1000.0] {
         let p = desk::plan(&desk, size, &boxes(dy));
         assert_eq!(
             spot(&p, 1).unwrap().y - spot(&p, 0).unwrap().y,
