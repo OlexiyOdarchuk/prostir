@@ -68,6 +68,7 @@ fn run(
     let mut timing = Timing {
         stream: Some(stream),
         feedback: Some(feedback.clone()),
+        started: Some(Instant::now()),
         ..Default::default()
     };
     let mut gate = KeyframeGate::new(stream, feedback.clone());
@@ -250,6 +251,8 @@ struct Timing {
     in_flight: HashMap<u64, (Instant, Instant, u32)>,
     /// When a shown frame was last reported to the PC.
     last_ack: Option<Instant>,
+    /// When the stream started here, until its first picture is out (for the log).
+    started: Option<Instant>,
     /// Received → handed to the decoder.
     wait: Histogram,
     /// Handed to the decoder → decoded.
@@ -266,6 +269,7 @@ impl Default for Timing {
             feedback: None,
             in_flight: HashMap::new(),
             last_ack: None,
+            started: None,
             wait: Histogram::default(),
             decode: Histogram::default(),
             queue: (0, 0, 0),
@@ -295,6 +299,14 @@ impl Timing {
         let Some((received, queued, seq)) = self.in_flight.remove(&pts_us) else {
             return;
         };
+        if let (Some(started), Some(stream)) = (self.started.take(), self.stream) {
+            info!(
+                "stream {} {:?}: first picture {} ms after it started",
+                stream.id.0,
+                stream.generation,
+                started.elapsed().as_millis()
+            );
+        }
         // Enough for the PC's latency figures: one frame every 100 ms, not every frame
         // as its own network packet.
         if let (Some(f), Some(stream)) = (&self.feedback, self.stream)

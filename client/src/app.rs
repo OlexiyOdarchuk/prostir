@@ -50,6 +50,8 @@ const TOAST_WIDTH: f32 = 0.46;
 /// How long a toast stays.
 const TOAST_FOR: Duration = Duration::from_secs(4);
 const ERROR_SHOWN_FOR: Duration = Duration::from_secs(8);
+/// A request without an answer for this long counts as failed (a late answer is let go).
+const ANSWER_WITHIN: Duration = Duration::from_secs(30);
 const CONFIRM_FOR: Duration = Duration::from_secs(4);
 /// How long a pinch must be held on a monitor before it starts dragging it.
 const HOLD_TO_DRAG: Duration = Duration::from_millis(300);
@@ -1603,9 +1605,18 @@ impl Scene {
         }
         self.last_req += 1;
         let req = ReqId(self.last_req);
+        info!("request {}: {asked:?}", req.0);
         self.send(ClientMsg::request(req, asked));
         self.asks.insert(req, (what, Instant::now()));
         Some(req)
+    }
+
+    /// Monitor `id` was asked to go and the PC has not answered yet: it is not shown
+    /// meanwhile.
+    fn being_removed(&self, id: ScreenId) -> bool {
+        self.asks
+            .values()
+            .any(|(what, _)| *what == ui::Asked::Remove(id))
     }
 
     /// Request `req` was answered: which control asked it, `None` for one this side
@@ -1622,10 +1633,19 @@ impl Scene {
                 outcome,
             });
         }
-        let Some((what, _)) = self.asks.remove(&req) else {
-            info!("an answer to request {}, which nothing waits for", req.0);
+        let Some((what, asked_at)) = self.asks.remove(&req) else {
+            info!(
+                "an answer to request {}, which nothing waits for (no answer within {} s)",
+                req.0,
+                ANSWER_WITHIN.as_secs()
+            );
             return None;
         };
+        info!(
+            "request {} answered in {} ms",
+            req.0,
+            asked_at.elapsed().as_millis()
+        );
         if let Outcome::Failed { error, detail } = outcome {
             warn!("request {} failed (code {})", req.0, error.code());
             self.ask_failed(what, ui::Failure::Pc(*error), detail.clone());
@@ -1649,7 +1669,6 @@ impl Scene {
     /// Requests without an answer for 30 s count as failed (a late answer is let go),
     /// and failures are shown for a while.
     fn expire_asks(&mut self) {
-        const ANSWER_WITHIN: Duration = Duration::from_secs(30);
         let late: Vec<ReqId> = self
             .asks
             .iter()
@@ -3082,6 +3101,8 @@ fn run(app: &AndroidApp) -> Result<()> {
         let mut order: Vec<(f32, ScreenId)> = scene
             .monitors
             .keys()
+            // Gone from view as soon as asked to go; back if the PC does not remove it.
+            .filter(|id| !scene.being_removed(**id))
             .filter_map(|id| {
                 let d = scene.shown.get(id)?.position.distance(head);
                 Some((if grabbed.contains(id) { -1.0 } else { d }, *id))
