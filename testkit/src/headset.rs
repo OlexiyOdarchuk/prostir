@@ -349,7 +349,19 @@ impl FakeHeadset {
         keys: &mut Keys,
         pairing: Option<&mut dyn FnMut() -> String>,
     ) -> Result<Self, ConnectError> {
-        Self::open(addr, keys, pairing, None)
+        Self::open(
+            addr,
+            keys,
+            pairing,
+            None,
+            &prostir_proto::app_version(env!("CARGO_PKG_VERSION")),
+        )
+    }
+
+    /// As [`FakeHeadset::connect`] for a trusted headset whose app says it is `app` in
+    /// its hello (another build, say).
+    pub fn connect_as(addr: SocketAddr, keys: &mut Keys, app: &str) -> Result<Self, ConnectError> {
+        Self::open(addr, keys, None, None, app)
     }
 
     /// As [`FakeHeadset::connect`] for a trusted headset that reads at most
@@ -359,7 +371,8 @@ impl FakeHeadset {
         keys: &mut Keys,
         bytes_per_sec: u64,
     ) -> Result<Self, ConnectError> {
-        Self::open(addr, keys, None, Some(bytes_per_sec))
+        let app = prostir_proto::app_version(env!("CARGO_PKG_VERSION"));
+        Self::open(addr, keys, None, Some(bytes_per_sec), &app)
     }
 
     fn open(
@@ -367,6 +380,7 @@ impl FakeHeadset {
         keys: &mut Keys,
         mut pairing: Option<&mut dyn FnMut() -> String>,
         read_rate: Option<u64>,
+        app: &str,
     ) -> Result<Self, ConnectError> {
         let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))?;
         stream.set_read_timeout(Some(REPLY))?;
@@ -386,7 +400,7 @@ impl FakeHeadset {
             tx: &mut *sender,
             packets: &mut packets,
         };
-        let (version, language) = open(&mut ends, keys, &peer, addr, &mut pairing)?;
+        let (version, language) = open(&mut ends, keys, &peer, addr, &mut pairing, app)?;
         receiver.set_idle_limit(Some(SILENCE));
         packets.set_limits(HostMsg::limits(true));
         let writer = Arc::new(Mutex::new(sender));
@@ -586,9 +600,10 @@ fn open(
     peer: &PeerInfo,
     addr: SocketAddr,
     pairing: &mut Option<&mut dyn FnMut() -> String>,
+    app: &str,
 ) -> Result<(u32, String), ConnectError> {
     // Versions first, before pairing.
-    handshake::send_hello(ends.tx, env!("CARGO_PKG_VERSION"))?;
+    handshake::send_hello(ends.tx, app)?;
     let (version, language) = match handshake::read_answer(ends.rx)? {
         Answer::Welcome { version, language } => (version, language),
         Answer::Incompatible { protocol, app } => {

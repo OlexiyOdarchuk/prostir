@@ -727,7 +727,7 @@ impl Panel {
             18.0,
             false,
             MUTED,
-            env!("CARGO_PKG_VERSION"),
+            &prostir_proto::app_version(env!("CARGO_PKG_VERSION")),
         ));
         let (status, light) = match &s.host {
             _ if s.update.is_some() => (
@@ -2106,7 +2106,7 @@ fn build_pair_offer(l: Lang, items: &mut Vec<Item>, x: f32, w: f32, host: &str, 
 
 /// The headset and the PC cannot talk: which one to update, and where.
 fn build_update(l: Lang, items: &mut Vec<Item>, x: f32, w: f32, pc_newer: bool, pc_app: &str) {
-    let ours = env!("CARGO_PKG_VERSION");
+    let ours = prostir_proto::app_version(env!("CARGO_PKG_VERSION"));
     let mut y = 180.0;
     let title = if pc_newer {
         l.t(

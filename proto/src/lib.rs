@@ -53,6 +53,45 @@ pub const MIN_PROTOCOL: u32 = 2;
 pub fn compatible(version: u32, min: u32) -> bool {
     version >= MIN_PROTOCOL && min <= PROTOCOL_VERSION
 }
+
+/// The revision of the messages on a development branch, raised with every change of
+/// them there. Two development builds both say [`PROTOCOL_VERSION`] but may read
+/// different messages: the revision in their app versions ([`app_version`]) lets the
+/// PC turn a build of another revision away with a clear word instead of a session
+/// that fails to parse. `None` in released builds, where the protocol version alone
+/// decides.
+pub const PROTO_REVISION: Option<u32> = Some(1);
+
+/// The app version this build says in the handshake: `base` (the crate version), with
+/// `-dev+pN` on a development branch (see [`PROTO_REVISION`]).
+pub fn app_version(base: &str) -> String {
+    match PROTO_REVISION {
+        Some(n) => format!("{base}-dev+p{n}"),
+        None => base.to_owned(),
+    }
+}
+
+/// The message revision a peer's app version carries (`0.2.0-dev+p5` gives 5); `None`
+/// for a released build.
+pub fn revision_of(app: &str) -> Option<u32> {
+    app.rsplit_once("+p")?.1.parse().ok()
+}
+
+/// Whether a peer that said `app` reads the messages this build sends. A released
+/// build does not look; a development build needs the same revision.
+pub fn same_revision(app: &str) -> bool {
+    PROTO_REVISION.is_none_or(|ours| revision_of(app) == Some(ours))
+}
+
+/// Whether a peer that turned this build away (its protocol and app version) is the
+/// newer one, so this side is the one to update: by the protocol, else by the revision
+/// of two development builds.
+pub fn peer_is_newer(protocol: u32, app: &str) -> bool {
+    match protocol.cmp(&PROTOCOL_VERSION) {
+        std::cmp::Ordering::Equal => revision_of(app) > PROTO_REVISION,
+        other => other.is_gt(),
+    }
+}
 /// PC sound sent to the headset: interleaved signed 16-bit little-endian stereo.
 pub const AUDIO_RATE: u32 = 48_000;
 pub const AUDIO_CHANNELS: u32 = 2;

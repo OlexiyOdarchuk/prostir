@@ -38,3 +38,27 @@ fn a_headset_that_leaves_says_why() {
     pc.wait_log(SOON, "keeping virtual monitors for 30 s");
     assert_eq!(pc.count_log("saying goodbye"), 0, "no goodbye back");
 }
+
+/// A development build of the headset with other messages than the PC's (another
+/// `+pN` in its version) is turned away before the session, told which build the PC is.
+#[test]
+fn another_development_build_gets_no_session() {
+    let Some(ours) = prostir_proto::PROTO_REVISION else {
+        return;
+    };
+    let dir = crate::pc::TestDir::new("other-build");
+    dir.save_monitors(crate::TWO_MONITORS);
+    let mut keys = dir.pair();
+    let mut pc = crate::pc::Pc::start(&dir, &Options::default());
+    let other = format!("0.2.0-dev+p{}", ours + 1);
+    match FakeHeadset::connect_as(pc.addr, &mut keys, &other) {
+        Err(ConnectError::Incompatible { protocol, app }) => {
+            assert_eq!(protocol, prostir_proto::PROTOCOL_VERSION);
+            assert_eq!(prostir_proto::revision_of(&app), Some(ours));
+        }
+        Err(e) => panic!("expected Incompatible, got {e}"),
+        Ok(_) => panic!("a session with another build"),
+    }
+    pc.wait_log(SOON, "reads other messages than this one");
+    assert_eq!(pc.count_log("fake desktop: created"), 0, "no monitors made");
+}

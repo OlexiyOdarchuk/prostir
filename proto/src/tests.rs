@@ -588,6 +588,36 @@ fn version_ranges() {
     assert!(!compatible(1, 1));
 }
 
+/// Development builds carry the revision of their messages in their app version, and
+/// only the same revision reads them; which side is newer goes by it too.
+#[test]
+fn development_revisions() {
+    let ours = app_version("0.2.0");
+    assert_eq!(revision_of(&ours), PROTO_REVISION);
+    assert!(same_revision(&ours));
+    assert_eq!(revision_of("0.2.0-dev+p7"), Some(7));
+    assert_eq!(revision_of("0.2.0"), None);
+    assert_eq!(revision_of("0.2.0-dev+px"), None);
+    if let Some(n) = PROTO_REVISION {
+        assert_eq!(ours, format!("0.2.0-dev+p{n}"));
+        assert!(!same_revision(&format!("0.2.0-dev+p{}", n + 1)));
+        assert!(
+            !same_revision("0.2.0"),
+            "a released build reads other messages"
+        );
+        assert!(peer_is_newer(
+            PROTOCOL_VERSION,
+            &format!("0.2.0-dev+p{}", n + 1)
+        ));
+        assert!(!peer_is_newer(
+            PROTOCOL_VERSION,
+            &format!("0.2.0-dev+p{}", n - 1)
+        ));
+    }
+    assert!(peer_is_newer(PROTOCOL_VERSION + 1, "9.0.0"));
+    assert!(!peer_is_newer(PROTOCOL_VERSION - 1, "0.1.3"));
+}
+
 /// A small random number generator, the same numbers on every run.
 pub(crate) struct Seeded(pub(crate) u64);
 

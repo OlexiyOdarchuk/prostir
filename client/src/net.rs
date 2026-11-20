@@ -15,7 +15,7 @@ use prostir_proto::link::{Closer, Link, PeerInfo, RecordReceiver, RecordSender};
 use prostir_proto::packet::Assembler;
 use prostir_proto::secure::{self, Identity, Pairing, TrustStore, confirmation, tags_match};
 use prostir_proto::stats::{Gaps, Period};
-use prostir_proto::{ClientMsg, Codec, HeadsetGoodbye, HostMsg, PROTOCOL_VERSION, PcGoodbye};
+use prostir_proto::{ClientMsg, Codec, HeadsetGoodbye, HostMsg, PcGoodbye};
 
 use crate::outbox::{Lanes, Outbox};
 use crate::ui::OfferWhy;
@@ -955,12 +955,13 @@ fn run_session(
     });
     // Versions first, before pairing: this exchange is the same in every version, so
     // a PC of any version says which side to update.
-    handshake::send_hello(&mut *sender, env!("CARGO_PKG_VERSION"))?;
+    let app = prostir_proto::app_version(env!("CARGO_PKG_VERSION"));
+    handshake::send_hello(&mut *sender, &app)?;
     let language = match handshake::read_answer(&mut *receiver)? {
         Answer::Welcome { language, .. } => crate::i18n::Lang::from_code(&language),
         Answer::Incompatible { protocol, app } => {
             let _ = events.send(NetEvent::Incompatible {
-                pc_newer: protocol > PROTOCOL_VERSION,
+                pc_newer: prostir_proto::peer_is_newer(protocol, &app),
                 pc_app: app,
             });
             // Nothing changes until one side is updated: try again only now and then.

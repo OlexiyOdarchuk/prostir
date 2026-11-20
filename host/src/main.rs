@@ -759,7 +759,7 @@ fn main() -> Result<()> {
     let port = listener.local_addr()?.port();
     info!(
         "Prostir {} waiting for the headset on port {port}",
-        env!("CARGO_PKG_VERSION"),
+        prostir_proto::app_version(env!("CARGO_PKG_VERSION")),
     );
     if !args.no_discovery {
         spawn_discovery(port)?;

@@ -237,11 +237,30 @@ fn accept_within(
             version, min, app, ..
         } if !prostir_proto::compatible(version, min) => {
             let app = peer_version(&app);
-            let first = incompatible(&mut link, min > PROTOCOL_VERSION, &app)?;
+            let update = if min > PROTOCOL_VERSION {
+                Update::Pc
+            } else {
+                Update::Headset
+            };
+            let first = incompatible(&mut link, update, &app)?;
             close_gently(&mut link);
             return Err(turned_away(
                 first,
                 format!("headset speaks protocol v{version} (app {app}), PC v{PROTOCOL_VERSION}"),
+            ));
+        }
+        // Two development builds of different revisions: the same protocol version,
+        // other messages.
+        First::Hello { app, .. } if !prostir_proto::same_revision(&app) => {
+            let app = peer_version(&app);
+            let first = incompatible(&mut link, Update::Both, &app)?;
+            close_gently(&mut link);
+            return Err(turned_away(
+                first,
+                format!(
+                    "headset build {app} reads other messages than this one ({})",
+                    prostir_proto::app_version(env!("CARGO_PKG_VERSION"))
+                ),
             ));
         }
         First::Hello { alone: true, .. } => {}
@@ -251,7 +270,7 @@ fn accept_within(
         // Only headsets from before protocol 2 (0.1) start with anything else: they
         // could ask to pair before saying hello.
         First::Other => {
-            let first = incompatible(&mut link, false, "0.1.x")?;
+            let first = incompatible(&mut link, Update::Headset, "0.1.x")?;
             close_gently(&mut link);
             return Err(turned_away(
                 first,
@@ -458,33 +477,53 @@ pub fn close_gently(link: &mut Link) {
     }
 }
 
+/// Which side has to be updated for a headset and a PC to talk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Update {
+    Pc,
+    Headset,
+    /// Development builds of different revisions (see `prostir_proto::PROTO_REVISION`).
+    Both,
+}
+
 /// The headset speaks another protocol: tell both the headset and the person at the PC
 /// which side needs the update. `false` when this was logged and shown a moment ago.
-fn incompatible(link: &mut Link, pc_too_old: bool, headset_app: &str) -> Result<bool> {
-    let ours = env!("CARGO_PKG_VERSION");
+fn incompatible(link: &mut Link, update: Update, headset_app: &str) -> Result<bool> {
+    let ours = prostir_proto::app_version(env!("CARGO_PKG_VERSION"));
     let headset_app = if headset_app.is_empty() {
         t("старіша", "older")
     } else {
         headset_app
     };
-    let (title, body) = if pc_too_old {
-        (
+    let (title, body) = match update {
+        Update::Pc => (
             t("Оновіть Prostir на ПК", "Update Prostir on the PC"),
             format!(
                 "{} {headset_app}, {} {ours}. prostir.ishawyha.dev",
                 t("Застосунок у шоломі новіший:", "The headset app is newer:"),
                 t("а на ПК", "the PC has")
             ),
-        )
-    } else {
-        (
+        ),
+        Update::Headset => (
             t("Оновіть Prostir у шоломі", "Update Prostir in the headset"),
             format!(
                 "{} {headset_app}, {} {ours}.",
                 t("Застосунок у шоломі старіший:", "The headset app is older:"),
                 t("а на ПК", "the PC has")
             ),
-        )
+        ),
+        Update::Both => (
+            t(
+                "Збірки шолома й ПК з різних версій гілки",
+                "The headset and PC builds are from different versions of the branch",
+            ),
+            format!(
+                "{} {headset_app}, {} {ours}. {}",
+                t("У шоломі", "The headset has"),
+                t("а на ПК", "the PC has"),
+                t("Оновіть обидві.", "Update both.")
+            ),
+        ),
     };
     // Headsets from before `Incompatible` existed still show this text.
     let error = HostMsg::Error {
@@ -493,7 +532,7 @@ fn incompatible(link: &mut Link, pc_too_old: bool, headset_app: &str) -> Result<
     handshake::send_from_pc(&mut *link.sender, &error)?;
     let answer = HostMsg::Incompatible {
         protocol: PROTOCOL_VERSION,
-        app: ours.into(),
+        app: ours.clone(),
     };
     handshake::send_from_pc(&mut *link.sender, &answer)?;
     // Once per headset version, and at most once in ten minutes whatever versions a
@@ -607,7 +646,7 @@ mod tests {
             let hello = ClientMsg::Hello {
                 version,
                 min: version,
-                app: "test".into(),
+                app: prostir_proto::app_version("0.2.0"),
             };
             // Alone in its record, as protocol 2 says hello.
             let mut bytes = Vec::new();
@@ -761,7 +800,8 @@ mod tests {
         let text = String::from_utf8(text.clone()).unwrap();
         assert!(text.contains("Prostir"), "{text}");
         let mut expected = PROTOCOL_VERSION.to_le_bytes().to_vec();
-        expected.extend_from_slice(env!("CARGO_PKG_VERSION").as_bytes());
+        expected
+            .extend_from_slice(prostir_proto::app_version(env!("CARGO_PKG_VERSION")).as_bytes());
         assert_eq!(incompatible, &expected);
     }
 
@@ -775,7 +815,7 @@ mod tests {
             answer,
             Answer::Incompatible {
                 protocol: PROTOCOL_VERSION,
-                app: env!("CARGO_PKG_VERSION").into(),
+                app: prostir_proto::app_version(env!("CARGO_PKG_VERSION")),
             }
         );
         // Older headsets show the text before it; it names the side to update.
@@ -797,6 +837,37 @@ mod tests {
             panic!("expected an error and Incompatible, got {msgs:?}")
         };
         assert!(String::from_utf8_lossy(text).contains("Prostir"));
+    }
+
+    /// A development build of another revision speaks the same protocol version but
+    /// other messages: it is turned away, told by the PC's revision which side is older.
+    #[test]
+    fn another_development_revision_is_turned_away() {
+        let Some(ours) = prostir_proto::PROTO_REVISION else {
+            return;
+        };
+        let mut pc = TestPc::new("rev");
+        let (refused, answer) = connect(&mut pc, move |h| {
+            let hello = ClientMsg::Hello {
+                version: PROTOCOL_VERSION,
+                min: PROTOCOL_VERSION,
+                app: format!("0.2.0-dev+p{}", ours + 1),
+            };
+            let mut bytes = Vec::new();
+            hello.write(&mut bytes).unwrap();
+            h.write_as_v1(&bytes);
+            handshake::read_answer(&mut *h.link.receiver).unwrap()
+        });
+        assert!(refused.is_err(), "the session must not start");
+        let Answer::Incompatible { protocol, app } = answer else {
+            panic!("expected Incompatible, got {answer:?}");
+        };
+        assert_eq!(protocol, PROTOCOL_VERSION);
+        assert_eq!(prostir_proto::revision_of(&app), Some(ours));
+        assert!(
+            !prostir_proto::peer_is_newer(protocol, &app),
+            "the headset is newer"
+        );
     }
 
     /// A 0.1 headset says hello in protocol 1 and is told to update, in bytes it reads.
