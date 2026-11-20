@@ -92,6 +92,12 @@ assets = [
     ["../../packaging/prostir.desktop", "usr/share/applications/", "644"],
     ["../../packaging/io.github.OlexiyOdarchuk.Prostir.Settings.desktop", "usr/share/applications/", "644"],
     ["../../packaging/prostir.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+    # Installed, not enabled: the first start of Prostir enables the socket for its user
+    # (and the preset for new users); the tray turns it off for good.
+    ["../../packaging/systemd/prostir.socket", "usr/lib/systemd/user/prostir.socket", "644"],
+    ["../../packaging/systemd/prostir.service", "usr/lib/systemd/user/prostir.service", "644"],
+    ["../../packaging/systemd/80-prostir.preset", "usr/lib/systemd/user-preset/80-prostir.preset", "644"],
+    ["../../packaging/udev/70-prostir-quest.rules", "usr/lib/udev/rules.d/70-prostir-quest.rules", "644"],
     ["../../README.md", "usr/share/doc/prostir/README.md", "644"],
     ["../../LICENSE", "usr/share/doc/prostir/LICENSE", "644"],
     ["../../LICENSE-EXCEPTION.md", "usr/share/doc/prostir/LICENSE-EXCEPTION.md", "644"],
@@ -114,6 +120,10 @@ assets = [
     { source = "../../packaging/prostir.desktop", dest = "/usr/share/applications/prostir.desktop", mode = "644" },
     { source = "../../packaging/io.github.OlexiyOdarchuk.Prostir.Settings.desktop", dest = "/usr/share/applications/io.github.OlexiyOdarchuk.Prostir.Settings.desktop", mode = "644" },
     { source = "../../packaging/prostir.svg", dest = "/usr/share/icons/hicolor/scalable/apps/prostir.svg", mode = "644" },
+    { source = "../../packaging/systemd/prostir.socket", dest = "/usr/lib/systemd/user/prostir.socket", mode = "644" },
+    { source = "../../packaging/systemd/prostir.service", dest = "/usr/lib/systemd/user/prostir.service", mode = "644" },
+    { source = "../../packaging/systemd/80-prostir.preset", dest = "/usr/lib/systemd/user-preset/80-prostir.preset", mode = "644" },
+    { source = "../../packaging/udev/70-prostir-quest.rules", dest = "/usr/lib/udev/rules.d/70-prostir-quest.rules", mode = "644" },
     { source = "../../README.md", dest = "/usr/share/doc/prostir/README.md", mode = "644", doc = true },
     { source = "../../LICENSE", dest = "/usr/share/licenses/prostir/LICENSE", mode = "644" },
     { source = "../../LICENSE-EXCEPTION.md", dest = "/usr/share/licenses/prostir/LICENSE-EXCEPTION.md", mode = "644" },
