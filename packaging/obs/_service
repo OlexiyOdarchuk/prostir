@@ -1,0 +1,23 @@
+<!--
+  The only file kept in the OBS package home:iShawyha:prostir/prostir. Each run (on a
+  trigger from .github/workflows/obs.yml, or "Trigger services" in the web UI) fetches
+  the newest release's OBS sources, which that workflow attaches to the GitHub release.
+  See packaging/obs/README.md.
+-->
+<services>
+  <service name="download_url">
+    <param name="url">https://github.com/OlexiyOdarchuk/prostir/releases/latest/download/prostir-vendored.tar.gz</param>
+  </service>
+  <service name="download_url">
+    <param name="url">https://github.com/OlexiyOdarchuk/prostir/releases/latest/download/prostir-obs.spec</param>
+    <param name="filename">prostir.spec</param>
+  </service>
+  <service name="download_url">
+    <param name="url">https://github.com/OlexiyOdarchuk/prostir/releases/latest/download/prostir-obs.dsc</param>
+    <param name="filename">prostir.dsc</param>
+  </service>
+  <service name="download_url">
+    <param name="url">https://github.com/OlexiyOdarchuk/prostir/releases/latest/download/prostir-obs-debian.tar.gz</param>
+    <param name="filename">debian.tar.gz</param>
+  </service>
+</services>

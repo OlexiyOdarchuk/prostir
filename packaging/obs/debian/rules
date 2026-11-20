@@ -1,0 +1,50 @@
+#!/usr/bin/make -f
+# The crates come from vendor/ in the source archive (packaging/obs/make-sources.sh);
+# --frozen fails instead of reaching the network.
+
+export DH_VERBOSE = 1
+export CARGO_HOME = $(CURDIR)/debian/cargo-home
+# Ubuntu's versioned toolchains (cargo-1.NN, when the default cargo is too old) live in
+# /usr/lib/rust-1.NN/bin: the newest one installed goes first on PATH.
+RUST_BIN := $(shell ls -d /usr/lib/rust-1.*/bin 2>/dev/null | sort -V | tail -n 1)
+ifneq (,$(RUST_BIN))
+export PATH := $(RUST_BIN):$(PATH)
+endif
+CARGO_FLAGS = --frozen --release \
+	--config 'source.crates-io.replace-with="vendored-sources"' \
+	--config 'source.vendored-sources.directory="vendor"'
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+
+override_dh_auto_build:
+	cargo --version
+	cargo build $(CARGO_FLAGS) -p prostir-host --bin prostir
+
+override_dh_auto_test:
+# One test at a time: tests that start programs in parallel can hand each other's
+# pipes to a child process, which made a_stopped_player_is_noticed fail now and then.
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+	cargo test $(CARGO_FLAGS) -p prostir-host -p prostir-proto -- --test-threads=1
+endif
+
+override_dh_auto_install:
+	install -Dm755 target/release/prostir debian/prostir/usr/bin/prostir
+	install -Dm644 packaging/prostir.desktop debian/prostir/usr/share/applications/prostir.desktop
+	install -Dm644 packaging/prostir.svg debian/prostir/usr/share/icons/hicolor/scalable/apps/prostir.svg
+	install -Dm644 LICENSE-EXCEPTION.md debian/prostir/usr/share/doc/prostir/LICENSE-EXCEPTION.md
+	install -Dm644 THIRD-PARTY-LICENSES.txt debian/prostir/usr/share/doc/prostir/THIRD-PARTY-LICENSES.txt
+
+override_dh_auto_clean:
+	rm -rf target debian/cargo-home
+
+# The license texts stay uncompressed, where debian/copyright says they are.
+override_dh_compress:
+	dh_compress -XLICENSE-EXCEPTION.md -XTHIRD-PARTY-LICENSES.txt
+
+# dh_clean deletes *.orig and other backup-looking files, but cargo checks every file
+# of a vendored crate (Cargo.toml.orig included) against .cargo-checksum.json.
+override_dh_clean:
+	dh_clean -Xvendor/

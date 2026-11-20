@@ -238,16 +238,47 @@ exists.
 
 ### With a package manager
 
-Each [release](../../releases) has packages for the PC part. They install
-`/usr/bin/prostir` and pull in the dependencies above.
+The packages install `/usr/bin/prostir` and pull in the dependencies above. From a
+repository, Prostir then updates with the rest of the system.
+
+**openSUSE** Tumbleweed, Slowroll and Leap 16.0, **Fedora** 44 and 45, **Debian 13**,
+**Ubuntu** 26.04 and 26.10: add the repository built on the
+[openSUSE Build Service](https://build.opensuse.org/package/show/home:iShawyha:prostir/prostir).
 
 ```sh
-yay -S prostir-bin                                  # Arch (AUR)
-sudo apt install ./prostir_<version>-1_amd64.deb    # Debian, Ubuntu
-sudo dnf install ./prostir-<version>-1.x86_64.rpm   # Fedora
+# openSUSE Tumbleweed. Slowroll: openSUSE_Slowroll, Leap: 16.0
+sudo zypper addrepo --refresh https://download.opensuse.org/repositories/home:iShawyha:prostir/openSUSE_Tumbleweed/home:iShawyha:prostir.repo
+sudo zypper refresh          # answer "a" to trust the repository key
+sudo zypper install prostir
 ```
 
-The `.rpm` is built for Fedora. On openSUSE and other distributions, use the tarball.
+```sh
+# Fedora 45. Fedora 44: Fedora_44
+sudo dnf config-manager addrepo --from-repofile=https://download.opensuse.org/repositories/home:iShawyha:prostir/Fedora_45/home:iShawyha:prostir.repo
+sudo dnf install prostir     # confirms the repository key
+```
+
+```sh
+# Debian 13. Ubuntu: xUbuntu_26.04 or xUbuntu_26.10
+repo=https://download.opensuse.org/repositories/home:/iShawyha:/prostir/Debian_13
+sudo mkdir -p /etc/apt/keyrings
+curl -fsSL "$repo/Release.key" | sudo tee /etc/apt/keyrings/prostir.asc > /dev/null
+echo "deb [signed-by=/etc/apt/keyrings/prostir.asc] $repo/ /" | sudo tee /etc/apt/sources.list.d/prostir.list
+sudo apt update && sudo apt install prostir
+```
+
+**Arch** (AUR): `yay -S prostir-bin`.
+
+Each [release](../../releases) also has a `.deb` and an `.rpm` (x86_64) to install by
+hand, without updates: `sudo apt install ./prostir_<version>-1_amd64.deb`, or
+`sudo dnf install ./prostir-<version>-1.x86_64.rpm` on Fedora.
+
+**ARM (aarch64), experimental.** The repositories also build Prostir for 64-bit ARM, for
+example Fedora Asahi Remix on Apple Silicon or a Snapdragon X laptop. On Tumbleweed for
+ARM, use `openSUSE_Factory_ARM` in the address above. These builds are untested. A PC
+without a VA-API H.265 or H.264 encoder (Asahi, Raspberry Pi 5) encodes on the CPU with
+x264, which costs CPU time and needs `x264enc` (see
+[NVIDIA and CPU encoding](#nvidia-and-cpu-encoding)).
 
 ### With Nix
 
@@ -524,10 +555,12 @@ at all until it is put right, and the PC's log says so.
 
 ## Update and uninstall
 
-**Update.** Install the new version the same way as the old one: your package manager
-(`yay -Syu`, `sudo apt install ./prostir_<version>-1_amd64.deb`,
-`sudo dnf upgrade ./prostir-<version>-1.x86_64.rpm`), or `./install.sh` from the new
-tarball. On the headset, `adb install -r prostir-<version>.apk` keeps the settings and
+**Update.** From a repository or the AUR, Prostir updates with the system
+(`sudo zypper dup` on Tumbleweed and Slowroll, `sudo zypper up` on Leap,
+`sudo dnf upgrade`, `sudo apt upgrade`, `yay -Syu`). Otherwise install the new version
+the same way as the old one (`sudo apt install ./prostir_<version>-1_amd64.deb`,
+`sudo dnf upgrade ./prostir-<version>-1.x86_64.rpm`), or run `./install.sh` from the
+new tarball. On the headset, `adb install -r prostir-<version>.apk` keeps the settings and
 the pairing. Settings and paired headsets on the PC stay in `~/.config/prostir`.
 
 Update both sides when you can. Small differences in version do not break the
@@ -538,9 +571,13 @@ connection; when the two are too far apart, the headset says which side to updat
 - Tarball install: `./install.sh --uninstall` removes the program, its menu entry,
   icon and autostart entry. `./install.sh --uninstall --purge` also removes the
   settings and paired headsets in `~/.config/prostir`.
-- Packages: `sudo pacman -R prostir-bin`, `sudo apt remove prostir` or
-  `sudo dnf remove prostir`. Packages do not touch your home folder; remove
-  `~/.config/prostir` and `~/.config/autostart/prostir.desktop` yourself if you want.
+- Packages: `sudo pacman -R prostir-bin`, `sudo zypper remove prostir`,
+  `sudo apt remove prostir` or `sudo dnf remove prostir`. Packages do not touch your
+  home folder; remove `~/.config/prostir` and `~/.config/autostart/prostir.desktop`
+  yourself if you want. To remove the repository too:
+  `sudo zypper removerepo home_iShawyha_prostir`,
+  `sudo rm /etc/yum.repos.d/home:iShawyha:prostir.repo` on Fedora, or
+  `sudo rm /etc/apt/sources.list.d/prostir.list /etc/apt/keyrings/prostir.asc`.
 - Hyprland: remove the lines you added to your config.
 - Headset: `adb uninstall dev.prostir.client`, or uninstall it from the Library. This
   also deletes its settings and pairing keys.

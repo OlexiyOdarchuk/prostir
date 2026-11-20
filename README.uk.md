@@ -239,16 +239,47 @@ gst-plugins-bad), якому потрібен власний драйвер NVID
 
 ### Через менеджер пакетів
 
-Кожен [реліз](../../releases) має пакети для ПК. Вони ставлять `/usr/bin/prostir` і
-підтягують залежності, перелічені вище.
+Пакети ставлять `/usr/bin/prostir` і підтягують залежності, перелічені вище. Зі
+сховища Prostir далі оновлюється разом із рештою системи.
+
+**openSUSE** Tumbleweed, Slowroll і Leap 16.0, **Fedora** 44 і 45, **Debian 13**,
+**Ubuntu** 26.04 і 26.10: додайте сховище, зібране на
+[openSUSE Build Service](https://build.opensuse.org/package/show/home:iShawyha:prostir/prostir).
 
 ```sh
-yay -S prostir-bin                                  # Arch (AUR)
-sudo apt install ./prostir_<версія>-1_amd64.deb     # Debian, Ubuntu
-sudo dnf install ./prostir-<версія>-1.x86_64.rpm    # Fedora
+# openSUSE Tumbleweed. Slowroll: openSUSE_Slowroll, Leap: 16.0
+sudo zypper addrepo --refresh https://download.opensuse.org/repositories/home:iShawyha:prostir/openSUSE_Tumbleweed/home:iShawyha:prostir.repo
+sudo zypper refresh          # відповідь "a", щоб довіряти ключу сховища
+sudo zypper install prostir
 ```
 
-`.rpm` зібрано для Fedora. В openSUSE та інших дистрибутивах беріть архів.
+```sh
+# Fedora 45. Fedora 44: Fedora_44
+sudo dnf config-manager addrepo --from-repofile=https://download.opensuse.org/repositories/home:iShawyha:prostir/Fedora_45/home:iShawyha:prostir.repo
+sudo dnf install prostir     # спитає підтвердити ключ сховища
+```
+
+```sh
+# Debian 13. Ubuntu: xUbuntu_26.04 або xUbuntu_26.10
+repo=https://download.opensuse.org/repositories/home:/iShawyha:/prostir/Debian_13
+sudo mkdir -p /etc/apt/keyrings
+curl -fsSL "$repo/Release.key" | sudo tee /etc/apt/keyrings/prostir.asc > /dev/null
+echo "deb [signed-by=/etc/apt/keyrings/prostir.asc] $repo/ /" | sudo tee /etc/apt/sources.list.d/prostir.list
+sudo apt update && sudo apt install prostir
+```
+
+**Arch** (AUR): `yay -S prostir-bin`.
+
+Кожен [реліз](../../releases) має ще `.deb` і `.rpm` (x86_64), щоб поставити вручну,
+без оновлень: `sudo apt install ./prostir_<версія>-1_amd64.deb` або
+`sudo dnf install ./prostir-<версія>-1.x86_64.rpm` у Fedora.
+
+**ARM (aarch64), експериментально.** Сховища збирають Prostir і для 64-бітного ARM,
+наприклад для Fedora Asahi Remix на Apple Silicon чи ноутбука зі Snapdragon X. У
+Tumbleweed для ARM пишіть в адресі вище `openSUSE_Factory_ARM`. Ці збірки не
+перевірені. ПК без кодувальника H.265 чи H.264 у VA-API (Asahi, Raspberry Pi 5) кодує
+процесором через x264, а це навантажує процесор і потребує `x264enc` (див.
+[NVIDIA і кодування на процесорі](#nvidia-і-кодування-на-процесорі)).
 
 ### Через Nix
 
@@ -480,9 +511,12 @@ prostir [--monitor WxH[@scale]]... [--codec h265|h264] [--bitrate MBPS] [--softw
 
 ## Оновлення й видалення
 
-**Оновлення.** Ставте нову версію так само, як стару: менеджером пакетів (`yay -Syu`,
-`sudo apt install ./prostir_<версія>-1_amd64.deb`,
-`sudo dnf upgrade ./prostir-<версія>-1.x86_64.rpm`) або `./install.sh` з нового архіву.
+**Оновлення.** Зі сховища чи AUR Prostir оновлюється разом із системою
+(`sudo zypper dup` у Tumbleweed і Slowroll, `sudo zypper up` у Leap, `sudo dnf upgrade`,
+`sudo apt upgrade`, `yay -Syu`). Інакше ставте нову версію так само, як стару
+(`sudo apt install ./prostir_<версія>-1_amd64.deb`,
+`sudo dnf upgrade ./prostir-<версія>-1.x86_64.rpm`) або запустіть `./install.sh` з
+нового архіву.
 На шоломі `adb install -r prostir-<версія>.apk` зберігає налаштування й сполучення.
 Налаштування й сполучені шоломи на ПК лишаються в `~/.config/prostir`.
 
@@ -494,9 +528,12 @@ prostir [--monitor WxH[@scale]]... [--codec h265|h264] [--bitrate MBPS] [--softw
 - Встановлення з архіву: `./install.sh --uninstall` прибирає програму, пункт меню,
   іконку й автозапуск. `./install.sh --uninstall --purge` прибирає ще й налаштування
   та сполучені шоломи в `~/.config/prostir`.
-- Пакети: `sudo pacman -R prostir-bin`, `sudo apt remove prostir` або
-  `sudo dnf remove prostir`. Пакети не чіпають домашньої теки; за бажання приберіть
-  `~/.config/prostir` і `~/.config/autostart/prostir.desktop` самі.
+- Пакети: `sudo pacman -R prostir-bin`, `sudo zypper remove prostir`,
+  `sudo apt remove prostir` або `sudo dnf remove prostir`. Пакети не чіпають домашньої
+  теки; за бажання приберіть `~/.config/prostir` і `~/.config/autostart/prostir.desktop`
+  самі. Щоб прибрати й сховище: `sudo zypper removerepo home_iShawyha_prostir`,
+  `sudo rm /etc/yum.repos.d/home:iShawyha:prostir.repo` у Fedora або
+  `sudo rm /etc/apt/sources.list.d/prostir.list /etc/apt/keyrings/prostir.asc`.
 - Hyprland: приберіть рядки, які ви додали в конфіг.
 - Шолом: `adb uninstall dev.prostir.client` або видаліть застосунок у Бібліотеці. Це
   стирає і його налаштування та ключі сполучення.

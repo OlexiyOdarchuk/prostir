@@ -10,7 +10,7 @@ license = "GPL-3.0-or-later"
 authors = ["Prostir contributors"]
 repository = "https://github.com/OlexiyOdarchuk/prostir"
 homepage = "https://prostir.ishawyha.dev"
-rust-version = "1.90"
+rust-version = "1.96"
 
 # The layout math's tests check its invariants over thousands of arrangements:
 # optimised in debug builds too, so `cargo test --workspace` stays quick.
