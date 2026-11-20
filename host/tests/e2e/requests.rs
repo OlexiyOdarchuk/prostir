@@ -339,3 +339,52 @@ fn a_guest_is_not_asked_for_the_volume() {
     guest.take_for(std::time::Duration::from_secs(1)).unwrap();
     assert!(guest.view().volume_asks.is_empty());
 }
+
+/// A display of the PC shown from the headset is starting in the list that comes
+/// with the reply, and streams after; hidden, it stops at once.
+#[test]
+fn a_display_of_the_pc_shown_starts_at_once() {
+    let options = Options {
+        physical: "HDMI-A-1=DEL 0x1 0@640x360".into(),
+        ..Options::default()
+    };
+    let (_dir, _pc, _keys, mut headset) = session("show-physical", &options);
+    headset
+        .wait(SOON, "the display of the PC listed", |v| {
+            v.displays().iter().any(|d| d.is_physical())
+        })
+        .unwrap();
+    let id = headset
+        .view()
+        .displays()
+        .iter()
+        .find(|d| d.is_physical())
+        .unwrap()
+        .id;
+    let shown = headset
+        .ask(Request::ShowPhysical { id, shown: true })
+        .unwrap();
+    assert_eq!(shown, Outcome::Done);
+    assert_eq!(
+        headset.view().display(id).map(|d| d.state.clone()),
+        Some(DisplayState::Starting),
+        "starting with the reply"
+    );
+    headset
+        .wait(SOON, "the display of the PC streams", |v| {
+            v.streams.get(&id).is_some_and(|s| s.has_picture())
+        })
+        .unwrap();
+    let hidden = headset
+        .ask(Request::ShowPhysical { id, shown: false })
+        .unwrap();
+    assert_eq!(hidden, Outcome::Done);
+    assert_eq!(
+        headset.view().display(id).map(|d| d.state.clone()),
+        Some(DisplayState::Running),
+        "not shown: as connected"
+    );
+    headset
+        .wait(SOON, "its stream ended", |v| v.ended.contains(&id))
+        .unwrap();
+}

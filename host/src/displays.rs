@@ -461,8 +461,17 @@ impl Displays {
                     s.output = Some(key);
                 }
             }
-            Done::Started { id, encoding } => {
-                if let Some(s) = self.screens.get_mut(&id) {
+            Done::Started {
+                id,
+                attempt,
+                encoding,
+            } => {
+                // One that is to stream no more (too big for every headset) stops soon.
+                let wanted = self.wants_stream(id);
+                if let Some(s) = self.screens.get_mut(&id).filter(|_| wanted) {
+                    if attempt != s.attempt {
+                        info!("{}: streams, as tried before", s.name());
+                    }
                     s.encoding = Some(encoding);
                     s.closed = false;
                     if !matches!(s.state, ScreenState::Absent) {
@@ -470,13 +479,30 @@ impl Displays {
                     }
                 }
             }
-            Done::Failed { id, error, why } => {
-                if let Some(s) = self.screens.get_mut(&id) {
+            Done::Failed {
+                id,
+                attempt,
+                error,
+                why,
+            } => {
+                // A failure of an earlier attempt, or of a stream no longer wanted,
+                // says nothing of now.
+                let wanted = self.wants_stream(id);
+                if let Some(s) = self
+                    .screens
+                    .get_mut(&id)
+                    .filter(|s| wanted && s.attempt == attempt)
+                {
                     s.encoding = None;
                     if s.is_physical() {
                         warn!("cannot show {}: {why}", s.name());
                     }
                     s.state = ScreenState::Failed { error, why };
+                }
+            }
+            Done::Stopped { id } => {
+                if let Some(s) = self.screens.get_mut(&id) {
+                    s.encoding = None;
                 }
             }
             Done::Lost { id } => {
@@ -508,6 +534,14 @@ impl Displays {
             Done::Gone => {}
         }
         DeskNews::None
+    }
+
+    /// Whether screen `id` is to stream: not one too big for every headset, nor a
+    /// display of the PC that is not shown or not connected.
+    fn wants_stream(&self, id: ScreenId) -> bool {
+        self.screens
+            .get(&id)
+            .is_some_and(|s| (!s.is_physical() || s.streaming) && !self.too_big.contains_key(&id))
     }
 
     /// Nobody waits for job `job` any more (its request failed): a window panel it
@@ -772,10 +806,13 @@ impl Displays {
 
     /// The first display streaming now that `headset` would not decode in `codec`:
     /// its size.
+    /// Streams that encode in `codec` already (a codec switch fitted down for another
+    /// headset, or kept because the one asked for did not start) stay as they are, so
+    /// they are left out.
     pub fn too_big_for(&self, codec: Codec, headset: &state::HeadsetCaps) -> Option<(u32, u32)> {
         self.screens
             .values()
-            .filter(|s| s.encoding.is_some())
+            .filter(|s| s.encoding.as_ref().is_some_and(|e| e.codec != codec))
             .filter_map(|s| {
                 self.router
                     .stream_size(s.id)
@@ -985,7 +1022,21 @@ impl Displays {
             });
         }
         *shown = show;
-        // Streamed or stopped once the PC's displays are looked at, right away.
+        // Starting or not at once, as the headset is told; the PC's displays are looked
+        // at again right away.
+        let here = self
+            .screens
+            .get(&id)
+            .is_some_and(|s| !matches!(s.state, ScreenState::Absent));
+        let streaming = self.screens.get(&id).is_some_and(|s| s.streaming);
+        if show && here && !streaming && !self.is_too_big(id) {
+            self.start_physical(id);
+        } else if !show && streaming {
+            self.stop_physical(id);
+            if let Some(s) = self.screens.get_mut(&id) {
+                s.state = ScreenState::Running;
+            }
+        }
         self.desk.ask(Job::LookPhysical);
         Ok(())
     }

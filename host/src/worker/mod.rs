@@ -234,16 +234,22 @@ pub enum Done {
         id: ScreenId,
         key: OutputKey,
     },
-    /// Screen `id` streams.
+    /// Screen `id` streams (its `attempt`, as the wanted state had it).
     Started {
         id: ScreenId,
+        attempt: u32,
         encoding: Encoding,
     },
-    /// Screen `id` could not be made or start streaming.
+    /// Screen `id` could not be made or start streaming at `attempt`.
     Failed {
         id: ScreenId,
+        attempt: u32,
         error: ErrorCode,
         why: String,
+    },
+    /// Screen `id` streams no more (the wanted state said so).
+    Stopped {
+        id: ScreenId,
     },
     /// The stream of display `id` of the PC stopped: it is shown again shortly.
     Lost {

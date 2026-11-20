@@ -242,9 +242,7 @@ fn carry_out(
             let headsets = displays.router.headsets();
             let fits = Displays::codec_for(codec, &headsets);
             let (_, would) = crate::encoder::pick(fits, software).context(UserError::Encoder)?;
-            if would != displays.codec()
-                && let Some((w, h)) = displays.too_big_for(would, asker.caps)
-            {
+            if let Some((w, h)) = displays.too_big_for(would, asker.caps) {
                 bail!(UserError::BadSize { w, h, scale: 100 });
             }
             store.set_encoding(bitrate, sharp.unwrap_or(now.sharp), codec, software);

@@ -35,6 +35,9 @@ use crate::screen::{ScreenId, SizeAction, SizeGuard};
 /// without it.
 const ENCODER_START: Duration = Duration::from_secs(10);
 const ENCODER_STOP: Duration = Duration::from_secs(5);
+/// A screen that went on with the encoder it had, the one wanted not starting, tries
+/// the wanted one again after this.
+const KEPT_FOR: Duration = Duration::from_secs(60);
 /// An encoder (by kind) left behind this many times is not used any more.
 const HANGS_OF_A_KIND: u32 = 3;
 /// With this many encoders left behind and still running, no more are started.
@@ -168,6 +171,9 @@ struct Slot {
     failed: Option<u32>,
     /// A display of the PC is shown again from then.
     rest_until: Option<Instant>,
+    /// The encoder and codec wanted that did not start, so it went on with the one it
+    /// had (`started_for`), and when to try the wanted one again.
+    kept: Option<((Backend, Codec), Instant)>,
     size_guard: SizeGuard,
     /// The desktop closing it was said.
     closed_told: bool,
@@ -183,6 +189,7 @@ impl Slot {
             started_for: None,
             failed: None,
             rest_until: None,
+            kept: None,
             size_guard: SizeGuard::default(),
             closed_told: false,
         }
@@ -478,7 +485,7 @@ impl Worker {
             if !w.stream {
                 return Some(Step::StopStream(*id));
             }
-            if slot.and_then(|s| s.started_for) != Some(cfg) {
+            if slot.is_some_and(|s| restart_due(s.started_for, s.kept, cfg, now)) {
                 return Some(Step::Restart(*id));
             }
             if encoder.is_paused() == wanted.streaming {
@@ -526,6 +533,7 @@ impl Worker {
                 }
                 self.shared.router.remove_stream(id);
                 self.layout_due = true;
+                self.done(Done::Stopped { id });
             }
             Step::Make(id) => {
                 self.begin(format!("making the output of {}", name(&id)));
@@ -662,6 +670,7 @@ impl Worker {
         }
         self.done(Done::Failed {
             id,
+            attempt,
             error: code_of(e),
             why: format!("{e:#}"),
         });
@@ -702,6 +711,8 @@ impl Worker {
             return;
         };
         let physical = matches!(w.what, What::Physical { .. });
+        let asked = (wanted.encoding.backend, wanted.encoding.codec);
+        let mut used = asked;
         let mut result =
             self.start_encoder(id, &w.name, physical, output.as_mut(), &wanted.encoding);
         if let (Err(e), Some(cfg)) = (&result, &fallback) {
@@ -710,6 +721,7 @@ impl Worker {
                 w.name, wanted.encoding.backend, wanted.encoding.codec, cfg.backend, cfg.codec
             );
             result = self.start_encoder(id, &w.name, physical, output.as_mut(), cfg);
+            used = (cfg.backend, cfg.codec);
         }
         let Some(slot) = self.slots.get_mut(&id) else {
             return;
@@ -721,19 +733,30 @@ impl Worker {
                 if !wanted.streaming {
                     encoder.set_paused(true);
                 }
+                // Went on with what it had: said, and the wanted one tried again later.
+                let kept = (used != asked).then(|| kept_note(used.1, asked.1));
+                let note = match (kept, encoder.note()) {
+                    (Some(kept), Some(note)) => Some(format!("{kept}; {note}")),
+                    (kept, note) => kept.or_else(|| note.map(str::to_owned)),
+                };
                 let encoding = Encoding {
                     encoder: encoder.kind().0.label(),
                     codec: encoder.codec(),
                     hardware: encoder.kind().0.hardware(),
                     copies: encoder.copies(),
-                    note: encoder.note().map(str::to_owned),
+                    note,
                 };
                 self.shared.router.set_keyframer(id, encoder.keyframer());
                 slot.encoder = Some(encoder);
-                slot.started_for = Some((wanted.encoding.backend, wanted.encoding.codec));
+                slot.started_for = Some(used);
+                slot.kept = (used != asked).then(|| (asked, Instant::now() + KEPT_FOR));
                 slot.failed = None;
                 self.layout_due = true;
-                self.done(Done::Started { id, encoding });
+                self.done(Done::Started {
+                    id,
+                    attempt: w.attempt,
+                    encoding,
+                });
             }
             Err(e) => {
                 error!("{}: no stream: {e:#}", w.name);
@@ -1810,6 +1833,35 @@ fn show_sharing_tip(number: u32) {
     dialogs::notify(t("Показ екрана", "Screen sharing"), &body);
 }
 
+/// Whether a screen's encoder starts over for the wanted encoder and codec `cfg`: it
+/// started for another (`started_for`), unless that one is what it kept because `cfg`
+/// did not start, and it is not time to try `cfg` again (`kept`).
+fn restart_due(
+    started_for: Option<(Backend, Codec)>,
+    kept: Option<((Backend, Codec), Instant)>,
+    cfg: (Backend, Codec),
+    now: Instant,
+) -> bool {
+    started_for != Some(cfg) && !kept.is_some_and(|(asked, until)| asked == cfg && now < until)
+}
+
+/// What a screen's encoding says when it went on in `used` because `asked` did not
+/// start: "kept H.264: H.265 did not start".
+fn kept_note(used: Codec, asked: Codec) -> String {
+    let name = |c: Codec| match c {
+        Codec::H264 => "H.264",
+        Codec::H265 => "H.265",
+        Codec::Av1 => "AV1",
+    };
+    format!(
+        "{} {}: {} {}",
+        t("лишився", "kept"),
+        name(used),
+        name(asked),
+        t("не запустився", "did not start")
+    )
+}
+
 /// How far a plan moves so that output `main` is at (0, 0): where `positions` put it
 /// (nothing, without it).
 fn origin_at(positions: &[(OutputKey, i32, i32)], main: Option<&OutputKey>) -> (i32, i32) {
@@ -2065,6 +2117,32 @@ mod tests {
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 5, "{calls:?}");
         assert!(calls[3..].iter().all(|c| c.starts_with("remove")));
+    }
+
+    /// A screen that kept its encoder because the wanted one did not start tries the
+    /// wanted one again only after a while; another wanted one, at once.
+    #[test]
+    fn a_kept_encoder_is_tried_again_later() {
+        let now = Instant::now();
+        let x264 = (Backend::X264, Codec::H264);
+        let va = (Backend::Va, Codec::H265);
+        assert!(!restart_due(Some(x264), None, x264, now), "as wanted");
+        assert!(restart_due(Some(x264), None, va, now), "another wanted");
+        let kept = Some((va, now + KEPT_FOR));
+        assert!(!restart_due(Some(x264), kept, va, now), "not again at once");
+        assert!(restart_due(Some(x264), kept, va, now + KEPT_FOR), "later");
+        let other = (Backend::Va, Codec::H264);
+        assert!(
+            restart_due(Some(x264), kept, other, now),
+            "another wanted at once"
+        );
+        assert_eq!(
+            kept_note(Codec::H264, Codec::H265),
+            t(
+                "лишився H.264: H.265 не запустився",
+                "kept H.264: H.265 did not start"
+            )
+        );
     }
 
     /// On a desktop whose primary output is always at (0, 0), the plan moves with it.
