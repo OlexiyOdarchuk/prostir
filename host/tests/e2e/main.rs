@@ -663,8 +663,9 @@ fn displays_too_big_in_one_codec_stream_in_another() {
 
 /// Another codec from the headset menu restarts every stream with what the PC really
 /// encodes with now, as far as it said it can (`choices` in `Encoding`): H.265 on
-/// the graphics card where it can, else H.264 there, else the CPU's H.264 again.
-/// Asking for what is in use already changes nothing.
+/// the graphics card where it can, else H.264 there. Asking for what is in use
+/// already changes nothing: on a PC without a graphics card encoder (CI), asking for
+/// H.265 on the card gives the CPU's H.264, which it encodes with already.
 #[test]
 fn a_codec_switch_restarts_every_stream() {
     let (_dir, _pc, _keys, mut headset) = session("codec", &Options::default());
@@ -713,7 +714,7 @@ fn a_codec_switch_restarts_every_stream() {
         .into_iter()
         .find(|c| can.contains(&(*c, true)));
     eprintln!("the PC can encode with {can:?}: on the graphics card {on_gpu:?}");
-    let got = ask(&mut headset, Codec::H265, false, true);
+    let got = ask(&mut headset, Codec::H265, false, on_gpu.is_some());
     match on_gpu {
         Some(codec) => {
             assert_eq!(got, (codec, true));
