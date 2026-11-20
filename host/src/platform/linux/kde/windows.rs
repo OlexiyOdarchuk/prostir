@@ -1,14 +1,105 @@
 //! KDE's windows. KWin has no query for them, so a small KWin script does the work
 //! and reports back over D-Bus to `dev.prostir.Host`.
 
+use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Result, bail};
 use log::warn;
 
-use crate::platform::ActiveWindow;
+use crate::platform::linux::screenshot;
+use crate::platform::{ActiveWindow, AppWindow, OutputKey, Pointer, WindowList, Windows};
+
+/// KDE's windows and mouse, for the core.
+pub struct KdeWindows {
+    /// The session bus, to ask KWin for its active output.
+    bus: Option<zbus::blocking::Connection>,
+}
+
+impl KdeWindows {
+    pub fn new() -> Self {
+        Self {
+            bus: zbus::blocking::Connection::session().ok(),
+        }
+    }
+}
+
+impl Windows for KdeWindows {
+    fn active(&mut self) -> Option<ActiveWindow> {
+        active()
+    }
+
+    /// KWin's active output: the one with the mouse, or with the focused window,
+    /// depending on the KDE setting.
+    fn active_output(&mut self) -> Option<OutputKey> {
+        let reply = self
+            .bus
+            .as_ref()?
+            .call_method(
+                Some("org.kde.KWin"),
+                "/KWin",
+                Some("org.kde.KWin"),
+                "activeOutputName",
+                &(),
+            )
+            .ok()?;
+        reply
+            .body()
+            .deserialize::<String>()
+            .ok()
+            .map(OutputKey::new)
+    }
+
+    fn move_to(&mut self, w: &ActiveWindow, output: &OutputKey, fill: bool) -> Result<()> {
+        move_to(w, output.as_str(), fill)
+    }
+
+    fn put_back(&mut self, w: &ActiveWindow, output: &OutputKey) -> Result<()> {
+        put_back(w, output.as_str())
+    }
+
+    fn forget_panel(&mut self, output: &OutputKey) {
+        kwin_unload(&format!("prostir-panel-{output}"));
+    }
+
+    /// KWin reports by itself which panels lost their window.
+    fn vacated(&mut self, _panels: &[OutputKey]) -> Vec<OutputKey> {
+        vacated().into_iter().map(OutputKey::new).collect()
+    }
+
+    /// Spectacle takes the whole desktop: it cannot take one output by name.
+    fn screenshot(&mut self, _output: Option<&OutputKey>) -> Result<PathBuf> {
+        let mut cmd = std::process::Command::new("spectacle");
+        cmd.args(["--background", "--nonotify", "--fullscreen", "--output"]);
+        screenshot::take("spectacle", cmd)
+    }
+
+    fn list(&self) -> Arc<dyn WindowList> {
+        Arc::new(KdeWindowList)
+    }
+}
+
+impl Pointer for KdeWindows {
+    fn position(&mut self) -> Option<(i32, i32)> {
+        cursor()
+    }
+
+    /// KWin scripts cannot move the mouse.
+    fn move_to(&mut self, _x: i32, _y: i32) -> bool {
+        false
+    }
+}
+
+/// Every window, asked of KWin from any thread.
+struct KdeWindowList;
+
+impl WindowList for KdeWindowList {
+    fn all(&self) -> Vec<AppWindow> {
+        all_windows()
+    }
+}
 
 /// What the KWin scripts report.
 enum Report {
@@ -21,7 +112,7 @@ enum Report {
     Windows(String),
 }
 
-pub fn active() -> Option<ActiveWindow> {
+fn active() -> Option<ActiveWindow> {
     let script = format!(
         "const w = workspace.activeWindow;
          if (w && w.normalWindow) {{
@@ -42,7 +133,7 @@ pub fn active() -> Option<ActiveWindow> {
 }
 
 /// Where the mouse is on the desktop (logical pixels).
-pub fn cursor() -> Option<(i32, i32)> {
+fn cursor() -> Option<(i32, i32)> {
     let script = format!(
         "callDBus('{BUS}', '{PATH}', '{BUS}', 'Cursor',
                   Math.round(workspace.cursorPos.x), Math.round(workspace.cursorPos.y));"
@@ -53,8 +144,8 @@ pub fn cursor() -> Option<(i32, i32)> {
     })
 }
 
-/// Every normal window: (process id, class, output name).
-pub fn all_windows() -> Vec<(u32, String, String)> {
+/// Every normal window.
+fn all_windows() -> Vec<AppWindow> {
     let script = format!(
         "var lines = [];
          workspace.windowList().forEach(function (w) {{
@@ -72,11 +163,11 @@ pub fn all_windows() -> Vec<(u32, String, String)> {
         list.lines()
             .filter_map(|l| {
                 let mut f = l.split('\t');
-                Some((
-                    f.next()?.parse().ok()?,
-                    f.next()?.to_owned(),
-                    f.next()?.to_owned(),
-                ))
+                Some(AppWindow {
+                    pid: f.next()?.parse().ok()?,
+                    class: f.next()?.to_owned(),
+                    output: OutputKey::new(f.next()?),
+                })
             })
             .collect()
     })
@@ -84,7 +175,7 @@ pub fn all_windows() -> Vec<(u32, String, String)> {
 }
 
 /// Moves window `w` to `output`; `fill`: full screen there (a window panel).
-pub fn move_to(w: &ActiveWindow, output: &str, fill: bool) -> Result<()> {
+fn move_to(w: &ActiveWindow, output: &str, fill: bool) -> Result<()> {
     let script = move_script(&w.id, output, fill);
     // A panel's script stays loaded to watch its window; others are done at once.
     let name = if fill {
@@ -137,7 +228,7 @@ fn move_script(id: &str, output: &str, fill: bool) -> String {
 }
 
 /// Puts window `w` back on `output` as an ordinary window (out of full screen).
-pub fn put_back(w: &ActiveWindow, output: &str) -> Result<()> {
+fn put_back(w: &ActiveWindow, output: &str) -> Result<()> {
     let script = format!(
         "const win = workspace.windowList().find(function (w) {{
            return w.internalId.toString() === {id};
@@ -153,14 +244,9 @@ pub fn put_back(w: &ActiveWindow, output: &str) -> Result<()> {
     kwin_run("prostir-put-back", &script, true)
 }
 
-/// Stops watching the window of panel `output`.
-pub fn forget_panel(output: &str) {
-    kwin_unload(&format!("prostir-panel-{output}"));
-}
-
 /// Panel outputs whose window closed or left since the last call (KWin reports by
 /// itself).
-pub fn vacated() -> Vec<String> {
+fn vacated() -> Vec<String> {
     let Some(rx) = reports() else {
         return Vec::new();
     };
@@ -196,7 +282,7 @@ impl Host {
             width,
             height,
             scale: f64::from(scale_milli.max(250)) / 1000.0,
-            output,
+            output: (!output.is_empty()).then(|| OutputKey::new(output)),
         });
         let _ = self.0.try_send(Report::Window(w));
     }

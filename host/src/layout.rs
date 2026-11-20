@@ -28,7 +28,7 @@ mod tests {
             width: 801,
             height: 100,
             scale: 1.5,
-            output: String::new(),
+            output: None,
         };
         assert_eq!(panel_size(&w), (1202, 300));
     }

@@ -554,7 +554,7 @@ impl Session {
     /// Looks again which monitor the sound comes from, while the headset wants to know.
     pub fn look_at_sound(&mut self, displays: &Displays) {
         if let Some(w) = &self.sound_source {
-            let id = w.output().and_then(|name| displays.id_of_output(&name));
+            let id = w.output().and_then(|key| displays.id_of_output(&key));
             if self.sound_from != id {
                 info!("sound comes from {id:?}");
             }
@@ -626,7 +626,7 @@ impl Session {
         self.sound_source = prefs.sound_from_screen.then(|| {
             self.sound_source
                 .take()
-                .unwrap_or_else(sound_source::Watcher::start)
+                .unwrap_or_else(|| sound_source::Watcher::start(displays.window_list()))
         });
     }
 

@@ -13,7 +13,6 @@ use prostir_proto::wire::WireError;
 use prostir_proto::{Codec, HostMsg};
 
 use crate::displays::{Displays, MONITORS_MAX, MONITORS_NO_LIMITS, WINDOWS_MAX};
-use crate::platform::windows;
 use crate::screen::ScreenId;
 use crate::store::Settings;
 
@@ -82,13 +81,16 @@ impl Publisher {
     }
 
     /// What the PC allows this headset now. "No limits" of a guest is for its own
-    /// budgets: the PC's limits follow the main headset's.
+    /// budgets: the PC's limits follow the main headset's. Only scales the desktop
+    /// gives an output are offered.
     pub fn limits(&self, displays: &Displays) -> Limits {
         let prefs = Prefs {
             no_limits: self.prefs().no_limits && self.access.is_main(),
             ..self.prefs()
         };
-        limits(&prefs, self.caps(), displays.codec())
+        let mut limits = limits(&prefs, self.caps(), displays.codec());
+        limits.scales.retain(|s| displays.scales().allows(*s));
+        limits
     }
 
     /// The PC's state now, as this headset is told it.
@@ -202,7 +204,7 @@ fn host_caps(displays: &Displays, volume: bool) -> HostCaps {
         caps::pc::SCALE,
         caps::pc::COMMANDS,
     ];
-    if windows::can_move_cursor() {
+    if displays.moves_mouse() {
         features.push(caps::pc::MOVE_MOUSE);
     }
     if displays.screenshots_one_output() {

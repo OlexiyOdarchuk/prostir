@@ -1,13 +1,73 @@
 //! Hyprland's windows, over its IPC socket: the active one, moving it, the mouse.
 
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use anyhow::{Result, bail};
 use log::warn;
 use serde_json::Value;
 
 use super::request;
-use crate::platform::ActiveWindow;
+use crate::platform::linux::screenshot;
+use crate::platform::{ActiveWindow, AppWindow, OutputKey, Pointer, WindowList, Windows};
 
-pub fn active() -> Option<ActiveWindow> {
+/// Hyprland's windows and mouse, for the core.
+pub struct HyprWindows;
+
+impl Windows for HyprWindows {
+    fn active(&mut self) -> Option<ActiveWindow> {
+        active()
+    }
+
+    /// Hyprland's focused monitor: the one with the mouse.
+    fn active_output(&mut self) -> Option<OutputKey> {
+        super::focused().map(OutputKey::new)
+    }
+
+    fn move_to(&mut self, w: &ActiveWindow, output: &OutputKey, fill: bool) -> Result<()> {
+        move_to(w, output.as_str(), fill)
+    }
+
+    fn put_back(&mut self, w: &ActiveWindow, output: &OutputKey) -> Result<()> {
+        put_back(w, output.as_str())
+    }
+
+    /// Hyprland is asked directly which panels have no window left.
+    fn vacated(&mut self, panels: &[OutputKey]) -> Vec<OutputKey> {
+        let names: Vec<String> = panels.iter().map(OutputKey::to_string).collect();
+        vacated(&names).into_iter().map(OutputKey::new).collect()
+    }
+
+    fn screenshot(&mut self, output: Option<&OutputKey>) -> Result<PathBuf> {
+        let mut cmd = std::process::Command::new("grim");
+        if let Some(o) = output {
+            cmd.args(["-o", o.as_str()]);
+        }
+        screenshot::take("grim", cmd)
+    }
+
+    fn list(&self) -> Arc<dyn WindowList> {
+        Arc::new(HyprWindows)
+    }
+}
+
+impl Pointer for HyprWindows {
+    fn position(&mut self) -> Option<(i32, i32)> {
+        cursor()
+    }
+
+    fn move_to(&mut self, x: i32, y: i32) -> bool {
+        move_cursor(x, y)
+    }
+}
+
+impl WindowList for HyprWindows {
+    fn all(&self) -> Vec<AppWindow> {
+        all_windows()
+    }
+}
+
+fn active() -> Option<ActiveWindow> {
     let json = request("j/activewindow").ok()?;
     let v: Value = serde_json::from_str(&json).ok()?;
     let size = v.get("size")?.as_array()?;
@@ -20,19 +80,19 @@ pub fn active() -> Option<ActiveWindow> {
         width: size.first()?.as_i64()? as i32,
         height: size.get(1)?.as_i64()? as i32,
         scale: on.as_ref().map_or(1.0, |m| m.2),
-        output: on.map(|m| m.1).unwrap_or_default(),
+        output: on.map(|m| OutputKey::new(m.1)),
     })
 }
 
 /// Where the mouse is on the desktop (logical pixels).
-pub fn cursor() -> Option<(i32, i32)> {
+fn cursor() -> Option<(i32, i32)> {
     let json = request("j/cursorpos").ok()?;
     let v: Value = serde_json::from_str(&json).ok()?;
     Some((v.get("x")?.as_i64()? as i32, v.get("y")?.as_i64()? as i32))
 }
 
-/// Every window: (process id, class, output name).
-pub fn all_windows() -> Vec<(u32, String, String)> {
+/// Every window.
+fn all_windows() -> Vec<AppWindow> {
     let monitors = monitors();
     let Ok(json) = request("j/clients") else {
         return Vec::new();
@@ -47,13 +107,17 @@ pub fn all_windows() -> Vec<(u32, String, String)> {
             let class = c.get("class")?.as_str()?.to_owned();
             let monitor = c.get("monitor")?.as_i64()?;
             let output = monitors.iter().find(|m| m.0 == monitor)?.1.clone();
-            Some((pid, class, output))
+            Some(AppWindow {
+                pid,
+                class,
+                output: OutputKey::new(output),
+            })
         })
         .collect()
 }
 
 /// Puts the mouse at `x`,`y` (logical desktop pixels).
-pub fn move_cursor(x: i32, y: i32) -> bool {
+fn move_cursor(x: i32, y: i32) -> bool {
     dispatch(
         &format!("hl.dsp.cursor.move({{x = {x}, y = {y}}})"),
         &format!("movecursor {x} {y}"),
@@ -61,7 +125,7 @@ pub fn move_cursor(x: i32, y: i32) -> bool {
 }
 
 /// Moves window `w` to `output`; `fill`: full screen there (a window panel).
-pub fn move_to(w: &ActiveWindow, output: &str, fill: bool) -> Result<()> {
+fn move_to(w: &ActiveWindow, output: &str, fill: bool) -> Result<()> {
     let address = &w.id;
     // Focus it first: the dispatchers act on the active window.
     dispatch(
@@ -84,7 +148,7 @@ pub fn move_to(w: &ActiveWindow, output: &str, fill: bool) -> Result<()> {
 }
 
 /// Puts window `w` back on `output` as an ordinary window (out of full screen).
-pub fn put_back(w: &ActiveWindow, output: &str) -> Result<()> {
+fn put_back(w: &ActiveWindow, output: &str) -> Result<()> {
     let address = &w.id;
     dispatch(
         &format!("hl.dsp.focus({{window = \"address:{address}\"}})"),
@@ -98,7 +162,7 @@ pub fn put_back(w: &ActiveWindow, output: &str) -> Result<()> {
 }
 
 /// Panel outputs (of `panels`) with no window left on them.
-pub fn vacated(panels: &[String]) -> Vec<String> {
+fn vacated(panels: &[String]) -> Vec<String> {
     if panels.is_empty() {
         return Vec::new();
     }

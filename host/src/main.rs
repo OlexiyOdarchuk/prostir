@@ -39,7 +39,7 @@ use displays::Displays;
 use encoder::EncoderConfig;
 use events::{Accepted, Event, EventSink, SessionId};
 use platform::MonitorSpec;
-use platform::{TrayCommand, TrayStatus, focus, tray};
+use platform::{TrayCommand, TrayStatus, tray};
 use screen::ScreenId;
 use session::{Closing, Session};
 use store::Store;
@@ -181,7 +181,6 @@ struct Brain {
     last_id: SessionId,
     /// The output that has the mouse, as last looked at.
     focus: Option<ScreenId>,
-    active_output: focus::ActiveOutput,
     quit: bool,
 }
 
@@ -501,10 +500,7 @@ impl Brain {
             return;
         };
         if clocks.focus(now) {
-            self.focus = self
-                .active_output
-                .get()
-                .and_then(|name| displays.id_of_output(&name));
+            self.focus = displays.active_output();
             for s in self.sessions.values_mut() {
                 s.look_at_sound(displays);
             }
@@ -809,7 +805,6 @@ fn main() -> Result<()> {
         phase: Phase::Idle,
         last_id: 0,
         focus: None,
-        active_output: focus::ActiveOutput::new(),
         quit: false,
     }
     .run(&received);

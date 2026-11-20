@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use prostir_proto::state::DisplayId;
 
 use crate::encoder::Encoder;
-use crate::platform::{ActiveWindow, MonitorSpec, Output, OutputBackend};
+use crate::platform::{ActiveWindow, MonitorSpec, Output, OutputKey};
 
 /// The PC's key for a screen: in its set, its rows and its saved files. Numbers come
 /// from a counter that never goes back (see `Store::new_id`), so a number is never
@@ -103,7 +103,7 @@ pub struct Screen {
     pub number: u32,
     // Field order matters: the encoder stops before the output goes away.
     pub stream: Option<Encoder>,
-    pub output: Option<Output>,
+    pub output: Option<Box<dyn Output>>,
     pub state: ScreenState,
     /// Puts the output's size back when another program changes it.
     pub size_guard: SizeGuard,
@@ -127,9 +127,9 @@ impl Screen {
         matches!(self.state, ScreenState::Running)
     }
 
-    /// The desktop's name for its output, while it has one.
-    pub fn output_name(&self) -> Option<&str> {
-        self.output.as_ref().map(OutputBackend::output_name)
+    /// The desktop's key for its output, while it has one.
+    pub fn output_key(&self) -> Option<&OutputKey> {
+        self.output.as_ref().map(|o| o.key())
     }
 
     pub fn is_virtual(&self) -> bool {

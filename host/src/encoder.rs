@@ -155,6 +155,7 @@ pub struct Encoder {
 
 /// Where the frames come from: the start of the pipeline, made by the platform (a
 /// PipeWire node on KDE, frames pushed by a capture on Hyprland).
+#[derive(Debug, Clone)]
 pub struct Input {
     /// GStreamer source elements. Frames the platform pushes itself go into an `appsrc`
     /// named `src` (see [`Encoder::appsrc`]).
@@ -505,7 +506,7 @@ impl Probe {
 /// Decodes one keyframe of a monitor's stream into a PNG in the Pictures folder (a
 /// screenshot of just that monitor where the desktop's tool cannot take one output).
 pub fn keyframe_to_png(data: &[u8], codec: Codec) -> Result<std::path::PathBuf> {
-    let path = crate::platform::windows::screenshot_path()?;
+    let path = crate::platform::screenshot_path()?;
     let (caps, parse) = match codec {
         Codec::H264 => ("video/x-h264", "h264parse"),
         Codec::H265 => ("video/x-h265", "h265parse"),

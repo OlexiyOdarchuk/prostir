@@ -6,18 +6,29 @@ pub mod plasma;
 pub mod virtual_output;
 pub mod windows;
 
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use log::info;
 
-use crate::platform::Geometry;
+use crate::encoder::Encoder;
+use crate::platform::{
+    AddModel, Cursor, DeskPlan, Desktop, DesktopCaps, FrameSource, Memory, Origin, Output,
+    OutputHealth, OutputKey, Outputs, PhysicalDisplay, Pointer, Scales, Units, VirtualSpec,
+    Windows,
+};
 use virtual_output::{Screencast, VirtualOutput};
+use windows::KdeWindows;
 
-/// The KDE side of [`super::desktop::Desktop`].
+/// The size range KWin makes virtual outputs in, in pixels.
+const WIDTHS: std::ops::RangeInclusive<u32> = 320..=7680;
+const HEIGHTS: std::ops::RangeInclusive<u32> = 240..=4320;
+
+/// KDE Plasma as the desktop.
 pub struct Kde {
-    pub screencast: Screencast,
+    caps: DesktopCaps,
+    screencast: Screencast,
+    windows: KdeWindows,
     /// When Plasma was last nudged to follow the primary output.
     primary_nudged: Option<Instant>,
     /// Last time the laptop panel was switched back on (to avoid fighting the user).
@@ -27,26 +38,75 @@ pub struct Kde {
 impl Kde {
     pub fn connect() -> Result<Self> {
         Ok(Self {
+            caps: DesktopCaps {
+                name: "KDE Plasma",
+                virtual_monitors: Ok(AddModel::OneByOne),
+                has_primary: true,
+                units: Units::Logical,
+                origin_is_primary: false,
+                scales: Scales::Any { min: 50, max: 400 },
+                refresh: vec![60],
+                // KDE's screenshot tool cannot take one output by name.
+                screenshot_one_output: false,
+                // KWin scripts cannot move the mouse.
+                moves_pointer: false,
+                // KWin removes the outputs of a connection that is gone.
+                cleans_up_after_crash: true,
+            },
             screencast: Screencast::connect()?,
+            windows: KdeWindows::new(),
             primary_nudged: None,
             woke_display_at: None,
         })
     }
+}
 
-    /// Moves outputs to `positions` and makes `primary` the primary output. Only what
-    /// differs from `current` is sent.
-    pub fn place(
-        &self,
-        positions: &[(String, i32, i32)],
-        primary: Option<&str>,
-        current: &HashMap<String, Geometry>,
-    ) -> anyhow::Result<()> {
-        let mut settings: Vec<String> = positions
+impl Desktop for Kde {
+    fn caps(&self) -> &DesktopCaps {
+        &self.caps
+    }
+
+    fn outputs(&self) -> Outputs {
+        kscreen::geometries()
+    }
+
+    fn physical(&self) -> Vec<PhysicalDisplay> {
+        self.screencast.physical_displays()
+    }
+
+    fn make(&mut self, spec: &VirtualSpec) -> Result<Box<dyn Output>> {
+        if !WIDTHS.contains(&spec.w)
+            || !HEIGHTS.contains(&spec.h)
+            || !self.caps.scales.allows(spec.scale)
+        {
+            bail!("monitor {spec} is out of range");
+        }
+        let output = self.screencast.create(spec)?;
+        Ok(Box::new(KdeOutput::new(output, Origin::Monitor, None)))
+    }
+
+    fn show(&mut self, key: &OutputKey) -> Result<Box<dyn Output>> {
+        // KWin streams a given display only once per connection: each one shown gets a
+        // connection of its own, kept as long as the output (so its stream number,
+        // which only tells the streams of one connection apart, is always the same).
+        let connection = Screencast::connect()?;
+        let output = connection.mirror(0, key.as_str())?;
+        Ok(Box::new(KdeOutput::new(
+            output,
+            Origin::Capture,
+            Some(connection),
+        )))
+    }
+
+    /// Only what differs from `current` is sent, in one call.
+    fn place(&mut self, plan: &DeskPlan, current: &Outputs) -> Result<()> {
+        let mut settings: Vec<String> = plan
+            .positions
             .iter()
-            .filter(|(name, x, y)| current.get(name).is_none_or(|g| (g.x, g.y) != (*x, *y)))
-            .map(|(name, x, y)| format!("output.{name}.position.{x},{y}"))
+            .filter(|(key, x, y)| current.get(key).is_none_or(|g| (g.x, g.y) != (*x, *y)))
+            .map(|(key, x, y)| format!("output.{key}.position.{x},{y}"))
             .collect();
-        if let Some(p) = primary
+        if let Some(p) = &plan.primary
             && current.get(p).is_none_or(|g| g.priority != Some(1))
         {
             settings.push(format!("output.{p}.priority.1"));
@@ -56,23 +116,22 @@ impl Kde {
 
     /// Makes sure KDE's primary output (where the Plasma panel lives) is `ours`. Right
     /// after outputs come and go (a profile switch) KDE can end up with another one.
-    pub fn keep_primary(&mut self, output: &VirtualOutput) {
+    fn keep_primary(&mut self, ours: &OutputKey) {
         let geometries = kscreen::geometries();
-        let ours = output.output_name();
         let kde_primary = geometries
             .iter()
             .filter(|(_, g)| g.enabled && g.w > 0)
             .min_by_key(|(_, g)| g.priority.unwrap_or(u32::MAX))
-            .map(|(name, _)| name.clone());
+            .map(|(key, _)| key.clone());
         let Some(g) = geometries.get(ours) else {
             return;
         };
-        if kde_primary.as_deref() != Some(ours) {
+        if kde_primary.as_ref() != Some(ours) {
             info!(
                 "KDE's primary output is {}, not {ours}: setting it again",
-                kde_primary.as_deref().unwrap_or("none")
+                kde_primary.as_ref().map_or("none", OutputKey::as_str)
             );
-            output.make_primary();
+            kscreen::set(ours.as_str(), "priority.1");
             return;
         }
         // KDE agrees; Plasma may still keep the panel on the former primary.
@@ -88,18 +147,18 @@ impl Kde {
         }
         let other = geometries
             .iter()
-            .find(|(name, g)| g.enabled && g.w > 0 && name.as_str() != ours)
-            .map(|(name, _)| name.clone());
+            .find(|(key, g)| g.enabled && g.w > 0 && *key != ours)
+            .map(|(key, _)| key.to_string());
         if let Some(other) = other {
             info!("Plasma's first screen is not {ours}: nudging it to follow");
             self.primary_nudged = Some(Instant::now());
-            plasma::nudge_primary(ours.to_owned(), other);
+            plasma::nudge_primary(ours.to_string(), other);
         }
     }
 
     /// KDE sometimes leaves the laptop panel off after the lid is opened again while
     /// virtual monitors exist. With the lid open, switch it on (for the mirror).
-    pub fn wake_physical_display(&mut self) {
+    fn wake_physical(&mut self) {
         if self
             .woke_display_at
             .is_some_and(|t| t.elapsed() < Duration::from_secs(30))
@@ -117,5 +176,76 @@ impl Kde {
         if let Err(e) = kscreen::apply(&settings) {
             log::warn!("{e:#}");
         }
+    }
+
+    fn sync_wallpapers(&mut self) {
+        plasma::sync_wallpapers();
+    }
+
+    fn windows(&mut self) -> Option<&mut dyn Windows> {
+        Some(&mut self.windows)
+    }
+
+    fn pointer(&mut self) -> Option<&mut dyn Pointer> {
+        Some(&mut self.windows)
+    }
+}
+
+/// A KWin output: a virtual one, or a display of the PC streamed as it is.
+struct KdeOutput {
+    key: OutputKey,
+    origin: Origin,
+    // Field order matters: the stream closes before its own KWin connection.
+    stream: VirtualOutput,
+    /// The connection of a display of the PC shown (see [`Kde::show`]).
+    _connection: Option<Screencast>,
+}
+
+impl KdeOutput {
+    fn new(stream: VirtualOutput, origin: Origin, connection: Option<Screencast>) -> Self {
+        Self {
+            key: OutputKey::new(stream.output_name()),
+            origin,
+            stream,
+            _connection: connection,
+        }
+    }
+}
+
+impl Output for KdeOutput {
+    fn key(&self) -> &OutputKey {
+        &self.key
+    }
+
+    fn health(&self) -> OutputHealth {
+        if self.stream.closed() {
+            OutputHealth::Closed
+        } else if let Some((w, h)) = self.stream.resized() {
+            OutputHealth::Resized { w, h }
+        } else {
+            OutputHealth::Live
+        }
+    }
+
+    fn source(&self) -> FrameSource {
+        FrameSource {
+            input: self.stream.input(),
+            origin: self.origin,
+            // PipeWire hands GPU buffers to an encoder that takes them.
+            memory: Memory::DmaBuf,
+            adapter: None,
+            cursor: Cursor::InFrame,
+        }
+    }
+
+    /// KWin feeds the encoder through PipeWire by itself.
+    fn attach(&mut self, _encoder: &Encoder) -> Result<()> {
+        Ok(())
+    }
+
+    fn detach(&mut self) {}
+
+    fn make_primary(&self) {
+        self.stream.make_primary();
     }
 }

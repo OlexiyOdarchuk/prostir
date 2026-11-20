@@ -4,36 +4,39 @@
 //! only through this module. What the platform's threads see (the tray's items, a
 //! signal to quit) goes to the control loop as events (`crate::events`).
 //!
-//! This file holds what every platform shares: the types below and two traits. Each
-//! operating system has a module of its own (`linux/`, picked with `cfg`) whose public
-//! items are re-exported here, so the core writes `platform::windows::active()` and
-//! never names the OS.
+//! The desktop is a contract (`contract.rs`): the traits [`Desktop`], [`Output`],
+//! [`Windows`] and [`Pointer`], and the data that says what differs ([`DesktopCaps`],
+//! [`FrameSource`], [`OutputHealth`], [`OutputKey`]). It has an implementation per
+//! desktop, picked once when a session starts ([`connect`]), and the core holds it as
+//! a `Box<dyn Desktop>`. Everything else of the platform has one implementation per
+//! build: each operating system has a module of its own (`linux/`, picked with `cfg`)
+//! whose public items are re-exported here, so the core writes `platform::tray::spawn`
+//! and never names the OS.
 //!
 //! # A new operating system (Windows)
 //!
 //! Add `platform/windows/mod.rs`, select it below next to `linux`, and provide what
 //! `linux/mod.rs` exports, with the same names and signatures:
 //!
-//! - `Desktop` implementing [`DesktopBackend`] and `Output` implementing
-//!   [`OutputBackend`]: creating and removing virtual monitors and the laptop-screen
-//!   mirror, their geometry and placement, the primary output, and the frame source
-//!   for the encoder ([`crate::encoder::Input`]: GStreamer source elements, or an
-//!   `appsrc` named `src` that [`OutputBackend::attach`] feeds).
-//! - `windows`: `active`, `cursor`, `all_windows`, `can_move_cursor`, `move_cursor`,
-//!   `move_to`, `put_back`, `forget_panel`, `vacated`, `screenshot`, `screenshot_path`.
-//! - `focus::ActiveOutput` (`new`, `get`): the output the user works on.
+//! - `connect`: the desktop, as a [`Desktop`] with its [`Output`]s, [`Windows`] and
+//!   [`Pointer`]: making and removing virtual monitors, showing the PC's own displays,
+//!   placing them, the primary output, and the frame source for the encoder
+//!   ([`FrameSource`]: GStreamer source elements, or an `appsrc` named `src` that
+//!   [`Output::attach`] feeds). How the contract says what Windows does differently is
+//!   in `contract.rs`.
 //! - `audio`: `AudioOut` (PC sound to the headset, as a default output device while it
 //!   exists), `MicIn` (the headset microphone as the default input: `push`,
-//!   `recording`), `restore_after_crash`.
+//!   `recording`), `SinkVolume`, `restore_after_crash`.
 //! - `sound_source::Watcher` (`start`, `output`): the output whose window plays sound.
 //! - `notifications::watch`: the PC's desktop notifications, as text.
 //! - `tray`: `spawn`, `Handle`, `set_status`, `set_battery`, `set_settings`,
 //!   `set_pairing`; the tray menu also turns autostart on and off.
 //! - `dialogs`: `ask_code` (the pairing code typed on the PC), `notify` and
 //!   `notify_and_wait` (desktop notifications).
-//! - System: `config_home`, `single_instance`, `clean_up_after_crash`, `give_memory_back`, `hostname`, `broadcast_addresses`,
-//!   `run` (a program run to the end, stopped if it hangs). The private runtime dir
-//!   stays inside the platform.
+//! - System: `config_home`, `single_instance`, `clean_up_after_crash`,
+//!   `give_memory_back`, `hostname`, `broadcast_addresses`, `screenshot_path`, `run` (a
+//!   program run to the end, stopped if it hangs). The private runtime dir stays inside
+//!   the platform.
 //! - `on_usb_arrival`: a USB device plugged in (for `adb reverse`).
 //!
 //! The network belongs to the operating system, not to the desktop: `net.rs` holds
@@ -47,18 +50,16 @@
 //! # A new Linux desktop (GNOME)
 //!
 //! Linux picks the desktop at run time (`linux/desktop.rs`: KDE Plasma or Hyprland).
-//! Add a `linux/gnome/` module next to `linux/kde/` and `linux/hyprland/`, a variant
-//! for it in `Desktop` and `Output` (making monitors, streaming them, placing them),
-//! and a branch in each function of `linux/windows.rs` and in `linux/focus.rs` (the
-//! active window and output, moving windows, the mouse, screenshots). Sound,
-//! notifications, the tray, dialogs and the system part are the same on every Linux
-//! desktop.
-
-use std::collections::HashMap;
+//! Add a `linux/gnome/` module next to `linux/kde/` and `linux/hyprland/` with a
+//! struct implementing [`Desktop`] (making monitors, streaming them, placing them), an
+//! [`Output`] for its outputs, and [`Windows`] and [`Pointer`] where it has them, and
+//! pick it in `linux/desktop.rs`. Sound, notifications, the tray, dialogs and the
+//! system part are the same on every Linux desktop.
 
 use anyhow::{Result, bail};
 
-use crate::encoder::{Encoder, Input};
+mod contract;
+pub use contract::*;
 
 #[cfg(all(target_os = "linux", not(feature = "fake-desktop")))]
 mod linux;
@@ -140,45 +141,6 @@ impl std::fmt::Display for MonitorSpec {
     }
 }
 
-/// A display of the PC itself, connected now.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PhysicalDisplay {
-    /// The connector it is on: `eDP-1`, `HDMI-A-1`.
-    pub connector: String,
-    /// Maker, model and serial number as the display says them (its EDID), as far as
-    /// the desktop tells; none when it says nothing.
-    pub edid: Option<String>,
-    /// The laptop's own panel.
-    pub builtin: bool,
-    /// Its picture in pixels, when known.
-    pub size: Option<(u32, u32)>,
-}
-
-/// Whether a connector is a laptop's own panel.
-pub fn is_panel(connector: &str) -> bool {
-    ["eDP", "LVDS", "DSI"]
-        .iter()
-        .any(|p| connector.starts_with(p))
-}
-
-/// The window that has the keyboard, as found when asked.
-#[derive(Debug, Clone)]
-pub struct ActiveWindow {
-    /// The desktop's id for it (Hyprland address, KWin internal id).
-    #[cfg_attr(
-        feature = "fake-desktop",
-        expect(dead_code, reason = "the fake desktop has no windows")
-    )]
-    pub id: String,
-    /// Logical size on the desktop.
-    pub width: i32,
-    pub height: i32,
-    /// Scale of the output it is on.
-    pub scale: f64,
-    /// The output it is on.
-    pub output: String,
-}
-
 /// What the tray asks the control loop to do.
 #[cfg_attr(
     feature = "fake-desktop",
@@ -225,103 +187,4 @@ pub enum NoCode {
     Cancelled,
     /// The PC has no program to ask with.
     NoDialog,
-}
-
-/// Where an output is on the desktop: logical position and size, and its priority
-/// (1 = primary; only KDE has priorities).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Geometry {
-    pub x: i32,
-    pub y: i32,
-    pub w: i32,
-    pub h: i32,
-    pub priority: Option<u32>,
-    /// `false` for an output the desktop lists as disabled (a closed laptop lid).
-    pub enabled: bool,
-}
-
-/// The desktop the monitors are added to, picked when a session starts. Implemented
-/// by the platform's `Desktop`; its outputs are the platform's `Output`.
-pub trait DesktopBackend: Sized {
-    /// Connects to the desktop (and clears what a crashed run left on it).
-    fn connect() -> Result<Self>;
-
-    /// Its name, for the headset: `KDE Plasma`, `Hyprland`.
-    fn name(&self) -> &'static str;
-
-    /// Whether the desktop has a primary output (where the panel and new windows go).
-    fn has_primary(&self) -> bool;
-
-    /// A new virtual monitor, number `number` (1-based).
-    fn create(&self, number: u32, spec: &MonitorSpec) -> Result<Output>;
-
-    /// The display of the PC itself to show in the headset when nothing else was
-    /// chosen for it, if one is on (an external monitor before the laptop panel on
-    /// Hyprland, never the panel of a closed laptop).
-    fn physical_output(&self) -> Option<String>;
-
-    /// The displays of the PC itself connected and on now (a closed laptop's panel is
-    /// not).
-    fn physical_displays(&self) -> Vec<PhysicalDisplay>;
-
-    /// No real display to mirror although one should be there (a laptop panel left
-    /// off after the lid was opened): switch it on, if the desktop needs that.
-    fn wake_physical_display(&mut self);
-
-    /// Streams an existing display, number `number`, named `name`.
-    fn mirror(&self, number: u32, name: &str) -> Result<Output>;
-
-    /// Logical geometry of every output.
-    fn geometries(&self) -> HashMap<String, Geometry>;
-
-    /// Moves outputs to `positions` (logical, top-left); also makes `primary` the
-    /// primary output where there is one. Only what differs from `current` is sent.
-    /// An error when the desktop did not take it.
-    fn place(
-        &self,
-        positions: &[(String, i32, i32)],
-        primary: Option<&str>,
-        current: &HashMap<String, Geometry>,
-    ) -> Result<()>;
-
-    /// Checks now and then that `primary` is still the primary output, and makes it
-    /// so again if the desktop moved it elsewhere.
-    fn keep_primary(&mut self, primary: &Output);
-
-    /// Whether output `name` is virtual (ours or another program's), not a real display.
-    fn is_virtual(&self, name: &str) -> bool;
-
-    /// Whether [`windows::screenshot`] can take a single output; if not, a monitor's
-    /// screenshot is decoded from its own stream.
-    fn screenshots_one_output(&self) -> bool;
-
-    /// Gives new monitors the wallpaper of the others, where the desktop needs that.
-    fn sync_wallpapers(&self);
-}
-
-/// A streamed output: a virtual monitor, a window panel, or the mirrored real display.
-/// Dropping it removes it from the desktop (a mirrored display stays).
-pub trait OutputBackend {
-    /// The desktop's name for it, e.g. `Virtual-Prostir-1`, `Prostir-1` or `eDP-1`.
-    fn output_name(&self) -> &str;
-
-    /// Whether the desktop closed it.
-    fn closed(&self) -> bool;
-
-    /// The pixel size another program gave it, when that is no longer the size it was
-    /// made with (on KDE, sharing it in Discord or OBS can do that). Starting its
-    /// encoder over puts the size back. `None` where the desktop never does that.
-    fn resized(&self) -> Option<(u32, u32)>;
-
-    /// Makes it the primary output (where the desktop has one).
-    fn make_primary(&self);
-
-    /// What to build the encoder on.
-    fn input(&self) -> Input;
-
-    /// Stops feeding the current encoder (before it is replaced).
-    fn detach(&mut self);
-
-    /// Starts feeding `encoder`, for inputs whose frames the platform pushes itself.
-    fn attach(&mut self, encoder: &Encoder) -> Result<()>;
 }

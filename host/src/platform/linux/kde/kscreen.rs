@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use log::{info, warn};
 
-use crate::platform::{Geometry, run};
+use crate::platform::linux::named_virtual;
+use crate::platform::{Geometry, OutputKey, Outputs, run};
 
 /// KScreen answers a question within a second.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -29,9 +30,9 @@ fn said(out: &std::process::Output) -> String {
 }
 
 /// Logical geometry `(x, y, width, height)` of each enabled output, from KScreen.
-pub fn geometries() -> HashMap<String, Geometry> {
+pub fn geometries() -> Outputs {
     let Ok(out) = kscreen_doctor(&["-o"], QUERY_TIMEOUT) else {
-        return HashMap::new();
+        return Outputs::new();
     };
     let text = String::from_utf8_lossy(&out.stdout);
     let mut name = None;
@@ -68,6 +69,7 @@ pub fn geometries() -> HashMap<String, Geometry> {
                         h,
                         priority,
                         enabled: true,
+                        is_virtual: named_virtual(n),
                     },
                 );
             }
@@ -78,7 +80,9 @@ pub fn geometries() -> HashMap<String, Geometry> {
             g.enabled = false;
         }
     }
-    map
+    map.into_iter()
+        .map(|(n, g)| (OutputKey::new(n), g))
+        .collect()
 }
 
 /// Connected real displays that KDE has switched off (e.g. the laptop panel after
