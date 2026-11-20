@@ -160,6 +160,7 @@ fn codec_name(codec: Codec) -> &'static str {
     match codec {
         Codec::H264 => "h264",
         Codec::H265 => "h265",
+        Codec::Av1 => "av1",
     }
 }
 
@@ -180,6 +181,7 @@ fn parse_settings(text: &str) -> (Settings, Kept) {
             ("codec", _) => match value {
                 "h264" => Some(Codec::H264),
                 "h265" => Some(Codec::H265),
+                "av1" => Some(Codec::Av1),
                 _ => None,
             }
             .map(|c| s.codec = c)

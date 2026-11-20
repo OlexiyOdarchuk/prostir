@@ -15,6 +15,7 @@ use prostir_proto::link::tcp::NoiseTcp;
 use prostir_proto::link::{Closer, Link, PeerInfo};
 use prostir_proto::packet::{self, Assembler, FRAGMENT, lane};
 use prostir_proto::secure::{self, Identity, Pairing, TrustStore, confirmation, tags_match};
+use prostir_proto::state::Part;
 use prostir_proto::{ClientMsg, HostMsg, PROTOCOL_VERSION};
 
 use crate::platform::dialogs::{ask_code, notify};
@@ -194,23 +195,24 @@ impl Connection {
 
 /// Encrypts the connection, checks the versions, pairs the headset if either side asks,
 /// and returns the connection once the headset is trusted and asked to open the
-/// session. The caller answers `Opened` once it can serve the session (its monitors
-/// made, its writer running), or an `Error` saying why it cannot.
+/// session, with the parts of the headset's state its `Open` carried. The caller
+/// answers `Snapshot` once it can serve the session (its monitors made, its writer
+/// running), or an `Error` saying why it cannot.
 pub fn accept(
     stream: TcpStream,
     security: &mut Security,
     tray: Option<&tray::Handle>,
-) -> Result<Connection> {
+) -> Result<(Connection, Vec<Part>)> {
     accept_within(stream, security, tray, SETUP_TIME)
 }
 
-/// As [`accept`], with `setup` for everything up to `Opened` (but pairing).
+/// As [`accept`], with `setup` for everything up to `Open` (but pairing).
 fn accept_within(
     stream: TcpStream,
     security: &mut Security,
     tray: Option<&tray::Handle>,
     setup: Duration,
-) -> Result<Connection> {
+) -> Result<(Connection, Vec<Part>)> {
     // A vanished headset does not hold the PC (the transport also gives up a write
     // after a few seconds, and the deadline closes a setup that drags on).
     stream.set_read_timeout(Some(READ_TIME))?;
@@ -293,12 +295,12 @@ fn accept_within(
     let mut attempts = 0;
     loop {
         match conn.recv()? {
-            ClientMsg::Open if security.trusted.contains(&peer.key) => {
+            ClientMsg::Open { parts } if security.trusted.contains(&peer.key) => {
                 conn.link.receiver.set_idle_limit(None);
                 drop(deadline);
-                return Ok(conn);
+                return Ok((conn, parts));
             }
-            ClientMsg::Open => {
+            ClientMsg::Open { .. } => {
                 info!(
                     "unknown headset {}: pairing needed",
                     secure::fingerprint(&peer.key)
@@ -782,9 +784,9 @@ mod tests {
         });
         let (s, _) = l.accept().unwrap();
         // The headset reads until the PC hangs up.
-        // Opened, as the session would send it, then the PC hangs up.
-        let accepted = accept(s, &mut pc.security, None).map(|mut conn| {
-            let _ = conn.send(HostMsg::Opened);
+        // A snapshot, as the session would send it, then the PC hangs up.
+        let accepted = accept(s, &mut pc.security, None).map(|(mut conn, _)| {
+            let _ = conn.send(HostMsg::Snapshot { parts: Vec::new() });
             conn.link.closer.close();
         });
         (accepted, h.join().unwrap())
@@ -987,10 +989,10 @@ mod tests {
         pc.security.trusted.add(key, "test headset").unwrap();
         let (refused, after) = connect(&mut pc, |h| {
             assert!(matches!(h.hello(PROTOCOL_VERSION), Answer::Welcome { .. }));
-            h.send(ClientMsg::AddMonitor {
-                width: 1920,
-                height: 1080,
-            });
+            h.send(ClientMsg::request(
+                prostir_proto::state::ReqId(1),
+                prostir_proto::request::Request::FindMouse,
+            ));
             h.recv().map_err(|e| e.kind())
         });
         let err = refused.unwrap_err().to_string();
@@ -998,7 +1000,7 @@ mod tests {
         assert_eq!(
             after,
             Err(std::io::ErrorKind::UnexpectedEof),
-            "closed, no Opened"
+            "closed, no snapshot"
         );
     }
 
@@ -1009,7 +1011,7 @@ mod tests {
         let mut pc = TestPc::new("pcc");
         let (accepted, (ok, opened)) = connect(&mut pc, |h| {
             assert!(matches!(h.hello(PROTOCOL_VERSION), Answer::Welcome { .. }));
-            h.send(ClientMsg::Open);
+            h.send(ClientMsg::Open { parts: Vec::new() });
             assert_eq!(h.recv().unwrap(), HostMsg::PairingRequired);
             h.send(ClientMsg::PairBegin {
                 headset_shows: false,
@@ -1030,11 +1032,11 @@ mod tests {
             let HostMsg::PairResult { tag } = h.recv().unwrap() else {
                 panic!("expected PairResult")
             };
-            h.send(ClientMsg::Open);
+            h.send(ClientMsg::Open { parts: Vec::new() });
             (tag.is_some(), h.recv().unwrap())
         });
         assert!(ok, "the codes must match");
-        assert_eq!(opened, HostMsg::Opened);
+        assert_eq!(opened, HostMsg::Snapshot { parts: Vec::new() });
         assert!(accepted.is_ok());
         assert_eq!(pc.security.trusted.len(), 1);
     }

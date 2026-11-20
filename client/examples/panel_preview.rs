@@ -51,15 +51,20 @@ fn main() {
         } else {
             Vec::new()
         },
-        pc: Some((
-            prostir_proto::PcSettings {
-                quality: 30,
-                codec: prostir_proto::Codec::H265,
+        pc: Some(prostir_proto::state::Encoding {
+            wanted: prostir_proto::state::Wanted {
+                bitrate: 30,
+                codec: Some(prostir_proto::Codec::H265),
                 software: false,
                 sharp: false,
             },
-            7,
-        )),
+            using: Some((prostir_proto::Codec::H265, true)),
+            choices: vec![
+                (prostir_proto::Codec::H265, true),
+                (prostir_proto::Codec::H264, true),
+                (prostir_proto::Codec::H264, false),
+            ],
+        }),
         pair_offer: std::env::var("OFFER").ok().map(|v| {
             let why = match v.as_str() {
                 "failed" => OfferWhy::WrongCodes,

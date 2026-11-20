@@ -1,0 +1,246 @@
+//! What a headset is told about the PC: the PC's state built from what owns each part
+//! (the screens, the store, the desktop), compared with what went to this session, so
+//! a part goes out whole and only when it changed. Values of enums go out only when the
+//! headset named the capability they need (see `PROTOCOL.md`, "Capabilities").
+
+use prostir_proto::state::{
+    self, Access, DisplayId, Focus, HeadsetCaps, HeadsetState, HostCaps, Limits, Mode, PcInfo,
+    PcState, Prefs, SoundFrom, caps, clip,
+};
+use prostir_proto::wire::WireError;
+use prostir_proto::{Codec, HostMsg, MAX_MONITORS};
+
+use crate::displays::Displays;
+use crate::platform::windows;
+use crate::screen::ScreenId;
+use crate::store::Settings;
+
+/// Monitor sizes the PC offers: the common ones, a 32:9 one where the headset decodes
+/// it, and a portrait one.
+const SIZES: [(u32, u32); 6] = [
+    (1920, 1080),
+    (2560, 1440),
+    (3840, 2160),
+    (3440, 1440),
+    (5120, 1440),
+    (1440, 2560),
+];
+/// Scales offered, in percent ("larger text").
+const SCALES: [u16; 3] = [100, 125, 150];
+/// The smallest and the largest monitor the PC makes, in pixels.
+pub const MIN_SIZE: (u32, u32) = (320, 240);
+pub const MAX_SIZE: (u32, u32) = (7680, 4320);
+/// Monitors with "No limits".
+const MONITORS_NO_LIMITS: u8 = 10;
+/// Window panels: the headset has only so many video decoders.
+const WINDOWS_MAX: u8 = 3;
+/// Displays of the PC itself shown at once, and with "No limits".
+const PHYSICAL_MAX: u8 = 1;
+const PHYSICAL_NO_LIMITS: u8 = 4;
+/// Streams at once: a lane each (`2..32`).
+const STREAMS_MAX: u8 = 30;
+
+/// What the parts are built from at one moment.
+pub struct Sources<'a> {
+    pub displays: &'a Displays,
+    pub wanted: &'a Settings,
+    /// The screen the mouse is on.
+    pub focus: Option<ScreenId>,
+    /// The screen the sound comes from, while the headset asks for it.
+    pub sound_from: Option<ScreenId>,
+}
+
+/// One session's view of the PC's state: the headset's own state, and what it was
+/// told so far.
+pub struct Publisher {
+    pub headset: HeadsetState,
+    sent: PcState,
+}
+
+impl Publisher {
+    pub fn new(headset: HeadsetState) -> Self {
+        Self {
+            headset,
+            sent: PcState::default(),
+        }
+    }
+
+    /// What the headset can do (`Open` always says).
+    pub fn caps(&self) -> &HeadsetCaps {
+        static NONE: std::sync::OnceLock<HeadsetCaps> = std::sync::OnceLock::new();
+        self.headset
+            .caps
+            .as_ref()
+            .unwrap_or_else(|| NONE.get_or_init(HeadsetCaps::default))
+    }
+
+    pub fn prefs(&self) -> Prefs {
+        self.headset.prefs.unwrap_or_default()
+    }
+
+    /// The PC's state now, as this headset is told it.
+    pub fn state(&self, src: &Sources) -> PcState {
+        let headset = self.caps();
+        let prefs = self.prefs();
+        let displays = src.displays.displays_part(headset);
+        let listed = |id: Option<ScreenId>| {
+            id.map(ScreenId::wire)
+                .filter(|id| displays.get(*id).is_some())
+        };
+        let focus = Focus {
+            display: listed(src.focus),
+        };
+        let sound_from = prefs.sound_from_screen.then(|| SoundFrom {
+            display: listed(src.sound_from),
+        });
+        PcState {
+            info: Some(pc_info(src.displays)),
+            caps: Some(host_caps(src.displays)),
+            access: Some(Access::MAIN),
+            limits: Some(limits(&prefs, headset, src.displays.codec())),
+            encoding: Some(src.displays.encoding_part(src.wanted, headset)),
+            sound: Some(src.displays.sound_part()),
+            focus: Some(focus),
+            sound_from,
+            displays: Some(displays),
+        }
+    }
+
+    /// The `Snapshot` that opens the session: everything there is.
+    pub fn snapshot(&mut self, src: &Sources) -> Result<HostMsg, WireError> {
+        let state = self.state(src);
+        let msg = state.snapshot()?;
+        self.sent = state;
+        Ok(msg)
+    }
+
+    /// The parts that changed since they were last sent, `Displays` first.
+    pub fn changed(&mut self, src: &Sources) -> Vec<HostMsg> {
+        let state = self.state(src);
+        let changed = state.changed(&self.sent);
+        self.sent = state;
+        changed
+    }
+
+    /// The displays the headset was told about.
+    pub fn listed(&self) -> impl Iterator<Item = DisplayId> + '_ {
+        self.sent.displays.iter().flat_map(|d| d.ids())
+    }
+}
+
+/// What the PC allows this headset: its own hard limits, more with "No limits", and
+/// sizes only as large as the headset decodes in the codec the PC sends.
+pub fn limits(prefs: &Prefs, headset: &HeadsetCaps, codec: Codec) -> Limits {
+    let decoder = headset.decoder(codec);
+    let fits = |(w, h): (u32, u32)| decoder.is_none_or(|d| w <= d.max_w && h <= d.max_h);
+    let max = decoder.map_or(MAX_SIZE, |d| {
+        (MAX_SIZE.0.min(d.max_w), MAX_SIZE.1.min(d.max_h))
+    });
+    let streams = match headset.streams_max {
+        0 => STREAMS_MAX,
+        n => n.min(STREAMS_MAX),
+    };
+    Limits {
+        virtual_max: if prefs.no_limits {
+            MONITORS_NO_LIMITS
+        } else {
+            MAX_MONITORS as u8
+        },
+        windows_max: WINDOWS_MAX,
+        physical_max: if prefs.no_limits {
+            PHYSICAL_NO_LIMITS
+        } else {
+            PHYSICAL_MAX
+        },
+        streams_max: streams,
+        min: MIN_SIZE,
+        max,
+        sizes: SIZES
+            .into_iter()
+            .filter(|s| fits(*s))
+            .map(|(w, h)| Mode::new(w, h))
+            .collect(),
+        scales: SCALES.to_vec(),
+    }
+}
+
+/// What this PC can do.
+fn host_caps(displays: &Displays) -> HostCaps {
+    let mut features = vec![
+        caps::pc::WINDOWS,
+        caps::pc::PHYSICAL,
+        caps::pc::NOTIFICATIONS,
+        caps::pc::SOUND_FROM,
+        caps::pc::NO_LIMITS,
+        caps::pc::SCALE,
+    ];
+    if windows::can_move_cursor() {
+        features.push(caps::pc::MOVE_MOUSE);
+    }
+    if displays.screenshots_one_output() {
+        features.push(caps::pc::SCREENSHOT_ONE);
+    }
+    features.sort();
+    HostCaps { features }
+}
+
+/// About this PC.
+fn pc_info(displays: &Displays) -> PcInfo {
+    PcInfo {
+        name: clip(&crate::platform::hostname(), state::MAX_DISPLAY_NAME),
+        app: clip(
+            &prostir_proto::app_version(env!("CARGO_PKG_VERSION")),
+            state::MAX_SHORT,
+        ),
+        language: crate::i18n::code().into(),
+        os: state::os::LINUX,
+        desktop: displays.desktop_name().into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prostir_proto::state::Decoder;
+
+    fn headset(decoders: Vec<Decoder>) -> HeadsetCaps {
+        HeadsetCaps {
+            decoders,
+            streams_max: 12,
+            ..HeadsetCaps::default()
+        }
+    }
+
+    /// "No limits" raises the counts; sizes stay within what the headset decodes.
+    #[test]
+    fn limits_follow_no_limits_and_the_decoders() {
+        let h264 = Decoder {
+            codec: 0,
+            max_w: 4096,
+            max_h: 4096,
+        };
+        let h265 = Decoder {
+            codec: 1,
+            max_w: 8192,
+            max_h: 4320,
+        };
+        let caps = headset(vec![h264, h265]);
+        let safe = limits(&Prefs::default(), &caps, Codec::H264);
+        assert_eq!((safe.virtual_max, safe.physical_max), (6, 1));
+        assert_eq!(safe.streams_max, 12);
+        assert_eq!(safe.max, (4096, 4096));
+        assert!(
+            !safe.sizes.contains(&Mode::new(5120, 1440)),
+            "too wide for H.264"
+        );
+        let free = Prefs {
+            no_limits: true,
+            ..Prefs::default()
+        };
+        let wide = limits(&free, &caps, Codec::H265);
+        assert_eq!((wide.virtual_max, wide.physical_max), (10, 4));
+        assert!(wide.sizes.contains(&Mode::new(5120, 1440)));
+        assert_eq!(wide.max, (7680, 4320));
+        assert!(wide.check().is_ok());
+    }
+}

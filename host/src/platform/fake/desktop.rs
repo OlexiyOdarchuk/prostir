@@ -73,6 +73,10 @@ impl DesktopBackend for FakeDesktop {
         })
     }
 
+    fn name(&self) -> &'static str {
+        "fake"
+    }
+
     fn has_primary(&self) -> bool {
         false
     }

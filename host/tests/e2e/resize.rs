@@ -46,7 +46,7 @@ fn wait_placed_as(pc: &Pc, headset: &mut FakeHeadset, skip: usize, before: &[(St
 fn a_monitor_resized_by_another_program_gets_its_size_back() {
     let (_dir, pc, _keys, mut headset) = session("resized", &Options::default());
     headset.take_for(Duration::from_secs(1)).unwrap();
-    let id = headset.view().order[1];
+    let id = headset.view().order()[1];
     let laid_out = placed(&pc);
     let layouts = pc.count_log(PLACED);
     let starts = pc.source_starts();
@@ -72,7 +72,7 @@ fn a_monitor_resized_by_another_program_gets_its_size_back() {
     assert_eq!(pc.count_log("created Fake-2"), 1, "not made anew");
     let view = headset.view();
     assert_eq!(view.streams[&id].width, 480);
-    assert_eq!(view.order.len(), 2);
+    assert_eq!(view.order().len(), 2);
     assert!(!view.closed, "the session goes on");
     assert_eq!(pc.count_log("notification: Screen sharing"), 1, "the tip");
 }
@@ -81,7 +81,7 @@ fn a_monitor_resized_by_another_program_gets_its_size_back() {
 fn a_size_that_does_not_come_back_makes_the_monitor_anew() {
     let (_dir, pc, _keys, mut headset) = session("resized-sticky", &Options::default());
     headset.take_for(Duration::from_secs(1)).unwrap();
-    let order = headset.view().order.clone();
+    let order = headset.view().order();
     let id = order[1];
     let laid_out = placed(&pc);
     let layouts = pc.count_log(PLACED);
@@ -106,7 +106,7 @@ fn a_size_that_does_not_come_back_makes_the_monitor_anew() {
 
     assert_eq!(pc.count_log("created Fake-2"), 2, "made anew once");
     let view = headset.view();
-    assert_eq!(view.order, order, "the same monitor in the same place");
+    assert_eq!(view.order(), order, "the same monitor in the same place");
     assert_eq!(view.streams[&id].width, 480);
     assert!(!view.closed, "the session goes on");
 }
@@ -115,7 +115,7 @@ fn a_size_that_does_not_come_back_makes_the_monitor_anew() {
 fn a_program_that_keeps_resizing_is_not_fought_forever() {
     let (_dir, pc, _keys, mut headset) = session("resized-again", &Options::default());
     headset.take_for(Duration::from_secs(1)).unwrap();
-    let id = headset.view().order[1];
+    let id = headset.view().order()[1];
     let starts = pc.source_starts()[SECOND];
 
     for i in 0..3 {

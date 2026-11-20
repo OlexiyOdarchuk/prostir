@@ -160,12 +160,20 @@ impl ErrorCode {
     }
 }
 
+impl ErrorCode {
+    /// The code as this build knows it: an unknown one reads as [`ErrorCode::OTHER`].
+    /// The number itself is kept as it came, for the log.
+    pub fn known(self) -> Self {
+        Self::from_code(self.0)
+    }
+}
+
 impl Wire for ErrorCode {
     fn put(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
         self.0.put(out)
     }
     fn get(r: &mut Reader<'_>) -> Result<Self, WireError> {
-        Ok(Self::from_code(u16::get(r)?))
+        Ok(Self(u16::get(r)?))
     }
 }
 
@@ -840,6 +848,198 @@ impl Wire for Part {
     }
 }
 
+/// The PC's state in parts: what the PC builds from what it has and compares with
+/// what it sent this session (so a part goes out only when it changed), and what the
+/// headset keeps from `Snapshot` and the parts after it. One type for both, so the two
+/// cannot drift apart.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PcState {
+    pub displays: Option<Displays>,
+    pub info: Option<PcInfo>,
+    pub caps: Option<HostCaps>,
+    pub access: Option<Access>,
+    pub limits: Option<Limits>,
+    pub encoding: Option<Encoding>,
+    pub sound: Option<Sound>,
+    pub focus: Option<Focus>,
+    pub sound_from: Option<SoundFrom>,
+}
+
+/// Tags of the PC's parts, in the order they go: `Displays` first (other parts name its
+/// displays), `Focus` and `SoundFrom` last.
+const PC_PARTS: &[u8] = &[31, 36, 37, 35, 34, 32, 33, 16, 23];
+
+impl PcState {
+    /// Whether messages with `tag` are parts of the PC's state.
+    pub(crate) fn is_part(tag: u8) -> bool {
+        PC_PARTS.contains(&tag)
+    }
+
+    /// Every part there is, in the order they go.
+    pub fn parts(&self) -> Vec<crate::HostMsg> {
+        self.changed(&Self::default())
+    }
+
+    /// The parts that differ from `sent`, whole, in the order they go.
+    pub fn changed(&self, sent: &Self) -> Vec<crate::HostMsg> {
+        use crate::HostMsg as M;
+        let mut out = Vec::new();
+        let mut part = |now: &Option<_>, then: &Option<_>, msg: &dyn Fn() -> M| {
+            if now.is_some() && now != then {
+                out.push(msg());
+            }
+        };
+        macro_rules! each {
+            ($($field:ident => $variant:ident),*) => {$(
+                part(
+                    &self.$field.clone().map(|p| M::$variant { part: p }),
+                    &sent.$field.clone().map(|p| M::$variant { part: p }),
+                    &|| M::$variant { part: self.$field.clone().expect("checked above") },
+                );
+            )*};
+        }
+        each!(
+            displays => Displays,
+            info => PcInfo,
+            caps => HostCaps,
+            access => Access,
+            limits => Limits,
+            encoding => Encoding,
+            sound => Sound,
+            focus => Focus,
+            sound_from => SoundFrom
+        );
+        out
+    }
+
+    /// The whole state as one `Snapshot`.
+    pub fn snapshot(&self) -> Result<crate::HostMsg, WireError> {
+        let parts = self
+            .parts()
+            .iter()
+            .filter_map(crate::HostMsg::to_part)
+            .collect::<Result<Vec<Part>, WireError>>()?;
+        Ok(crate::HostMsg::Snapshot { parts })
+    }
+
+    /// Takes the part `msg`; gives back a message that is not one. A part that names
+    /// a display the state does not list is the PC's bug: an error.
+    pub fn apply(&mut self, msg: crate::HostMsg) -> Result<Option<crate::HostMsg>, WireError> {
+        use crate::HostMsg as M;
+        let known = |id: Option<DisplayId>, displays: &Option<Displays>| {
+            displays.as_ref().is_none_or(|d| d.knows(id))
+        };
+        match msg {
+            M::Displays { part } => self.displays = Some(part),
+            M::PcInfo { part } => self.info = Some(part),
+            M::HostCaps { part } => self.caps = Some(part),
+            M::Access { part } => self.access = Some(part),
+            M::Limits { part } => self.limits = Some(part),
+            M::Encoding { part } => self.encoding = Some(part),
+            M::Sound { part } => self.sound = Some(part),
+            M::Focus { part } if known(part.display, &self.displays) => self.focus = Some(part),
+            M::SoundFrom { part } if known(part.display, &self.displays) => {
+                self.sound_from = Some(part)
+            }
+            M::Focus { .. } | M::SoundFrom { .. } => {
+                return Err(WireError::Invalid("a display that is not listed"));
+            }
+            other => return Ok(Some(other)),
+        }
+        Ok(None)
+    }
+
+    /// The state a `Snapshot`'s parts hold. A part this build does not know is skipped;
+    /// one twice is an error.
+    pub fn from_snapshot(parts: &[Part]) -> Result<Self, WireError> {
+        let mut state = Self::default();
+        let mut seen = Vec::new();
+        for part in parts.iter().filter(|p| Self::is_part(p.tag)) {
+            if seen.contains(&part.tag) {
+                return Err(WireError::Invalid("a part twice in one snapshot"));
+            }
+            seen.push(part.tag);
+            let msg = crate::HostMsg::decode(part.tag, &part.body)?;
+            state.apply(msg)?;
+        }
+        Ok(state)
+    }
+}
+
+/// The headset's state in parts: what it says in `Open` and changes after, as the PC
+/// keeps it for the session.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HeadsetState {
+    pub caps: Option<HeadsetCaps>,
+    pub prefs: Option<Prefs>,
+    pub presence: Option<Presence>,
+    pub battery: Option<Battery>,
+}
+
+/// Tags of the headset's parts, in the order they go.
+const HEADSET_PARTS: &[u8] = &[138, 134, 115, 119];
+
+impl HeadsetState {
+    /// Whether messages with `tag` are parts of the headset's state.
+    pub(crate) fn is_part(tag: u8) -> bool {
+        HEADSET_PARTS.contains(&tag)
+    }
+
+    /// Every part there is, in the order they go.
+    pub fn parts(&self) -> Vec<crate::ClientMsg> {
+        use crate::ClientMsg as M;
+        let mut out = Vec::new();
+        out.extend(self.caps.clone().map(|part| M::HeadsetCaps { part }));
+        out.extend(self.prefs.map(|part| M::Prefs { part }));
+        out.extend(self.presence.map(|part| M::Presence { part }));
+        out.extend(self.battery.map(|part| M::Battery { part }));
+        out
+    }
+
+    /// The whole state as `Open`.
+    pub fn open(&self) -> Result<crate::ClientMsg, WireError> {
+        let parts = self
+            .parts()
+            .iter()
+            .filter_map(crate::ClientMsg::to_part)
+            .collect::<Result<Vec<Part>, WireError>>()?;
+        Ok(crate::ClientMsg::Open { parts })
+    }
+
+    /// Takes the part `msg`; gives back a message that is not one.
+    pub fn apply(&mut self, msg: crate::ClientMsg) -> Option<crate::ClientMsg> {
+        use crate::ClientMsg as M;
+        match msg {
+            M::HeadsetCaps { part } => self.caps = Some(part),
+            M::Prefs { part } => self.prefs = Some(part),
+            M::Presence { part } => self.presence = Some(part),
+            M::Battery { part } => self.battery = Some(part),
+            other => return Some(other),
+        }
+        None
+    }
+
+    /// The state `Open`'s parts hold: `HeadsetCaps` must be among them. A part this
+    /// build does not know is skipped; one twice is an error.
+    pub fn from_open(parts: &[Part]) -> Result<Self, WireError> {
+        let mut state = Self::default();
+        let mut seen = Vec::new();
+        for part in parts.iter().filter(|p| Self::is_part(p.tag)) {
+            if seen.contains(&part.tag) {
+                return Err(WireError::Invalid("a part twice in Open"));
+            }
+            seen.push(part.tag);
+            state.apply(crate::ClientMsg::decode(part.tag, &part.body)?);
+        }
+        if state.caps.is_none() {
+            return Err(WireError::Invalid(
+                "Open without the headset's capabilities",
+            ));
+        }
+        Ok(state)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -881,7 +1081,9 @@ mod tests {
     #[test]
     fn unknown_error_codes_read_as_other() {
         assert_eq!(decode::<ErrorCode>(&[4, 0]), Ok(ErrorCode::LIMIT));
-        assert_eq!(decode::<ErrorCode>(&[200, 0]), Ok(ErrorCode::OTHER));
+        let unknown = decode::<ErrorCode>(&[200, 0]).unwrap();
+        assert_eq!(unknown.known(), ErrorCode::OTHER);
+        assert_eq!(unknown.code(), 200, "kept for the log");
         assert_eq!(ErrorCode::from_code(14), ErrorCode::BAD_ARGUMENT);
         assert_eq!(ErrorCode::from_code(15), ErrorCode::OTHER);
     }

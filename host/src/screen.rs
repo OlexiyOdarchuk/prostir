@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use prostir_proto::{MIRROR_ID, WINDOW_IDS};
+use prostir_proto::state::DisplayId;
 
 use crate::encoder::Encoder;
 use crate::platform::{ActiveWindow, MonitorSpec, Output, OutputBackend};
@@ -11,15 +11,18 @@ use crate::platform::{ActiveWindow, MonitorSpec, Output, OutputBackend};
 /// The PC's key for a screen: in its set, its rows and its saved files. A virtual
 /// monitor keeps its number between runs, so the headset finds it where it was.
 ///
-/// The protocol still numbers streams with a `u8` (virtual monitors `0..`, window
-/// panels `10..13`, the laptop screen `100`), and the numbers here are the same, so
-/// [`ScreenId::wire`] and [`ScreenId::from_wire`] are the only places they cross.
+/// The protocol's [`DisplayId`] is the same number, so [`ScreenId::wire`] and
+/// [`ScreenId::from_wire`] are the only places they cross. For now virtual monitors
+/// have `0..`, window panels `10..13` and the laptop screen `100`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ScreenId(u32);
 
+/// Numbers of window panels, given out for one session.
+const PANELS: std::ops::Range<u32> = 10..13;
+
 impl ScreenId {
     /// The laptop screen (the physical display streamed as it is).
-    pub const BUILTIN: Self = Self(MIRROR_ID as u32);
+    pub const BUILTIN: Self = Self(100);
 
     /// A virtual monitor's number as saved (`0..`).
     pub fn saved(n: u32) -> Self {
@@ -41,17 +44,17 @@ impl ScreenId {
 
     /// Numbers of window panels, given out for one session.
     pub fn panels() -> impl Iterator<Item = Self> {
-        WINDOW_IDS.map(|id| Self(u32::from(id)))
+        PANELS.map(Self)
     }
 
-    /// The stream id in protocol messages.
-    pub fn wire(self) -> u8 {
-        u8::try_from(self.0).expect("screen numbers fit the protocol's stream ids")
+    /// The display in protocol messages.
+    pub fn wire(self) -> DisplayId {
+        DisplayId(self.0)
     }
 
     /// The screen a protocol message names.
-    pub fn from_wire(id: u8) -> Self {
-        Self(u32::from(id))
+    pub fn from_wire(id: DisplayId) -> Self {
+        Self(id.0)
     }
 
     /// The name the screen's output and stream go by: `Prostir-N` from 1.
@@ -68,11 +71,6 @@ impl std::fmt::Display for ScreenId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.name())
     }
-}
-
-/// Stream ids of `ids`, for a protocol message.
-pub fn wire_ids(ids: &[ScreenId]) -> Vec<u8> {
-    ids.iter().map(|id| id.wire()).collect()
 }
 
 /// What a screen shows.
@@ -253,20 +251,18 @@ mod tests {
     /// laptop screen's.
     #[test]
     fn numbers_are_the_protocols() {
-        assert_eq!(ScreenId::BUILTIN.wire(), MIRROR_ID);
-        assert_eq!(ScreenId::from_wire(3), ScreenId::from_wire(3));
-        let taken = [0, 1, 3].map(ScreenId::from_wire);
+        assert_eq!(ScreenId::BUILTIN.wire(), DisplayId(100));
+        let id = |n| ScreenId::from_wire(DisplayId(n));
+        assert_eq!(id(3).wire(), DisplayId(3));
+        let taken = [0, 1, 3].map(id);
+        assert_eq!(ScreenId::first_free(|i| taken.contains(&i)), id(2));
+        let ten: Vec<ScreenId> = (0..10).map(id).collect();
         assert_eq!(
-            ScreenId::first_free(|id| taken.contains(&id)),
-            ScreenId::from_wire(2)
-        );
-        let ten: Vec<ScreenId> = (0..10).map(ScreenId::from_wire).collect();
-        assert_eq!(
-            ScreenId::first_free(|id| ten.contains(&id)),
-            ScreenId::from_wire(13),
+            ScreenId::first_free(|i| ten.contains(&i)),
+            id(13),
             "past the window panels"
         );
-        assert_eq!(ScreenId::from_wire(0).name(), "Prostir-1");
+        assert_eq!(id(0).name(), "Prostir-1");
     }
 
     const SHRUNK: Option<(u32, u32)> = Some((320, 240));

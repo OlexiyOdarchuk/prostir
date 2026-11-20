@@ -38,6 +38,13 @@ impl DesktopBackend for Desktop {
         }
     }
 
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Kde(_) => "KDE Plasma",
+            Self::Hyprland => "Hyprland",
+        }
+    }
+
     fn has_primary(&self) -> bool {
         matches!(self, Self::Kde(_))
     }

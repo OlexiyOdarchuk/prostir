@@ -107,7 +107,9 @@ fn the_largest_frame_comes_back_whole() {
         .map(|i| (i % 249) as u8)
         .collect();
     let frame = HostMsg::Frame {
-        id: 3,
+        id: crate::state::DisplayId(3),
+        generation: crate::state::Gen(1),
+        seq: 0,
         keyframe: true,
         pts_us: 99,
         data,
@@ -327,7 +329,9 @@ fn limits_before_and_in_the_session() {
 #[test]
 fn a_message_cut_off_with_its_connection_is_gone() {
     let frame = HostMsg::Frame {
-        id: 0,
+        id: crate::state::DisplayId(0),
+        generation: crate::state::Gen(1),
+        seq: 0,
         keyframe: true,
         pts_us: 1,
         data: vec![1; 3 * FRAGMENT],
@@ -356,7 +360,9 @@ fn a_message_cut_off_with_its_connection_is_gone() {
 #[test]
 fn a_first_packet_always_holds_the_header() {
     let frame = HostMsg::Frame {
-        id: 1,
+        id: crate::state::DisplayId(1),
+        generation: crate::state::Gen(1),
+        seq: 0,
         keyframe: false,
         pts_us: 5,
         data: vec![7; 40],
@@ -387,7 +393,9 @@ fn random_packets_come_back_or_fail_never_panic() {
             for _ in 0..1 + rng.below(4) {
                 let msg = match rng.below(3) {
                     0 => HostMsg::Frame {
-                        id: l as u8,
+                        id: crate::state::DisplayId(l as u32),
+                        generation: crate::state::Gen(1),
+                        seq: 0,
                         keyframe: rng.below(2) == 0,
                         pts_us: rng.next(),
                         data: (0..rng.below(3 * 1024)).map(|_| rng.next() as u8).collect(),

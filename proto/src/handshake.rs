@@ -131,7 +131,7 @@ mod tests {
         expected.extend_from_slice(b"0.2.0");
         assert_eq!(pc.receiver.recv().unwrap(), expected);
         send_hello(&mut *headset.sender, "0.2.0").unwrap();
-        let open = ClientMsg::Open.encode().unwrap();
+        let open = ClientMsg::Open { parts: Vec::new() }.encode().unwrap();
         packet::send_whole(&mut *headset.sender, lane::CONTROL, open, packet::FRAGMENT).unwrap();
         assert_eq!(
             read_first(&mut *pc.receiver).unwrap(),
@@ -145,7 +145,7 @@ mod tests {
         let mut packets = ClientMsg::assembler();
         assert_eq!(
             ClientMsg::recv(&mut *pc.receiver, &mut packets).unwrap(),
-            ClientMsg::Open
+            ClientMsg::Open { parts: Vec::new() }
         );
 
         let welcome = HostMsg::Welcome {
@@ -153,8 +153,8 @@ mod tests {
             language: "uk".into(),
         };
         send_from_pc(&mut *pc.sender, &welcome).unwrap();
-        let opened = HostMsg::Opened.encode().unwrap();
-        packet::send_whole(&mut *pc.sender, lane::CONTROL, opened, packet::FRAGMENT).unwrap();
+        let snapshot = HostMsg::Snapshot { parts: Vec::new() }.encode().unwrap();
+        packet::send_whole(&mut *pc.sender, lane::CONTROL, snapshot, packet::FRAGMENT).unwrap();
         assert_eq!(
             read_answer(&mut *headset.receiver).unwrap(),
             Answer::Welcome {
@@ -165,7 +165,7 @@ mod tests {
         let mut packets = HostMsg::assembler();
         assert_eq!(
             HostMsg::recv(&mut *headset.receiver, &mut packets).unwrap(),
-            HostMsg::Opened
+            HostMsg::Snapshot { parts: Vec::new() }
         );
     }
 

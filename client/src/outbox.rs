@@ -216,6 +216,8 @@ impl State {
 mod tests {
     use super::*;
     use prostir_proto::link::memory;
+    use prostir_proto::request::Request;
+    use prostir_proto::state::{DisplayId, Gen, ReqId};
 
     /// Sends everything waiting through a link and reads it back as the PC would.
     fn sent(o: &Outbox) -> Vec<(u8, ClientMsg)> {
@@ -252,14 +254,26 @@ mod tests {
     fn control_goes_first_and_each_class_has_its_lane() {
         let o = Outbox::default();
         o.push(ClientMsg::Mic { pcm: vec![1; 960] }).unwrap();
-        o.push(ClientMsg::FrameShown { id: 0, pts_us: 5 }).unwrap();
+        o.push(ClientMsg::FrameShown {
+            id: DisplayId(0),
+            generation: Gen(1),
+            seq: 5,
+        })
+        .unwrap();
         o.push(ClientMsg::SetMic { enabled: true }).unwrap();
         assert_eq!(
             sent(&o),
             [
                 (lane::CONTROL, ClientMsg::SetMic { enabled: true }),
                 (lane::SOUND, ClientMsg::Mic { pcm: vec![1; 960] }),
-                (lane::SOUND, ClientMsg::FrameShown { id: 0, pts_us: 5 }),
+                (
+                    lane::SOUND,
+                    ClientMsg::FrameShown {
+                        id: DisplayId(0),
+                        generation: Gen(1),
+                        seq: 5,
+                    }
+                ),
             ]
         );
     }
@@ -273,8 +287,12 @@ mod tests {
             o.push(ClientMsg::Mic { pcm: vec![0; 2] }).unwrap();
         }
         for i in 0..MAX_LOSSY + 10 {
-            let id = (i % 100) as u8;
-            o.push(ClientMsg::RemoveMonitor { id }).unwrap();
+            let id = DisplayId((i % 100) as u32);
+            o.push(ClientMsg::request(
+                ReqId(i as u32),
+                Request::RemoveDisplay { id },
+            ))
+            .unwrap();
         }
         let msgs = sent(&o);
         let mic = msgs.iter().filter(|(l, _)| *l == lane::SOUND).count();
@@ -313,7 +331,7 @@ mod tests {
         o.push(ClientMsg::Mic { pcm: vec![1; 960] }).unwrap();
         o.push(ClientMsg::SetMic { enabled: false }).unwrap();
         o.say_goodbye(HeadsetGoodbye::OtherPc);
-        assert!(o.push(ClientMsg::Open).is_err());
+        assert!(o.push(ClientMsg::Open { parts: Vec::new() }).is_err());
         assert_eq!(
             sent(&o),
             [
@@ -329,7 +347,7 @@ mod tests {
     fn nothing_is_taken_once_closed() {
         let o = Outbox::default();
         o.close();
-        assert!(o.push(ClientMsg::Open).is_err());
+        assert!(o.push(ClientMsg::Open { parts: Vec::new() }).is_err());
         assert_eq!(o.next(&mut Lanes::default()), None);
         // Nor what cannot be sent at all.
         let o = Outbox::default();

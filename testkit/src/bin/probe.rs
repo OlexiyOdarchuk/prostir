@@ -4,8 +4,8 @@
 //!
 //! Usage: prostir-probe [HOST:PORT] [SECONDS] [DIR]
 //!
-//! `PROBE_SEND=detach|here:N|shot:N|close:N|find|notify|mouse:N` sends one request
-//! after two seconds.
+//! `PROBE_SEND=detach|here:N|shot:N|close:N|find|mouse:N` sends one request after
+//! two seconds.
 
 use std::collections::HashMap;
 use std::io::{BufWriter, Write};
@@ -13,7 +13,9 @@ use std::net::ToSocketAddrs;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use prostir_proto::request::Request;
 use prostir_proto::secure;
+use prostir_proto::state::DisplayId;
 use prostir_proto::{ClientMsg, Codec, HostMsg};
 use prostir_testkit::{ConnectError, FakeHeadset, Keys};
 
@@ -25,26 +27,33 @@ struct Stats {
     first_is_key: Option<bool>,
 }
 
+/// What `PROBE_SEND` names: a request, or another message.
+enum Send {
+    Request(Request),
+    Message(ClientMsg),
+}
+
 /// The request named by `PROBE_SEND`.
-fn request(what: &str) -> Option<ClientMsg> {
-    let num = || {
-        what.split(':')
-            .nth(1)
-            .and_then(|n| n.parse().ok())
-            .unwrap_or(0)
+fn request(what: &str) -> Option<Send> {
+    let id = || {
+        DisplayId(
+            what.split(':')
+                .nth(1)
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(0),
+        )
     };
     Some(match what.split(':').next()? {
-        "detach" => ClientMsg::DetachWindow,
-        "here" => ClientMsg::WindowHere { id: num() },
-        "shot" => ClientMsg::Screenshot { id: num() },
-        "close" => ClientMsg::RemoveMonitor { id: num() },
-        "find" => ClientMsg::FindMouse,
-        "notify" => ClientMsg::SetNotifications { enabled: true },
-        "mouse" => ClientMsg::MouseTo {
-            id: num(),
-            x: 32768,
-            y: 32768,
-        },
+        "detach" => Send::Request(Request::DetachWindow),
+        "here" => Send::Request(Request::WindowHere { id: id() }),
+        "shot" => Send::Request(Request::Screenshot { id: id() }),
+        "close" => Send::Request(Request::RemoveDisplay { id: id() }),
+        "find" => Send::Request(Request::FindMouse),
+        "mouse" => Send::Message(ClientMsg::MouseTo {
+            id: id(),
+            u: 32768,
+            v: 32768,
+        }),
         _ => return None,
     })
 }
@@ -85,8 +94,11 @@ fn main() -> Result<()> {
         "connected, host protocol v{}, language {}",
         headset.version, headset.language
     );
+    for part in headset.view().pc.parts() {
+        println!("PC: {part:?}");
+    }
 
-    let mut streams: HashMap<u8, Stats> = HashMap::new();
+    let mut streams: HashMap<DisplayId, Stats> = HashMap::new();
     // Raw PCM: play with `pw-play --format s16 --rate 48000 --channels 2 audio.raw`.
     let mut audio = BufWriter::new(std::fs::File::create(dir.join("audio.raw"))?);
     let mut audio_bytes = 0u64;
@@ -96,10 +108,18 @@ fn main() -> Result<()> {
     while start.elapsed() < Duration::from_secs(seconds) {
         if start.elapsed() > Duration::from_secs(2)
             && let Some(what) = to_send.take()
-            && let Some(msg) = request(&what)
         {
-            println!("sending {msg:?}");
-            headset.send(&msg)?;
+            match request(&what) {
+                Some(Send::Request(r)) => {
+                    let req = headset.request(r.clone())?;
+                    println!("request {}: {r:?}", req.0);
+                }
+                Some(Send::Message(msg)) => {
+                    println!("sending {msg:?}");
+                    headset.send(&msg)?;
+                }
+                None => println!("PROBE_SEND={what}: nothing to send"),
+            }
         }
         let Some(msg) = headset.recv(Duration::from_millis(200))? else {
             if quiet_since.elapsed() > Duration::from_secs(15) {
@@ -111,15 +131,23 @@ fn main() -> Result<()> {
         match msg {
             HostMsg::StreamStart {
                 id,
-                width,
-                height,
+                generation,
+                w,
+                h,
                 codec,
-                name,
             } => {
-                println!("stream {id} '{name}': {width}x{height} {codec:?}");
-                let ext = if codec == Codec::H265 { "h265" } else { "h264" };
+                let name = headset
+                    .view()
+                    .display(id)
+                    .map_or_else(|| format!("{id}"), |d| d.name.clone());
+                println!("stream {} '{name}' {generation:?}: {w}x{h} {codec:?}", id.0);
+                let ext = match codec {
+                    Codec::H264 => "h264",
+                    Codec::H265 => "h265",
+                    Codec::Av1 => "av1",
+                };
                 let file = BufWriter::new(std::fs::File::create(
-                    dir.join(format!("monitor-{}.{ext}", id + 1)),
+                    dir.join(format!("display-{}.{ext}", id.0)),
                 )?);
                 streams.insert(
                     id,
@@ -136,7 +164,7 @@ fn main() -> Result<()> {
                 id, keyframe, data, ..
             } => {
                 let Some(s) = streams.get_mut(&id) else {
-                    bail!("frame for unannounced stream {id}")
+                    bail!("frame for unannounced stream {}", id.0)
                 };
                 s.first_is_key.get_or_insert(keyframe);
                 s.frames += 1;
@@ -148,23 +176,15 @@ fn main() -> Result<()> {
                 audio_bytes += pcm.len() as u64;
                 audio.write_all(&pcm)?;
             }
-            HostMsg::StreamEnd { id } => println!("stream {id} ended"),
-            HostMsg::PrimaryChanged { id } => println!("primary monitor: {id}"),
+            HostMsg::StreamEnd { id, .. } => println!("stream {} ended", id.0),
+            HostMsg::Reply { req, outcome } => println!("reply {}: {outcome:?}", req.0),
             HostMsg::Error { text } => println!("host error: {text}"),
-            HostMsg::MirrorWanted { enabled } => println!("mirror wanted: {enabled}"),
-            HostMsg::Order { ids } => println!("order: {ids:?}"),
-            HostMsg::AudioWanted { enabled } => println!("sound to headset: {enabled}"),
-            HostMsg::MicWanted { enabled } => println!("headset microphone wanted: {enabled}"),
+            HostMsg::Problem { error, detail, .. } => {
+                println!("problem {}: {detail}", error.code())
+            }
             HostMsg::MicActive { active } => println!("PC is recording: {active}"),
-            HostMsg::Focus { id } => println!("mouse on: {id:?}"),
             HostMsg::Recenter => println!("PC asks to bring the monitors in front"),
             HostMsg::Notice { text } => println!("PC says: {text}"),
-            HostMsg::MouseAt { id, x, y } => println!("mouse on {id} at {x},{y}"),
-            HostMsg::Abilities { bits } => println!("PC abilities: {bits:#b}"),
-            HostMsg::SoundFrom { id } => println!("sound from monitor {id:?}"),
-            HostMsg::PcSettings { settings, encoders } => {
-                println!("PC encodes: {settings:?}, can use {encoders:#05b}")
-            }
             HostMsg::Ping { .. } | HostMsg::Pong { .. } => {}
             HostMsg::Goodbye { reason } => {
                 println!(
@@ -172,12 +192,8 @@ fn main() -> Result<()> {
                     prostir_proto::PcGoodbye::from_code(reason)
                 )
             }
-            HostMsg::Incompatible { .. }
-            | HostMsg::PairingRequired
-            | HostMsg::PairMsg { .. }
-            | HostMsg::PairResult { .. }
-            | HostMsg::Welcome { .. }
-            | HostMsg::Opened => {}
+            // A part of the PC's state.
+            part => println!("PC: {part:?}"),
         }
     }
     let secs = start.elapsed().as_secs_f64();
@@ -189,7 +205,8 @@ fn main() -> Result<()> {
     for (id, s) in &mut streams {
         s.file.flush()?;
         println!(
-            "stream {id}: {} frames ({:.1} fps), {} keyframes, {:.2} Mbit/s, first frame keyframe: {:?}",
+            "stream {}: {} frames ({:.1} fps), {} keyframes, {:.2} Mbit/s, first frame keyframe: {:?}",
+            id.0,
             s.frames,
             s.frames as f64 / secs,
             s.keyframes,

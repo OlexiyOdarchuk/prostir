@@ -3,7 +3,9 @@
 
 use std::time::Duration;
 
-use prostir_proto::{ClientMsg, LayoutEntry, LayoutRow};
+use prostir_proto::ClientMsg;
+use prostir_proto::request::{Outcome, Request};
+use prostir_proto::state::{DisplayId, Mode, Placed, Row};
 use prostir_testkit::View;
 
 use crate::pc::{Options, Pc, TestDir};
@@ -32,22 +34,26 @@ pub fn placed(pc: &Pc) -> Vec<(String, i32, i32)> {
 }
 
 /// Two rows from the headset: the second monitor over the first.
-fn two_rows(first: u8, second: u8) -> ClientMsg {
-    let at = |id, middle| LayoutEntry {
+fn two_rows(first: DisplayId, second: DisplayId) -> ClientMsg {
+    let at = |id, middle| Placed {
         id,
         center: Some(0),
         middle: Some(middle),
     };
-    ClientMsg::SetLayout {
+    ClientMsg::Arrange {
         rows: vec![
-            LayoutRow {
+            Row {
                 entries: vec![at(second, -400)],
             },
-            LayoutRow {
+            Row {
                 entries: vec![at(first, 0)],
             },
         ],
     }
+}
+
+fn ids<const N: usize>(n: [u32; N]) -> [DisplayId; N] {
+    n.map(DisplayId)
 }
 
 /// Screens saved in `screens.txt`, by number.
@@ -72,14 +78,16 @@ fn a_monitor_that_cannot_start_stays_in_the_set() {
     let pc = Pc::start(&dir, &options);
     let mut headset = connect(&pc, &mut keys);
     headset
-        .wait(START, "one monitor showing, an error for the other", |v| {
+        .wait(START, "one monitor showing, the other failed", |v| {
             v.streams.values().any(|s| s.has_picture())
-                && v.errors.iter().any(|e| e.contains("could not start"))
+                && v.displays().iter().any(|d| {
+                    matches!(&d.state, prostir_proto::state::DisplayState::Failed { detail, .. } if detail.contains("broken"))
+                })
         })
         .unwrap();
     let view = headset.view();
-    assert_eq!(view.order, [0, 1], "both stay in the order");
-    assert!(!view.streams.contains_key(&1));
+    assert_eq!(view.order(), ids([0, 1]), "both stay in the list");
+    assert!(!view.streams.contains_key(&DisplayId(1)));
     headset.disconnect();
     pc.quit();
     assert_eq!(saved_numbers(&dir), [0, 1], "both stay in the set");
@@ -89,26 +97,24 @@ fn a_monitor_that_cannot_start_stays_in_the_set() {
     headset
         .wait(START, "every monitor showing", View::all_monitors_show)
         .unwrap();
-    assert_eq!(headset.view().order, [0, 1]);
+    assert_eq!(headset.view().order(), ids([0, 1]));
 }
 
 /// Monitors keep their numbers between runs, so the headset finds each where it was.
 #[test]
 fn monitors_keep_their_numbers_after_a_restart() {
     let (dir, pc, mut keys, mut headset) = session("numbers", &Options::default());
-    headset
-        .send(&ClientMsg::AddMonitor {
-            width: 800,
-            height: 450,
+    let added = headset
+        .ask(Request::AddDisplay {
+            mode: Mode::new(800, 450),
         })
         .unwrap();
-    headset
-        .wait(SOON, "a third monitor", |v| v.order.len() == 3)
+    assert_eq!(added, Outcome::Added { id: DisplayId(2) });
+    let removed = headset
+        .ask(Request::RemoveDisplay { id: DisplayId(0) })
         .unwrap();
-    headset.send(&ClientMsg::RemoveMonitor { id: 0 }).unwrap();
-    headset
-        .wait(SOON, "the first one gone", |v| v.order == [1, 2])
-        .unwrap();
+    assert_eq!(removed, Outcome::Done);
+    assert_eq!(headset.view().order(), ids([1, 2]));
     // Written off the main loop within a pass.
     headset.take_for(Duration::from_millis(500)).unwrap();
     headset.disconnect();
@@ -120,8 +126,8 @@ fn monitors_keep_their_numbers_after_a_restart() {
     headset
         .wait(START, "every monitor showing", View::all_monitors_show)
         .unwrap();
-    assert_eq!(headset.view().order, [1, 2], "the same numbers");
-    assert_eq!(headset.view().streams[&2].width, 800);
+    assert_eq!(headset.view().order(), ids([1, 2]), "the same numbers");
+    assert_eq!(headset.view().streams[&DisplayId(2)].width, 800);
 }
 
 /// Two rows from the headset reach the desktop (one monitor over the other), and a
@@ -130,7 +136,7 @@ fn monitors_keep_their_numbers_after_a_restart() {
 #[test]
 fn two_rows_survive_a_restart() {
     let (dir, pc, mut keys, mut headset) = session("two-rows", &Options::default());
-    let order = headset.view().order.clone();
+    let order = headset.view().order();
     headset.send(&two_rows(order[0], order[1])).unwrap();
     // Fake-1 640x360 under Fake-2 480x272, touching.
     let stacked = |p: &[(String, i32, i32)]| {
@@ -186,7 +192,7 @@ fn a_tray_change_without_monitors_survives_quitting() {
 #[test]
 fn killed_mid_change_leaves_readable_files() {
     let (dir, pc, mut keys, mut headset) = session("killed", &Options::default());
-    let order = headset.view().order.clone();
+    let order = headset.view().order();
     for i in 0..60 {
         let msg = if i % 2 == 0 {
             two_rows(order[0], order[1])
@@ -205,7 +211,7 @@ fn killed_mid_change_leaves_readable_files() {
     headset
         .wait(START, "every monitor showing", View::all_monitors_show)
         .unwrap();
-    assert_eq!(headset.view().order.len(), 2);
+    assert_eq!(headset.view().order().len(), 2);
     assert_eq!(pc.count_log("screens.txt.bad"), 0);
     pc.wait_log(SOON, "fake desktop: placed");
 }

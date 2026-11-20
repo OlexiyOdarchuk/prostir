@@ -35,7 +35,7 @@ pub const FRAGMENT: usize = 16 * 1024;
 /// A message's header: its tag and payload length.
 pub const MESSAGE_HEADER: usize = 5;
 /// The most bytes of a message kept apart from its body (see [`Encoded`]).
-pub const MAX_HEAD: usize = 16;
+pub const MAX_HEAD: usize = 32;
 
 const FIRST: u8 = 1;
 const LAST: u8 = 2;
@@ -46,14 +46,11 @@ pub mod lane {
     pub const CONTROL: u8 = 0;
     /// PC sound, or the headset's microphone.
     pub const SOUND: u8 = 1;
-    /// The first lane of video (see [`video`]).
+    /// The first lane of video.
     pub const VIDEO: u8 = 2;
-
-    /// The lane of video stream `id`: one each, from [`VIDEO`] on. Stream ids above
-    /// 253 would share the last lane, and the apps make none.
-    pub const fn video(id: u8) -> u8 {
-        VIDEO.saturating_add(id)
-    }
+    /// The lanes of video streams: the sender takes a free one for each stream, from
+    /// its start to its end.
+    pub const STREAMS: std::ops::Range<u8> = VIDEO..32;
 }
 
 /// What a receiver accepts.

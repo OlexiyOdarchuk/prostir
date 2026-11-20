@@ -11,9 +11,14 @@ use prostir_proto::handshake::{self, Answer};
 use prostir_proto::link::tcp::{NoiseTcp, Plain, SocketOptions};
 use prostir_proto::link::{Closer, Link, PeerInfo, RecordReceiver, RecordSender};
 use prostir_proto::packet::{self, Assembler, FRAGMENT, lane};
+use prostir_proto::request::{Outcome, Request};
 use prostir_proto::secure::{Identity, Pairing, TrustStore, confirmation, tags_match};
+use prostir_proto::state::{
+    Decoder, Display, DisplayId, Encoding, Gen, HeadsetCaps, HeadsetState, PcState, Prefs,
+    Presence, ReqId, caps,
+};
 use prostir_proto::stats::{Gaps, Pings};
-use prostir_proto::{ClientMsg, Codec, HostMsg, PcSettings};
+use prostir_proto::{ClientMsg, Codec, HostMsg};
 
 use crate::nal;
 
@@ -93,10 +98,12 @@ impl From<anyhow::Error> for ConnectError {
     }
 }
 
-/// One monitor (or window panel, or mirror) stream as the headset sees it.
+/// One stream as the headset sees it: a monitor, a window panel or a display of the PC.
 #[derive(Debug, Clone)]
 pub struct Stream {
+    /// The display's name, as `Displays` had it when the stream started.
     pub name: String,
+    pub generation: Gen,
     pub width: u32,
     pub height: u32,
     pub codec: Codec,
@@ -112,6 +119,8 @@ pub struct Stream {
     pub first_is_key: Option<bool>,
     /// Keyframes a decoder could not start from (no parameter sets or no IDR).
     pub bad_keyframes: u64,
+    /// The number of the last frame; frames of a generation count from 0.
+    pub last_seq: Option<u32>,
 }
 
 impl Stream {
@@ -121,23 +130,40 @@ impl Stream {
     }
 }
 
+/// A message from the PC, in short, in the order it came: for tests of the order of
+/// messages within a lane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Arrival {
+    /// `Displays` with these displays.
+    Displays(Vec<DisplayId>),
+    Reply(ReqId),
+    StreamStart(DisplayId, Gen),
+    StreamEnd(DisplayId, Gen),
+    /// The first frame after a start.
+    FirstFrame(DisplayId, Gen),
+    Other(&'static str),
+}
+
 /// What the PC told the headset in this session.
 #[derive(Debug, Clone, Default)]
 pub struct View {
-    /// Streams running now, by id.
-    pub streams: BTreeMap<u8, Stream>,
-    /// Ids of streams the PC ended, in order.
-    pub ended: Vec<u8>,
-    /// Left-to-right order of the monitors, as last sent.
-    pub order: Vec<u8>,
-    pub primary: Option<u8>,
-    /// How the PC encodes and what it could encode with.
-    pub pc_settings: Option<(PcSettings, u8)>,
-    /// How many times the PC sent them, to tell an answer from what it said before.
-    pub pc_settings_count: u32,
-    pub audio_wanted: Option<bool>,
-    pub mic_wanted: Option<bool>,
-    pub mirror_wanted: Option<bool>,
+    /// The PC's state: the snapshot, then every part since.
+    pub pc: PcState,
+    /// Streams running now, by display.
+    pub streams: BTreeMap<DisplayId, Stream>,
+    /// Streams the PC ended, in order.
+    pub ended: Vec<DisplayId>,
+    /// Displays that left `Displays` in this session.
+    pub removed: Vec<DisplayId>,
+    /// Replies to requests, by number.
+    pub replies: BTreeMap<ReqId, Outcome>,
+    /// What went wrong, as the PC said: failed replies, problems, errors (the detail).
+    pub errors: Vec<String>,
+    pub notices: Vec<String>,
+    /// How many times `Encoding` came, to tell an answer from what it said before.
+    pub encoding_count: u32,
+    /// The PC asks for the microphone.
+    pub mic_active: Option<bool>,
     /// Bytes of PC sound received.
     pub audio_bytes: u64,
     /// How late each slice of sound arrived, in order: from when the fake desktop made
@@ -146,8 +172,6 @@ pub struct View {
     pub sound_delays: Vec<Duration>,
     /// Pauses between slices of sound arriving.
     pub sound_gaps: Gaps,
-    pub errors: Vec<String>,
-    pub notices: Vec<String>,
     /// Pings from the PC (each answered at once).
     pub pings: u32,
     /// The PC ended the session on purpose, with this reason code.
@@ -163,28 +187,57 @@ pub struct View {
     /// Slices of sound that came in while a frame was half way in: they went between
     /// its packets.
     pub sound_between_fragments: u32,
+    /// What came, in order.
+    pub arrivals: Vec<Arrival>,
+    /// Broken rules: a stream started for a display not in `Displays`, a frame of a
+    /// generation that never started, a frame number out of order.
+    pub broken: Vec<String>,
+    /// The displays of the last `Displays`.
+    listed: Vec<DisplayId>,
 }
 
 impl View {
     fn apply(&mut self, arrived: &Arrived) {
-        let msg = &arrived.msg;
         self.messages += 1;
+        let msg = arrived.msg.clone();
+        let msg = match self.pc.apply(msg) {
+            Ok(None) => {
+                self.part(&arrived.msg);
+                self.round_trips.extend(arrived.round_trip);
+                return;
+            }
+            Ok(Some(msg)) => msg,
+            Err(e) => {
+                self.broken.push(format!("{e}: {:?}", arrived.msg));
+                return;
+            }
+        };
         match msg {
             HostMsg::StreamStart {
                 id,
-                width,
-                height,
+                generation,
+                w,
+                h,
                 codec,
-                name,
             } => {
-                let starts = self.streams.get(id).map_or(0, |s| s.starts) + 1;
+                self.arrivals.push(Arrival::StreamStart(id, generation));
+                let name = match self.display(id) {
+                    Some(d) => d.name.clone(),
+                    None => {
+                        self.broken
+                            .push(format!("{id} started before it was listed"));
+                        format!("{id}")
+                    }
+                };
+                let starts = self.streams.get(&id).map_or(0, |s| s.starts) + 1;
                 self.streams.insert(
-                    *id,
+                    id,
                     Stream {
-                        name: name.clone(),
-                        width: *width,
-                        height: *height,
-                        codec: *codec,
+                        name,
+                        generation,
+                        width: w,
+                        height: h,
+                        codec,
                         starts,
                         frames: 0,
                         keyframes: 0,
@@ -193,39 +246,69 @@ impl View {
                         keyframe_max: 0,
                         first_is_key: None,
                         bad_keyframes: 0,
+                        last_seq: None,
                     },
                 );
             }
             HostMsg::Frame {
-                id, keyframe, data, ..
+                id,
+                generation,
+                seq,
+                keyframe,
+                data,
+                ..
             } => {
-                if let Some(s) = self.streams.get_mut(id) {
-                    s.first_is_key.get_or_insert(*keyframe);
-                    s.frames += 1;
-                    s.bytes += data.len() as u64;
-                    if *keyframe {
-                        s.keyframes += 1;
-                        s.keyframe_bytes += data.len() as u64;
-                        s.keyframe_max = s.keyframe_max.max(data.len() as u64);
-                        if !nal::starts_decoder(data, s.codec) {
-                            s.bad_keyframes += 1;
-                        }
+                let Some(s) = self
+                    .streams
+                    .get_mut(&id)
+                    .filter(|s| s.generation == generation)
+                else {
+                    self.broken.push(format!(
+                        "a frame of {id} {generation:?}, which never started"
+                    ));
+                    return;
+                };
+                if s.last_seq.is_none() {
+                    self.arrivals.push(Arrival::FirstFrame(id, generation));
+                }
+                if s.last_seq.is_some_and(|last| seq <= last) || (s.last_seq.is_none() && seq != 0)
+                {
+                    self.broken
+                        .push(format!("frame {seq} of {id} out of order"));
+                }
+                s.last_seq = Some(seq);
+                s.first_is_key.get_or_insert(keyframe);
+                s.frames += 1;
+                s.bytes += data.len() as u64;
+                if keyframe {
+                    s.keyframes += 1;
+                    s.keyframe_bytes += data.len() as u64;
+                    s.keyframe_max = s.keyframe_max.max(data.len() as u64);
+                    if !nal::starts_decoder(&data, s.codec) {
+                        s.bad_keyframes += 1;
                     }
                 }
             }
-            HostMsg::StreamEnd { id } => {
-                self.streams.remove(id);
-                self.ended.push(*id);
+            HostMsg::StreamEnd { id, generation } => {
+                self.arrivals.push(Arrival::StreamEnd(id, generation));
+                if self
+                    .streams
+                    .get(&id)
+                    .is_some_and(|s| s.generation == generation)
+                {
+                    self.streams.remove(&id);
+                }
+                self.ended.push(id);
             }
-            HostMsg::Order { ids } => self.order = ids.clone(),
-            HostMsg::PrimaryChanged { id } => self.primary = Some(*id),
-            HostMsg::PcSettings { settings, encoders } => {
-                self.pc_settings = Some((*settings, *encoders));
-                self.pc_settings_count += 1;
+            HostMsg::Reply { req, outcome } => {
+                self.arrivals.push(Arrival::Reply(req));
+                if let Outcome::Failed { detail, .. } = &outcome {
+                    self.errors.push(detail.clone());
+                }
+                self.replies.insert(req, outcome);
             }
-            HostMsg::AudioWanted { enabled } => self.audio_wanted = Some(*enabled),
-            HostMsg::MicWanted { enabled } => self.mic_wanted = Some(*enabled),
-            HostMsg::MirrorWanted { enabled } => self.mirror_wanted = Some(*enabled),
+            HostMsg::Problem { detail, .. } => self.errors.push(detail),
+            HostMsg::MicActive { active } => self.mic_active = Some(active),
             HostMsg::Audio { pcm } => {
                 self.audio_bytes += pcm.len() as u64;
                 self.sound_between_fragments += u32::from(arrived.between_fragments);
@@ -236,22 +319,87 @@ impl View {
                 }
                 self.sound_gaps.event(arrived.at);
             }
-            HostMsg::Error { text } => self.errors.push(text.clone()),
-            HostMsg::Notice { text } => self.notices.push(text.clone()),
+            HostMsg::Error { text } => self.errors.push(text),
+            HostMsg::Notice { text } => self.notices.push(text),
             HostMsg::Ping { .. } => self.pings += 1,
-            HostMsg::Goodbye { reason } => self.goodbye = Some(*reason),
-            _ => {}
+            HostMsg::Goodbye { reason } => self.goodbye = Some(reason),
+            other => self.arrivals.push(Arrival::Other(other_name(&other))),
         }
         self.round_trips.extend(arrived.round_trip);
     }
 
-    /// Every monitor in `order` streams and shows a picture.
+    /// A part of the state came (already in `pc`).
+    fn part(&mut self, msg: &HostMsg) {
+        match msg {
+            HostMsg::Displays { part } => {
+                let ids: Vec<DisplayId> = part.ids().collect();
+                self.arrivals.push(Arrival::Displays(ids.clone()));
+                let listed: Vec<DisplayId> = self.listed.clone();
+                for id in listed.iter().filter(|id| !ids.contains(id)) {
+                    self.removed.push(*id);
+                }
+                self.listed = ids;
+            }
+            HostMsg::Encoding { .. } => {
+                self.encoding_count += 1;
+                self.arrivals.push(Arrival::Other("Encoding"));
+            }
+            other => self.arrivals.push(Arrival::Other(other_name(other))),
+        }
+    }
+
+    /// The displays the PC has, as it listed them.
+    pub fn displays(&self) -> &[Display] {
+        self.pc.displays.as_ref().map_or(&[], |d| &d.displays)
+    }
+
+    pub fn display(&self, id: DisplayId) -> Option<&Display> {
+        self.displays().iter().find(|d| d.id == id)
+    }
+
+    /// The virtual monitors, in the order of the rows.
+    pub fn order(&self) -> Vec<DisplayId> {
+        self.displays()
+            .iter()
+            .filter(|d| d.is_virtual())
+            .map(|d| d.id)
+            .collect()
+    }
+
+    pub fn primary(&self) -> Option<DisplayId> {
+        self.pc.displays.as_ref()?.primary
+    }
+
+    pub fn encoding(&self) -> Option<&Encoding> {
+        self.pc.encoding.as_ref()
+    }
+
+    /// Every virtual monitor streams and shows a picture.
     pub fn all_monitors_show(&self) -> bool {
-        !self.order.is_empty()
-            && self
-                .order
+        let order = self.order();
+        !order.is_empty()
+            && order
                 .iter()
                 .all(|id| self.streams.get(id).is_some_and(Stream::has_picture))
+    }
+}
+
+/// A message's name, for [`Arrival::Other`].
+fn other_name(msg: &HostMsg) -> &'static str {
+    match msg {
+        HostMsg::Displays { .. } => "Displays",
+        HostMsg::Encoding { .. } => "Encoding",
+        HostMsg::Sound { .. } => "Sound",
+        HostMsg::Limits { .. } => "Limits",
+        HostMsg::Access { .. } => "Access",
+        HostMsg::PcInfo { .. } => "PcInfo",
+        HostMsg::HostCaps { .. } => "HostCaps",
+        HostMsg::Focus { .. } => "Focus",
+        HostMsg::SoundFrom { .. } => "SoundFrom",
+        HostMsg::Snapshot { .. } => "Snapshot",
+        HostMsg::Recenter => "Recenter",
+        HostMsg::Problem { .. } => "Problem",
+        _ => "other",
     }
 }
 
@@ -334,12 +482,42 @@ pub struct FakeHeadset {
     shared: Arc<Shared>,
     incoming: Receiver<Arrived>,
     view: View,
+    /// The number of the last request sent.
+    last_req: u32,
     /// The PC's protocol version and language, from its welcome.
     pub version: u32,
     pub language: String,
 }
 
 impl FakeHeadset {
+    /// What this fake headset says about itself in `Open`: it shows everything the
+    /// Quest app shows and decodes what it decodes, worn.
+    pub fn state() -> HeadsetState {
+        HeadsetState {
+            caps: Some(HeadsetCaps {
+                features: vec![caps::headset::PHYSICAL, caps::headset::WINDOWS],
+                decoders: vec![
+                    Decoder {
+                        codec: 0,
+                        max_w: 4096,
+                        max_h: 4096,
+                    },
+                    Decoder {
+                        codec: 1,
+                        max_w: 8192,
+                        max_h: 4320,
+                    },
+                ],
+                streams_max: 30,
+                layers_max: 16,
+                model: "prostir-testkit".into(),
+            }),
+            prefs: Some(Prefs::default()),
+            presence: Some(Presence { worn: true }),
+            battery: None,
+        }
+    }
+
     /// Connects to the PC at `addr`, says hello and opens the session. A PC this
     /// headset does not know, or one that does not know this headset, is paired with
     /// the code `pairing` gives (shown by the headset, typed on the PC); without it a
@@ -349,19 +527,25 @@ impl FakeHeadset {
         keys: &mut Keys,
         pairing: Option<&mut dyn FnMut() -> String>,
     ) -> Result<Self, ConnectError> {
-        Self::open(
-            addr,
-            keys,
-            pairing,
-            None,
-            &prostir_proto::app_version(env!("CARGO_PKG_VERSION")),
-        )
+        let app = prostir_proto::app_version(env!("CARGO_PKG_VERSION"));
+        Self::open(addr, keys, pairing, None, &app, &Self::state())
     }
 
     /// As [`FakeHeadset::connect`] for a trusted headset whose app says it is `app` in
     /// its hello (another build, say).
     pub fn connect_as(addr: SocketAddr, keys: &mut Keys, app: &str) -> Result<Self, ConnectError> {
-        Self::open(addr, keys, None, None, app)
+        Self::open(addr, keys, None, None, app, &Self::state())
+    }
+
+    /// As [`FakeHeadset::connect`] for a trusted headset that says `state` about
+    /// itself in `Open` (fewer capabilities, say).
+    pub fn connect_saying(
+        addr: SocketAddr,
+        keys: &mut Keys,
+        state: &HeadsetState,
+    ) -> Result<Self, ConnectError> {
+        let app = prostir_proto::app_version(env!("CARGO_PKG_VERSION"));
+        Self::open(addr, keys, None, None, &app, state)
     }
 
     /// As [`FakeHeadset::connect`] for a trusted headset that reads at most
@@ -372,7 +556,7 @@ impl FakeHeadset {
         bytes_per_sec: u64,
     ) -> Result<Self, ConnectError> {
         let app = prostir_proto::app_version(env!("CARGO_PKG_VERSION"));
-        Self::open(addr, keys, None, Some(bytes_per_sec), &app)
+        Self::open(addr, keys, None, Some(bytes_per_sec), &app, &Self::state())
     }
 
     fn open(
@@ -381,6 +565,7 @@ impl FakeHeadset {
         mut pairing: Option<&mut dyn FnMut() -> String>,
         read_rate: Option<u64>,
         app: &str,
+        state: &HeadsetState,
     ) -> Result<Self, ConnectError> {
         let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))?;
         stream.set_read_timeout(Some(REPLY))?;
@@ -400,9 +585,8 @@ impl FakeHeadset {
             tx: &mut *sender,
             packets: &mut packets,
         };
-        let (version, language) = open(&mut ends, keys, &peer, addr, &mut pairing, app)?;
+        let (version, language, pc) = open(&mut ends, keys, &peer, addr, &mut pairing, app, state)?;
         receiver.set_idle_limit(Some(SILENCE));
-        packets.set_limits(HostMsg::limits(true));
         let writer = Arc::new(Mutex::new(sender));
         let shared = Arc::new(Shared::default());
         let incoming = spawn_reader(
@@ -414,15 +598,43 @@ impl FakeHeadset {
             read_rate,
         )?;
         spawn_pinger(writer.clone(), shared.clone())?;
+        let listed = pc.displays.iter().flat_map(|d| d.ids()).collect();
         Ok(Self {
             closer,
             writer,
             shared,
             incoming,
-            view: View::default(),
+            view: View {
+                pc,
+                listed,
+                ..View::default()
+            },
+            last_req: 0,
             version,
             language,
         })
+    }
+
+    /// Sends request `asked`, numbered after the last one: its number.
+    pub fn request(&mut self, asked: Request) -> Result<ReqId> {
+        self.last_req += 1;
+        let req = ReqId(self.last_req);
+        self.send(&ClientMsg::request(req, asked))?;
+        Ok(req)
+    }
+
+    /// Takes what the PC sends until it answers request `req`, for up to `timeout`.
+    pub fn reply(&mut self, req: ReqId, timeout: Duration) -> Result<Outcome> {
+        self.wait(timeout, &format!("the reply to request {}", req.0), |v| {
+            v.replies.contains_key(&req)
+        })?;
+        Ok(self.view.replies[&req].clone())
+    }
+
+    /// Sends request `asked` and waits for its reply.
+    pub fn ask(&mut self, asked: Request) -> Result<Outcome> {
+        let req = self.request(asked)?;
+        self.reply(req, REPLY)
     }
 
     /// Sends `msg` to the PC.
@@ -502,7 +714,7 @@ impl FakeHeadset {
     }
 
     /// Counts start again from here: frames, sound, ended streams, errors and notices.
-    /// What the headset knows stays: the streams, the order, the settings.
+    /// What the headset knows stays: the streams, the PC's state.
     pub fn reset_counts(&mut self) {
         let v = &mut self.view;
         for s in v.streams.values_mut() {
@@ -510,6 +722,8 @@ impl FakeHeadset {
             (s.keyframe_bytes, s.keyframe_max) = (0, 0);
         }
         v.ended.clear();
+        v.removed.clear();
+        v.arrivals.clear();
         v.errors.clear();
         v.notices.clear();
         v.pings = 0;
@@ -592,8 +806,8 @@ impl Ends<'_> {
     }
 }
 
-/// Says hello, pairs if asked to and possible, and opens the session: the PC's protocol
-/// version and language.
+/// Says hello, pairs if asked to and possible, and opens the session with `state`: the
+/// PC's protocol version, language and state (its snapshot, which must come first).
 fn open(
     ends: &mut Ends,
     keys: &mut Keys,
@@ -601,7 +815,8 @@ fn open(
     addr: SocketAddr,
     pairing: &mut Option<&mut dyn FnMut() -> String>,
     app: &str,
-) -> Result<(u32, String), ConnectError> {
+    state: &HeadsetState,
+) -> Result<(u32, String, PcState), ConnectError> {
     // Versions first, before pairing.
     handshake::send_hello(ends.tx, app)?;
     let (version, language) = match handshake::read_answer(ends.rx)? {
@@ -616,7 +831,10 @@ fn open(
         pair(ends, &keys.identity, peer, &code())?;
         keys.trusted.add(peer.key, &addr.to_string())?;
     }
-    ends.send(ClientMsg::Open)?;
+    let open = state.open().map_err(|e| anyhow!("{e}"))?;
+    ends.send(open.clone())?;
+    // The PC is trusted from here: its snapshot may be as big as it needs.
+    ends.packets.set_limits(HostMsg::limits(true));
     let mut refused = None;
     loop {
         let msg = match ends.recv() {
@@ -630,17 +848,22 @@ fn open(
             }
         };
         match msg {
-            HostMsg::Opened => return Ok((version, language)),
+            HostMsg::Snapshot { parts } => {
+                let pc = PcState::from_snapshot(&parts).map_err(|e| anyhow!("snapshot: {e}"))?;
+                return Ok((version, language, pc));
+            }
             HostMsg::Error { text } => refused = Some(text),
             HostMsg::PairingRequired => {
                 let Some(code) = pairing.as_mut() else {
                     return Err(ConnectError::NotPaired);
                 };
+                ends.packets.set_limits(HostMsg::limits(false));
                 pair(ends, &keys.identity, peer, &code())?;
                 keys.trusted.add(peer.key, &addr.to_string())?;
-                ends.send(ClientMsg::Open)?;
+                ends.send(open.clone())?;
+                ends.packets.set_limits(HostMsg::limits(true));
             }
-            other => return Err(anyhow!("unexpected {other:?} before the session").into()),
+            other => return Err(anyhow!("unexpected {other:?} before the snapshot").into()),
         }
     }
 }
@@ -668,7 +891,7 @@ fn spawn_reader(
                 }
             }
             let _close = Close(closer.clone());
-            let mut acked: BTreeMap<u8, Instant> = BTreeMap::new();
+            let mut acked: BTreeMap<DisplayId, Instant> = BTreeMap::new();
             // Bytes read but not yet waited for, when reading at a set rate.
             let mut unpaid = 0u64;
             loop {
@@ -725,13 +948,19 @@ fn spawn_reader(
                     }
                     _ => {}
                 }
-                if let HostMsg::Frame { id, pts_us, .. } = &msg
+                if let HostMsg::Frame {
+                    id,
+                    generation,
+                    seq,
+                    ..
+                } = &msg
                     && acked.get(id).is_none_or(|t| t.elapsed() >= ACK_EVERY)
                 {
                     acked.insert(*id, Instant::now());
                     let shown = ClientMsg::FrameShown {
                         id: *id,
-                        pts_us: *pts_us,
+                        generation: *generation,
+                        seq: *seq,
                     };
                     let _ = send(&mut **writer.lock().unwrap(), shown);
                 }

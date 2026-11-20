@@ -8,6 +8,8 @@ mod outbox;
 mod pacing;
 mod pairing;
 mod platform;
+mod publish;
+mod requests;
 mod screen;
 mod store;
 mod usage;
@@ -22,6 +24,8 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use log::{debug, error, info, warn};
 use prostir_proto::link::{Closer, Link, Via};
+use prostir_proto::request::{Asked, Outcome};
+use prostir_proto::state::{ErrorCode, HeadsetState, Part, clip};
 use prostir_proto::stats::Period;
 use prostir_proto::{ClientMsg, Codec, HeadsetGoodbye, HostMsg, PcGoodbye};
 
@@ -131,7 +135,6 @@ impl Control {
             }
             if let Some(d) = displays.as_deref_mut() {
                 d.apply(&store.wanted());
-                d.announce_pc_settings();
             }
         }
         if self.quit {
@@ -162,9 +165,12 @@ impl Control {
     }
 }
 
+/// Longest notification passed to the headset, in bytes.
+const MAX_NOTICE: usize = 8 * 1024;
+
 /// Keeps the set and its rows as they are now (`chosen`: the headset changed which
 /// monitors there are).
-fn keep_screens(store: &mut Store, displays: &Displays, chosen: bool) {
+pub fn keep_screens(store: &mut Store, displays: &Displays, chosen: bool) {
     if let Some(set) = displays.saved_screens() {
         store.set_screens(set, chosen);
     }
@@ -226,6 +232,7 @@ fn via_name(via: Via) -> &'static str {
 
 fn serve_client(
     conn: pairing::Connection,
+    open: Vec<Part>,
     displays: &mut Displays,
     control: &mut Control,
     store: &mut Store,
@@ -241,10 +248,21 @@ fn serve_client(
         mut packets,
     } = conn;
     let via = via_name(peer.via);
+    // What the headset said about itself; without it there is no session.
+    let headset = HeadsetState::from_open(&open).context("the headset's Open")?;
+    let mut publisher = publish::Publisher::new(headset);
+    displays.fit_codec(publisher.caps());
     let outbox = Arc::new(outbox::Outbox::default());
     // The session opens now that it can be served: the monitors exist, and the writer
-    // (which also pings) starts below. The headset counts silence from here.
-    outbox.control(HostMsg::Opened);
+    // (which also pings) starts below. The headset counts silence from here. The
+    // snapshot is the first message, before any stream can start.
+    let snapshot = publisher.snapshot(&publish::Sources {
+        displays,
+        wanted: &store.wanted(),
+        focus: None,
+        sound_from: None,
+    })?;
+    outbox.control(snapshot);
     packets.set_limits(ClientMsg::limits(true));
     let writer_thread = {
         let closer = closer.clone();
@@ -358,15 +376,19 @@ fn serve_client(
     }
 
     displays.router.attach(outbox.clone());
-    if let Some(id) = displays.primary() {
-        displays
-            .router
-            .send(HostMsg::PrimaryChanged { id: id.wire() });
-    }
-    displays.send_order();
-    displays.announce_settings();
+    // The streams the snapshot listed may start (each starts over just below).
+    let listed = publisher.listed().map(ScreenId::from_wire).collect();
+    displays.router.publish(&listed);
     displays.headset_connected();
-    displays.force_keyframes();
+    let mut session = Session {
+        publisher,
+        notifications: None,
+        sound_source: None,
+        battery_warned: false,
+        replies: Vec::new(),
+    };
+    session.headset_changed(displays, control);
+    session.publish(displays, store, None, None);
     usage::headset_connected(store.wanted().count);
 
     // Housekeeping runs on a clock: the headset acknowledges every frame, so the
@@ -374,37 +396,26 @@ fn serve_client(
     let mut next_tick = Instant::now();
     // The display under the mouse, for dimming the others in the headset.
     let active_output = focus::ActiveOutput::new();
-    let mut battery_warned = false;
-    // PC notifications passed to the headset, while it asks for them.
-    let mut notifications: Option<notifications::Watcher> = None;
-    // Which monitor the sound comes from, while the headset wants to know.
-    let mut sound_source: Option<sound_source::Watcher> = None;
     let mut sound_from = None;
     let mut focus = None;
     let mut next_focus = Instant::now();
     let (result, goodbye) = loop {
-        // What changed in the last pass: the desktop laid out once, and the files
-        // written, off this thread.
+        // What changed in the last pass: the desktop laid out once, the headset told,
+        // then the replies, and the files written, off this thread.
         displays.place();
+        session.publish(displays, store, focus, sound_from);
         store.flush();
         if Instant::now() >= next_focus {
             next_focus = Instant::now() + Duration::from_millis(150);
-            let id = active_output
+            focus = active_output
                 .get()
-                .and_then(|name| displays.id_of_output(&name))
-                .map(ScreenId::wire);
-            if focus != Some(id) {
-                focus = Some(id);
-                displays.router.send(HostMsg::Focus { id });
-            }
-            if let Some(w) = &sound_source {
+                .and_then(|name| displays.id_of_output(&name));
+            if let Some(w) = &session.sound_source {
                 let id = w.output().and_then(|name| displays.id_of_output(&name));
-                if sound_from != Some(id) {
-                    sound_from = Some(id);
+                if sound_from != id {
                     info!("sound comes from {id:?}");
-                    let id = id.map(ScreenId::wire);
-                    displays.router.send(HostMsg::SoundFrom { id });
                 }
+                sound_from = id;
             }
         }
         if Instant::now() >= next_tick {
@@ -419,14 +430,7 @@ fn serve_client(
                 break (Ok(()), Some(PcGoodbye::TakenOff));
             }
             if !displays.healthy() {
-                report(
-                    displays,
-                    i18n::t(
-                        "На ПК зупинився віртуальний монітор або кодувальник",
-                        "A virtual monitor or encoder stopped on the PC",
-                    )
-                    .into(),
-                );
+                warn!("a virtual monitor or encoder stopped on the PC");
                 let failed = anyhow::anyhow!("virtual monitor or encoder stopped");
                 break (Err(failed), Some(PcGoodbye::Failed));
             }
@@ -435,156 +439,11 @@ fn serve_client(
             .min(next_focus)
             .saturating_duration_since(Instant::now());
         match msg_rx.recv_timeout(wait) {
-            Ok(Ok(ClientMsg::RequestKeyframe { id })) => {
-                displays.force_keyframe(ScreenId::from_wire(id));
-            }
-            Ok(Ok(ClientMsg::FrameShown { id, pts_us })) => {
-                displays.router.frame_shown(ScreenId::from_wire(id), pts_us);
-            }
-            Ok(Ok(ClientMsg::AddMonitor { width, height })) => {
-                let spec = MonitorSpec {
-                    width,
-                    height,
-                    scale: 1.0,
-                };
-                match displays.add(spec) {
-                    Ok(id) => {
-                        info!("headset added {id}");
-                        displays.force_keyframe(id);
-                        keep_screens(store, displays, true);
-                        displays.sync_wallpapers();
-                    }
-                    Err(e) => report(displays, format!("{e:#}")),
-                }
-            }
-            Ok(Ok(ClientMsg::RemoveMonitor { id })) => {
-                let id = ScreenId::from_wire(id);
-                let monitor = displays.is_monitor(id);
-                match displays.remove(id) {
-                    Ok(()) => {
-                        info!("headset removed {id}");
-                        keep_screens(store, displays, monitor);
-                    }
-                    Err(e) => report(displays, format!("{e:#}")),
-                }
-            }
-            Ok(Ok(ClientMsg::SetOrder { ids })) => {
-                let ids: Vec<ScreenId> = ids.into_iter().map(ScreenId::from_wire).collect();
-                match displays.set_order(&ids) {
-                    Ok(()) => keep_screens(store, displays, false),
-                    Err(e) => report(displays, format!("{e:#}")),
-                }
-            }
-            Ok(Ok(ClientMsg::SetLayout { rows })) => {
-                displays.set_layout(&rows);
-                keep_screens(store, displays, false);
-            }
-            Ok(Ok(ClientMsg::SetMonitors { sizes, primary })) => {
-                match displays.set_monitors(&sizes, primary as usize) {
-                    Ok(()) => info!("headset switched to {} monitor(s)", sizes.len()),
-                    Err(e) => report(displays, format!("{e:#}")),
-                }
-                displays.force_keyframes();
-                keep_screens(store, displays, true);
-                displays.sync_wallpapers();
-            }
-            Ok(Ok(ClientMsg::Mic { pcm })) => displays.push_mic(pcm),
-            Ok(Ok(ClientMsg::Presence { worn })) => displays.set_worn(worn),
-            Ok(Ok(ClientMsg::SetMic { enabled })) => {
-                store.change(|s| s.mic = enabled);
-                displays.apply(&store.wanted());
-            }
-            Ok(Ok(ClientMsg::SetAudio { enabled })) => {
-                store.change(|s| s.audio = enabled);
-                displays.apply(&store.wanted());
-            }
-            Ok(Ok(ClientMsg::SetMirror { enabled })) => {
-                store.change(|s| s.mirror = enabled);
-                displays.apply(&store.wanted());
-            }
-            Ok(Ok(ClientMsg::SetPrimary { id })) => {
-                let id = ScreenId::from_wire(id);
-                info!("headset made {id} the primary monitor");
-                displays.set_primary(id);
-                keep_screens(store, displays, false);
-                displays.sync_wallpapers();
-            }
-            Ok(Ok(ClientMsg::DetachWindow)) => {
-                if let Err(e) = displays.detach_window() {
-                    report(displays, format!("{e:#}"));
-                }
-            }
-            Ok(Ok(ClientMsg::WindowHere { id })) => {
-                if let Err(e) = displays.window_here(ScreenId::from_wire(id)) {
-                    report(displays, format!("{e:#}"));
-                }
-            }
-            Ok(Ok(ClientMsg::Screenshot { id })) => {
-                match displays.screenshot(ScreenId::from_wire(id)) {
-                    Ok(path) => displays.router.send(HostMsg::Notice {
-                        text: format!(
-                            "{} {}",
-                            i18n::t("Знімок збережено:", "Screenshot saved:"),
-                            home_relative(&path)
-                        ),
-                    }),
-                    Err(e) => report(displays, format!("{e:#}")),
-                }
-            }
-            Ok(Ok(ClientMsg::SetNotifications { enabled })) => {
-                notifications = if enabled {
-                    notifications.or_else(|| {
-                        let router = displays.router.clone();
-                        notifications::watch(move |text| router.send(HostMsg::Notice { text }))
-                    })
-                } else {
-                    None
-                };
-            }
-            Ok(Ok(ClientMsg::SetSoundFromScreen { enabled })) => {
-                sound_source = enabled.then(|| {
-                    sound_source
-                        .take()
-                        .unwrap_or_else(sound_source::Watcher::start)
-                });
-                sound_from = None;
-            }
-            Ok(Ok(ClientMsg::FindMouse)) => {
-                if let Some((id, x, y)) = displays.find_mouse() {
-                    let id = id.wire();
-                    displays.router.send(HostMsg::MouseAt { id, x, y });
-                }
-            }
-            Ok(Ok(ClientMsg::MouseTo { id, x, y })) => {
-                displays.mouse_to(ScreenId::from_wire(id), x, y);
-            }
-            Ok(Ok(ClientMsg::Battery { percent, charging })) => {
-                tray::set_battery(control.tray.as_ref(), Some((percent, charging)));
-                // Once per session, when it gets low.
-                if percent <= 15 && !charging && !battery_warned {
-                    battery_warned = true;
-                    notify_battery(percent);
-                }
-            }
-            Ok(Ok(ClientMsg::SetPcSettings { settings })) => {
-                // Kept as asked: the codec stays chosen when another one encodes.
-                let quality = settings.quality.clamp(5, 100);
-                store.set_encoding(quality, settings.sharp, settings.codec, settings.software);
-                // Quality and clearer text apply even when the codec cannot change.
-                displays.apply(&store.wanted());
-                if let Err(e) = displays.encode_with(settings.codec, settings.software) {
-                    report(displays, format!("{e:#}"));
-                }
-                // A monitor whose stream could not start again is gone.
-                keep_screens(store, displays, false);
-                displays.announce_pc_settings();
-                control.show(Some(via), Some(displays), store);
-            }
             Ok(Ok(ClientMsg::Goodbye { reason })) => {
                 info!("{}", headset_left(reason));
                 break (Ok(()), None);
             }
-            Ok(Ok(other)) => warn!("ignoring {other:?}"),
+            Ok(Ok(msg)) => session.handle(msg, displays, control, store),
             Ok(Err(e)) if e.kind() == ErrorKind::UnexpectedEof => break (Ok(()), None),
             Ok(Err(e)) if e.kind() == ErrorKind::TimedOut => {
                 let silence = anyhow::anyhow!(
@@ -621,10 +480,141 @@ fn serve_client(
     result
 }
 
-/// Logs a failed request and shows it in the headset menu.
-fn report(displays: &Displays, text: String) {
-    warn!("{text}");
-    displays.router.send(HostMsg::Error { text });
+/// One session's state on the PC: what the headset said and was told, the watchers
+/// its preferences ask for, and the replies waiting for this pass's state to go first.
+struct Session {
+    publisher: publish::Publisher,
+    /// PC notifications passed to the headset, while it asks for them.
+    notifications: Option<notifications::Watcher>,
+    /// Which monitor the sound comes from, while the headset wants to know.
+    sound_source: Option<sound_source::Watcher>,
+    battery_warned: bool,
+    /// Replies to send once the parts they changed went out.
+    replies: Vec<HostMsg>,
+}
+
+impl Session {
+    /// Tells the headset what changed, then the replies.
+    fn publish(
+        &mut self,
+        displays: &mut Displays,
+        store: &Store,
+        focus: Option<ScreenId>,
+        sound_from: Option<ScreenId>,
+    ) {
+        let sources = publish::Sources {
+            displays,
+            wanted: &store.wanted(),
+            focus,
+            sound_from,
+        };
+        for msg in self.publisher.changed(&sources) {
+            displays.router.send(msg);
+        }
+        let listed = self.publisher.listed().map(ScreenId::from_wire).collect();
+        for id in displays.router.publish(&listed) {
+            displays.fresh_picture(id);
+        }
+        for reply in self.replies.drain(..) {
+            displays.router.send(reply);
+        }
+    }
+
+    /// Follows what the headset said about itself: worn or not, its battery, and the
+    /// watchers its preferences ask for.
+    fn headset_changed(&mut self, displays: &mut Displays, control: &Control) {
+        let headset = &self.publisher.headset;
+        if let Some(p) = headset.presence {
+            displays.set_worn(p.worn);
+        }
+        if let Some(b) = headset.battery {
+            tray::set_battery(control.tray.as_ref(), Some((b.percent, b.charging)));
+            // Once per session, when it gets low.
+            if b.percent <= 15 && !b.charging && !self.battery_warned {
+                self.battery_warned = true;
+                notify_battery(b.percent);
+            }
+        }
+        let prefs = self.publisher.prefs();
+        self.notifications = if prefs.notifications {
+            self.notifications.take().or_else(|| {
+                let router = displays.router.clone();
+                notifications::watch(move |text| {
+                    let text = clip(&text, MAX_NOTICE);
+                    router.send(HostMsg::Notice { text })
+                })
+            })
+        } else {
+            None
+        };
+        self.sound_source = prefs.sound_from_screen.then(|| {
+            self.sound_source
+                .take()
+                .unwrap_or_else(sound_source::Watcher::start)
+        });
+    }
+
+    /// One message from the headset.
+    fn handle(
+        &mut self,
+        msg: ClientMsg,
+        displays: &mut Displays,
+        control: &mut Control,
+        store: &mut Store,
+    ) {
+        let msg = match self.publisher.headset.apply(msg) {
+            None => return self.headset_changed(displays, control),
+            Some(msg) => msg,
+        };
+        match msg {
+            ClientMsg::RequestKeyframe { id, generation } => {
+                let id = ScreenId::from_wire(id);
+                if displays.router.is_current(id, generation) {
+                    displays.force_keyframe(id);
+                }
+            }
+            ClientMsg::FrameShown {
+                id,
+                generation,
+                seq,
+            } => {
+                displays
+                    .router
+                    .frame_shown(ScreenId::from_wire(id), generation, seq);
+            }
+            ClientMsg::Request { req, asked } => {
+                let outcome = match asked {
+                    Asked::Known(request) => {
+                        requests::handle(request, displays, store, self.publisher.caps())
+                    }
+                    Asked::Unknown { kind } => {
+                        info!("the headset asked for something unknown (kind {kind})");
+                        Outcome::failed(ErrorCode::UNSUPPORTED, "")
+                    }
+                };
+                if let Outcome::Failed { detail, .. } = &outcome {
+                    warn!("request {}: {detail}", req.0);
+                }
+                self.replies.push(HostMsg::Reply { req, outcome });
+                control.show(None, Some(displays), store);
+            }
+            ClientMsg::Arrange { rows } => {
+                displays.set_layout(&rows);
+                keep_screens(store, displays, false);
+            }
+            ClientMsg::Mic { pcm } => displays.push_mic(pcm),
+            ClientMsg::SetMic { enabled } => {
+                store.change(|s| s.mic = enabled);
+                displays.apply(&store.wanted());
+            }
+            ClientMsg::MouseTo { id, u, v } => {
+                displays.mouse_to(ScreenId::from_wire(id), u, v);
+            }
+            // Used for priorities from step 10 on.
+            ClientMsg::Gaze { .. } => {}
+            other => warn!("ignoring {other:?}"),
+        }
+    }
 }
 
 fn spawn_discovery(port: u16) -> Result<()> {
@@ -703,17 +693,6 @@ fn create_displays(args: &Args, store: &Store) -> Result<Displays> {
         sharp: wanted.sharp,
     };
     Displays::create(store.screens(), &wanted, cfg, !args.keep_primary)
-}
-
-/// `~/Pictures/…` rather than the full path, for showing.
-fn home_relative(path: &std::path::Path) -> String {
-    let shown = path.to_string_lossy().into_owned();
-    match std::env::var("HOME") {
-        Ok(home) if !home.is_empty() && shown.starts_with(&home) => {
-            format!("~{}", &shown[home.len()..])
-        }
-        _ => shown,
-    }
 }
 
 /// The headset's battery is low: say so on the PC, where the user is looking.
@@ -795,9 +774,9 @@ fn main() -> Result<()> {
                     warn!("connection from {addr}: {e}");
                     continue;
                 }
-                let mut conn =
+                let (mut conn, open) =
                     match pairing::accept(stream, &mut control.security, control.tray.as_ref()) {
-                        Ok(conn) => conn,
+                        Ok(accepted) => accepted,
                         Err(e) if e.is::<pairing::TurnedAwayAgain>() => {
                             debug!("rejected connection from {addr}: {e:#}");
                             continue;
@@ -819,7 +798,7 @@ fn main() -> Result<()> {
                         Ok(d) => displays = Some(d),
                         Err(e) => {
                             error!("{e:#}");
-                            // Tell the headset why, instead of Opened.
+                            // Tell the headset why, instead of a snapshot.
                             let _ = conn.send(HostMsg::Error {
                                 text: format!("{e:#}"),
                             });
@@ -830,6 +809,7 @@ fn main() -> Result<()> {
                 }
                 if let Err(e) = serve_client(
                     conn,
+                    open,
                     displays.as_mut().expect("made above if it was missing"),
                     &mut control,
                     &mut store,

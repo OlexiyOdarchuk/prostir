@@ -15,15 +15,23 @@ use ndk::media::media_codec::{
 };
 use ndk::media::media_format::MediaFormat;
 use ndk::native_window::NativeWindow;
+use prostir_proto::state::{DisplayId, Gen};
 use prostir_proto::stats::{Histogram, Period};
 use prostir_proto::{ClientMsg, Codec};
 
 use crate::net::{Feedback, Frame, Frames};
 
+/// The stream a decoder decodes: its display and generation (see `StreamStart`).
+#[derive(Debug, Clone, Copy)]
+pub struct Stream {
+    pub id: DisplayId,
+    pub generation: Gen,
+}
+
 /// Decodes `frames` into `window` until the channel closes or `stop` is set.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn(
-    id: u8,
+    stream: Stream,
     codec: Codec,
     width: u32,
     height: u32,
@@ -32,10 +40,13 @@ pub fn spawn(
     feedback: Feedback,
     stop: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
+    let id = stream.id.0;
     std::thread::Builder::new()
         .name(format!("decoder-{id}"))
         .spawn(move || {
-            if let Err(e) = run(id, codec, width, height, &window, &frames, &feedback, &stop) {
+            if let Err(e) = run(
+                stream, codec, width, height, &window, &frames, &feedback, &stop,
+            ) {
                 error!("decoder {id}: {e:#}");
             }
             info!("decoder {id} stopped");
@@ -45,7 +56,7 @@ pub fn spawn(
 
 #[allow(clippy::too_many_arguments)]
 fn run(
-    id: u8,
+    stream: Stream,
     codec: Codec,
     width: u32,
     height: u32,
@@ -55,11 +66,11 @@ fn run(
     stop: &AtomicBool,
 ) -> Result<()> {
     let mut timing = Timing {
-        id,
+        stream: Some(stream),
         feedback: Some(feedback.clone()),
         ..Default::default()
     };
-    let mut gate = KeyframeGate::new(id, feedback.clone());
+    let mut gate = KeyframeGate::new(stream, feedback.clone());
     // A decoder error (a lost surface, a bad frame) recreates the decoder instead of
     // freezing the monitor; only repeated failures in a row give up.
     let mut failures = 0;
@@ -94,7 +105,7 @@ fn run(
             Ok(()) => return Ok(()),
             Err(e) if failures < 5 => {
                 failures += 1;
-                warn!("decoder {id}: {e:#}; starting it again");
+                warn!("decoder {}: {e:#}; starting it again", stream.id.0);
                 std::thread::sleep(Duration::from_millis(200));
             }
             Err(e) => return Err(e),
@@ -135,16 +146,16 @@ fn start_decoder(
 /// After a frame is lost, the frames that follow it until the next keyframe would
 /// decode into garbage: skip them and ask the PC for a keyframe (not on every frame).
 struct KeyframeGate {
-    id: u8,
+    stream: Stream,
     feedback: Feedback,
     waiting: bool,
     asked: Option<Instant>,
 }
 
 impl KeyframeGate {
-    fn new(id: u8, feedback: Feedback) -> Self {
+    fn new(stream: Stream, feedback: Feedback) -> Self {
         Self {
-            id,
+            stream,
             feedback,
             waiting: false,
             asked: None,
@@ -162,9 +173,10 @@ impl KeyframeGate {
             .is_none_or(|t| t.elapsed() >= Duration::from_millis(300))
         {
             self.asked = Some(Instant::now());
-            let _ = self
-                .feedback
-                .send(ClientMsg::RequestKeyframe { id: self.id });
+            let _ = self.feedback.send(ClientMsg::RequestKeyframe {
+                id: self.stream.id,
+                generation: self.stream.generation,
+            });
         }
     }
 
@@ -231,11 +243,11 @@ const REPORT_EVERY: Duration = Duration::from_secs(10);
 /// Where time goes per frame: network arrival → decoder input → decoded output, and
 /// how many frames wait for the decoder.
 struct Timing {
-    id: u8,
+    stream: Option<Stream>,
     /// Reports shown frames so the host can measure the whole trip.
     feedback: Option<Feedback>,
-    /// pts → (received, queued) for frames inside the decoder.
-    in_flight: HashMap<u64, (Instant, Instant)>,
+    /// pts → (received, queued, the frame's number) for frames inside the decoder.
+    in_flight: HashMap<u64, (Instant, Instant, u32)>,
     /// When a shown frame was last reported to the PC.
     last_ack: Option<Instant>,
     /// Received → handed to the decoder.
@@ -250,7 +262,7 @@ struct Timing {
 impl Default for Timing {
     fn default() -> Self {
         Self {
-            id: 0,
+            stream: None,
             feedback: None,
             in_flight: HashMap::new(),
             last_ack: None,
@@ -276,26 +288,27 @@ impl Timing {
             self.in_flight.clear();
         }
         self.in_flight
-            .insert(frame.pts_us, (frame.received, Instant::now()));
+            .insert(frame.pts_us, (frame.received, Instant::now(), frame.seq));
     }
 
     fn decoded(&mut self, pts_us: u64) {
+        let Some((received, queued, seq)) = self.in_flight.remove(&pts_us) else {
+            return;
+        };
         // Enough for the PC's latency figures: one frame every 100 ms, not every frame
         // as its own network packet.
-        if let Some(f) = &self.feedback
+        if let (Some(f), Some(stream)) = (&self.feedback, self.stream)
             && self
                 .last_ack
                 .is_none_or(|t| t.elapsed() >= Duration::from_millis(100))
         {
             self.last_ack = Some(Instant::now());
             let _ = f.send(ClientMsg::FrameShown {
-                id: self.id,
-                pts_us,
+                id: stream.id,
+                generation: stream.generation,
+                seq,
             });
         }
-        let Some((received, queued)) = self.in_flight.remove(&pts_us) else {
-            return;
-        };
         self.wait.add(queued - received);
         self.decode.add(queued.elapsed());
     }
@@ -313,7 +326,7 @@ impl Timing {
         }
         info!(
             "decoder {}: {} frames decoded; net → decoder {}; decode {}; waiting for the decoder avg {:.1} max {max}; inside the decoder {}",
-            self.id,
+            self.stream.map_or(0, |s| s.id.0),
             decode.count(),
             wait.summary_ms(),
             decode.summary_ms(),

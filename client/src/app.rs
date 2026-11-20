@@ -20,11 +20,16 @@ use glam::{Vec2, Vec3};
 use log::{error, info, warn};
 use openxr as xr;
 use openxr::sys::Handle as _;
-use prostir_proto::{ClientMsg, MIRROR_ID, is_window_panel};
+use prostir_proto::request::{Outcome, Primary, Request};
+use prostir_proto::state::{
+    self, Battery, DisplayId, DisplayKind, HeadsetCaps, HeadsetState, Mode, Prefs, Presence, ReqId,
+    caps,
+};
+use prostir_proto::{ClientMsg, Codec};
 
 use crate::i18n::{Lang, Language};
 use crate::input::Controls;
-use crate::layout::{self, Cylinder, Grab, Hit, Placement, Ray};
+use crate::layout::{self, Cylinder, Grab, Held, Hit, Placement, Ray, ScreenId};
 use crate::net::{Feedback, NetEvent};
 use crate::overlay::{self, Overlay, Sphere};
 use crate::profiles::{self, Profile};
@@ -33,10 +38,6 @@ use crate::ui::{self, Action, MonitorEntry, Panel, Tab, UiState};
 use crate::xrutil::{self, Gfx, ImageLayer, as_layer, pose, posef, vec3};
 use crate::{background, decoder, egl, net, passthrough};
 
-/// Grab id for the menu panel (monitor ids are 0..=MIRROR_ID).
-const PANEL_ID: u8 = 250;
-/// Grab id for the keyboard window.
-const KEYBOARD_ID: u8 = 251;
 /// The keyboard window's depth as a share of its width (a keyboard's shape).
 const KEYBOARD_ASPECT: f32 = 0.44;
 const PANEL_WIDTH: f32 = 0.62;
@@ -66,7 +67,7 @@ const POKE_BEHIND: f32 = -0.06;
 /// A monitor held with both hands: the distance between them sets its width.
 #[derive(Clone, Copy)]
 struct Scaling {
-    id: u8,
+    id: ScreenId,
     /// The hand that took hold second (the first one keeps its ordinary grab).
     hand: usize,
     start_distance: f32,
@@ -239,9 +240,9 @@ impl Drop for Monitor {
 enum Target {
     Panel,
     MenuButton,
-    Monitor(u8),
+    Monitor(ScreenId),
     /// "Attach" under a detached window: back onto the monitors.
-    Attach(u8),
+    Attach(ScreenId),
     /// The menu by the left wrist.
     Wrist,
     Keyboard,
@@ -332,24 +333,24 @@ fn lying_flat(position: Vec3, head: Vec3) -> glam::Quat {
 
 /// Everything shown in the headset and how it is arranged.
 struct Scene {
-    monitors: HashMap<u8, Monitor>,
+    monitors: HashMap<ScreenId, Monitor>,
     /// Left-to-right order of the Quest monitors, shared with the host and KDE.
-    order: Vec<u8>,
-    placements: HashMap<u8, Placement>,
-    primary: Option<u8>,
+    order: Vec<ScreenId>,
+    placements: HashMap<ScreenId, Placement>,
+    primary: Option<ScreenId>,
     mirror_wanted: bool,
     audio_wanted: bool,
     mic_wanted: bool,
     /// The monitor the mouse is on (from the PC).
-    focus: Option<u8>,
+    focus: Option<ScreenId>,
     /// Current brightness of each monitor, easing towards 1 or the dimmed level.
-    brightness: HashMap<u8, f32>,
+    brightness: HashMap<ScreenId, f32>,
     /// Resizing a monitor with both hands.
     scaling: Option<Scaling>,
     /// Where each monitor is drawn: follows `placements`, easing into new spots.
-    shown: HashMap<u8, Placement>,
+    shown: HashMap<ScreenId, Placement>,
     /// How far each monitor has faded in (0 to 1) since it appeared.
-    appear: HashMap<u8, f32>,
+    appear: HashMap<ScreenId, f32>,
     /// The headset is on the head (the session is visible); streaming pauses otherwise.
     worn: bool,
     settings: Settings,
@@ -368,7 +369,11 @@ struct Scene {
     /// A PC on the network that refuses the connection (a firewall).
     unreachable: Option<String>,
     /// How the connected PC encodes, and what it can encode with.
-    pc: Option<(prostir_proto::PcSettings, u8)>,
+    pc: Option<state::Encoding>,
+    /// The connected PC's displays, as it last listed them in this session.
+    pc_displays: Option<state::Displays>,
+    /// The number of the last request to the PC in this session.
+    last_req: u32,
     /// An unknown PC waiting for "Pair" or "Not now" (survives the disconnect that
     /// follows the question).
     pair_offer: Option<(String, crate::ui::OfferWhy)>,
@@ -378,7 +383,7 @@ struct Scene {
     feedback: Option<Feedback>,
     error: Option<(String, Instant)>,
     /// "×" pressed once on this monitor; a second press within a few seconds removes it.
-    confirm_remove: Option<(u8, Instant)>,
+    confirm_remove: Option<(ScreenId, Instant)>,
     /// "Save current" pressed once for this profile.
     confirm_save: Option<(usize, Instant)>,
     /// Paired PCs (key, name), read from the trust file when the menu opens.
@@ -393,17 +398,17 @@ struct Scene {
     /// with the head turned, and the arrangement must not swing after it.
     follow_hold: bool,
     /// The detached window whose "Attach" button shows, and when it was pointed at.
-    attach_for: Option<(u8, Instant)>,
+    attach_for: Option<(ScreenId, Instant)>,
     /// The wrist menu, while the left palm is turned to the face.
     wrist: Option<Placement>,
     /// The monitor picked on the menu's map.
-    selected: Option<u8>,
+    selected: Option<ScreenId>,
     /// The PC can move the mouse.
     can_move_mouse: bool,
     /// The headset's battery (percent, charging), read once a minute.
     headset_battery: Option<(u8, bool)>,
     /// The monitor the sound comes from, as the PC says.
-    sound_from: Option<u8>,
+    sound_from: Option<ScreenId>,
     /// The display rate setting changed: apply it.
     refresh_due: bool,
     /// Time worn since the last rest reminder.
@@ -411,11 +416,11 @@ struct Scene {
     /// Since when the headset is off the head (for rest reminders).
     off_since: Option<Instant>,
     /// Mouse follows the gaze: the monitor looked at and since when.
-    gaze_on: Option<(u8, Instant)>,
+    gaze_on: Option<(ScreenId, Instant)>,
     /// When the mouse was last sent somewhere by the gaze.
     gaze_moved: Option<Instant>,
     /// "Where is the mouse": monitor, point across its image, since when.
-    finder: Option<(u8, Vec2, Instant)>,
+    finder: Option<(ScreenId, Vec2, Instant)>,
     /// A short message shown on its own: text, since when, where (`None` until placed).
     toast: Option<(String, Instant, Option<Placement>)>,
     /// The PC speaks another protocol: (the PC is newer, its app version).
@@ -460,24 +465,66 @@ struct Scene {
     desk: layout::Desk,
     /// The stream size each desk placement was made for (see `fit_to_stream`). Not
     /// kept for the cinema view.
-    placed_for: HashMap<u8, layout::PixelSize>,
+    placed_for: HashMap<ScreenId, layout::PixelSize>,
     settings_path: PathBuf,
 }
 
 impl Scene {
+    /// What display `id` of the PC is, as its list says (`None`: not listed).
+    fn kind(&self, id: ScreenId) -> Option<&DisplayKind> {
+        self.pc_displays
+            .as_ref()?
+            .get(DisplayId(id))
+            .map(|d| &d.kind)
+    }
+
+    /// A virtual monitor (not a window panel, nor a display of the PC itself).
+    fn is_monitor(&self, id: ScreenId) -> bool {
+        matches!(self.kind(id), Some(DisplayKind::Virtual))
+    }
+
+    /// A window panel.
+    fn is_window(&self, id: ScreenId) -> bool {
+        matches!(self.kind(id), Some(DisplayKind::Window { .. }))
+    }
+
+    /// The display of the PC itself shown in the headset (the laptop screen), if one is.
+    fn mirror_id(&self) -> Option<ScreenId> {
+        self.pc_displays
+            .as_ref()?
+            .displays
+            .iter()
+            .find(|d| d.is_shown_physical())
+            .map(|d| d.id.0)
+    }
+
+    /// The display of the PC itself the "laptop screen" switch shows or hides: the one
+    /// shown, else the laptop's own panel, else the first one.
+    fn physical_id(&self) -> Option<ScreenId> {
+        let displays = &self.pc_displays.as_ref()?.displays;
+        let physical = || displays.iter().filter(|d| d.is_physical());
+        self.mirror_id()
+            .or_else(|| {
+                physical()
+                    .find(|d| matches!(d.kind, DisplayKind::Physical { builtin: true, .. }))
+                    .map(|d| d.id.0)
+            })
+            .or_else(|| physical().next().map(|d| d.id.0))
+    }
+
     /// Quest monitors left to right: in the host's order, unknown ones at the end.
-    fn quest_sizes(&self) -> Vec<(u8, u32, u32)> {
-        let mut ids: Vec<u8> = self
+    fn quest_sizes(&self) -> Vec<(ScreenId, u32, u32)> {
+        let mut ids: Vec<ScreenId> = self
             .order
             .iter()
             .copied()
             .filter(|id| self.monitors.contains_key(id))
             .collect();
-        let mut rest: Vec<u8> = self
+        let mut rest: Vec<ScreenId> = self
             .monitors
             .keys()
             .copied()
-            .filter(|id| *id != MIRROR_ID && !is_window_panel(*id) && !ids.contains(id))
+            .filter(|id| self.is_monitor(*id) && !ids.contains(id))
             .collect();
         rest.sort_unstable();
         ids.extend(rest);
@@ -532,7 +579,7 @@ impl Scene {
             "KDE arrangement: {}",
             rows.iter()
                 .map(|r| {
-                    let ids: Vec<u8> = r.ids().collect();
+                    let ids: Vec<u32> = r.ids().map(|id| id.0).collect();
                     let centers: Vec<Option<i32>> = r.entries.iter().map(|e| e.center).collect();
                     format!("{ids:?}@{centers:?}")
                 })
@@ -541,17 +588,19 @@ impl Scene {
         );
         self.order = rows
             .iter()
-            .flat_map(prostir_proto::LayoutRow::ids)
-            .filter(|id| *id != MIRROR_ID)
+            .flat_map(state::Row::ids)
+            .map(|id| id.0)
+            .filter(|id| self.is_monitor(*id))
             .collect();
         self.sent_layout = Some(desktop);
-        self.send(ClientMsg::SetLayout { rows });
+        self.send(ClientMsg::Arrange { rows });
     }
 
-    fn mirror_size(&self) -> Option<(u8, u32, u32)> {
+    fn mirror_size(&self) -> Option<(ScreenId, u32, u32)> {
+        let id = self.mirror_id()?;
         self.monitors
-            .get(&MIRROR_ID)
-            .map(|m| (MIRROR_ID, m.width_px, m.height_px))
+            .get(&id)
+            .map(|m| (id, m.width_px, m.height_px))
     }
 
     /// Puts the laptop mirror back under the primary monitor, leaving the rest alone.
@@ -563,14 +612,16 @@ impl Scene {
             self.mirror_size(),
             self.curve_factor(),
         ));
-        if let Some(p) = all.get(&MIRROR_ID) {
-            self.placements.insert(MIRROR_ID, *p);
+        if let Some(id) = self.mirror_id()
+            && let Some(p) = all.get(&id)
+        {
+            self.placements.insert(id, *p);
         }
     }
 
     /// Moves the drawn monitors towards their places (held ones follow at once) and
     /// fades new ones in.
-    fn animate(&mut self, dt: f32, held: &[u8]) {
+    fn animate(&mut self, dt: f32, held: &[ScreenId]) {
         // About a quarter of a second to settle.
         let k = 1.0 - (-dt * 12.0).exp();
         for (id, target) in &self.placements {
@@ -657,7 +708,10 @@ impl Scene {
             self.placements.insert(m.0, at);
             placed = true;
         }
-        if self.monitors.contains_key(&MIRROR_ID) && !self.placements.contains_key(&MIRROR_ID) {
+        if let Some(id) = self.mirror_id()
+            && self.monitors.contains_key(&id)
+            && !self.placements.contains_key(&id)
+        {
             self.place_mirror();
             placed = true;
         }
@@ -711,9 +765,16 @@ impl Scene {
 
     /// Saves the arrangement as the desk layout. In cinema mode `placements` is the
     /// cinema view, which is not saved: the desk layout stays as the user left it.
+    /// Window panels are placed afresh when they appear, so they are not kept.
     fn save_layout(&self) {
+        let desk: HashMap<ScreenId, Placement> = self
+            .placements
+            .iter()
+            .filter(|(id, _)| !self.is_window(**id))
+            .map(|(id, p)| (*id, *p))
+            .collect();
         self.desk.save(
-            &self.placements,
+            &desk,
             &self.placed_for,
             (self.center, self.radius),
             self.settings.cinema,
@@ -725,25 +786,31 @@ impl Scene {
     /// keep facing the way this one was laid out (from a 0.1.0 file, which does not
     /// say, the way its monitors face).
     fn adopt_desk(&mut self, saved: layout::Arrangement) {
-        self.placements.retain(|id, _| is_window_panel(*id));
+        let windows: Vec<ScreenId> = self
+            .placements
+            .keys()
+            .copied()
+            .filter(|id| self.is_window(*id))
+            .collect();
+        self.placements.retain(|id, _| windows.contains(id));
         self.placements.extend(saved.placements);
         self.placed_for = saved.sizes;
         self.radius = saved.radius.unwrap_or(layout::RADIUS);
-        let live: Vec<(u8, layout::PixelSize)> = self
+        let live: Vec<(ScreenId, layout::PixelSize)> = self
             .monitors
             .iter()
             .map(|(id, m)| (*id, (m.width_px, m.height_px)))
             .collect();
         for (id, size) in live {
-            if !is_window_panel(id) {
+            if !self.is_window(id) {
                 self.fit_to_stream(id, size);
             }
         }
         self.center = saved.center.unwrap_or_else(|| {
-            let desk: HashMap<u8, Placement> = self
+            let desk: HashMap<ScreenId, Placement> = self
                 .placements
                 .iter()
-                .filter(|(id, _)| !is_window_panel(**id))
+                .filter(|(id, _)| !self.is_window(**id))
                 .map(|(id, p)| (*id, *p))
                 .collect();
             (
@@ -755,7 +822,7 @@ impl Scene {
 
     /// The desk placement of monitor `id` follows its stream, now `size` pixels: the
     /// same size of a pixel as before (see `layout::refit`).
-    fn fit_to_stream(&mut self, id: u8, size: layout::PixelSize) {
+    fn fit_to_stream(&mut self, id: ScreenId, size: layout::PixelSize) {
         if let (Some(p), Some(&was)) = (self.placements.get_mut(&id), self.placed_for.get(&id)) {
             *p = layout::refit(*p, was, size);
         }
@@ -765,7 +832,10 @@ impl Scene {
     /// Lays everything out by the chosen preset.
     /// Layouts are worked out around the origin facing -Z; this moves them to where
     /// the user sat and looked when they last asked to bring everything in front.
-    fn around_user(&self, mut placements: HashMap<u8, Placement>) -> HashMap<u8, Placement> {
+    fn around_user(
+        &self,
+        mut placements: HashMap<ScreenId, Placement>,
+    ) -> HashMap<ScreenId, Placement> {
         let (center, yaw) = self.center;
         let turn = glam::Quat::from_rotation_y(yaw);
         for p in placements.values_mut() {
@@ -777,10 +847,10 @@ impl Scene {
 
     fn arrange_all(&mut self) {
         // Window panels stay where they are, whatever the layout.
-        let panels: Vec<(u8, Placement)> = self
+        let panels: Vec<(ScreenId, Placement)> = self
             .placements
             .iter()
-            .filter(|(id, _)| is_window_panel(**id))
+            .filter(|(id, _)| self.is_window(**id))
             .map(|(id, p)| (*id, *p))
             .collect();
         self.arrange_monitors();
@@ -796,7 +866,8 @@ impl Scene {
             self.grabs = [None, None];
             return;
         }
-        let mirror_place = self.placements.get(&MIRROR_ID).copied();
+        let mirror = self.mirror_id();
+        let mirror_place = mirror.and_then(|id| self.placements.get(&id).copied());
         self.radius = layout::preset_radius(self.settings.preset, &self.quest_sizes());
         self.placements = self.around_user(layout::arrange(
             self.settings.preset,
@@ -806,8 +877,10 @@ impl Scene {
             self.curve_factor(),
         ));
         // Keep the mirror's spot while the laptop lid is closed.
-        if let (Some(p), false) = (mirror_place, self.placements.contains_key(&MIRROR_ID)) {
-            self.placements.insert(MIRROR_ID, p);
+        if let (Some(id), Some(p)) = (mirror, mirror_place)
+            && !self.placements.contains_key(&id)
+        {
+            self.placements.insert(id, p);
         }
         self.grabs = [None, None];
         self.save_layout();
@@ -816,7 +889,7 @@ impl Scene {
 
     /// A new window panel: in front of the user, a little closer than the monitors and
     /// below eye level, beside panels already there. Flat, at the monitors' sharpness.
-    fn place_window_panel(&mut self, id: u8) {
+    fn place_window_panel(&mut self, id: ScreenId) {
         let Some(m) = self.monitors.get(&id) else {
             return;
         };
@@ -827,7 +900,7 @@ impl Scene {
         let others = self
             .placements
             .keys()
-            .filter(|k| is_window_panel(**k) && **k != id)
+            .filter(|k| self.is_window(**k) && **k != id)
             .count();
         let width =
             (m.width_px as f32 * layout::METRES_PER_PIXEL * DISTANCE / self.radius).clamp(0.2, 1.2);
@@ -861,12 +934,12 @@ impl Scene {
     }
 
     /// The monitors on the map: the desktop the PC gets (see `layout::Desktop`).
-    fn map_spots(&self) -> HashMap<u8, [f32; 4]> {
+    fn map_spots(&self) -> HashMap<ScreenId, [f32; 4]> {
         self.desktop().spots()
     }
 
     /// The rows last sent to the PC, by id: what its desktop is laid out by now.
-    fn sent_rows(&self) -> Vec<Vec<u8>> {
+    fn sent_rows(&self) -> Vec<Vec<ScreenId>> {
         self.sent_layout
             .as_ref()
             .map(|d| d.rows.clone())
@@ -886,7 +959,7 @@ impl Scene {
         )
     }
 
-    fn place_of(&self, id: u8) -> ui::Place {
+    fn place_of(&self, id: ScreenId) -> ui::Place {
         let Some(p) = self.placements.get(&id) else {
             return ui::Place::Unknown;
         };
@@ -927,7 +1000,7 @@ impl Scene {
             .keys()
             .filter_map(|id| {
                 let p = self.placements.get(id)?;
-                let c = curve.filter(|_| !is_window_panel(*id));
+                let c = curve.filter(|_| !self.is_window(*id));
                 let hit = layout::hit_surface(ray, p, self.height_of(*id), c)?;
                 Some((*id, hit, *p, c))
             })
@@ -954,9 +1027,9 @@ impl Scene {
                     let f = |v: f32| (v * 65535.0) as u16;
                     info!("gaze: mouse to monitor {id} at {:.2},{:.2}", uv.x, uv.y);
                     self.send(ClientMsg::MouseTo {
-                        id,
-                        x: f(uv.x),
-                        y: f(uv.y),
+                        id: DisplayId(id),
+                        u: f(uv.x),
+                        v: f(uv.y),
                     });
                     self.focus = Some(id);
                     self.gaze_moved = Some(Instant::now());
@@ -1032,11 +1105,11 @@ impl Scene {
     }
 
     /// The monitor most straight ahead of the head (not a window panel).
-    fn monitor_in_front(&self) -> Option<u8> {
+    fn monitor_in_front(&self) -> Option<ScreenId> {
         let (head, forward) = self.head;
         self.placements
             .iter()
-            .filter(|(id, _)| !is_window_panel(**id) && self.monitors.contains_key(*id))
+            .filter(|(id, _)| !self.is_window(**id) && self.monitors.contains_key(*id))
             .max_by(|a, b| {
                 let score = |p: &Placement| (p.position - head).normalize_or_zero().dot(forward);
                 score(a.1).total_cmp(&score(b.1))
@@ -1083,10 +1156,7 @@ impl Scene {
         let step_shift = shift * k;
         let rot = glam::Quat::from_rotation_y(step_turn);
         let new_pos = pos + step_shift;
-        for (id, p) in self.placements.iter_mut() {
-            if *id == PANEL_ID {
-                continue;
-            }
+        for p in self.placements.values_mut() {
             p.position = new_pos + rot * (p.position - pos);
             p.rotation = rot * p.rotation;
         }
@@ -1150,9 +1220,8 @@ impl Scene {
             return;
         }
         let lid = self
-            .placements
-            .contains_key(&MIRROR_ID)
-            .then_some(MIRROR_ID);
+            .mirror_id()
+            .filter(|id| self.placements.contains_key(id));
         let lined = layout::line_up(
             &self.placements,
             &self.layout_sizes(),
@@ -1180,7 +1249,7 @@ impl Scene {
         self.curve_factor().map(|f| f * self.radius)
     }
 
-    fn height_of(&self, id: u8) -> f32 {
+    fn height_of(&self, id: ScreenId) -> f32 {
         match (self.placements.get(&id), self.monitors.get(&id)) {
             (Some(p), Some(m)) => p.width * m.aspect(),
             _ => 0.0,
@@ -1190,12 +1259,10 @@ impl Scene {
     /// "Move all together": monitor `id` went from `before` to `after` in the user's
     /// hand, and the rest of the arrangement (monitors and the laptop screen, not
     /// window panels) goes along as one piece: moved, turned and scaled with it.
-    fn carry_all(&mut self, id: u8, before: &Placement, after: &Placement) {
+    fn carry_all(&mut self, id: ScreenId, before: &Placement, after: &Placement) {
         if !self.settings.move_all
             || self.settings.cinema
-            || id == PANEL_ID
-            || id == KEYBOARD_ID
-            || is_window_panel(id)
+            || self.is_window(id)
             || !self.monitors.contains_key(&id)
         {
             return;
@@ -1204,13 +1271,19 @@ impl Scene {
         // One scale for all, kept so no monitor goes past the size limits: clamping
         // each on its own would pull the arrangement apart.
         let mut scale = after.width / before.width.max(1e-3);
+        let windows: Vec<ScreenId> = self
+            .placements
+            .keys()
+            .copied()
+            .filter(|id| self.is_window(*id))
+            .collect();
         for (other, p) in &self.placements {
-            if *other != id && !is_window_panel(*other) {
+            if *other != id && !windows.contains(other) {
                 scale = scale.clamp(0.2 / p.width.max(1e-3), 8.0 / p.width.max(1e-3));
             }
         }
         for (other, p) in self.placements.iter_mut() {
-            if *other == id || is_window_panel(*other) {
+            if *other == id || windows.contains(other) {
                 continue;
             }
             p.position = after.position + turn * (p.position - before.position) * scale;
@@ -1222,30 +1295,30 @@ impl Scene {
     /// What moves with the hands now: the held monitors, and with "move all together"
     /// every monitor that goes along (drawn where it is, not catching up, or the
     /// arrangement would tear apart while it moves).
-    fn moving_now(&self, held: &[u8]) -> Vec<u8> {
+    fn moving_now(&self, held: &[ScreenId]) -> Vec<ScreenId> {
         let carrying = self.settings.move_all
             && !self.settings.cinema
             && held
                 .iter()
                 .chain(self.scaling.as_ref().map(|s| &s.id))
-                .any(|id| self.monitors.contains_key(id) && !is_window_panel(*id));
+                .any(|id| self.monitors.contains_key(id) && !self.is_window(*id));
         let mut ids = held.to_vec();
         if carrying {
-            ids.extend(self.placements.keys().filter(|id| !is_window_panel(**id)));
+            ids.extend(self.placements.keys().filter(|id| !self.is_window(**id)));
         }
         ids
     }
 
     /// The magnet: where monitor `id`, let go now, would stick (not on a wall, where
     /// monitors stay in its plane, nor for the laptop screen or window panels).
-    fn stick_of(&self, id: u8) -> Option<layout::Stick> {
+    fn stick_of(&self, id: ScreenId) -> Option<layout::Stick> {
         // Lying down the monitors are a tilted band the presets keep exact; window
         // panels float on their own.
         if self.settings.cinema
             || !self.settings.magnet
             || self.settings.move_all
             || self.settings.preset == crate::settings::Preset::Overhead
-            || is_window_panel(id)
+            || self.is_window(id)
             || !self.monitors.contains_key(&id)
         {
             return None;
@@ -1259,7 +1332,7 @@ impl Scene {
 
     /// The monitors that make up the arrangement: the Quest monitors and the laptop
     /// screen, if it shows.
-    fn layout_sizes(&self) -> Vec<(u8, u32, u32)> {
+    fn layout_sizes(&self) -> Vec<(ScreenId, u32, u32)> {
         let mut sizes = self.quest_sizes();
         sizes.extend(self.mirror_size());
         sizes
@@ -1267,7 +1340,7 @@ impl Scene {
 
     /// Where the "Attach" button under detached window `id` is (as drawn, while it
     /// glides).
-    fn attach_place(&self, id: u8) -> Option<Placement> {
+    fn attach_place(&self, id: ScreenId) -> Option<Placement> {
         let p = self.shown.get(&id).or_else(|| self.placements.get(&id))?;
         let down = p.width * self.monitors.get(&id)?.aspect() / 2.0 + ATTACH_GAP;
         Some(Placement {
@@ -1330,7 +1403,7 @@ impl Scene {
                         ray,
                         p,
                         self.height_of(*id),
-                        curve.filter(|_| !is_window_panel(*id)),
+                        curve.filter(|_| !self.is_window(*id)),
                     ),
                 );
             }
@@ -1349,17 +1422,15 @@ impl Scene {
             self.button_place = None;
             return;
         }
-        let shown = |id: &u8| self.placements.contains_key(id);
+        let shown = |id: &ScreenId| self.placements.contains_key(id);
         let anchor = self
             .primary
             .filter(shown)
             .or_else(|| self.quest_sizes().iter().map(|m| m.0).find(|id| shown(id)));
         let mirror = self
-            .monitors
-            .contains_key(&MIRROR_ID)
-            .then(|| self.placements.get(&MIRROR_ID).copied())
-            .flatten()
-            .map(|m| (m, self.height_of(MIRROR_ID)));
+            .mirror_id()
+            .filter(|id| self.monitors.contains_key(id))
+            .and_then(|id| Some((*self.placements.get(&id)?, self.height_of(id))));
         self.button_place = anchor.and_then(|id| {
             let p = self.placements.get(&id)?;
             let h = self.height_of(id);
@@ -1398,11 +1469,52 @@ impl Scene {
         self.panel_open = true;
     }
 
-    /// Tells the PC whether the headset is worn (quietly: nothing to show the user).
+    /// Tells the PC whether the headset is worn (quietly: nothing to show the user),
+    /// and keeps it for the next `Open`.
     fn tell_presence(&self) {
+        self.steering.set_headset(self.headset_state());
         if let Some(f) = &self.feedback {
-            let _ = f.send(ClientMsg::Presence { worn: self.worn });
+            let _ = f.send(ClientMsg::Presence {
+                part: Presence { worn: self.worn },
+            });
         }
+    }
+
+    /// The headset's settings the PC acts on.
+    fn prefs(&self) -> Prefs {
+        prefs_of(&self.settings)
+    }
+
+    /// What the headset says about itself when it opens a session.
+    fn headset_state(&self) -> HeadsetState {
+        headset_state(&self.settings, self.worn, self.headset_battery)
+    }
+
+    /// The settings the PC acts on changed: it hears at once, and the next session
+    /// starts with them.
+    fn prefs_changed(&mut self) {
+        self.steering.set_headset(self.headset_state());
+        let part = self.prefs();
+        if self.feedback.is_some() {
+            self.send(ClientMsg::Prefs { part });
+        }
+    }
+
+    /// Asks the PC to change something: one reply comes with its number. Without a
+    /// connection nothing is sent (and nothing kept to send later: repeating "add a
+    /// monitor" after reconnecting could add two).
+    fn request(&mut self, asked: Request) -> Option<ReqId> {
+        if self.feedback.is_none() {
+            let what = self
+                .lang()
+                .t("Немає з'єднання з ПК", "No connection to the PC");
+            self.show_error(what.into());
+            return None;
+        }
+        self.last_req += 1;
+        let req = ReqId(self.last_req);
+        self.send(ClientMsg::request(req, asked));
+        Some(req)
     }
 
     fn send(&mut self, msg: ClientMsg) {
@@ -1454,7 +1566,7 @@ impl Scene {
             pairing: self.pairing.clone(),
             pair_offer: self.pair_offer.clone(),
             unreachable: self.unreachable.clone(),
-            pc: self.pc,
+            pc: self.pc.clone(),
             can_move_mouse: self.can_move_mouse,
             monitors: self
                 .quest_sizes()
@@ -1470,7 +1582,7 @@ impl Scene {
             windows: self
                 .monitors
                 .iter()
-                .filter(|(id, _)| is_window_panel(**id))
+                .filter(|(id, _)| self.is_window(**id))
                 .map(|(id, m)| MonitorEntry {
                     id: *id,
                     width: m.width_px,
@@ -1482,15 +1594,16 @@ impl Scene {
             primary: self.primary,
             selected: self.selected.filter(|id| self.monitors.contains_key(id)),
             mirror_seen: self
-                .monitors
-                .contains_key(&MIRROR_ID)
-                .then(|| spots.get(&MIRROR_ID).copied())
-                .flatten(),
+                .mirror_id()
+                .filter(|id| self.monitors.contains_key(id))
+                .and_then(|id| spots.get(&id).copied()),
             mirror_wanted: self.mirror_wanted,
             audio_wanted: self.audio_wanted,
             mic_wanted: self.mic_wanted,
             mic_denied: self.mic_wanted && crate::mic::denied(),
-            mirror_active: self.monitors.contains_key(&MIRROR_ID),
+            mirror_active: self
+                .mirror_id()
+                .is_some_and(|id| self.monitors.contains_key(&id)),
             settings: self.settings,
             room_available: room,
             panorama_available: panorama,
@@ -1735,6 +1848,8 @@ fn run(app: &AndroidApp) -> Result<()> {
 
     let (net_tx, net_rx) = mpsc::channel();
     let steering = net::Steering::default();
+    // What the first `Open` says, before the network thread can connect.
+    steering.set_headset(headset_state(&settings, true, crate::mic::battery()));
     // However this function ends, the network thread and its session end with it.
     struct StopNetwork(net::Steering);
     impl Drop for StopNetwork {
@@ -1796,6 +1911,8 @@ fn run(app: &AndroidApp) -> Result<()> {
         pair_offer: None,
         unreachable: None,
         pc: None,
+        pc_displays: None,
+        last_req: 0,
         steering,
         offline_since: Some(Instant::now()),
         feedback: None,
@@ -2119,8 +2236,13 @@ fn run(app: &AndroidApp) -> Result<()> {
         {
             last_battery = Some(Instant::now());
             scene.headset_battery = crate::mic::battery();
-            if let Some((percent, charging)) = scene.headset_battery {
-                scene.send(ClientMsg::Battery { percent, charging });
+            scene.steering.set_headset(scene.headset_state());
+            if let Some((percent, charging)) = scene.headset_battery
+                && scene.feedback.is_some()
+            {
+                scene.send(ClientMsg::Battery {
+                    part: Battery { percent, charging },
+                });
             }
         }
 
@@ -2130,7 +2252,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         // A detached window pointed at shows "Attach" under it; it lingers so the
         // pointer can move down onto it.
         let pointed = picks.iter().flatten().find_map(|(t, _)| match t {
-            Target::Monitor(id) | Target::Attach(id) if is_window_panel(*id) => Some(*id),
+            Target::Monitor(id) | Target::Attach(id) if scene.is_window(*id) => Some(*id),
             _ => None,
         });
         if let Some(id) = pointed {
@@ -2387,33 +2509,40 @@ fn run(app: &AndroidApp) -> Result<()> {
             if end_grab && let Some(released) = scene.grabs[hand].take() {
                 // A monitor put somewhere new stays there until the head comes back
                 // near where it was (the menu and the keyboard do not count).
-                scene.follow_hold =
-                    scene.settings.follow && scene.placements.contains_key(&released.id);
+                scene.follow_hold = scene.settings.follow
+                    && released
+                        .id
+                        .screen()
+                        .is_some_and(|id| scene.placements.contains_key(&id));
                 // Letting go with the first hand ends resizing too.
                 scene.scaling = None;
-                if released.id == KEYBOARD_ID {
-                    if let Some(k) = scene.keyboard_place {
-                        layout::save(&scene.keyboard_path, &HashMap::from([(0, k)]));
+                match released.id {
+                    Held::Keyboard => {
+                        if let Some(k) = scene.keyboard_place {
+                            layout::save(&scene.keyboard_path, &HashMap::from([(0, k)]));
+                        }
                     }
-                } else if !scene.settings.cinema {
-                    // Let go next to another monitor: it sticks to it, edge to edge.
-                    if let Some(s) = scene.stick_of(released.id) {
-                        scene.placements.insert(released.id, s.placement);
-                        controls.pulse(&session, hand);
-                    }
-                    scene.save_layout();
-                    // Dropped somewhere else: KDE's arrangement follows what the eyes see.
-                    if released.id != PANEL_ID {
+                    Held::Menu if !scene.settings.cinema => scene.save_layout(),
+                    Held::Screen(id) if !scene.settings.cinema => {
+                        // Let go next to another monitor: it sticks to it, edge to edge.
+                        if let Some(s) = scene.stick_of(id) {
+                            scene.placements.insert(id, s.placement);
+                            controls.pulse(&session, hand);
+                        }
+                        scene.save_layout();
+                        // Dropped somewhere else: KDE's arrangement follows what the
+                        // eyes see.
                         scene.send_layout();
                     }
+                    Held::Menu | Held::Screen(_) => {}
                 }
             }
             let Some(ray) = input.ray else { continue };
             if let Some(mut grab) = scene.grabs[hand] {
                 let target = match grab.id {
-                    PANEL_ID => Some(&mut scene.panel_place),
-                    KEYBOARD_ID => scene.keyboard_place.as_mut(),
-                    id => scene.placements.get_mut(&id),
+                    Held::Menu => Some(&mut scene.panel_place),
+                    Held::Keyboard => scene.keyboard_place.as_mut(),
+                    Held::Screen(id) => scene.placements.get_mut(&id),
                 };
                 let wall = scene.settings.preset == crate::settings::Preset::Wall
                     && !scene.settings.cinema;
@@ -2421,16 +2550,18 @@ fn run(app: &AndroidApp) -> Result<()> {
                 if let Some(p) = target {
                     let before = *p;
                     grab.update(p, ray, head, input.stick, dt);
-                    if grab.id == KEYBOARD_ID {
+                    if grab.id == Held::Keyboard {
                         // It follows the hand but stays flat, like the desk.
                         p.rotation = lying_flat(p.position, head);
-                    } else if wall && grab.id != PANEL_ID {
+                    } else if wall && grab.id != Held::Menu {
                         // On a wall, monitors stay parallel to it wherever they go.
                         p.rotation = wall_facing;
                     }
                     let after = *p;
                     scene.grabs[hand] = Some(grab);
-                    scene.carry_all(grab.id, &before, &after);
+                    if let Some(id) = grab.id.screen() {
+                        scene.carry_all(id, &before, &after);
+                    }
                 }
             } else if start_grab {
                 hold_since[hand] = None;
@@ -2438,14 +2569,17 @@ fn run(app: &AndroidApp) -> Result<()> {
                 pending_click[hand] = None;
                 let other = scene.grabs[1 - hand].map(|g| g.id);
                 let grabbed = match picks[hand] {
-                    Some((Target::Panel, hit)) if other != Some(PANEL_ID) => {
-                        Some(Grab::start(PANEL_ID, hit.t, hit.local, &scene.panel_place))
-                    }
-                    Some((Target::Keyboard, hit)) if other != Some(KEYBOARD_ID) => scene
+                    Some((Target::Panel, hit)) if other != Some(Held::Menu) => Some(Grab::start(
+                        Held::Menu,
+                        hit.t,
+                        hit.local,
+                        &scene.panel_place,
+                    )),
+                    Some((Target::Keyboard, hit)) if other != Some(Held::Keyboard) => scene
                         .keyboard_place
-                        .map(|k| Grab::start(KEYBOARD_ID, hit.t, hit.local, &k)),
+                        .map(|k| Grab::start(Held::Keyboard, hit.t, hit.local, &k)),
                     // The other hand already holds it: resize with both.
-                    Some((Target::Monitor(id), _)) if other == Some(id) => {
+                    Some((Target::Monitor(id), _)) if other == Some(Held::Screen(id)) => {
                         if let (Some(a), Some(b), Some(p)) = (
                             controls.state[0].ray,
                             controls.state[1].ray,
@@ -2461,9 +2595,9 @@ fn run(app: &AndroidApp) -> Result<()> {
                         }
                         None
                     }
-                    Some((Target::Monitor(id), hit)) if other != Some(id) => {
-                        Some(Grab::start(id, hit.t, hit.local, &scene.placements[&id]))
-                    }
+                    Some((Target::Monitor(id), hit)) if other != Some(Held::Screen(id)) => Some(
+                        Grab::start(Held::Screen(id), hit.t, hit.local, &scene.placements[&id]),
+                    ),
                     _ => None,
                 }
                 .map(|g| {
@@ -2585,7 +2719,7 @@ fn run(app: &AndroidApp) -> Result<()> {
             let age = at.elapsed();
             match (scene.shown.get(&id), age < FINDER_FOR) {
                 (Some(p), true) => {
-                    let c = scene.curve_radius().filter(|_| !is_window_panel(id));
+                    let c = scene.curve_radius().filter(|_| !scene.is_window(id));
                     let (point, _) = layout::image_point(p, scene.height_of(id), c, uv);
                     let t = age.as_secs_f32() / FINDER_FOR.as_secs_f32();
                     for k in 0..3 {
@@ -2603,7 +2737,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         }
         // The magnet while dragging: the edge the monitor would stick to lights up.
         for g in scene.grabs.iter().flatten() {
-            let Some(s) = scene.stick_of(g.id) else {
+            let Some(s) = g.id.screen().and_then(|id| scene.stick_of(id)) else {
                 continue;
             };
             let Some(n) = scene.shown.get(&s.neighbour).copied() else {
@@ -2751,14 +2885,19 @@ fn run(app: &AndroidApp) -> Result<()> {
             });
 
         // Far monitors first so nearer (and grabbed) ones draw on top.
-        let grabbed: Vec<u8> = scene.grabs.iter().flatten().map(|g| g.id).collect();
+        let grabbed: Vec<ScreenId> = scene
+            .grabs
+            .iter()
+            .flatten()
+            .filter_map(|g| g.id.screen())
+            .collect();
         let moving = scene.moving_now(&grabbed);
         scene.animate(dt, &moving);
         // Keep KDE's arrangement in step once nothing is being moved.
         if grabbed.is_empty() && scene.scaling.is_none() && !scene.relayout_pending() {
             scene.send_layout();
         }
-        let mut order: Vec<(f32, u8)> = scene
+        let mut order: Vec<(f32, ScreenId)> = scene
             .monitors
             .keys()
             .filter_map(|id| {
@@ -2843,7 +2982,7 @@ fn run(app: &AndroidApp) -> Result<()> {
                 image_array_index: 0,
             };
             // Window panels stay flat.
-            if let Some(radius) = curve.filter(|_| !is_window_panel(*id)) {
+            if let Some(radius) = curve.filter(|_| !scene.is_window(*id)) {
                 let c = Cylinder::new(p, radius);
                 cylinders.push(xr::sys::CompositionLayerCylinderKHR {
                     ty: xr::sys::CompositionLayerCylinderKHR::TYPE,
@@ -3000,6 +3139,7 @@ fn handle_net_event(
             name,
             feedback,
             language,
+            opened_with,
         } => {
             info!("connected to {addr} ({name:?}), language {language:?}");
             if language.is_some() && language != scene.settings.pc_language {
@@ -3015,19 +3155,19 @@ fn handle_net_event(
                 }
             }));
             scene.feedback = Some(feedback);
+            scene.last_req = 0;
             scene.sent_layout = None;
             scene.update_needed = None;
             // The PC follows the headset's microphone switch.
             scene.send(ClientMsg::SetMic {
                 enabled: scene.settings.mic,
             });
-            if scene.settings.notifications {
-                scene.send(ClientMsg::SetNotifications { enabled: true });
+            // What changed since `Open` went (it carried the state of that moment).
+            let now = scene.headset_state();
+            if now.prefs != opened_with.prefs {
+                scene.prefs_changed();
             }
-            if scene.settings.sound_from_screen {
-                scene.send(ClientMsg::SetSoundFromScreen { enabled: true });
-            }
-            if !scene.worn {
+            if now.presence != opened_with.presence {
                 scene.tell_presence();
             }
             scene.offline_since = None;
@@ -3036,15 +3176,34 @@ fn handle_net_event(
         }
         NetEvent::Hosts(hosts) => scene.found = hosts,
         NetEvent::Unreachable(name) => scene.unreachable = name,
-        NetEvent::PcSettings(settings, encoders) => scene.pc = Some((settings, encoders)),
+        NetEvent::Encoding(encoding) => scene.pc = Some(encoding),
+        NetEvent::Sound(sound) => scene.audio_wanted = sound.to_headset,
+        NetEvent::HostCaps(pc) => {
+            info!("the PC can: {:?}", pc.features);
+            scene.can_move_mouse = pc.has(caps::pc::MOVE_MOUSE);
+        }
         NetEvent::Recenter => scene.recenter(),
         NetEvent::Notice(text) => scene.show_toast(text),
-        NetEvent::MouseAt(id, x, y) => scene.finder = Some((id, Vec2::new(x, y), Instant::now())),
-        NetEvent::SoundFrom(id) => scene.sound_from = id,
-        NetEvent::Abilities(bits) => {
-            info!("PC abilities {bits:#b}");
-            scene.can_move_mouse = bits & prostir_proto::abilities::MOVE_MOUSE != 0;
+        NetEvent::Reply { req, outcome } => match outcome {
+            Outcome::Failed { detail, .. } => {
+                warn!("request {} failed", req.0);
+                scene.show_error(detail);
+            }
+            Outcome::Saved { path } => {
+                let saved = scene.lang().t("Знімок збережено:", "Screenshot saved:");
+                scene.show_toast(format!("{saved} {path}"));
+            }
+            Outcome::Pointer { id, u, v } => {
+                let f = |v: u16| f32::from(v) / 65535.0;
+                scene.finder = Some((id.0, Vec2::new(f(u), f(v)), Instant::now()));
+            }
+            Outcome::Done | Outcome::Added { .. } | Outcome::Ids { .. } => {}
+        },
+        NetEvent::Problem { error, detail } => {
+            warn!("a problem on the PC (code {})", error.code());
+            scene.show_error(detail);
         }
+        NetEvent::SoundFrom(id) => scene.sound_from = id.map(|id| id.0),
         NetEvent::Pairing { host, code } => {
             let failed = scene.pairing.as_ref().is_some_and(|p| p.failed);
             scene.pairing = Some(ui::PairingView {
@@ -3075,70 +3234,33 @@ fn handle_net_event(
             scene.host = None;
             scene.pc = None;
             scene.feedback = None;
-            // The next session's order is news, not monitors removed.
+            // The next session's list is news, not displays removed.
             scene.order.clear();
+            scene.pc_displays = None;
             if let Some(text) = disconnect_text(scene.lang(), why) {
                 scene.show_toast(text.into());
             }
         }
-        NetEvent::PrimaryChanged(id) => {
-            info!("primary monitor: Prostir-{}", id + 1);
-            scene.primary = Some(id);
-            if scene.relayout_pending() {
-                scene.arrange_all();
-            }
-        }
-        NetEvent::MirrorWanted(enabled) => scene.mirror_wanted = enabled,
-        NetEvent::AudioWanted(enabled) => scene.audio_wanted = enabled,
-        NetEvent::Focus(id) => scene.focus = id,
-        NetEvent::Order(ids) => {
-            // Monitors gone from the order were removed: their places go, nothing
-            // else moves.
-            let gone: Vec<u8> = scene
-                .order
-                .iter()
-                .copied()
-                .filter(|id| !ids.contains(id))
-                .collect();
-            for id in &gone {
-                scene.placements.remove(id);
-            }
-            scene.order = ids;
-            // A profile's places on the numbers its monitors have now (the last order
-            // of the right length while the PC makes them counts).
-            if scene.places_pending()
-                && let Some((places, _)) = &scene.pending_places
-                && places.len() == scene.order.len()
-                && !scene.settings.cinema
-            {
-                for (id, p) in scene.order.clone().into_iter().zip(places.clone()) {
-                    scene.placements.insert(id, p);
-                    scene.placed_for.remove(&id);
-                }
-                scene.save_layout();
-            } else if scene.relayout_pending() {
-                scene.arrange_all();
-            } else if !gone.is_empty() {
-                scene.save_layout();
-            }
-            scene.place_missing();
-            scene.build_cinema_view_if_due();
-        }
+        NetEvent::Focus(id) => scene.focus = id.map(|id| id.0),
+        NetEvent::Displays(displays) => displays_changed(scene, displays),
         NetEvent::HostError(text) => scene.show_error(text),
         NetEvent::StreamStart {
             id,
+            generation,
             width,
             height,
             codec,
             frames,
             feedback,
         } => {
+            let stream = decoder::Stream { id, generation };
+            let id = id.0;
             scene.monitors.remove(&id);
             match xrutil::create_surface_swapchain(session, vm, width, height) {
                 Ok((swapchain, window)) => {
                     let stop = Arc::new(AtomicBool::new(false));
                     let decoder = decoder::spawn(
-                        id,
+                        stream,
                         codec,
                         width,
                         height,
@@ -3157,41 +3279,156 @@ fn handle_net_event(
                             swapchain,
                         },
                     );
-                    if !is_window_panel(id) && !scene.settings.cinema {
-                        scene.fit_to_stream(id, (width, height));
-                    }
-                    if is_window_panel(id) {
-                        if !scene.placements.contains_key(&id) {
-                            scene.place_window_panel(id);
-                        }
-                    } else if scene.relayout_pending() {
-                        scene.arrange_all();
-                    } else if !scene.placements.contains_key(&id) {
-                        // A monitor the arrangement has no place for: next to the
-                        // others, which stay. One it knows stays where it is.
-                        scene.place_missing();
-                    }
-                    scene.build_cinema_view_if_due();
+                    stream_shown(scene, id);
                 }
                 Err(e) => error!("monitor {id}: {e:#}"),
             }
         }
-        NetEvent::StreamEnd { id, removed } => {
-            scene.monitors.remove(&id);
-            for g in &mut scene.grabs {
-                if g.is_some_and(|g| g.id == id) {
-                    *g = None;
-                }
-            }
-            // A monitor the PC removed leaves its place once it is out of the order
-            // too; one whose stream only failed keeps it. The others never move.
-            if removed && is_window_panel(id) {
-                scene.placements.remove(&id);
-            } else if removed && id != MIRROR_ID && !scene.order.contains(&id) {
-                scene.placements.remove(&id);
-                scene.save_layout();
+        // The stream stopped; the display keeps its place (only the list says it is gone).
+        NetEvent::StreamEnd { id } => {
+            scene.monitors.remove(&id.0);
+        }
+    }
+}
+
+/// A stream of display `id` shows: it gets its place (a display not listed yet waits
+/// for the list, unseen).
+fn stream_shown(scene: &mut Scene, id: ScreenId) {
+    let Some(kind) = scene.kind(id).cloned() else {
+        return;
+    };
+    let size = scene.monitors.get(&id).map(|m| (m.width_px, m.height_px));
+    if let (DisplayKind::Virtual, Some(size)) = (&kind, size)
+        && !scene.settings.cinema
+    {
+        scene.fit_to_stream(id, size);
+    }
+    match kind {
+        DisplayKind::Window { .. } => {
+            if !scene.placements.contains_key(&id) {
+                scene.place_window_panel(id);
             }
         }
+        _ if scene.relayout_pending() => scene.arrange_all(),
+        // A monitor the arrangement has no place for: next to the others, which
+        // stay. One it knows stays where it is.
+        _ if !scene.placements.contains_key(&id) => scene.place_missing(),
+        _ => {}
+    }
+    scene.build_cinema_view_if_due();
+}
+
+/// The PC listed its displays anew: the one source of which there are. Within a
+/// session, a display that left the list is gone, and its place goes with it (a
+/// display of the PC itself keeps its place: it comes back where it was).
+fn displays_changed(scene: &mut Scene, displays: state::Displays) {
+    let ids: Vec<ScreenId> = displays.ids().map(|id| id.0).collect();
+    let gone: Vec<ScreenId> = scene
+        .pc_displays
+        .iter()
+        .flat_map(|d| &d.displays)
+        .filter(|d| !ids.contains(&d.id.0) && !d.is_physical())
+        .map(|d| d.id.0)
+        .collect();
+    let order: Vec<ScreenId> = displays
+        .displays
+        .iter()
+        .filter(|d| d.is_virtual())
+        .map(|d| d.id.0)
+        .collect();
+    let primary = displays.primary.map(|p| p.0);
+    scene.mirror_wanted = displays.displays.iter().any(|d| d.is_shown_physical());
+    scene.pc_displays = Some(displays);
+    for id in &gone {
+        scene.placements.remove(id);
+        scene.monitors.remove(id);
+        for g in &mut scene.grabs {
+            if g.is_some_and(|g| g.id == Held::Screen(*id)) {
+                *g = None;
+            }
+        }
+    }
+    if primary != scene.primary {
+        info!("primary display: {primary:?}");
+        scene.primary = primary;
+        if scene.relayout_pending() {
+            scene.arrange_all();
+        }
+    }
+    scene.order = order;
+    // A profile's places on the numbers its monitors have now (the last list of the
+    // right length while the PC makes them counts).
+    if scene.places_pending()
+        && let Some((places, _)) = &scene.pending_places
+        && places.len() == scene.order.len()
+        && !scene.settings.cinema
+    {
+        for (id, p) in scene.order.clone().into_iter().zip(places.clone()) {
+            scene.placements.insert(id, p);
+            scene.placed_for.remove(&id);
+        }
+        scene.save_layout();
+    } else if scene.relayout_pending() {
+        scene.arrange_all();
+    } else if !gone.is_empty() {
+        scene.save_layout();
+    }
+    // Streams that came before the list said what they are.
+    let waiting: Vec<ScreenId> = scene
+        .monitors
+        .keys()
+        .copied()
+        .filter(|id| !scene.placements.contains_key(id))
+        .collect();
+    for id in waiting {
+        stream_shown(scene, id);
+    }
+    scene.place_missing();
+    scene.build_cinema_view_if_due();
+}
+
+/// The headset's settings the PC acts on, from `s`.
+fn prefs_of(s: &Settings) -> Prefs {
+    Prefs {
+        notifications: s.notifications,
+        sound_from_screen: s.sound_from_screen,
+        focus_mode: s.focus,
+        gaze_mouse_ms: s
+            .gaze_mouse
+            .then(|| u16::try_from(GAZE_DWELL.as_millis()).unwrap_or(u16::MAX)),
+        no_limits: false,
+    }
+}
+
+/// What the headset says about itself when it opens a session: what it can do, its
+/// settings, whether it is worn, its battery.
+fn headset_state(settings: &Settings, worn: bool, battery: Option<(u8, bool)>) -> HeadsetState {
+    HeadsetState {
+        caps: Some(headset_caps()),
+        prefs: Some(prefs_of(settings)),
+        presence: Some(Presence { worn }),
+        battery: battery.map(|(percent, charging)| Battery { percent, charging }),
+    }
+}
+
+/// What this headset can do, for the PC: the displays it shows, the codecs it decodes
+/// and how large (Quest 3: H.264 up to 4K, HEVC up to 8K), how many streams and
+/// compositor layers at once.
+fn headset_caps() -> HeadsetCaps {
+    let decoder = |codec: Codec, max_w, max_h| state::Decoder {
+        codec: prostir_proto::wire::encode(&codec).map_or(0, |b| b[0]),
+        max_w,
+        max_h,
+    };
+    HeadsetCaps {
+        features: vec![caps::headset::PHYSICAL, caps::headset::WINDOWS],
+        decoders: vec![
+            decoder(Codec::H264, 4096, 4096),
+            decoder(Codec::H265, 8192, 4320),
+        ],
+        streams_max: 16,
+        layers_max: 16,
+        model: "Meta Quest".into(),
     }
 }
 
@@ -3237,14 +3474,18 @@ fn handle_action(
         scene.active_profile = None;
     }
     match action {
-        Action::Add { width, height } => scene.send(ClientMsg::AddMonitor { width, height }),
+        Action::Add { width, height } => {
+            scene.request(Request::AddDisplay {
+                mode: Mode::new(width, height),
+            });
+        }
         Action::Remove(id) => {
             let confirmed = scene
                 .confirm_remove
                 .is_some_and(|(c, at)| c == id && at.elapsed() < CONFIRM_FOR);
             if confirmed {
                 scene.confirm_remove = None;
-                scene.send(ClientMsg::RemoveMonitor { id });
+                scene.request(Request::RemoveDisplay { id: DisplayId(id) });
             } else {
                 scene.confirm_remove = Some((id, Instant::now()));
             }
@@ -3290,32 +3531,38 @@ fn handle_action(
         Action::Focus(on) => {
             scene.settings.focus = on;
             scene.settings.save(settings_path);
+            scene.prefs_changed();
         }
         Action::DetachWindow => {
-            scene.send(ClientMsg::DetachWindow);
+            scene.request(Request::DetachWindow);
             // The panel appears in front: the menu steps aside.
             scene.panel_open = false;
         }
         Action::WindowHere => {
             if let Some(id) = scene.monitor_in_front() {
-                scene.send(ClientMsg::WindowHere { id });
+                scene.request(Request::WindowHere { id: DisplayId(id) });
             }
         }
         Action::Screenshot => {
             if let Some(id) = scene.monitor_in_front() {
-                scene.send(ClientMsg::Screenshot { id });
+                scene.request(Request::Screenshot { id: DisplayId(id) });
             }
         }
-        Action::CloseWindow(id) => scene.send(ClientMsg::RemoveMonitor { id }),
+        Action::CloseWindow(id) => {
+            scene.request(Request::RemoveDisplay { id: DisplayId(id) });
+        }
         Action::Tidy => scene.tidy_up(),
         Action::SelectMonitor(id) => {
             scene.selected = Some(id);
             scene.confirm_remove = None;
         }
-        Action::FindMouse => scene.send(ClientMsg::FindMouse),
+        Action::FindMouse => {
+            scene.request(Request::FindMouse);
+        }
         Action::GazeMouse(on) => {
             scene.settings.gaze_mouse = on;
             scene.settings.save(settings_path);
+            scene.prefs_changed();
         }
         Action::LargeMenu(on) => {
             scene.settings.large_menu = on;
@@ -3347,7 +3594,7 @@ fn handle_action(
         Action::SoundFromScreen(on) => {
             scene.settings.sound_from_screen = on;
             scene.settings.save(settings_path);
-            scene.send(ClientMsg::SetSoundFromScreen { enabled: on });
+            scene.prefs_changed();
             if !on {
                 scene.sound_from = None;
             }
@@ -3355,7 +3602,7 @@ fn handle_action(
         Action::Notifications(on) => {
             scene.settings.notifications = on;
             scene.settings.save(settings_path);
-            scene.send(ClientMsg::SetNotifications { enabled: on });
+            scene.prefs_changed();
         }
         Action::BatterySaver(on) => {
             scene.settings.battery_saver = on;
@@ -3392,11 +3639,13 @@ fn handle_action(
             scene.settings.save(settings_path);
             controls.hands_enabled = mode == HandMode::Control;
         }
-        Action::MakePrimary(id) => scene.send(ClientMsg::SetPrimary { id }),
+        Action::MakePrimary(id) => {
+            scene.request(Request::SetPrimary { id: DisplayId(id) });
+        }
         // Swaps the places of a monitor and its neighbour in the order; the others
         // stay.
         Action::Move { id, delta } => {
-            let ids: Vec<u8> = scene.quest_sizes().iter().map(|m| m.0).collect();
+            let ids: Vec<ScreenId> = scene.quest_sizes().iter().map(|m| m.0).collect();
             if let Some(i) = ids.iter().position(|x| *x == id) {
                 let j = (i as i32 + delta).clamp(0, ids.len() as i32 - 1) as usize;
                 let other = ids[j];
@@ -3405,7 +3654,8 @@ fn handle_action(
                     scene.placements.get(&other).copied(),
                 ) {
                     // Each at the other's place, at the size of its own pixels.
-                    let size = |id: u8| scene.monitors.get(&id).map(|m| (m.width_px, m.height_px));
+                    let size =
+                        |id: ScreenId| scene.monitors.get(&id).map(|m| (m.width_px, m.height_px));
                     if let (Some(sa), Some(sb)) = (size(id), size(other)) {
                         scene.placements.insert(id, layout::refit(b, sb, sa));
                         scene.placements.insert(other, layout::refit(a, sa, sb));
@@ -3423,11 +3673,18 @@ fn handle_action(
         }
         Action::SetAudio(enabled) => {
             scene.audio_wanted = enabled;
-            scene.send(ClientMsg::SetAudio { enabled });
+            scene.request(Request::SetSound {
+                to_headset: enabled,
+            });
         }
         Action::SetMirror(enabled) => {
-            scene.mirror_wanted = enabled;
-            scene.send(ClientMsg::SetMirror { enabled });
+            if let Some(id) = scene.physical_id() {
+                scene.mirror_wanted = enabled;
+                scene.request(Request::ShowPhysical {
+                    id: DisplayId(id),
+                    shown: enabled,
+                });
+            }
         }
         Action::Preset(preset) => {
             scene.settings.preset = preset;
@@ -3456,14 +3713,18 @@ fn handle_action(
             }
             let p = scene.profiles[i].clone();
             scene.pending_places = None;
-            scene.send(ClientMsg::SetMonitors {
-                sizes: p.sizes.clone(),
-                primary: p.primary,
+            let shown_physical = scene
+                .physical_id()
+                .filter(|_| p.mirror)
+                .map(DisplayId)
+                .into_iter()
+                .collect();
+            scene.mirror_wanted = p.mirror;
+            scene.request(Request::SetDisplays {
+                modes: p.sizes.iter().map(|&(w, h)| Mode::new(w, h)).collect(),
+                primary: Some(Primary::Index { index: p.primary }),
+                shown_physical,
             });
-            if p.mirror != scene.mirror_wanted {
-                scene.mirror_wanted = p.mirror;
-                scene.send(ClientMsg::SetMirror { enabled: p.mirror });
-            }
             let s = &mut scene.settings;
             s.preset = p.settings.preset;
             s.curve = p.settings.curve;
@@ -3523,12 +3784,21 @@ fn handle_action(
                 scene.paired = store.entries().to_vec();
             }
         }
-        Action::SetPc(settings) => {
-            // Shown at once; the PC confirms (or corrects) with its own message.
-            if let Some((pc, _)) = &mut scene.pc {
-                *pc = settings;
+        Action::SetEncoding(change) => {
+            // Shown at once; the PC confirms (or corrects) with its `Encoding`.
+            if let Some(pc) = &mut scene.pc {
+                let w = &mut pc.wanted;
+                w.bitrate = change.bitrate.unwrap_or(w.bitrate);
+                w.codec = change.codec.or(w.codec);
+                w.software = change.software.unwrap_or(w.software);
+                w.sharp = change.sharp.unwrap_or(w.sharp);
             }
-            scene.send(ClientMsg::SetPcSettings { settings });
+            scene.request(Request::SetEncoding {
+                bitrate: change.bitrate,
+                codec: change.codec,
+                software: change.software,
+                sharp: change.sharp,
+            });
         }
         Action::ShowTips => {
             scene.settings.intro_seen = false;

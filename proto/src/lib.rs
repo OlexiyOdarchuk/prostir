@@ -22,6 +22,14 @@
 //! Only the media messages ([`HostMsg::Frame`], [`HostMsg::Audio`], [`ClientMsg::Mic`])
 //! end in bytes running to the end of the payload too. They are read and written by
 //! hand, so their data is never copied on the way.
+//!
+//! # State, requests and replies
+//!
+//! Each side tells the other its state in parts ([`state`]): a message of its own for
+//! each change, always the whole part, and all of them at once at the start of a
+//! session, in [`ClientMsg::Open`] and [`HostMsg::Snapshot`] (see [`state::PcState`]).
+//! What the headset asks the PC to change goes in [`ClientMsg::Request`], answered by
+//! exactly one [`HostMsg::Reply`] ([`request`]); the parts it changed come before it.
 
 // Everything here parses data from the network: no unsafe code at all.
 #![forbid(unsafe_code)]
@@ -40,7 +48,13 @@ use std::io::{self, Read, Write};
 
 use link::RecordReceiver;
 use packet::{Assembler, Encoded, Limits, Message};
-use wire::{Reader, Wire, WireError, wire_enum, wire_struct};
+use request::{Asked, Outcome, Request};
+use state::{
+    Access, Battery, DisplayId, Displays, Encoding, ErrorCode, Focus, Gen, HeadsetCaps, HostCaps,
+    MAX_DETAIL, MAX_DISPLAYS, MAX_GROWING, Part, PcInfo, Prefs, Presence, ReqId, Row, Sound,
+    SoundFrom,
+};
+use wire::{Reader, Wire, WireError, wire_enum};
 
 pub const TCP_PORT: u16 = 47830;
 pub const DISCOVERY_PORT: u16 = 47831;
@@ -63,7 +77,7 @@ pub fn compatible(version: u32, min: u32) -> bool {
 /// PC turn a build of another revision away with a clear word instead of a session
 /// that fails to parse. `None` in released builds, where the protocol version alone
 /// decides.
-pub const PROTO_REVISION: Option<u32> = Some(1);
+pub const PROTO_REVISION: Option<u32> = Some(2);
 
 /// The app version this build says in the handshake: `base` (the crate version), with
 /// `-dev+pN` on a development branch (see [`PROTO_REVISION`]).
@@ -100,19 +114,6 @@ pub const AUDIO_RATE: u32 = 48_000;
 pub const AUDIO_CHANNELS: u32 = 2;
 /// Headset microphone sent to the PC: interleaved signed 16-bit little-endian mono.
 pub const MIC_CHANNELS: u32 = 1;
-
-/// What the PC can encode with ([`HostMsg::PcSettings`]).
-pub mod encoders {
-    pub const GPU_H264: u8 = 1;
-    pub const GPU_H265: u8 = 2;
-    pub const CPU_H264: u8 = 4;
-}
-
-/// What the PC can do beyond the basics ([`HostMsg::Abilities`]).
-pub mod abilities {
-    /// Move the mouse (to where the user looks).
-    pub const MOVE_MOUSE: u8 = 1;
-}
 
 /// Why the PC ends a session ([`HostMsg::Goodbye`]). A code a reader does not know
 /// reads as [`PcGoodbye::Other`], so a new reason needs no new protocol version.
@@ -180,18 +181,6 @@ impl HeadsetGoodbye {
 /// Most virtual monitors a PC makes: more streams than this overwhelm the headset's
 /// hardware decoders.
 pub const MAX_MONITORS: usize = 6;
-
-/// Stream ids of window panels: small outputs made for one window each, shown as
-/// floating panels (at most three: the headset has only so many video decoders).
-pub const WINDOW_IDS: std::ops::Range<u8> = 10..13;
-
-/// Whether `id` is a window panel (see [`WINDOW_IDS`]).
-pub fn is_window_panel(id: u8) -> bool {
-    WINDOW_IDS.contains(&id)
-}
-
-/// Stream id of the mirrored physical display (laptop panel); Quest monitors use 0..
-pub const MIRROR_ID: u8 = 100;
 /// Prefix of the UDP discovery beacon: `MAGIC ++ tcp_port (u16 LE) ++ hostname (utf-8)`.
 pub const BEACON_MAGIC: &[u8; 8] = b"PROSTIR1";
 
@@ -200,28 +189,28 @@ const MAX_HOST_PAYLOAD: u32 = 64 * 1024 * 1024;
 /// Largest message from the PC before the session is open ([`HostMsg::read_setup`]):
 /// the PC is not trusted yet, and nothing it sends then is big.
 const MAX_SETUP_PAYLOAD: u32 = 64 * 1024;
-/// Largest message from the headset: the biggest real one is a slice of microphone
-/// sound (under 1 KiB). A peer is not trusted yet when its first messages arrive, so
-/// this keeps what it can make the PC allocate small.
+/// Largest message from the headset: the biggest real one is `Open` with the
+/// headset's state (a few hundred bytes) or a slice of microphone sound (under 1 KiB).
+/// A peer is not trusted yet when its first messages arrive, so this keeps what it can
+/// make the PC allocate small.
 const MAX_CLIENT_PAYLOAD: u32 = 64 * 1024;
 /// Lanes that may hold a message being put together at once, in the session: one for
-/// control, one for sound and one for each stream, with room to spare. Before the
-/// session one is enough.
+/// control, one for sound and one for each stream (the sender picks a free one in
+/// `2..32` for each), with room to spare. Before the session one is enough.
 const SESSION_LANES: usize = 32;
-/// Most rows, or monitors in all rows, a layout may list (there are at most six
-/// monitors, a laptop screen and three window panels). Also the most monitors in an
-/// order or a set of monitors.
-const MAX_LAYOUT_ENTRIES: usize = 16;
-/// Longest name of a stream or a headset, in bytes.
+/// Longest name of a headset, in bytes.
 const MAX_NAME: usize = 64;
-/// Longest notice, in bytes (a desktop notification, or a path on the PC).
+/// Longest notice, in bytes (a desktop notification).
 const MAX_TEXT: usize = 8 * 1024;
 
 wire_enum! {
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub enum Codec {
         0 => H264,
         1 => H265,
+        /// On the wire only to a headset that decodes it (see `PROTOCOL.md`,
+        /// "Capabilities"); no PC encodes it yet.
+        2 => Av1,
     }
 }
 
@@ -230,54 +219,8 @@ impl Codec {
         match self {
             Codec::H264 => "video/avc",
             Codec::H265 => "video/hevc",
+            Codec::Av1 => "video/av01",
         }
-    }
-}
-
-wire_struct! {
-    /// How the PC encodes, changed from the headset menu ([`HostMsg::PcSettings`],
-    /// [`ClientMsg::SetPcSettings`]).
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct PcSettings {
-        /// Bitrate per monitor, Mbit/s.
-        pub quality: u32,
-        pub codec: Codec,
-        /// Encode on the CPU (x264) instead of the graphics card.
-        pub software: bool,
-        /// Slower encoder preset for clearer small text.
-        pub sharp: bool,
-    }
-}
-
-wire_struct! {
-    /// One row of monitors in [`ClientMsg::SetLayout`].
-    #[derive(Debug, Clone, Default, PartialEq, Eq)]
-    pub struct LayoutRow {
-        /// Left to right.
-        #[wire(max = MAX_LAYOUT_ENTRIES)]
-        pub entries: Vec<LayoutEntry>,
-    }
-}
-
-impl LayoutRow {
-    /// The monitor ids, left to right.
-    pub fn ids(&self) -> impl Iterator<Item = u8> + '_ {
-        self.entries.iter().map(|e| e.id)
-    }
-}
-
-wire_struct! {
-    /// A monitor in a [`LayoutRow`] and where its centre is seen, in pixels of one
-    /// scale shared by all monitors. The PC lines monitors of other rows up with
-    /// these, so one hung above another is above it on the desktop too.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct LayoutEntry {
-        pub id: u8,
-        /// Across, left to right (`None`: just right of the previous one).
-        pub center: Option<i32>,
-        /// Down (`None`: not known, centred in the row). A portrait monitor whose top
-        /// lines up with a landscape one's stands that way on the desktop too.
-        pub middle: Option<i32>,
     }
 }
 
@@ -296,39 +239,67 @@ wire_enum! {
             #[wire(rest)]
             language: String,
         },
-        /// The session started (the answer to [`ClientMsg::Open`] from a headset the
-        /// PC trusts). The PC's state follows.
-        24 => Opened,
-        /// A virtual monitor appeared. `width`/`height` are in pixels.
+        /// The session started: the answer to [`ClientMsg::Open`] from a headset the
+        /// PC trusts, with every part of the PC's state (see [`state::PcState`]).
+        28 => Snapshot {
+            #[wire(max = MAX_GROWING)]
+            parts: Vec<Part>,
+        },
+        /// Part: the PC's displays (see [`state::Displays`]).
+        31 => Displays { part: Displays },
+        /// Part: how the PC encodes.
+        32 => Encoding { part: Encoding },
+        /// Part: where the PC's sound goes, and its end of the microphone.
+        33 => Sound { part: Sound },
+        /// Part: what the PC allows.
+        34 => Limits { part: state::Limits },
+        /// Part: this headset's role and rights.
+        35 => Access { part: Access },
+        /// Part: about the PC.
+        36 => PcInfo { part: PcInfo },
+        /// Part: what the PC can do (in `Snapshot` only).
+        37 => HostCaps { part: HostCaps },
+        /// Part: the display the mouse is on.
+        16 => Focus { part: Focus },
+        /// Part: the display the sound comes from, while the headset asks for it.
+        23 => SoundFrom { part: SoundFrom },
+        /// The answer to [`ClientMsg::Request`] `req`, after the parts it changed.
+        29 => Reply { req: ReqId, outcome: Outcome },
+        /// Something went wrong that nobody asked for and that does not last (what
+        /// lasts is in the state: a display `Failed`, the microphone `Failed`).
+        38 => Problem {
+            error: ErrorCode,
+            #[wire(max = MAX_DETAIL)]
+            detail: String,
+            display: Option<DisplayId>,
+        },
+        /// The stream of display `id` starts, or starts over (a new generation): its
+        /// size in pixels and codec. In the stream's own lane, after `Displays` lists
+        /// the display.
         2 => StreamStart {
-            id: u8,
-            width: u32,
-            height: u32,
+            id: DisplayId,
+            generation: Gen,
+            w: u32,
+            h: u32,
             codec: Codec,
-            #[wire(max = MAX_NAME)]
-            name: String,
         },
         /// One encoded access unit (Annex-B byte stream, parameter sets in-band on
-        /// keyframes).
+        /// keyframes), number `seq` of its generation, from 0.
         3 => Frame {
-            id: u8,
+            id: DisplayId,
+            generation: Gen,
+            seq: u32,
             keyframe: bool,
             pts_us: u64,
             #[wire(rest)]
             data: Vec<u8>,
         },
-        4 => StreamEnd { id: u8 },
-        /// This monitor is KDE's primary one (the Plasma panel lives there).
-        5 => PrimaryChanged { id: u8 },
-        /// Left-to-right order of the Quest monitors (as in KDE's layout).
-        8 => Order {
-            #[wire(max = MAX_LAYOUT_ENTRIES)]
-            ids: Vec<u8>,
-        },
-        /// Whether the physical display should be mirrored into the headset.
-        7 => MirrorWanted { enabled: bool },
-        /// Something failed; shown in the headset menu. Frozen (see the crate root):
-        /// it also tells headsets older than [`HostMsg::Incompatible`] what to update.
+        /// The stream of this generation stopped (never "the display is gone": only
+        /// `Displays` says that).
+        4 => StreamEnd { id: DisplayId, generation: Gen },
+        /// Something failed before the session (pairing, opening it); shown in the
+        /// headset menu. Frozen (see the crate root): it also tells headsets older than
+        /// [`HostMsg::Incompatible`] what to update.
         6 => Error {
             #[wire(rest)]
             text: String,
@@ -338,10 +309,6 @@ wire_enum! {
             #[wire(rest)]
             pcm: Vec<u8>,
         },
-        /// Whether PC sound goes to the headset.
-        13 => AudioWanted { enabled: bool },
-        /// Whether the headset microphone should be the PC's microphone.
-        14 => MicWanted { enabled: bool },
         /// A PC app is recording from the headset microphone right now: capture it.
         15 => MicActive { active: bool },
         /// The headset speaks another protocol version: one side has to be updated.
@@ -356,23 +323,11 @@ wire_enum! {
         },
         /// Turn the monitors to face the user (asked for from the PC's tray).
         19 => Recenter,
-        /// Something done, to show briefly (not an error): "Saved to ~/Pictures/…".
+        /// A desktop notification of the PC, while the headset asks for them.
         20 => Notice {
             #[wire(max = MAX_TEXT)]
             text: String,
         },
-        /// Where the mouse is: monitor `id`, `x`/`y` across its image (0..=65535 from
-        /// the top left). The answer to [`ClientMsg::FindMouse`].
-        21 => MouseAt { id: u8, x: u16, y: u16 },
-        /// What this PC can do (bits of [`abilities`]).
-        22 => Abilities { bits: u8 },
-        /// The sound comes from the window on monitor `id` (`None`: not known).
-        23 => SoundFrom { id: Option<u8> },
-        /// The PC's encoding settings and what it can encode with (bits of
-        /// [`encoders`]).
-        18 => PcSettings { settings: PcSettings, encoders: u8 },
-        /// The monitor the mouse is on (`None`: none of the streamed ones).
-        16 => Focus { id: Option<u8> },
         /// The PC does not know this headset yet: pair first (the answer to
         /// [`ClientMsg::Open`]).
         9 => PairingRequired,
@@ -405,26 +360,42 @@ wire_enum! {
             #[wire(rest)]
             app: String,
         },
-        /// Start the session, once the headset trusts the PC. Answered with
-        /// [`HostMsg::Opened`], or [`HostMsg::PairingRequired`].
-        127 => Open,
-        102 => RequestKeyframe { id: u8 },
-        /// The decoder handed the frame with this `pts_us` to the compositor.
-        103 => FrameShown { id: u8, pts_us: u64 },
-        /// Create another virtual monitor of this size in pixels.
-        104 => AddMonitor { width: u32, height: u32 },
-        105 => RemoveMonitor { id: u8 },
-        /// New left-to-right order of the Quest monitors.
-        108 => SetOrder {
-            #[wire(max = MAX_LAYOUT_ENTRIES)]
-            ids: Vec<u8>,
+        /// Start the session, once the headset trusts the PC, with every part of the
+        /// headset's state (see [`state::HeadsetState`]; `HeadsetCaps` always).
+        /// Answered with [`HostMsg::Snapshot`], or [`HostMsg::PairingRequired`].
+        127 => Open {
+            #[wire(max = MAX_GROWING)]
+            parts: Vec<Part>,
         },
-        /// Show or hide the mirror of the physical display.
-        107 => SetMirror { enabled: bool },
-        /// Make this monitor KDE's primary one.
-        106 => SetPrimary { id: u8 },
-        /// Send PC sound to the headset (or keep it on the PC).
-        112 => SetAudio { enabled: bool },
+        /// Part: what the headset can do (in `Open` only).
+        138 => HeadsetCaps { part: HeadsetCaps },
+        /// Part: the headset's settings the PC acts on.
+        134 => Prefs { part: Prefs },
+        /// Part: whether the headset is worn; streaming pauses while it is not.
+        115 => Presence { part: Presence },
+        /// Part: the headset's battery, for the PC's tray.
+        119 => Battery { part: Battery },
+        /// How the displays stand around the user, for the desktop's arrangement: rows
+        /// from top to bottom (see [`state::Row`]); the PC lays its outputs out to match.
+        /// At most [`MAX_DISPLAYS`] displays in all rows together, each once.
+        133 => Arrange {
+            #[wire(max = MAX_DISPLAYS)]
+            rows: Vec<Row>,
+        },
+        /// The display the user looks at, and where on it (0..=65535 from the top left).
+        137 => Gaze {
+            display: Option<DisplayId>,
+            u: u16,
+            v: u16,
+        },
+        /// A change of the PC's state from the menu, answered by one [`HostMsg::Reply`].
+        131 => Request { req: ReqId, asked: Asked<Request> },
+        /// Put the mouse on display `id`, at `u`/`v` across its image (0..=65535).
+        124 => MouseTo { id: DisplayId, u: u16, v: u16 },
+        /// The decoder lost frames of this generation: a keyframe, please.
+        102 => RequestKeyframe { id: DisplayId, generation: Gen },
+        /// The decoder handed frame `seq` of this generation to the compositor.
+        103 => FrameShown { id: DisplayId, generation: Gen, seq: u32 },
         /// Use the headset microphone as the PC's microphone.
         113 => SetMic { enabled: bool },
         /// A slice of headset microphone sound (see [`MIC_CHANNELS`]).
@@ -432,43 +403,6 @@ wire_enum! {
             #[wire(rest)]
             pcm: Vec<u8>,
         },
-        /// Switch to this set of monitors, left to right (a profile). Monitors whose
-        /// size already matches are kept, so their windows stay where they are.
-        116 => SetMonitors {
-            /// Width and height in pixels.
-            #[wire(max = MAX_LAYOUT_ENTRIES)]
-            sizes: Vec<(u32, u32)>,
-            /// Index into `sizes`.
-            primary: u8,
-        },
-        /// How the monitors stand around the user, for the desktop's arrangement: rows
-        /// from top to bottom, with where each monitor is seen (see [`LayoutRow`]); the
-        /// PC lays its outputs out to match. At most 16 monitors in all rows together,
-        /// each of them once.
-        117 => SetLayout {
-            #[wire(max = MAX_LAYOUT_ENTRIES)]
-            rows: Vec<LayoutRow>,
-        },
-        /// Whether the headset is being worn; streaming pauses while it is not.
-        115 => Presence { worn: bool },
-        /// Change how the PC encodes (from the headset menu).
-        118 => SetPcSettings { settings: PcSettings },
-        /// The headset's battery, for the PC's tray.
-        119 => Battery { percent: u8, charging: bool },
-        /// Put the PC's active window on a panel of its own (a small output its size).
-        120 => DetachWindow,
-        /// Move the PC's active window to monitor `id` (the one the user looks at).
-        121 => WindowHere { id: u8 },
-        /// Save a picture of monitor `id` on the PC.
-        122 => Screenshot { id: u8 },
-        /// Where is the mouse? (answered with [`HostMsg::MouseAt`])
-        123 => FindMouse,
-        /// Pass the PC's desktop notifications to the headset (as [`HostMsg::Notice`]).
-        125 => SetNotifications { enabled: bool },
-        /// Say which monitor the sound comes from ([`HostMsg::SoundFrom`]).
-        126 => SetSoundFromScreen { enabled: bool },
-        /// Put the mouse on monitor `id`, at `x`/`y` across its image (0..=65535).
-        124 => MouseTo { id: u8, x: u16, y: u16 },
         /// Start pairing. `headset_shows`: the headset displays the code and the PC
         /// asks for it; otherwise the PC displays it and the headset asks.
         109 => PairBegin {
@@ -490,6 +424,24 @@ wire_enum! {
     }
 }
 
+/// Tags no message of this build has any more, never to be used again: messages of
+/// earlier development builds of protocol 2 (never released), whose bytes another
+/// development build could still send.
+pub const RETIRED_HOST_TAGS: &[u8] = &[5, 7, 8, 13, 14, 18, 21, 22, 24];
+pub const RETIRED_CLIENT_TAGS: &[u8] = &[
+    104, 105, 106, 107, 108, 112, 116, 117, 118, 120, 121, 122, 123, 125, 126,
+];
+
+impl ClientMsg {
+    /// Request `asked`, numbered `req`.
+    pub fn request(req: ReqId, asked: Request) -> Self {
+        Self::Request {
+            req,
+            asked: Asked::Known(asked),
+        }
+    }
+}
+
 /// Tags the code below needs by name (the tests check them against the
 /// declarations): the media messages, read and written by hand, and the hello.
 mod tag {
@@ -499,8 +451,8 @@ mod tag {
     pub const HELLO: u8 = 101;
 }
 
-/// [`HostMsg::Frame`] before its data: id, keyframe, pts_us.
-const FRAME_HEAD: usize = 1 + 1 + 8;
+/// [`HostMsg::Frame`] before its data: id, generation, seq, keyframe, pts_us.
+const FRAME_HEAD: usize = 4 + 4 + 4 + 1 + 8;
 
 /// The first payload bytes of a message from the PC kept apart from its data, so
 /// the data of a frame is the body as it came (see [`packet::Assembler`]).
@@ -551,7 +503,8 @@ fn skip(r: &mut impl Read, len: usize) -> io::Result<()> {
 
 impl HostMsg {
     /// What a headset accepts from the PC: before the session (when the PC may not
-    /// be trusted yet), or in it (`opened`).
+    /// be trusted yet), or in it (`opened`, from the moment the headset sends `Open`
+    /// to a PC it trusts, so the snapshot of the PC's state has no ceiling of its own).
     pub fn limits(opened: bool) -> Limits {
         match opened {
             false => Limits {
@@ -579,14 +532,19 @@ impl HostMsg {
         match self {
             HostMsg::Frame {
                 id,
+                generation,
+                seq,
                 keyframe,
                 pts_us,
                 data,
             } => {
-                let mut head = [0u8; FRAME_HEAD];
-                head[0] = id;
-                head[1] = u8::from(keyframe);
-                head[2..].copy_from_slice(&pts_us.to_le_bytes());
+                let mut head = Vec::with_capacity(FRAME_HEAD);
+                id.put(&mut head)
+                    .and_then(|()| generation.put(&mut head))
+                    .and_then(|()| seq.put(&mut head))
+                    .and_then(|()| keyframe.put(&mut head))
+                    .and_then(|()| pts_us.put(&mut head))
+                    .map_err(unsendable)?;
                 Encoded::new(tag::FRAME, &head, data)
             }
             HostMsg::Audio { pcm } => Encoded::new(tag::AUDIO, &[], pcm),
@@ -604,10 +562,17 @@ impl HostMsg {
         Ok(Some(match m.tag {
             tag::FRAME => {
                 let mut h = Reader::new(m.head());
-                let (id, keyframe, pts_us) =
-                    (u8::get(&mut h)?, bool::get(&mut h)?, u64::get(&mut h)?);
+                let (id, generation, seq) = (
+                    DisplayId::get(&mut h)?,
+                    Gen::get(&mut h)?,
+                    u32::get(&mut h)?,
+                );
+                let (keyframe, pts_us) = (bool::get(&mut h)?, u64::get(&mut h)?);
+                h.finish()?;
                 HostMsg::Frame {
                     id,
+                    generation,
+                    seq,
                     keyframe,
                     pts_us,
                     data: m.body,
@@ -637,9 +602,9 @@ impl HostMsg {
         self.clone().encode()?.write_to(w)
     }
 
-    /// The next message from the PC read as one stream, until [`HostMsg::Opened`]
-    /// (the version handshake): the PC may not be trusted yet, so a message over 64 KiB
-    /// is an error. Messages from a newer PC are skipped.
+    /// The next message from the PC read as one stream, during the version handshake:
+    /// the PC may not be trusted yet, so a message over 64 KiB is an error. Messages
+    /// from a newer PC are skipped.
     pub fn read_setup(r: &mut impl Read) -> io::Result<Self> {
         Self::read_within(r, MAX_SETUP_PAYLOAD)
     }
@@ -658,14 +623,40 @@ impl HostMsg {
         }
     }
 
-    fn decode(tag: u8, payload: &[u8]) -> Result<Self, WireError> {
+    /// The message with `tag` whose fields are `payload`, checked (see
+    /// [`HostMsg::check`]).
+    pub(crate) fn decode(tag: u8, payload: &[u8]) -> Result<Self, WireError> {
         let mut r = Reader::new(payload);
         let msg = Self::get_fields(tag, &mut r)?.ok_or(WireError::UnknownTag {
             what: "HostMsg",
             tag,
         })?;
         r.finish()?;
+        msg.check()?;
         Ok(msg)
+    }
+
+    /// Values the format allows but the protocol does not: a bug of the PC, which
+    /// ends the session like any message that does not parse.
+    fn check(&self) -> Result<(), WireError> {
+        match self {
+            Self::Displays { part } => part.check(),
+            Self::Limits { part } => part.check(),
+            _ => Ok(()),
+        }
+    }
+
+    /// The part this message carries, as a part of `Snapshot`; `None` for a message
+    /// that is not a part of the PC's state.
+    pub fn to_part(&self) -> Option<Result<Part, WireError>> {
+        state::PcState::is_part(self.wire_tag()).then(|| {
+            let mut body = Vec::new();
+            self.put_fields(&mut body)?;
+            Ok(Part {
+                tag: self.wire_tag(),
+                body,
+            })
+        })
     }
 }
 
@@ -754,31 +745,42 @@ impl ClientMsg {
         }
     }
 
-    fn decode(tag: u8, payload: &[u8]) -> Result<Self, WireError> {
+    /// The message with `tag` whose fields are `payload`, checked (see
+    /// [`ClientMsg::check`]).
+    pub(crate) fn decode(tag: u8, payload: &[u8]) -> Result<Self, WireError> {
         let mut r = Reader::new(payload);
         let msg = Self::get_fields(tag, &mut r)?.ok_or(WireError::UnknownTag {
             what: "ClientMsg",
             tag,
         })?;
         r.finish()?;
-        if let ClientMsg::SetLayout { rows } = &msg {
-            // Each monitor once, so the order the PC makes from it fits in a message.
-            let len = rows.iter().map(|r| r.entries.len()).sum();
-            if len > MAX_LAYOUT_ENTRIES {
-                return Err(WireError::TooLong {
-                    len,
-                    max: MAX_LAYOUT_ENTRIES,
-                });
-            }
-            let mut seen = Vec::with_capacity(len);
-            for id in rows.iter().flat_map(LayoutRow::ids) {
-                if seen.contains(&id) {
-                    return Err(WireError::Repeated(u32::from(id)));
-                }
-                seen.push(id);
-            }
-        }
+        msg.check()?;
         Ok(msg)
+    }
+
+    /// Values the format allows but the protocol does not: a bug of the headset,
+    /// which ends the session like any message that does not parse. Bad arguments
+    /// of a request are not this: they get a failed reply.
+    fn check(&self) -> Result<(), WireError> {
+        match self {
+            // Each display once, so the order the PC makes from it fits in a message.
+            Self::Arrange { rows } => state::check_rows(rows),
+            Self::HeadsetCaps { part } => part.check(),
+            _ => Ok(()),
+        }
+    }
+
+    /// The part this message carries, as a part of `Open`; `None` for a message that
+    /// is not a part of the headset's state.
+    pub fn to_part(&self) -> Option<Result<Part, WireError>> {
+        state::HeadsetState::is_part(self.wire_tag()).then(|| {
+            let mut body = Vec::new();
+            self.put_fields(&mut body)?;
+            Ok(Part {
+                tag: self.wire_tag(),
+                body,
+            })
+        })
     }
 }
 

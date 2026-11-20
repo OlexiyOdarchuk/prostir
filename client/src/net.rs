@@ -13,7 +13,11 @@ use prostir_proto::handshake::{self, Answer};
 use prostir_proto::link::tcp::{NoiseTcp, Plain};
 use prostir_proto::link::{Closer, Link, PeerInfo, RecordReceiver, RecordSender};
 use prostir_proto::packet::Assembler;
+use prostir_proto::request::Outcome;
 use prostir_proto::secure::{self, Identity, Pairing, TrustStore, confirmation, tags_match};
+use prostir_proto::state::{
+    self, DisplayId, ErrorCode, Gen, HeadsetState, HostCaps, PcState, ReqId,
+};
 use prostir_proto::stats::{Gaps, Period};
 use prostir_proto::{ClientMsg, Codec, HeadsetGoodbye, HostMsg, PcGoodbye};
 
@@ -36,6 +40,8 @@ const SILENCE: Duration = Duration::from_secs(5);
 pub struct Frame {
     /// When the frame arrived from the network.
     pub received: std::time::Instant,
+    /// Its number in its generation.
+    pub seq: u32,
     pub pts_us: u64,
     pub keyframe: bool,
     pub data: Vec<u8>,
@@ -135,38 +141,56 @@ pub struct FoundHost {
 }
 
 pub enum NetEvent {
-    /// Connected; the handle sends requests (add monitor…) to the host.
+    /// Connected; the handle sends requests (add monitor…) to the host. `opened_with`:
+    /// the headset's state as `Open` carried it.
     Connected {
         addr: SocketAddr,
         name: Option<String>,
         feedback: Feedback,
         /// The PC's interface language.
         language: Option<crate::i18n::Lang>,
+        opened_with: HeadsetState,
     },
     /// PCs currently seen on the network (sent when the list changes).
     Hosts(Vec<FoundHost>),
-    PrimaryChanged(u8),
-    MirrorWanted(bool),
-    /// Whether PC sound comes to the headset.
-    AudioWanted(bool),
-    /// The monitor the mouse is on, if it is one of ours.
-    Focus(Option<u8>),
-    /// Left-to-right order of the Quest monitors.
-    Order(Vec<u8>),
-    /// A request failed on the host; shown in the menu.
+    /// The PC's displays: the one source of which there are.
+    Displays(state::Displays),
+    /// How the PC encodes.
+    Encoding(state::Encoding),
+    /// Where the PC's sound goes.
+    Sound(state::Sound),
+    /// What the PC can do.
+    HostCaps(HostCaps),
+    /// The display the mouse is on, if it is one of them.
+    Focus(Option<DisplayId>),
+    /// The display the sound comes from (`None`: not known).
+    SoundFrom(Option<DisplayId>),
+    /// The answer to request `req`.
+    Reply {
+        req: ReqId,
+        outcome: Outcome,
+    },
+    /// Something went wrong on the PC that nobody asked for.
+    Problem {
+        error: ErrorCode,
+        detail: String,
+    },
+    /// The PC said why it cannot serve the headset (before the session); shown in the
+    /// menu.
     HostError(String),
+    /// A stream starts (or starts over in a new generation).
     StreamStart {
-        id: u8,
+        id: DisplayId,
+        generation: Gen,
         width: u32,
         height: u32,
         codec: Codec,
         frames: Frames,
         feedback: Feedback,
     },
-    /// `removed`: the host took the monitor away (not just a lost connection).
+    /// The stream stopped (the display may still be there: only `Displays` says).
     StreamEnd {
-        id: u8,
-        removed: bool,
+        id: DisplayId,
     },
     /// Pairing with a new PC: show `code` (the PC asks for it), or, with `None`,
     /// ask for the code the PC shows.
@@ -176,18 +200,10 @@ pub enum NetEvent {
     },
     /// The codes did not match; a new attempt follows.
     PairingFailed,
-    /// How the PC encodes and what it can encode with.
-    PcSettings(prostir_proto::PcSettings, u8),
     /// The PC's tray asks to bring the monitors in front.
     Recenter,
-    /// Something done on the PC, to show briefly.
+    /// A desktop notification of the PC.
     Notice(String),
-    /// Where the mouse is: monitor, across its image (0..=1 from the top left).
-    MouseAt(u8, f32, f32),
-    /// What the PC can do (bits of `prostir_proto::abilities`).
-    Abilities(u8),
-    /// The monitor the sound comes from (`None`: not known).
-    SoundFrom(Option<u8>),
     /// A PC announces itself on the network but does not accept the connection
     /// (a firewall on the PC); `None` once connecting works again.
     Unreachable(Option<String>),
@@ -258,6 +274,8 @@ struct Steer {
     trust_changed: bool,
     /// The app is closing: the network thread ends, and so does its session.
     quit: bool,
+    /// What the headset says about itself when it opens a session (`Open`).
+    headset: HeadsetState,
 }
 
 type PeerKey = [u8; 32];
@@ -328,6 +346,16 @@ impl Steering {
         if let Some(cur) = self.lock().current.as_mut().filter(|c| c.addr == addr) {
             cur.feedback = Some(feedback.clone());
         }
+    }
+
+    /// What the headset is now (its preferences, worn or not, its microphone): what the
+    /// next `Open` says.
+    pub fn set_headset(&self, state: HeadsetState) {
+        self.lock().headset = state;
+    }
+
+    fn headset(&self) -> HeadsetState {
+        self.lock().headset.clone()
     }
 
     /// A PC was forgotten in the menu: the next connection reads the trust file again.
@@ -903,6 +931,8 @@ impl Session<'_> {
 }
 
 struct StreamSlot {
+    /// The generation its frames belong to.
+    generation: Gen,
     tx: SyncSender<Frame>,
     /// Shared with [`Frames`]: counted up here before sending, down when taken.
     waiting: Arc<AtomicUsize>,
@@ -980,7 +1010,7 @@ fn run_session(
     }
     let _stop = StopOnExit(feedback.clone());
     let mut packets = HostMsg::assembler();
-    {
+    let opened = {
         let mut session = Session {
             addr,
             receiver: &mut *receiver,
@@ -998,13 +1028,21 @@ fn run_session(
         if !trusted.contains(&peer.key) {
             session.pair_if_approved(trusted)?;
         }
-        feedback.send(ClientMsg::Open)?;
-        loop {
+        let opened_with = steering.headset();
+        let open = opened_with
+            .open()
+            .map_err(|e| std::io::Error::other(format!("Open: {e}")))?;
+        feedback.send(open.clone())?;
+        // The PC is trusted from here: its snapshot may be as big as it needs.
+        session.packets.set_limits(HostMsg::limits(true));
+        let snapshot = loop {
             match session.read()? {
-                HostMsg::Opened => break,
+                HostMsg::Snapshot { parts } => break parts,
                 HostMsg::PairingRequired => {
+                    session.packets.set_limits(HostMsg::limits(false));
                     session.pair_if_approved(trusted)?;
-                    feedback.send(ClientMsg::Open)?;
+                    feedback.send(open.clone())?;
+                    session.packets.set_limits(HostMsg::limits(true));
                 }
                 // The PC cannot open the session (no encoder, say), and closes the
                 // connection after saying why.
@@ -1014,22 +1052,29 @@ fn run_session(
                 }
                 other => return Err(std::io::Error::other(format!("unexpected {other:?}"))),
             }
+        };
+        let state = PcState::from_snapshot(&snapshot).map_err(std::io::Error::from)?;
+        ended.opened = true;
+        // Both sides ping every second: a few seconds of silence is a dead link.
+        receiver.set_idle_limit(Some(SILENCE));
+        feedback.start_pings();
+        steering.opened(addr, &feedback);
+        let _ = events.send(NetEvent::Connected {
+            addr,
+            name,
+            feedback: feedback.clone(),
+            language,
+            opened_with: opened_with.clone(),
+        });
+        // The snapshot's parts, as they would come one by one.
+        for part in state.parts() {
+            tell_part(events, &part);
         }
-    }
-    ended.opened = true;
-    packets.set_limits(HostMsg::limits(true));
-    // Both sides ping every second: a few seconds of silence is a dead link.
-    receiver.set_idle_limit(Some(SILENCE));
-    feedback.start_pings();
-    steering.opened(addr, &feedback);
-    let _ = events.send(NetEvent::Connected {
-        addr,
-        name,
-        feedback: feedback.clone(),
-        language,
-    });
+        (state, opened_with)
+    };
+    let (mut pc, opened_with) = opened;
 
-    let mut streams: HashMap<u8, StreamSlot> = HashMap::new();
+    let mut streams: HashMap<DisplayId, StreamSlot> = HashMap::new();
     // Started on the first sound slice, stopped with the session.
     let mut player: Option<crate::audio::Player> = None;
     // Runs only while a PC app records from the headset microphone and the user's
@@ -1041,6 +1086,7 @@ fn run_session(
     let mut gaps = Gaps::default();
     let mut media_bytes = 0u64;
     let mut report = Period::new(REPORT_EVERY);
+    let caps = opened_with.caps.unwrap_or_default();
     let result = loop {
         let msg = match HostMsg::recv(&mut *receiver, &mut packets) {
             Ok(m) => m,
@@ -1065,23 +1111,50 @@ fn run_session(
             gaps.restart();
             media_bytes = 0;
         }
+        // A part of the PC's state: kept, checked, and told to the app.
+        let msg = match pc.apply(msg.clone()) {
+            Ok(None) => {
+                tell_part(events, &msg);
+                if let HostMsg::Sound { part } = &msg
+                    && !part.to_headset
+                {
+                    player = None;
+                }
+                continue;
+            }
+            Ok(Some(msg)) => msg,
+            Err(e) => break Err(e.into()),
+        };
         match msg {
             HostMsg::StreamStart {
                 id,
-                width,
-                height,
+                generation,
+                w,
+                h,
                 codec,
-                name,
             } => {
-                info!("monitor {name}: {width}x{height} {codec:?}");
+                // The PC sends only what this headset decodes: anything else is its bug.
+                if !caps
+                    .decoder(codec)
+                    .is_some_and(|d| w <= d.max_w && h <= d.max_h)
+                {
+                    break Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "a stream of {w}x{h} in {codec:?}, which this headset does not decode"
+                        ),
+                    ));
+                }
+                info!("stream {} {generation:?}: {w}x{h} {codec:?}", id.0);
                 if streams.remove(&id).is_some() {
-                    let _ = events.send(NetEvent::StreamEnd { id, removed: false });
+                    let _ = events.send(NetEvent::StreamEnd { id });
                 }
                 let (tx, rx) = mpsc::sync_channel(32);
                 let waiting = Arc::new(AtomicUsize::new(0));
                 streams.insert(
                     id,
                     StreamSlot {
+                        generation,
                         tx,
                         waiting: waiting.clone(),
                         waiting_for_keyframe: true,
@@ -1089,8 +1162,9 @@ fn run_session(
                 );
                 let _ = events.send(NetEvent::StreamStart {
                     id,
-                    width,
-                    height,
+                    generation,
+                    width: w,
+                    height: h,
                     codec,
                     frames: Frames { rx, waiting },
                     feedback: feedback.clone(),
@@ -1098,11 +1172,14 @@ fn run_session(
             }
             HostMsg::Frame {
                 id,
+                generation,
+                seq,
                 pts_us,
                 keyframe,
                 data,
             } => {
-                let Some(slot) = streams.get_mut(&id) else {
+                // A frame of another start of the stream is of no use.
+                let Some(slot) = streams.get_mut(&id).filter(|s| s.generation == generation) else {
                     continue;
                 };
                 if slot.waiting_for_keyframe && !keyframe {
@@ -1111,6 +1188,7 @@ fn run_session(
                 slot.waiting.fetch_add(1, Ordering::Relaxed);
                 let sent = slot.tx.try_send(Frame {
                     received: now,
+                    seq,
                     pts_us,
                     keyframe,
                     data,
@@ -1121,29 +1199,24 @@ fn run_session(
                 match sent {
                     Ok(()) => slot.waiting_for_keyframe = false,
                     Err(TrySendError::Full(_)) => {
-                        warn!("decoder {id} is behind, dropping until next keyframe");
+                        warn!("decoder {} is behind, dropping until next keyframe", id.0);
                         slot.waiting_for_keyframe = true;
-                        feedback.send(ClientMsg::RequestKeyframe { id })?;
+                        feedback.send(ClientMsg::RequestKeyframe { id, generation })?;
                     }
                     Err(TrySendError::Disconnected(_)) => {}
                 }
             }
-            HostMsg::StreamEnd { id } => {
-                if streams.remove(&id).is_some() {
-                    let _ = events.send(NetEvent::StreamEnd { id, removed: true });
+            HostMsg::StreamEnd { id, generation } => {
+                if streams.get(&id).is_some_and(|s| s.generation == generation) {
+                    streams.remove(&id);
+                    let _ = events.send(NetEvent::StreamEnd { id });
                 }
             }
-            HostMsg::PrimaryChanged { id } => {
-                let _ = events.send(NetEvent::PrimaryChanged(id));
+            HostMsg::Reply { req, outcome } => {
+                let _ = events.send(NetEvent::Reply { req, outcome });
             }
-            HostMsg::MirrorWanted { enabled } => {
-                let _ = events.send(NetEvent::MirrorWanted(enabled));
-            }
-            HostMsg::Focus { id } => {
-                let _ = events.send(NetEvent::Focus(id));
-            }
-            HostMsg::Order { ids } => {
-                let _ = events.send(NetEvent::Order(ids));
+            HostMsg::Problem { error, detail, .. } => {
+                let _ = events.send(NetEvent::Problem { error, detail });
             }
             HostMsg::Error { text } => {
                 ended.refused = Some(Instant::now());
@@ -1154,32 +1227,11 @@ fn run_session(
                     .get_or_insert_with(crate::audio::Player::spawn)
                     .push(pcm);
             }
-            HostMsg::AudioWanted { enabled } => {
-                if !enabled {
-                    player = None;
-                }
-                let _ = events.send(NetEvent::AudioWanted(enabled));
-            }
-            // The headset's own switch decides about its microphone.
-            HostMsg::MicWanted { .. } => {}
-            HostMsg::PcSettings { settings, encoders } => {
-                let _ = events.send(NetEvent::PcSettings(settings, encoders));
-            }
             HostMsg::Recenter => {
                 let _ = events.send(NetEvent::Recenter);
             }
             HostMsg::Notice { text } => {
                 let _ = events.send(NetEvent::Notice(text));
-            }
-            HostMsg::MouseAt { id, x, y } => {
-                let f = |v: u16| f32::from(v) / 65535.0;
-                let _ = events.send(NetEvent::MouseAt(id, f(x), f(y)));
-            }
-            HostMsg::Abilities { bits } => {
-                let _ = events.send(NetEvent::Abilities(bits));
-            }
-            HostMsg::SoundFrom { id } => {
-                let _ = events.send(NetEvent::SoundFrom(id));
             }
             // The PC asks; the headset's own switch decides (checked below too).
             HostMsg::MicActive { active } => mic_asked = active,
@@ -1200,13 +1252,8 @@ fn run_session(
                 }
                 break Ok(());
             }
-            // Only before the session: ignored in it.
-            HostMsg::Welcome { .. }
-            | HostMsg::Opened
-            | HostMsg::Incompatible { .. }
-            | HostMsg::PairingRequired
-            | HostMsg::PairMsg { .. }
-            | HostMsg::PairResult { .. } => {}
+            // Only before the session: ignored in it, as parts already taken are.
+            _ => {}
         }
         let record = mic_asked && crate::mic::allowed();
         if record != recorder.is_some() {
@@ -1214,7 +1261,22 @@ fn run_session(
         }
     };
     for id in streams.into_keys() {
-        let _ = events.send(NetEvent::StreamEnd { id, removed: false });
+        let _ = events.send(NetEvent::StreamEnd { id });
     }
     result
+}
+
+/// Tells the app about a part of the PC's state.
+fn tell_part(events: &Sender<NetEvent>, msg: &HostMsg) {
+    let event = match msg.clone() {
+        HostMsg::Displays { part } => NetEvent::Displays(part),
+        HostMsg::Encoding { part } => NetEvent::Encoding(part),
+        HostMsg::Sound { part } => NetEvent::Sound(part),
+        HostMsg::HostCaps { part } => NetEvent::HostCaps(part),
+        HostMsg::Focus { part } => NetEvent::Focus(part.display),
+        HostMsg::SoundFrom { part } => NetEvent::SoundFrom(part.display),
+        // Not used by the app yet.
+        _ => return,
+    };
+    let _ = events.send(event);
 }

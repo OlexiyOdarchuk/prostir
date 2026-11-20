@@ -88,7 +88,7 @@ fn sound_under_keyframes_on_a_shaped_link() {
     // The keyframes of the start are out of the way.
     headset.take_for(Duration::from_secs(2)).unwrap();
     headset.reset_counts();
-    let ids = headset.view().order.clone();
+    let ids = headset.view().order();
     let reports_before = pc.count_log(": sent ");
     let pacing_before = pc.count_log("pacing: ");
     let start = Instant::now();
@@ -96,7 +96,10 @@ fn sound_under_keyframes_on_a_shaped_link() {
     while start.elapsed() < measure {
         if Instant::now() >= next_keyframes {
             for &id in &ids {
-                headset.send(&ClientMsg::RequestKeyframe { id }).unwrap();
+                let generation = headset.view().streams[&id].generation;
+                headset
+                    .send(&ClientMsg::RequestKeyframe { id, generation })
+                    .unwrap();
             }
             next_keyframes += KEYFRAMES_EVERY;
         }

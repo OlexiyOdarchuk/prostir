@@ -27,8 +27,9 @@ use std::time::{Duration, Instant};
 use log::warn;
 use prostir_proto::link::RecordSender;
 use prostir_proto::packet::{Encoded, FRAGMENT, Outgoing, lane};
+use prostir_proto::state::DisplayId;
 use prostir_proto::stats::{Histogram, Pings, per_minute};
-use prostir_proto::{HostMsg, MIRROR_ID, PcGoodbye};
+use prostir_proto::{HostMsg, PcGoodbye};
 
 /// Sound queued at most: 8 slices of 10 ms. Older slices make room for newer ones.
 const MAX_AUDIO: usize = 8;
@@ -43,9 +44,6 @@ const MAX_CONTROL_BYTES: usize = 4 << 20;
 /// connection from falling silent (which ends a session after a few seconds).
 pub const PING_EVERY: Duration = Duration::from_secs(1);
 
-// Every stream id the PC makes has a lane of its own (the mirror's is the highest).
-const _: () = assert!(MIRROR_ID <= u8::MAX - lane::VIDEO);
-
 struct Frame {
     queued: Instant,
     keyframe: bool,
@@ -54,9 +52,9 @@ struct Frame {
 
 /// What waits in a stream's lane: frames, and the start and end of the stream, which
 /// go in the same lane so they never overtake a frame of the old size that is being
-/// sent already.
+/// sent already. A stream holds its lane from its start to its end (`last`).
 enum Item {
-    Announce(Encoded),
+    Announce { msg: Encoded, last: bool },
     Frame(Frame),
 }
 
@@ -134,7 +132,7 @@ impl VideoStats {
 /// What the outbox did since the stats were last taken.
 #[derive(Debug, Clone, Default)]
 pub struct OutboxStats {
-    pub video: BTreeMap<u8, VideoStats>,
+    pub video: BTreeMap<DisplayId, VideoStats>,
     /// Sound: from queued to going out (it waits behind at most one packet of video).
     pub audio_wait: Histogram,
     /// Sound slices dropped to make room for newer ones.
@@ -149,10 +147,12 @@ struct State {
     control_bytes: usize,
     /// Sound slices with when each was queued.
     audio: VecDeque<(Instant, Encoded)>,
-    streams: BTreeMap<u8, StreamQueue>,
+    streams: BTreeMap<DisplayId, StreamQueue>,
+    /// The lane each stream sends in, from its first message to its end.
+    stream_lanes: BTreeMap<DisplayId, u8>,
     video_bytes: usize,
     /// Streams that lost a frame since the router last looked: they need a keyframe.
-    dropped: BTreeSet<u8>,
+    dropped: BTreeSet<DisplayId>,
     /// Bytes queued since the writer last asked: what the streams need.
     queued: usize,
     /// The round trip of the latest pong, until the writer takes it.
@@ -180,7 +180,7 @@ pub struct Outbox {
 pub enum Pick {
     Control,
     Sound,
-    Video(u8),
+    Video(DisplayId),
 }
 
 /// The messages the writer has started: at most one per lane.
@@ -188,10 +188,10 @@ pub enum Pick {
 pub struct Lanes {
     control: Option<Outgoing>,
     sound: Option<Outgoing>,
-    video: BTreeMap<u8, Outgoing>,
+    video: BTreeMap<DisplayId, Outgoing>,
     /// The stream that sent the last video packet: the next one goes to the stream
     /// after it.
-    last_stream: Option<u8>,
+    last_stream: Option<DisplayId>,
 }
 
 impl Lanes {
@@ -247,7 +247,8 @@ impl Outbox {
     /// belong to the old size or codec).
     pub fn control(&self, msg: HostMsg) -> bool {
         let stream = match &msg {
-            HostMsg::StreamStart { id, .. } | HostMsg::StreamEnd { id } => Some(*id),
+            HostMsg::StreamStart { id, .. } => Some((*id, false)),
+            HostMsg::StreamEnd { id, .. } => Some((*id, true)),
             _ => None,
         };
         let mut s = self.lock();
@@ -260,14 +261,14 @@ impl Outbox {
         };
         s.queued += msg.len();
         match stream {
-            Some(id) => {
+            Some((id, last)) => {
                 let gone = s.drop_frames(id);
                 if gone > 0 {
                     s.stats.video.entry(id).or_default().dropped.restart += gone;
                 }
                 let q = s.streams.entry(id).or_default();
                 q.broken = false;
-                q.items.push_back(Item::Announce(msg));
+                q.items.push_back(Item::Announce { msg, last });
             }
             None => {
                 s.control_bytes += msg.len();
@@ -310,7 +311,7 @@ impl Outbox {
     /// Queues an encoded frame of stream `id`. `false`: not queued, and the stream
     /// must wait for a keyframe. A keyframe replaces the frames of its stream still
     /// waiting.
-    pub fn video(&self, id: u8, keyframe: bool, msg: HostMsg) -> bool {
+    pub fn video(&self, id: DisplayId, keyframe: bool, msg: HostMsg) -> bool {
         let mut s = self.lock();
         if s.closed || s.leaving {
             return false;
@@ -371,7 +372,7 @@ impl Outbox {
     }
 
     /// Streams that lost frames since the last call.
-    pub fn take_dropped(&self) -> BTreeSet<u8> {
+    pub fn take_dropped(&self) -> BTreeSet<DisplayId> {
         std::mem::take(&mut self.lock().dropped)
     }
 
@@ -384,6 +385,7 @@ impl Outbox {
         }
         s.audio.clear();
         s.streams.clear();
+        s.stream_lanes.clear();
         s.video_bytes = 0;
         if let Some(goodbye) = encode(HostMsg::Goodbye {
             reason: reason.code(),
@@ -411,6 +413,7 @@ impl Outbox {
         s.control.clear();
         s.audio.clear();
         s.streams.clear();
+        s.stream_lanes.clear();
         s.video_bytes = 0;
         self.ready.notify_all();
     }
@@ -470,7 +473,7 @@ impl Outbox {
 
 impl State {
     /// Drops the frames of stream `id` still waiting (not one being sent); how many.
-    fn drop_frames(&mut self, id: u8) -> u32 {
+    fn drop_frames(&mut self, id: DisplayId) -> u32 {
         let Some(q) = self.streams.get_mut(&id) else {
             return 0;
         };
@@ -530,16 +533,41 @@ impl State {
         lanes.control.is_some().then_some(Pick::Control)
     }
 
+    /// The lane of stream `id`: the one it has, or a free one (taken by no other stream
+    /// and by no message still going out); `None` while every lane is busy.
+    fn stream_lane(&mut self, id: DisplayId, lanes: &Lanes) -> Option<u8> {
+        if let Some(&l) = self.stream_lanes.get(&id) {
+            return Some(l);
+        }
+        let free = lane::STREAMS.clone().find(|l| {
+            !self.stream_lanes.values().any(|t| t == l)
+                && !lanes.video.values().any(|o| o.lane() == *l)
+        })?;
+        self.stream_lanes.insert(id, free);
+        Some(free)
+    }
+
     /// Moves the next message of stream `id` worth sending into its lane; `false`
     /// if there is none.
-    fn start_video(&mut self, id: u8, lanes: &mut Lanes) -> bool {
+    fn start_video(&mut self, id: DisplayId, lanes: &mut Lanes) -> bool {
+        if self.streams.get(&id).is_none_or(|q| q.items.is_empty()) {
+            return false;
+        }
+        let Some(lane) = self.stream_lane(id, lanes) else {
+            return false;
+        };
         let Some(q) = self.streams.get_mut(&id) else {
             return false;
         };
         while let Some(item) = q.items.pop_front() {
             let f = match item {
-                Item::Announce(msg) => {
-                    lanes.video.insert(id, Outgoing::new(lane::video(id), msg));
+                Item::Announce { msg, last } => {
+                    lanes.video.insert(id, Outgoing::new(lane, msg));
+                    // Its end: the lane is free for another stream once that is out.
+                    if last && q.items.is_empty() {
+                        self.streams.remove(&id);
+                        self.stream_lanes.remove(&id);
+                    }
                     return true;
                 }
                 Item::Frame(f) => f,
@@ -567,9 +595,7 @@ impl State {
                 stats.keyframe_bytes += f.msg.len() as u64;
                 stats.keyframe_max = stats.keyframe_max.max(f.msg.len());
             }
-            lanes
-                .video
-                .insert(id, Outgoing::new(lane::video(id), f.msg));
+            lanes.video.insert(id, Outgoing::new(lane, f.msg));
             return true;
         }
         false
@@ -580,6 +606,11 @@ impl State {
 pub(crate) mod tests {
     use super::*;
     use prostir_proto::link::LinkInfo;
+    use prostir_proto::state::Gen;
+
+    fn d(n: u32) -> DisplayId {
+        DisplayId(n)
+    }
 
     /// Takes the records the writer sends, and reads them back as the headset would.
     #[derive(Default)]
@@ -622,12 +653,14 @@ pub(crate) mod tests {
         }
     }
 
-    fn frame(id: u8, keyframe: bool, bytes: usize) -> HostMsg {
+    fn frame(id: u32, keyframe: bool, bytes: usize) -> HostMsg {
         HostMsg::Frame {
-            id,
+            id: d(id),
+            generation: Gen(1),
+            seq: 0,
             pts_us: 0,
             keyframe,
-            data: vec![id; bytes],
+            data: vec![id as u8; bytes],
         }
     }
 
@@ -644,16 +677,17 @@ pub(crate) mod tests {
     #[test]
     fn control_and_sound_go_before_video() {
         let o = Outbox::default();
-        assert!(o.video(0, true, frame(0, true, 10)));
+        assert!(o.video(d(0), true, frame(0, true, 10)));
         o.audio(HostMsg::Audio { pcm: vec![1] });
-        o.control(HostMsg::Focus { id: Some(0) });
+        let focus = HostMsg::Focus {
+            part: prostir_proto::state::Focus {
+                display: Some(d(0)),
+            },
+        };
+        o.control(focus.clone());
         assert_eq!(
             o.sent(),
-            [
-                HostMsg::Focus { id: Some(0) },
-                HostMsg::Audio { pcm: vec![1] },
-                frame(0, true, 10)
-            ]
+            [focus, HostMsg::Audio { pcm: vec![1] }, frame(0, true, 10)]
         );
     }
 
@@ -663,13 +697,14 @@ pub(crate) mod tests {
     fn sound_goes_between_the_packets_of_a_keyframe() {
         let o = Outbox::default();
         let (mut lanes, mut out) = (Lanes::default(), Capture::default());
-        assert!(o.video(3, true, frame(3, true, 10 * FRAGMENT)));
+        assert!(o.video(d(3), true, frame(3, true, 10 * FRAGMENT)));
         send(&o, &mut lanes, &mut out, 2);
         o.audio(HostMsg::Audio { pcm: vec![7; 1920] });
         send(&o, &mut lanes, &mut out, 2);
         o.control(HostMsg::Recenter);
         send(&o, &mut lanes, &mut out, 100);
-        let video = lane::video(3);
+        // The first stream takes the first lane.
+        let video = lane::VIDEO;
         assert_eq!(
             out.lanes()[..6],
             [video, video, lane::SOUND, video, lane::CONTROL, video]
@@ -691,11 +726,11 @@ pub(crate) mod tests {
     fn streams_take_turns() {
         let o = Outbox::default();
         for id in [1, 4, 9] {
-            assert!(o.video(id, true, frame(id, true, 3 * FRAGMENT)));
+            assert!(o.video(d(id), true, frame(id, true, 3 * FRAGMENT)));
         }
         let (mut lanes, mut out) = (Lanes::default(), Capture::default());
         send(&o, &mut lanes, &mut out, 100);
-        let [a, b, c] = [1, 4, 9].map(lane::video);
+        let [a, b, c] = [2, 3, 4];
         assert_eq!(out.lanes(), [a, b, c, a, b, c, a, b, c, a, b, c]);
         assert_eq!(out.messages().len(), 3);
     }
@@ -706,24 +741,24 @@ pub(crate) mod tests {
     fn a_keyframe_replaces_older_frames() {
         let o = Outbox::default();
         let (mut lanes, mut out) = (Lanes::default(), Capture::default());
-        assert!(o.video(1, false, frame(1, false, 2 * FRAGMENT)));
+        assert!(o.video(d(1), false, frame(1, false, 2 * FRAGMENT)));
         send(&o, &mut lanes, &mut out, 1);
-        assert!(o.video(1, false, frame(1, false, 20)));
-        assert!(o.video(2, false, frame(2, false, 20)));
-        assert!(o.video(1, true, frame(1, true, 30)));
+        assert!(o.video(d(1), false, frame(1, false, 20)));
+        assert!(o.video(d(2), false, frame(2, false, 20)));
+        assert!(o.video(d(1), true, frame(1, true, 30)));
         send(&o, &mut lanes, &mut out, 100);
-        let sent: Vec<(u8, usize)> = out
+        let sent: Vec<(u32, usize)> = out
             .messages()
             .iter()
             .map(|m| match m {
-                HostMsg::Frame { id, data, .. } => (*id, data.len()),
+                HostMsg::Frame { id, data, .. } => (id.0, data.len()),
                 other => panic!("{other:?}"),
             })
             .collect();
         assert_eq!(sent, [(2, 20), (1, 2 * FRAGMENT), (1, 30)]);
         let stats = o.take_stats();
-        assert_eq!(stats.video[&1].dropped.replaced, 1);
-        assert_eq!(stats.video[&2].dropped.total(), 0);
+        assert_eq!(stats.video[&d(1)].dropped.replaced, 1);
+        assert_eq!(stats.video[&d(2)].dropped.total(), 0);
         // Replaced by a keyframe: nothing to ask the encoder for.
         assert!(o.take_dropped().is_empty());
     }
@@ -734,40 +769,40 @@ pub(crate) mod tests {
     fn a_stream_start_follows_the_frame_being_sent() {
         let o = Outbox::default();
         let (mut lanes, mut out) = (Lanes::default(), Capture::default());
-        assert!(o.video(5, true, frame(5, true, 3 * FRAGMENT)));
+        assert!(o.video(d(5), true, frame(5, true, 3 * FRAGMENT)));
         send(&o, &mut lanes, &mut out, 1);
-        assert!(o.video(5, false, frame(5, false, 10)));
+        assert!(o.video(d(5), false, frame(5, false, 10)));
         let start = HostMsg::StreamStart {
-            id: 5,
-            width: 640,
-            height: 360,
+            id: d(5),
+            generation: Gen(2),
+            w: 640,
+            h: 360,
             codec: prostir_proto::Codec::H264,
-            name: "Prostir-6".into(),
         };
         o.control(start.clone());
         send(&o, &mut lanes, &mut out, 100);
-        assert!(out.lanes().iter().all(|&l| l == lane::video(5)));
+        assert!(out.lanes().iter().all(|&l| l == lane::VIDEO));
         assert_eq!(out.messages(), [frame(5, true, 3 * FRAGMENT), start]);
-        assert_eq!(o.take_stats().video[&5].dropped.restart, 1);
+        assert_eq!(o.take_stats().video[&d(5)].dropped.restart, 1);
     }
 
     #[test]
     fn late_frames_are_dropped_until_a_keyframe() {
         let o = Outbox::default();
-        o.video(1, false, frame(1, false, 10));
-        o.video(1, false, frame(1, false, 10));
+        o.video(d(1), false, frame(1, false, 10));
+        o.video(d(1), false, frame(1, false, 10));
         // Another stream is not affected.
         std::thread::sleep(MAX_AGE + Duration::from_millis(20));
-        o.video(2, false, frame(2, false, 10));
+        o.video(d(2), false, frame(2, false, 10));
         assert_eq!(o.sent(), [frame(2, false, 10)]);
-        assert_eq!(o.take_dropped(), BTreeSet::from([1]));
+        assert_eq!(o.take_dropped(), BTreeSet::from([d(1)]));
         // Lost: the stream takes only a keyframe now.
-        assert!(!o.video(1, false, frame(1, false, 10)));
-        assert!(o.video(1, true, frame(1, true, 10)));
-        assert!(o.video(1, false, frame(1, false, 10)));
+        assert!(!o.video(d(1), false, frame(1, false, 10)));
+        assert!(o.video(d(1), true, frame(1, true, 10)));
+        assert!(o.video(d(1), false, frame(1, false, 10)));
         assert_eq!(o.sent(), [frame(1, true, 10), frame(1, false, 10)]);
         let stats = o.take_stats();
-        let one = &stats.video[&1];
+        let one = &stats.video[&d(1)];
         assert_eq!(
             one.dropped,
             Drops {
@@ -777,8 +812,8 @@ pub(crate) mod tests {
             }
         );
         assert_eq!((one.frames, one.keyframes), (2, 1));
-        assert_eq!(stats.video[&2].frames, 1);
-        assert!(stats.video[&2].wait.max() < MAX_AGE);
+        assert_eq!(stats.video[&d(2)].frames, 1);
+        assert!(stats.video[&d(2)].wait.max() < MAX_AGE);
         // Taken: counting starts over.
         assert!(o.take_stats().video.is_empty());
     }
@@ -786,23 +821,26 @@ pub(crate) mod tests {
     #[test]
     fn drops_are_counted_by_reason() {
         let o = Outbox::default();
-        assert!(o.video(4, true, frame(4, true, MAX_VIDEO_BYTES)));
+        assert!(o.video(d(4), true, frame(4, true, MAX_VIDEO_BYTES)));
         // Full: only keyframes still get in.
-        assert!(!o.video(4, false, frame(4, false, 10)));
-        assert!(o.video(6, true, frame(6, true, 10)));
-        o.control(HostMsg::StreamEnd { id: 6 });
-        assert!(o.video(4, true, frame(4, true, 10)));
+        assert!(!o.video(d(4), false, frame(4, false, 10)));
+        assert!(o.video(d(6), true, frame(6, true, 10)));
+        o.control(HostMsg::StreamEnd {
+            id: d(6),
+            generation: Gen(1),
+        });
+        assert!(o.video(d(4), true, frame(4, true, 10)));
         let stats = o.take_stats();
         assert_eq!(
-            stats.video[&4].dropped,
+            stats.video[&d(4)].dropped,
             Drops {
                 full: 1,
                 replaced: 1,
                 ..Drops::default()
             }
         );
-        assert_eq!(stats.video[&6].dropped.restart, 1);
-        assert_eq!(stats.video[&4].dropped.total(), 2);
+        assert_eq!(stats.video[&d(6)].dropped.restart, 1);
+        assert_eq!(stats.video[&d(4)].dropped.total(), 2);
     }
 
     #[test]
@@ -878,13 +916,13 @@ pub(crate) mod tests {
     fn a_goodbye_is_the_last_thing_sent() {
         let o = Outbox::default();
         let (mut lanes, mut out) = (Lanes::default(), Capture::default());
-        assert!(o.video(1, true, frame(1, true, 3 * FRAGMENT)));
+        assert!(o.video(d(1), true, frame(1, true, 3 * FRAGMENT)));
         send(&o, &mut lanes, &mut out, 1);
         o.audio(HostMsg::Audio { pcm: vec![1] });
         o.control(HostMsg::Recenter);
         o.say_goodbye(PcGoodbye::TakenOff);
         assert!(!o.control(HostMsg::Recenter), "nothing after the goodbye");
-        assert!(!o.video(1, true, frame(1, true, 1)));
+        assert!(!o.video(d(1), true, frame(1, true, 1)));
         send(&o, &mut lanes, &mut out, 100);
         assert_eq!(
             out.messages(),
@@ -894,13 +932,75 @@ pub(crate) mod tests {
         assert_eq!(o.next(&mut lanes), None, "done, without waiting");
     }
 
+    /// A stream keeps its lane from its start to its end; then another stream takes
+    /// it, but not while the end is still going out.
+    #[test]
+    fn streams_take_free_lanes_and_give_them_back() {
+        let start = |id| HostMsg::StreamStart {
+            id: d(id),
+            generation: Gen(id),
+            w: 64,
+            h: 32,
+            codec: prostir_proto::Codec::H264,
+        };
+        let end = |id| HostMsg::StreamEnd {
+            id: d(id),
+            generation: Gen(id),
+        };
+        // The lane of each start and end sent, by stream.
+        let lanes_of = |out: &Capture| -> Vec<(u32, u8)> {
+            out.records
+                .iter()
+                .filter(|r| r[0] == 3)
+                .filter_map(|r| match HostMsg::read_setup(&mut &r[2..]).ok()? {
+                    HostMsg::StreamStart { id, .. } | HostMsg::StreamEnd { id, .. } => {
+                        Some((id.0, r[1]))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let o = Outbox::default();
+        let (mut lanes, mut out) = (Lanes::default(), Capture::default());
+        // Numbers far apart get neighbouring lanes.
+        o.control(start(70_000));
+        o.control(start(3));
+        send(&o, &mut lanes, &mut out, 10);
+        assert_eq!(lanes_of(&out), [(3, 2), (70_000, 3)]);
+        o.control(end(70_000));
+        o.control(start(9));
+        send(&o, &mut lanes, &mut out, 10);
+        o.control(start(11));
+        send(&o, &mut lanes, &mut out, 10);
+        let mut later = lanes_of(&out)[2..].to_vec();
+        assert_eq!(
+            later.pop(),
+            Some((11, 3)),
+            "the ended stream's lane is free after it"
+        );
+        later.sort_unstable();
+        assert_eq!(later, [(9, 4), (70_000, 3)], "the end in its own lane");
+        // Every lane taken: the next stream waits for one.
+        let o = Outbox::default();
+        let (mut lanes, mut out) = (Lanes::default(), Capture::default());
+        for id in 0..31 {
+            o.control(start(id));
+        }
+        send(&o, &mut lanes, &mut out, 100);
+        assert_eq!(out.records.len(), 30, "one stream waits for a lane");
+        o.control(end(0));
+        send(&o, &mut lanes, &mut out, 100);
+        assert_eq!(lanes_of(&out)[30..], [(0, 2), (30, 2)]);
+    }
+
     /// A message that cannot be sent ends the session, and nothing else is sent.
     #[test]
     fn a_message_over_its_limits_ends_the_session() {
         let o = Outbox::default();
-        assert!(!o.control(HostMsg::Order {
-            ids: (0..17).collect()
-        }));
-        assert!(!o.video(0, true, frame(0, true, 1)));
+        let too_long = HostMsg::Notice {
+            text: "x".repeat(8 * 1024 + 1),
+        };
+        assert!(!o.control(too_long));
+        assert!(!o.video(d(0), true, frame(0, true, 1)));
     }
 }

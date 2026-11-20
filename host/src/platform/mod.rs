@@ -210,6 +210,9 @@ pub trait DesktopBackend: Sized {
     /// Connects to the desktop (and clears what a crashed run left on it).
     fn connect() -> Result<Self>;
 
+    /// Its name, for the headset: `KDE Plasma`, `Hyprland`.
+    fn name(&self) -> &'static str;
+
     /// Whether the desktop has a primary output (where the panel and new windows go).
     fn has_primary(&self) -> bool;
 

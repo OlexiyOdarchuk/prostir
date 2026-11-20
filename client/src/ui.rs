@@ -4,10 +4,12 @@
 use std::collections::HashMap;
 
 use fontdue::{Font, FontSettings, Metrics};
-use prostir_proto::PcSettings;
+use prostir_proto::Codec;
+use prostir_proto::state::Encoding;
 use tiny_skia::{FillRule, Paint, Path, PathBuilder, Pixmap, Rect, Stroke, Transform};
 
 use crate::i18n::{Lang, Language};
+use crate::layout::ScreenId;
 use crate::profiles::Profile;
 use crate::settings::{Background, Curve, HandMode, Preset, Settings, Sky};
 
@@ -17,13 +19,24 @@ pub const HEIGHT: u32 = 960;
 pub const WRIST_WIDTH: u32 = 512;
 pub const WRIST_HEIGHT: u32 = 512;
 pub use prostir_proto::MAX_MONITORS;
+/// Window panels at once.
+const MAX_WINDOWS: usize = 3;
 
 static REGULAR: &[u8] = include_bytes!("../assets/NotoSans-Regular.ttf");
 static MEDIUM: &[u8] = include_bytes!("../assets/NotoSans-Medium.ttf");
 
+/// A change of how the PC encodes, from the menu: `None` leaves a setting as it is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EncodingChange {
+    pub bitrate: Option<u16>,
+    pub codec: Option<Codec>,
+    pub software: Option<bool>,
+    pub sharp: Option<bool>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct MonitorEntry {
-    pub id: u8,
+    pub id: ScreenId,
     pub width: u32,
     pub height: u32,
     /// Where it stands around the user, to tell monitors apart.
@@ -96,10 +109,10 @@ pub struct UiState {
     /// Quest monitors, sorted by id.
     pub monitors: Vec<MonitorEntry>,
     /// The monitor picked on the map (its actions show under it).
-    pub selected: Option<u8>,
+    pub selected: Option<ScreenId>,
     /// The laptop screen on the map: centre and half size as seen, in radians.
     pub mirror_seen: Option<[f32; 4]>,
-    pub primary: Option<u8>,
+    pub primary: Option<ScreenId>,
     pub mirror_wanted: bool,
     /// PC sound goes to the headset.
     pub audio_wanted: bool,
@@ -107,7 +120,7 @@ pub struct UiState {
     /// Access to the microphone was refused in the system.
     pub mic_denied: bool,
     /// How the PC encodes and what it can encode with (while connected).
-    pub pc: Option<(PcSettings, u8)>,
+    pub pc: Option<Encoding>,
     /// Window panels shown (detached PC windows).
     pub windows: Vec<MonitorEntry>,
     /// The PC can move the mouse (for following the gaze).
@@ -133,7 +146,7 @@ pub struct UiState {
     pub keyboard_available: bool,
     pub error: Option<String>,
     /// Monitor whose "×" was pressed once and now asks for confirmation.
-    pub confirm_remove: Option<u8>,
+    pub confirm_remove: Option<ScreenId>,
     /// A profile whose "Save current" was pressed once (press again to overwrite).
     pub confirm_save: Option<usize>,
     pub tab: Tab,
@@ -190,11 +203,11 @@ pub enum Action {
         width: u32,
         height: u32,
     },
-    Remove(u8),
-    MakePrimary(u8),
+    Remove(ScreenId),
+    MakePrimary(ScreenId),
     /// Move a monitor left (-1) or right (+1) in the row.
     Move {
-        id: u8,
+        id: ScreenId,
         delta: i32,
     },
     SetMirror(bool),
@@ -233,7 +246,7 @@ pub enum Action {
     /// Ask for microphone access again after it was refused.
     AskMic,
     /// Change how the PC encodes.
-    SetPc(PcSettings),
+    SetEncoding(EncodingChange),
     /// Show the first-run tips again.
     ShowTips,
     /// The monitors follow the head.
@@ -249,9 +262,9 @@ pub enum Action {
     /// Save a picture of the monitor in front on the PC.
     Screenshot,
     /// Close a window panel (its window goes back to the monitors).
-    CloseWindow(u8),
+    CloseWindow(ScreenId),
     /// Pick a monitor on the map.
-    SelectMonitor(u8),
+    SelectMonitor(ScreenId),
     /// What the A button does: take the seams out of the arrangement.
     Tidy,
     /// Open the main menu (from the wrist menu).
@@ -1825,7 +1838,7 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
     );
     // The cinema screen can be picked before switching to cinema.
     if s.monitors.len() > 1 {
-        let sizes: Vec<(u8, u32, u32)> = s
+        let sizes: Vec<(ScreenId, u32, u32)> = s
             .monitors
             .iter()
             .map(|m| (m.id, m.width, m.height))
@@ -2422,7 +2435,7 @@ fn build_quick(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
     };
     let tw = (w - 2.0 * 12.0) / 3.0;
     let th = 140.0;
-    let full = s.windows.len() >= prostir_proto::WINDOW_IDS.len();
+    let full = s.windows.len() >= MAX_WINDOWS;
     let tiles: [(&str, String, bool, Option<Action>); 9] = [
         (
             l.t("Перед собою", "In front of me"),
@@ -2939,7 +2952,7 @@ fn paired_pcs(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
 /// How the PC encodes: quality, codec, graphics card or CPU, text preset.
 fn build_pc(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -> f32 {
     let l = s.lang;
-    let Some((pc, encoders)) = s.pc else {
+    let Some(pc) = &s.pc else {
         items.push(text(
             x,
             y + 20.0,
@@ -2953,12 +2966,11 @@ fn build_pc(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -> f
         ));
         return y + 70.0;
     };
-    use prostir_proto::encoders::{CPU_H264, GPU_H264, GPU_H265};
-    let set = |change: &dyn Fn(&mut PcSettings)| {
-        let mut p = pc;
-        change(&mut p);
-        Action::SetPc(p)
-    };
+    let wanted = pc.wanted;
+    let can = |codec: Codec, gpu: bool| pc.choices.contains(&(codec, gpu));
+    let any_gpu = pc.choices.iter().any(|(_, gpu)| *gpu);
+    let set = |change: EncodingChange| Action::SetEncoding(change);
+    let none = EncodingChange::default();
     segmented(
         items,
         x,
@@ -2971,10 +2983,16 @@ fn build_pc(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -> f
             (50, l.t("Висока", "High")),
         ]
         .into_iter()
-        .map(|(q, label)| (label, set(&|p| p.quality = q), pc.quality == q, true))
+        .map(|(q, label)| {
+            let change = EncodingChange {
+                bitrate: Some(q),
+                ..none
+            };
+            (label, set(change), wanted.bitrate == q, true)
+        })
         .collect(),
     );
-    let gpu = !pc.software;
+    let gpu = !wanted.software;
     segmented(
         items,
         x,
@@ -2984,18 +3002,22 @@ fn build_pc(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -> f
         vec![
             (
                 l.t("Відеокарта", "Graphics card"),
-                set(&|p| p.software = false),
+                set(EncodingChange {
+                    software: Some(false),
+                    ..none
+                }),
                 gpu,
-                encoders & (GPU_H264 | GPU_H265) != 0,
+                any_gpu,
             ),
             (
                 l.t("Процесор", "Processor"),
-                set(&|p| {
-                    p.software = true;
-                    p.codec = prostir_proto::Codec::H264;
+                set(EncodingChange {
+                    software: Some(true),
+                    codec: Some(Codec::H264),
+                    ..none
                 }),
                 !gpu,
-                encoders & CPU_H264 != 0,
+                can(Codec::H264, false),
             ),
         ],
     );
@@ -3008,15 +3030,21 @@ fn build_pc(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -> f
         vec![
             (
                 "HEVC",
-                set(&|p| p.codec = prostir_proto::Codec::H265),
-                pc.codec == prostir_proto::Codec::H265,
-                gpu && encoders & GPU_H265 != 0,
+                set(EncodingChange {
+                    codec: Some(Codec::H265),
+                    ..none
+                }),
+                wanted.codec == Some(Codec::H265),
+                gpu && can(Codec::H265, true),
             ),
             (
                 "H.264",
-                set(&|p| p.codec = prostir_proto::Codec::H264),
-                pc.codec == prostir_proto::Codec::H264,
-                encoders & (GPU_H264 | CPU_H264) != 0,
+                set(EncodingChange {
+                    codec: Some(Codec::H264),
+                    ..none
+                }),
+                wanted.codec == Some(Codec::H264),
+                can(Codec::H264, true) || can(Codec::H264, false),
             ),
         ],
     );
@@ -3041,14 +3069,20 @@ fn build_pc(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -> f
         vec![
             (
                 l.t("Вимкнено", "Off"),
-                set(&|p| p.sharp = false),
-                !pc.sharp,
+                set(EncodingChange {
+                    sharp: Some(false),
+                    ..none
+                }),
+                !wanted.sharp,
                 gpu,
             ),
             (
                 l.t("Увімкнено", "On"),
-                set(&|p| p.sharp = true),
-                pc.sharp,
+                set(EncodingChange {
+                    sharp: Some(true),
+                    ..none
+                }),
+                wanted.sharp,
                 gpu,
             ),
         ],
@@ -3306,15 +3340,20 @@ mod tests {
             unreachable: Some("workstation-with-a-long-name".into()),
             pair_offer: None,
             mic_denied: true,
-            pc: Some((
-                PcSettings {
-                    quality: 30,
-                    codec: prostir_proto::Codec::H265,
+            pc: Some(Encoding {
+                wanted: prostir_proto::state::Wanted {
+                    bitrate: 30,
+                    codec: Some(Codec::H265),
                     software: false,
                     sharp: true,
                 },
-                7,
-            )),
+                using: Some((Codec::H265, true)),
+                choices: vec![
+                    (Codec::H265, true),
+                    (Codec::H264, true),
+                    (Codec::H264, false),
+                ],
+            }),
             can_move_mouse: false,
             paired: vec!["workstation".into(), "a-much-longer-laptop-name".into()],
             battery: Some((100, true)),
@@ -3460,7 +3499,7 @@ mod tests {
                         height: 1440,
                         // The longest name.
                         place: Place::Right,
-                        seen: Some([(f32::from(id) - 2.5) * 0.9, 0.0, 0.45, 0.19]),
+                        seen: Some([(id as f32 - 2.5) * 0.9, 0.0, 0.45, 0.19]),
                     })
                     .collect();
                 states.push(st);
@@ -3525,18 +3564,19 @@ mod tests {
     /// mapped the way the headset maps them, drawn with each monitor picked in turn.
     fn pick_each(
         panel: &mut Panel,
-        monitors: &[(u8, u32, u32, f32, f32)],
+        monitors: &[(ScreenId, u32, u32, f32, f32)],
         mirror: Option<(f32, f32)>,
-        primary: u8,
+        primary: ScreenId,
     ) {
         use crate::layout::{Desktop, Placement};
         use crate::settings::Preset;
         use glam::{Quat, Vec3};
-        use prostir_proto::MIRROR_ID;
+        /// The laptop screen's number in these tests.
+        const MIRROR_ID: ScreenId = 100;
         const METRES_PER_PX: f32 = 0.0003;
         let mirror = mirror.map(|(x, y)| (MIRROR_ID, 1920, 1080, x, y));
         let all: Vec<_> = monitors.iter().copied().chain(mirror).collect();
-        let placements: HashMap<u8, Placement> = all
+        let placements: HashMap<ScreenId, Placement> = all
             .iter()
             .map(|&(id, w, _, x, y)| {
                 let place = Placement {
@@ -3547,7 +3587,8 @@ mod tests {
                 (id, place)
             })
             .collect();
-        let sizes: Vec<(u8, u32, u32)> = all.iter().map(|&(id, w, h, ..)| (id, w, h)).collect();
+        let sizes: Vec<(ScreenId, u32, u32)> =
+            all.iter().map(|&(id, w, h, ..)| (id, w, h)).collect();
         let center = (Vec3::ZERO, 0.0);
         let spots = Desktop::of(
             &placements,
@@ -3599,7 +3640,7 @@ mod tests {
             .enumerate()
             .map(|(id, &(w, h, x, y))| {
                 let centre = |at: i32, size: u32| (at + size as i32 / 2) as f32;
-                (id as u8, w, h, centre(x, w), centre(y, h))
+                (id as ScreenId, w, h, centre(x, w), centre(y, h))
             })
             .collect();
         let laptop = Some((192.0 + 960.0, 3840.0 + 540.0));
@@ -3636,7 +3677,7 @@ mod tests {
         for _ in 0..500 {
             // Centres (pixels) all within a few pixels, near each other, or far apart.
             let spread = [1, 2_000, 20_000, 2_000_000][rng.below(4) as usize];
-            let count = 1 + rng.below(6) as u8;
+            let count = 1 + rng.below(6) as ScreenId;
             let monitors: Vec<_> = (0..count)
                 .map(|id| {
                     let (w, h) = SIZES[rng.below(5) as usize];
@@ -3644,7 +3685,7 @@ mod tests {
                 })
                 .collect();
             let laptop = (rng.below(2) == 0).then(|| (rng.within(spread), rng.within(spread)));
-            let primary = rng.below(u64::from(count)) as u8;
+            let primary = rng.below(u64::from(count)) as ScreenId;
             pick_each(&mut panel, &monitors, laptop, primary);
         }
     }

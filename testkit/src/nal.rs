@@ -14,6 +14,8 @@ pub fn unit_types(data: &[u8], codec: Codec) -> Vec<u8> {
                 types.push(match codec {
                     Codec::H264 => header & 0x1f,
                     Codec::H265 => (header >> 1) & 0x3f,
+                    // AV1 has no NAL units: no PC sends it yet.
+                    Codec::Av1 => 0,
                 });
             }
             i += 3;
@@ -34,6 +36,7 @@ pub fn starts_decoder(data: &[u8], codec: Codec) -> bool {
         Codec::H264 => has(7) && has(8) && has(5),
         // VPS, SPS, PPS, IDR (with or without leading pictures).
         Codec::H265 => has(32) && has(33) && has(34) && (has(19) || has(20)),
+        Codec::Av1 => false,
     }
 }
 

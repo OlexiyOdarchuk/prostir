@@ -27,14 +27,23 @@ pub enum Backend {
 }
 
 impl Backend {
-    fn elements(self, codec: Codec) -> &'static [&'static str] {
-        match (self, codec) {
+    /// The GStreamer elements it encodes `codec` with; none for a codec it cannot
+    /// encode (AV1: no encoder of Prostir makes it yet).
+    fn elements(self, codec: Codec) -> Option<&'static [&'static str]> {
+        Some(match (self, codec) {
             (Self::Va, Codec::H265) => &["vapostproc", "vah265enc"],
             (Self::Va, Codec::H264) => &["vapostproc", "vah264enc"],
             (Self::Nvenc, Codec::H265) => &["nvh265enc"],
             (Self::Nvenc, Codec::H264) => &["nvh264enc"],
-            (Self::X264, _) => &["x264enc"],
-        }
+            (Self::X264, Codec::H264) => &["x264enc"],
+            (_, Codec::Av1) | (Self::X264, Codec::H265) => return None,
+        })
+    }
+
+    /// Whether this PC has what it takes to encode `codec` with it.
+    fn can(self, codec: Codec) -> bool {
+        self.elements(codec)
+            .is_some_and(|e| e.iter().all(|e| gst::ElementFactory::find(e).is_some()))
     }
 
     /// Whether the encoder takes frames straight from GPU buffers (dmabuf).
@@ -43,53 +52,44 @@ impl Backend {
     }
 }
 
-/// What this PC can encode with, as bits of [`prostir_proto::encoders`].
-pub fn available() -> u8 {
-    use prostir_proto::encoders::{CPU_H264, GPU_H264, GPU_H265};
-    let has = |backend: Backend, codec: Codec| {
-        backend
-            .elements(codec)
-            .iter()
-            .all(|e| gst::ElementFactory::find(e).is_some())
-    };
-    let mut bits = 0;
-    if has(Backend::Va, Codec::H264) || has(Backend::Nvenc, Codec::H264) {
-        bits |= GPU_H264;
+/// What this PC can encode with: each codec, and whether on the graphics card.
+pub fn available() -> Vec<(Codec, bool)> {
+    let mut choices = Vec::new();
+    for codec in [Codec::H265, Codec::H264, Codec::Av1] {
+        if Backend::Va.can(codec) || Backend::Nvenc.can(codec) {
+            choices.push((codec, true));
+        }
+        if Backend::X264.can(codec) {
+            choices.push((codec, false));
+        }
     }
-    if has(Backend::Va, Codec::H265) || has(Backend::Nvenc, Codec::H265) {
-        bits |= GPU_H265;
-    }
-    if has(Backend::X264, Codec::H264) {
-        bits |= CPU_H264;
-    }
-    bits
+    choices
 }
 
 /// Picks the first encoder this PC has: VA-API, then NVENC, then x264 on the CPU, in
 /// the preferred codec first. `software` forces x264. The error names what to install.
 pub fn pick(prefer: Codec, software: bool) -> Result<(Backend, Codec)> {
-    let other = match prefer {
-        Codec::H265 => Codec::H264,
-        Codec::H264 => Codec::H265,
-    };
+    // The preferred codec first, then the others from the sharpest.
+    let mut codecs = vec![prefer];
+    codecs.extend(
+        [Codec::H265, Codec::H264]
+            .into_iter()
+            .filter(|c| *c != prefer),
+    );
     let mut order = Vec::new();
     if !software {
         for backend in [Backend::Va, Backend::Nvenc] {
-            order.push((backend, prefer));
-            order.push((backend, other));
+            order.extend(codecs.iter().map(|c| (backend, *c)));
         }
     }
     order.push((Backend::X264, Codec::H264));
-    let parsers = |codec| match codec {
+    let parser = |codec| match codec {
         Codec::H265 => "h265parse",
         Codec::H264 => "h264parse",
+        Codec::Av1 => "av1parse",
     };
     let found = order.into_iter().find(|(backend, codec)| {
-        backend
-            .elements(*codec)
-            .iter()
-            .chain(std::iter::once(&parsers(*codec)))
-            .all(|e| gst::ElementFactory::find(e).is_some())
+        backend.can(*codec) && gst::ElementFactory::find(parser(*codec)).is_some()
     });
     found.ok_or_else(|| {
         anyhow!(
@@ -161,10 +161,13 @@ pub struct Input {
     pub label: String,
 }
 
-fn pipeline_description(input: &Input, cfg: &EncoderConfig) -> String {
+fn pipeline_description(input: &Input, cfg: &EncoderConfig) -> Result<String> {
     let source = &input.source;
     let (encoder, parser, caps) = match (cfg.codec, cfg.backend) {
-        (_, Backend::X264) => (
+        (Codec::Av1, _) | (Codec::H265, Backend::X264) => {
+            bail!("no encoder for {:?} on {:?}", cfg.codec, cfg.backend)
+        }
+        (Codec::H264, Backend::X264) => (
             format!(
                 "videoconvert name=enc_in ! video/x-raw,format=I420 ! x264enc name=enc tune=zerolatency speed-preset=superfast \
                  bitrate={} key-int-max=600 bframes=0",
@@ -212,9 +215,9 @@ fn pipeline_description(input: &Input, cfg: &EncoderConfig) -> String {
             "video/x-h265,stream-format=byte-stream,alignment=au",
         ),
     };
-    format!(
+    Ok(format!(
         "{source} ! queue max-size-buffers=2 leaky=downstream ! {encoder} ! {parser} ! {caps} ! appsink name=sink sync=false max-buffers=8"
-    )
+    ))
 }
 
 impl Encoder {
@@ -224,7 +227,7 @@ impl Encoder {
         cfg: &EncoderConfig,
         on_event: impl Fn(EncoderEvent) -> bool + Send + Sync + 'static,
     ) -> Result<Self> {
-        let desc = pipeline_description(input, cfg);
+        let desc = pipeline_description(input, cfg)?;
         let node = input.label.clone();
         debug!("pipeline: {desc}");
         let pipeline = gst::parse::launch(&desc)
@@ -494,6 +497,7 @@ pub fn keyframe_to_png(data: &[u8], codec: Codec) -> Result<std::path::PathBuf> 
     let (caps, parse) = match codec {
         Codec::H264 => ("video/x-h264", "h264parse"),
         Codec::H265 => ("video/x-h265", "h265parse"),
+        Codec::Av1 => ("video/x-av1", "av1parse"),
     };
     let pipeline = gst::parse::launch(&format!(
         "appsrc name=src caps={caps},stream-format=byte-stream,alignment=au ! {parse} ! \

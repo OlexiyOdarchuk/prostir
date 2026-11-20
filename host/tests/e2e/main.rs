@@ -14,7 +14,9 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use pc::{Options, Pc, TestDir};
-use prostir_proto::{ClientMsg, Codec, LayoutEntry, LayoutRow, PcSettings, encoders};
+use prostir_proto::request::{Outcome, Primary, Request};
+use prostir_proto::state::{DisplayId, Mode, Placed, Presence, Row};
+use prostir_proto::{ClientMsg, Codec};
 use prostir_testkit::{ConnectError, FakeHeadset, Keys, View};
 
 /// Long enough for a slow CI machine to start GStreamer and the encoders.
@@ -54,13 +56,20 @@ pub fn session(name: &str, options: &Options) -> (TestDir, Pc, Keys, FakeHeadset
     (dir, pc, keys, headset)
 }
 
+/// Takes the headset off (`false`) or puts it on.
+pub fn worn(worn: bool) -> ClientMsg {
+    ClientMsg::Presence {
+        part: Presence { worn },
+    }
+}
+
 #[test]
 fn a_trusted_headset_gets_its_monitors_and_sound() {
     let (_dir, pc, _keys, mut headset) = session("trusted", &Options::default());
     assert_eq!(headset.language, "en");
     let view = headset.view();
-    assert_eq!(view.order.len(), 2);
-    for id in &view.order {
+    assert_eq!(view.order().len(), 2);
+    for id in &view.order() {
         let s = &view.streams[id];
         assert_eq!(s.codec, Codec::H264, "the CPU encoder makes H.264");
         assert_eq!(
@@ -73,13 +82,14 @@ fn a_trusted_headset_gets_its_monitors_and_sound() {
     }
     assert_eq!(
         (
-            view.streams[&view.order[0]].width,
-            view.streams[&view.order[1]].width
+            view.streams[&view.order()[0]].width,
+            view.streams[&view.order()[1]].width
         ),
         (640, 480)
     );
-    let (settings, _) = view.pc_settings.expect("the PC says how it encodes");
-    assert_eq!((settings.codec, settings.software), (Codec::H264, true));
+    let encoding = view.encoding().expect("the PC says how it encodes");
+    assert_eq!(encoding.using, Some((Codec::H264, false)), "on the CPU");
+    assert!(view.broken.is_empty(), "{:?}", view.broken);
     headset.wait(SOON, "sound", |v| v.audio_bytes > 0).unwrap();
     pc.quit();
 }
@@ -179,15 +189,15 @@ fn a_pc_that_forgot_the_headset_pairs_again() {
 #[test]
 fn a_layout_with_a_repeated_monitor_is_refused() {
     let (_dir, pc, mut keys, mut headset) = session("repeated", &Options::default());
-    let first = headset.view().order[0];
-    let entry = LayoutEntry {
+    let first = headset.view().order()[0];
+    let entry = Placed {
         id: first,
         center: None,
         middle: None,
     };
     headset
-        .send(&ClientMsg::SetLayout {
-            rows: vec![LayoutRow {
+        .send(&ClientMsg::Arrange {
+            rows: vec![Row {
                 entries: vec![entry; 16],
             }],
         })
@@ -196,7 +206,7 @@ fn a_layout_with_a_repeated_monitor_is_refused() {
     let mut back = connect(&pc, &mut keys);
     back.wait(START, "every monitor showing", View::all_monitors_show)
         .unwrap();
-    assert_eq!(back.view().order.len(), 2);
+    assert_eq!(back.view().order().len(), 2);
     assert_eq!(pc.count_log("panicked"), 0, "no thread of the PC app died");
 }
 
@@ -208,15 +218,23 @@ fn a_new_set_of_monitors_is_laid_out_once() {
     // Laid out once the session settles.
     headset.take_for(Duration::from_secs(1)).unwrap();
     let before = pc.count_log("fake desktop: placed");
-    headset
-        .send(&ClientMsg::SetMonitors {
-            sizes: vec![(800, 450), (640, 360), (480, 272), (320, 240)],
-            primary: 1,
+    let sizes = [(800, 450), (640, 360), (480, 272), (320, 240)];
+    let outcome = headset
+        .ask(Request::SetDisplays {
+            modes: sizes.iter().map(|&(w, h)| Mode::new(w, h)).collect(),
+            primary: Some(Primary::Index { index: 1 }),
+            shown_physical: Vec::new(),
         })
         .unwrap();
+    let Outcome::Ids { ids } = outcome else {
+        panic!("the monitors' numbers, not {outcome:?}")
+    };
+    assert_eq!(ids.len(), 4);
+    assert_eq!(headset.view().order(), ids, "in the order of the sizes");
+    assert_eq!(headset.view().primary(), Some(ids[1]));
     headset
         .wait(SOON, "four monitors showing", |v| {
-            v.order.len() == 4 && v.all_monitors_show()
+            v.order().len() == 4 && v.all_monitors_show()
         })
         .unwrap();
     headset.take_for(Duration::from_secs(1)).unwrap();
@@ -226,45 +244,173 @@ fn a_new_set_of_monitors_is_laid_out_once() {
     assert!(line.contains("Fake-"), "{line}");
 }
 
+/// A monitor added: the list with it comes before the reply that names it (both in the
+/// control lane), its start before its frames (in its own lane). Removed: the list
+/// without it before the reply, and its stream ends. The last one stays.
 #[test]
 fn monitors_are_added_and_removed() {
     let (_dir, _pc, _keys, mut headset) = session("add-remove", &Options::default());
-    headset
-        .send(&ClientMsg::AddMonitor {
-            width: 800,
-            height: 450,
+    let from = headset.view().arrivals.len();
+    let req = headset
+        .request(Request::AddDisplay {
+            mode: Mode::new(800, 450),
         })
         .unwrap();
+    let Outcome::Added { id: added } = headset.reply(req, SOON).unwrap() else {
+        panic!("a new monitor")
+    };
     headset
         .wait(SOON, "a third monitor showing", |v| {
-            v.order.len() == 3 && v.all_monitors_show()
+            v.order().len() == 3 && v.all_monitors_show()
         })
         .unwrap();
-    let added = *headset.view().order.last().unwrap();
+    let arrivals = &headset.view().arrivals[from..];
+    let at = |a: &prostir_testkit::Arrival| arrivals.iter().position(|x| x == a).unwrap();
+    let listed = arrivals
+        .iter()
+        .position(|a| matches!(a, prostir_testkit::Arrival::Displays(ids) if ids.contains(&added)))
+        .expect("a list with the new monitor");
+    assert!(
+        listed < at(&prostir_testkit::Arrival::Reply(req)),
+        "{arrivals:?}"
+    );
+    let generation = headset.view().streams[&added].generation;
+    assert!(
+        at(&prostir_testkit::Arrival::StreamStart(added, generation))
+            < at(&prostir_testkit::Arrival::FirstFrame(added, generation)),
+        "{arrivals:?}"
+    );
     assert_eq!(headset.view().streams[&added].width, 800);
-    headset
-        .send(&ClientMsg::RemoveMonitor { id: added })
+    assert_eq!(headset.view().order().last(), Some(&added), "at the end");
+
+    let from = headset.view().arrivals.len();
+    let req = headset
+        .request(Request::RemoveDisplay { id: added })
         .unwrap();
-    headset
-        .wait(SOON, "the monitor gone", |v| {
-            v.ended.contains(&added) && v.order.len() == 2
-        })
+    assert_eq!(headset.reply(req, SOON).unwrap(), Outcome::Done);
+    let arrivals = headset.view().arrivals[from..].to_vec();
+    let gone = arrivals
+        .iter()
+        .position(|a| matches!(a, prostir_testkit::Arrival::Displays(ids) if !ids.contains(&added)))
+        .expect("a list without it");
+    let replied = arrivals
+        .iter()
+        .position(|a| *a == prostir_testkit::Arrival::Reply(req))
         .unwrap();
+    assert!(gone < replied, "{arrivals:?}");
+    headset
+        .wait(SOON, "its stream ended", |v| v.ended.contains(&added))
+        .unwrap();
+    assert_eq!(headset.view().removed, [added]);
+    assert_eq!(headset.view().order().len(), 2);
     // The last one stays: the PC says why.
-    let first = headset.view().order[0];
+    let [first, last] = headset.view().order()[..] else {
+        panic!("two monitors")
+    };
+    assert_eq!(
+        headset.ask(Request::RemoveDisplay { id: first }).unwrap(),
+        Outcome::Done
+    );
+    let refused = headset.ask(Request::RemoveDisplay { id: last }).unwrap();
+    let Outcome::Failed { detail, .. } = refused else {
+        panic!("the last monitor stays, not {refused:?}")
+    };
+    assert!(detail.contains("last monitor"), "{detail}");
+    assert_eq!(headset.view().order(), [last]);
+    assert!(
+        headset.view().broken.is_empty(),
+        "{:?}",
+        headset.view().broken
+    );
+}
+
+/// The session opens with the snapshot of everything the PC has, before any stream:
+/// the monitors with their numbers, sizes, kinds and places on the desktop, the
+/// primary one, how it encodes, what it allows and can do.
+#[test]
+fn the_session_opens_with_a_snapshot() {
+    let (_dir, pc, _keys, mut headset) = session("snapshot", &Options::default());
+    let view = headset.view();
+    let displays = view.displays();
+    assert_eq!(displays.len(), 2);
+    assert_eq!(displays[0].id, DisplayId(0));
+    assert_eq!((displays[0].mode.w, displays[0].mode.h), (640, 360));
+    assert_eq!((displays[1].mode.w, displays[1].mode.h), (480, 272));
+    assert!(displays.iter().all(|d| d.is_virtual()));
+    assert!(view.primary().is_some());
+    let encoding = view.encoding().unwrap();
+    assert!(encoding.choices.contains(&(Codec::H264, false)));
+    let limits = view.pc.limits.as_ref().unwrap();
+    assert_eq!(limits.virtual_max, 6);
+    // H.264 on the CPU: as wide as the headset decodes it.
+    assert_eq!(limits.max, (4096, 4096));
+    assert!(!limits.sizes.contains(&Mode::new(5120, 1440)));
+    assert_eq!(view.pc.info.as_ref().unwrap().desktop, "fake");
+    assert!(view.pc.access.unwrap().is_main());
+    // Where the fake desktop put them, once it laid them out.
     headset
-        .send(&ClientMsg::RemoveMonitor { id: first })
-        .unwrap();
-    let last = headset.view().order[1];
-    headset
-        .send(&ClientMsg::RemoveMonitor { id: last })
-        .unwrap();
-    headset
-        .wait(SOON, "an error for the last monitor", |v| {
-            v.errors.iter().any(|e| e.contains("last monitor"))
+        .wait(SOON, "both on the desktop", |v| {
+            v.displays().iter().all(|d| d.desk.is_some())
         })
         .unwrap();
-    assert_eq!(headset.view().order, [last]);
+    let placed = saved::placed(&pc);
+    for d in headset.view().displays() {
+        let desk = d.desk.unwrap();
+        let name = format!("Fake-{}", d.id.0 + 1);
+        assert!(
+            placed.contains(&(name, desk.x, desk.y)),
+            "{desk:?} not in {placed:?}"
+        );
+    }
+}
+
+/// A request of a kind the PC does not know gets its reply all the same, with its
+/// number: unsupported.
+#[test]
+fn an_unknown_request_is_unsupported() {
+    let (_dir, _pc, _keys, mut headset) = session("unknown-request", &Options::default());
+    headset
+        .send(&ClientMsg::Request {
+            req: prostir_proto::state::ReqId(41),
+            asked: prostir_proto::request::Asked::Unknown { kind: 200 },
+        })
+        .unwrap();
+    let outcome = headset
+        .reply(prostir_proto::state::ReqId(41), SOON)
+        .unwrap();
+    assert!(
+        matches!(outcome, Outcome::Failed { error, .. } if error == prostir_proto::state::ErrorCode::UNSUPPORTED),
+        "{outcome:?}"
+    );
+}
+
+/// A headset that shows neither window panels nor the PC's own displays, and decodes
+/// only H.264, is told about neither, and not about a codec it does not decode.
+#[test]
+fn a_headset_hears_only_what_it_can_show() {
+    let dir = TestDir::new("fewer-caps");
+    dir.save_monitors("row\n640x360\nmirror on\ncodec h265\n");
+    let mut keys = dir.pair();
+    let pc = Pc::start(&dir, &Options::default());
+    let mut state = FakeHeadset::state();
+    let caps = state.caps.as_mut().unwrap();
+    caps.features.clear();
+    caps.decoders.retain(|d| d.codec == 0);
+    let mut headset = FakeHeadset::connect_saying(pc.addr, &mut keys, &state)
+        .unwrap_or_else(|e| panic!("connecting: {e}"));
+    headset
+        .wait(START, "every monitor showing", View::all_monitors_show)
+        .unwrap();
+    let view = headset.view();
+    assert!(view.displays().iter().all(|d| d.is_virtual()));
+    let encoding = view.encoding().unwrap();
+    assert_eq!(
+        encoding.wanted.codec, None,
+        "H.265 is saved, not decoded here"
+    );
+    assert!(encoding.choices.iter().all(|(c, _)| *c == Codec::H264));
+    let limits = view.pc.limits.as_ref().unwrap();
+    assert!(!limits.sizes.contains(&Mode::new(5120, 1440)));
 }
 
 /// Taken off for a moment, the monitors pause and come back; for longer than 10 s, the
@@ -278,7 +424,7 @@ fn taking_the_headset_off_pauses_and_then_ends_the_session() {
         ..Options::default()
     };
     let (_dir, mut pc, mut keys, mut headset) = session("presence", &options);
-    headset.send(&ClientMsg::Presence { worn: false }).unwrap();
+    headset.send(&worn(false)).unwrap();
     // Frames already on their way still arrive; after that, nothing.
     headset.take_for(Duration::from_secs(1)).unwrap();
     headset.reset_counts();
@@ -286,7 +432,7 @@ fn taking_the_headset_off_pauses_and_then_ends_the_session() {
     let paused: u64 = headset.view().streams.values().map(|s| s.frames).sum();
     assert_eq!(paused, 0, "no frames while the headset is off");
     // Back on: a fresh picture on every monitor (resumed streams start with a keyframe).
-    headset.send(&ClientMsg::Presence { worn: true }).unwrap();
+    headset.send(&worn(true)).unwrap();
     headset
         .wait(SOON, "pictures after putting it on", |v| {
             v.streams.len() == 2 && v.streams.values().all(|s| s.has_picture())
@@ -309,7 +455,7 @@ fn taking_the_headset_off_pauses_and_then_ends_the_session() {
     assert!(headset.view().pings > 5, "the PC pings every second");
     assert!(!headset.view().round_trips.is_empty(), "and answers");
     // Off for good: the session ends, and the monitors go.
-    headset.send(&ClientMsg::Presence { worn: false }).unwrap();
+    headset.send(&worn(false)).unwrap();
     headset.wait_closed(Duration::from_secs(15)).unwrap();
     assert_eq!(
         headset.view().goodbye,
@@ -333,12 +479,12 @@ fn taking_the_headset_off_pauses_and_then_ends_the_session() {
 #[test]
 fn a_still_screen_shows_again_after_putting_the_headset_on() {
     let (_dir, mut pc, _keys, mut headset) = session("still", &Options::default());
-    headset.send(&ClientMsg::Presence { worn: false }).unwrap();
+    headset.send(&worn(false)).unwrap();
     pc.wait_log(SOON, "paused: headset not worn or gone");
     headset.take_for(Duration::from_secs(1)).unwrap();
     headset.reset_counts();
     let before = pc.source_starts();
-    headset.send(&ClientMsg::Presence { worn: true }).unwrap();
+    headset.send(&worn(true)).unwrap();
     headset
         .wait(SOON, "pictures after putting it on", |v| {
             v.streams.len() == 2 && v.streams.values().all(|s| s.has_picture())
@@ -362,7 +508,7 @@ fn monitors_kept_after_a_disconnect_show_again() {
     let mut back = connect(&pc, &mut keys);
     back.wait(SOON, "every kept monitor showing", View::all_monitors_show)
         .unwrap();
-    assert_eq!(back.view().order.len(), 2);
+    assert_eq!(back.view().order().len(), 2);
     // Time for a late second start to show in the log.
     back.take_for(Duration::from_secs(1)).unwrap();
     assert_started_once(&before, &pc.source_starts());
@@ -372,48 +518,43 @@ fn monitors_kept_after_a_disconnect_show_again() {
 }
 
 /// Another codec from the headset menu restarts every stream with what the PC really
-/// encodes with now, as far as it said it can (`encoders` in its settings): H.265 on
+/// encodes with now, as far as it said it can (`choices` in `Encoding`): H.265 on
 /// the graphics card where it can, else H.264 there, else the CPU's H.264 again.
 /// Asking for what is in use already changes nothing.
 #[test]
 fn a_codec_switch_restarts_every_stream() {
     let (_dir, _pc, _keys, mut headset) = session("codec", &Options::default());
-    let (_, can) = headset
+    let can = headset
         .view()
-        .pc_settings
-        .expect("the PC says how it encodes");
-    let starts = |headset: &FakeHeadset| -> Vec<(u8, u32)> {
+        .encoding()
+        .expect("the PC says how it encodes")
+        .choices
+        .clone();
+    let starts = |headset: &FakeHeadset| -> Vec<(DisplayId, u32)> {
         let streams = &headset.view().streams;
         streams.iter().map(|(id, s)| (*id, s.starts)).collect()
     };
-    // Asks for `codec` (on the CPU with `software`) and returns the PC's answer: the
-    // settings it sends after this, as they are once every stream that was to start
-    // over (`restart`) did, with the new codec and a picture.
+    // Asks for `codec` (on the CPU with `software`) and returns what the PC encodes
+    // with after it (its `Encoding` comes before the reply), once every stream that
+    // was to start over (`restart`) did, with the new codec and a picture.
     let ask = |headset: &mut FakeHeadset, codec, software, restart: bool| {
         let before = starts(headset);
-        let answered = headset.view().pc_settings_count;
-        let settings = PcSettings {
-            quality: 8,
-            codec,
-            software,
-            sharp: false,
-        };
         headset
-            .send(&ClientMsg::SetPcSettings { settings })
-            .unwrap();
-        headset
-            .wait(SOON, "the settings in use after asking", |v| {
-                v.pc_settings_count > answered
+            .ask(Request::SetEncoding {
+                bitrate: Some(8),
+                codec: Some(codec),
+                software: Some(software),
+                sharp: Some(false),
             })
             .unwrap();
+        let now = headset.view().encoding().unwrap().using.unwrap();
         if restart {
             headset
                 .wait(SOON, "every stream started over with the new codec", |v| {
-                    let now = v.pc_settings.unwrap().0;
                     before.iter().all(|(id, n)| {
-                        v.streams.get(id).is_some_and(|s| {
-                            s.starts > *n && s.codec == now.codec && s.has_picture()
-                        })
+                        v.streams
+                            .get(id)
+                            .is_some_and(|s| s.starts > *n && s.codec == now.0 && s.has_picture())
                     })
                 })
                 .unwrap();
@@ -421,29 +562,24 @@ fn a_codec_switch_restarts_every_stream() {
             headset.take_for(Duration::from_secs(2)).unwrap();
             assert_eq!(starts(headset), before, "no stream started over");
         }
-        let now = headset.view().pc_settings.unwrap().0;
-        (now.codec, now.software)
+        now
     };
 
-    let on_gpu = if can & encoders::GPU_H265 != 0 {
-        Some(Codec::H265)
-    } else if can & encoders::GPU_H264 != 0 {
-        Some(Codec::H264)
-    } else {
-        None
-    };
-    eprintln!("the PC can encode with {can:#05b}: on the graphics card {on_gpu:?}");
+    let on_gpu = [Codec::H265, Codec::H264]
+        .into_iter()
+        .find(|c| can.contains(&(*c, true)));
+    eprintln!("the PC can encode with {can:?}: on the graphics card {on_gpu:?}");
     let got = ask(&mut headset, Codec::H265, false, true);
     match on_gpu {
         Some(codec) => {
-            assert_eq!(got, (codec, false));
+            assert_eq!(got, (codec, true));
             let cpu = ask(&mut headset, Codec::H264, true, true);
-            assert_eq!(cpu, (Codec::H264, true));
+            assert_eq!(cpu, (Codec::H264, false));
         }
         None => {
-            assert_eq!(got, (Codec::H264, true));
+            assert_eq!(got, (Codec::H264, false));
             let same = ask(&mut headset, Codec::H264, true, false);
-            assert_eq!(same, (Codec::H264, true));
+            assert_eq!(same, (Codec::H264, false));
         }
     }
 }

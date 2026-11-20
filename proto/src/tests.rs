@@ -1,4 +1,9 @@
 use super::*;
+use crate::request::Request;
+use crate::state::{
+    Decoder, DeskRect, Display, DisplayKind, DisplayState, Feature, HeadsetState, MicDevice, Mode,
+    PcState, Placed, Wanted,
+};
 
 /// A message as it goes on the wire: tag, length, payload.
 fn framed(tag: u8, payload: &[u8]) -> Vec<u8> {
@@ -69,47 +74,174 @@ fn too_long(len: usize, max: usize) -> WireError {
     WireError::TooLong { len, max }
 }
 
-fn settings() -> PcSettings {
-    PcSettings {
-        quality: 30,
-        codec: Codec::H264,
-        software: false,
-        sharp: true,
+fn display(id: u32, kind: DisplayKind) -> Display {
+    Display {
+        id: DisplayId(id),
+        kind,
+        name: format!("Prostir-{id}"),
+        mode: Mode::new(2560, 1440),
+        desk: Some(DeskRect {
+            x: 0,
+            y: -1440,
+            w: 2560,
+            h: 1440,
+        }),
+        state: DisplayState::Running,
+    }
+}
+
+/// The PC's state with something in every part.
+pub(crate) fn pc_state() -> PcState {
+    PcState {
+        displays: Some(Displays {
+            displays: vec![
+                display(3, DisplayKind::Virtual),
+                display(
+                    100,
+                    DisplayKind::Physical {
+                        builtin: true,
+                        connector: "eDP-1".into(),
+                        shown: true,
+                    },
+                ),
+                Display {
+                    state: DisplayState::Failed {
+                        error: ErrorCode::DESKTOP,
+                        detail: "KScreen".into(),
+                    },
+                    desk: None,
+                    ..display(
+                        101,
+                        DisplayKind::Window {
+                            title: "Firefox".into(),
+                        },
+                    )
+                },
+            ],
+            primary: Some(DisplayId(3)),
+        }),
+        info: Some(PcInfo {
+            name: "desk".into(),
+            app: "0.2.0".into(),
+            language: "uk".into(),
+            os: state::os::LINUX,
+            desktop: "KDE Plasma".into(),
+        }),
+        caps: Some(HostCaps {
+            features: vec![state::caps::pc::MOVE_MOUSE, Feature(900)],
+        }),
+        access: Some(Access::MAIN),
+        limits: Some(state::Limits {
+            virtual_max: 6,
+            windows_max: 3,
+            physical_max: 1,
+            streams_max: 10,
+            min: (320, 240),
+            max: (7680, 4320),
+            sizes: vec![Mode::new(1920, 1080), Mode::new(5120, 1440)],
+            scales: vec![100, 125, 150],
+        }),
+        encoding: Some(Encoding {
+            wanted: Wanted {
+                bitrate: 30,
+                codec: Some(Codec::H265),
+                software: false,
+                sharp: true,
+            },
+            using: Some((Codec::H264, true)),
+            choices: vec![(Codec::H264, true), (Codec::H264, false)],
+        }),
+        sound: Some(Sound {
+            to_headset: true,
+            mic: MicDevice::Failed {
+                error: ErrorCode::SOUND,
+                detail: "pw-loopback".into(),
+            },
+        }),
+        focus: Some(Focus {
+            display: Some(DisplayId(100)),
+        }),
+        sound_from: Some(SoundFrom { display: None }),
+    }
+}
+
+/// The headset's state with something in every part.
+pub(crate) fn headset_state() -> HeadsetState {
+    HeadsetState {
+        caps: Some(HeadsetCaps {
+            features: vec![state::caps::headset::PHYSICAL, Feature(77)],
+            decoders: vec![Decoder {
+                codec: 1,
+                max_w: 8192,
+                max_h: 4320,
+            }],
+            streams_max: 12,
+            layers_max: 16,
+            model: "Quest 3".into(),
+        }),
+        prefs: Some(Prefs {
+            notifications: true,
+            sound_from_screen: false,
+            focus_mode: false,
+            gaze_mouse_ms: Some(600),
+            no_limits: true,
+        }),
+        presence: Some(Presence { worn: true }),
+        battery: Some(Battery {
+            percent: 72,
+            charging: true,
+        }),
     }
 }
 
 pub(crate) fn host_samples() -> Vec<HostMsg> {
-    vec![
+    let mut samples = vec![
         HostMsg::Welcome {
             version: 2,
             language: "uk".into(),
         },
-        HostMsg::Opened,
+        pc_state().snapshot().unwrap(),
+        HostMsg::Focus {
+            part: Focus { display: None },
+        },
+        HostMsg::Reply {
+            req: ReqId(1),
+            outcome: Outcome::Added { id: DisplayId(9) },
+        },
+        HostMsg::Reply {
+            req: ReqId(u32::MAX),
+            outcome: Outcome::failed(ErrorCode::LIMIT, "6"),
+        },
+        HostMsg::Problem {
+            error: ErrorCode::ENCODER,
+            detail: "vah265enc".into(),
+            display: Some(DisplayId(3)),
+        },
         HostMsg::StreamStart {
-            id: 2,
-            width: 2560,
-            height: 1440,
+            id: DisplayId(2),
+            generation: Gen(7),
+            w: 2560,
+            h: 1440,
             codec: Codec::H265,
-            name: "Prostir-3".into(),
         },
         HostMsg::Frame {
-            id: 2,
+            id: DisplayId(2),
+            generation: Gen(7),
+            seq: 41,
             keyframe: true,
             pts_us: 123_456_789,
             data: vec![0, 0, 0, 1, 0x40],
         },
-        HostMsg::StreamEnd { id: 2 },
-        HostMsg::PrimaryChanged { id: 1 },
-        HostMsg::Order { ids: vec![0, 3, 1] },
-        HostMsg::MirrorWanted { enabled: true },
+        HostMsg::StreamEnd {
+            id: DisplayId(2),
+            generation: Gen(7),
+        },
         HostMsg::Error {
             text: "Не вдалося".into(),
         },
         HostMsg::Audio {
             pcm: vec![0, 1, 2, 3],
         },
-        HostMsg::AudioWanted { enabled: false },
-        HostMsg::MicWanted { enabled: true },
         HostMsg::MicActive { active: true },
         HostMsg::Incompatible {
             protocol: 10,
@@ -117,22 +249,8 @@ pub(crate) fn host_samples() -> Vec<HostMsg> {
         },
         HostMsg::Recenter,
         HostMsg::Notice {
-            text: "Збережено".into(),
+            text: "Нове повідомлення".into(),
         },
-        HostMsg::MouseAt {
-            id: 1,
-            x: 65535,
-            y: 300,
-        },
-        HostMsg::Abilities { bits: 1 },
-        HostMsg::SoundFrom { id: Some(2) },
-        HostMsg::SoundFrom { id: None },
-        HostMsg::PcSettings {
-            settings: settings(),
-            encoders: encoders::GPU_H264 | encoders::GPU_H265,
-        },
-        HostMsg::Focus { id: Some(0) },
-        HostMsg::Focus { id: None },
         HostMsg::PairingRequired,
         HostMsg::PairMsg { msg: [4; 33] },
         HostMsg::PairResult { tag: Some([1; 32]) },
@@ -140,57 +258,69 @@ pub(crate) fn host_samples() -> Vec<HostMsg> {
         HostMsg::Ping { seq: 7 },
         HostMsg::Pong { seq: u32::MAX },
         HostMsg::Goodbye { reason: 3 },
-    ]
+    ];
+    samples.extend(pc_state().parts());
+    samples
 }
 
 pub(crate) fn client_samples() -> Vec<ClientMsg> {
-    vec![
+    let mut samples = vec![
         ClientMsg::Hello {
             version: 2,
             min: 2,
             app: "0.2.0".into(),
         },
-        ClientMsg::Open,
-        ClientMsg::RequestKeyframe { id: 7 },
+        headset_state().open().unwrap(),
+        ClientMsg::RequestKeyframe {
+            id: DisplayId(7),
+            generation: Gen(1),
+        },
         ClientMsg::FrameShown {
-            id: 1,
-            pts_us: 3_600_000_000_123,
+            id: DisplayId(1),
+            generation: Gen(3),
+            seq: 3_600,
         },
-        ClientMsg::AddMonitor {
-            width: 3440,
-            height: 1440,
+        ClientMsg::request(
+            ReqId(1),
+            Request::AddDisplay {
+                mode: Mode::new(3440, 1440),
+            },
+        ),
+        ClientMsg::request(
+            ReqId(2),
+            Request::SetEncoding {
+                bitrate: Some(50),
+                codec: None,
+                software: Some(false),
+                sharp: None,
+            },
+        ),
+        ClientMsg::Request {
+            req: ReqId(3),
+            asked: Asked::Unknown { kind: 200 },
         },
-        ClientMsg::RemoveMonitor { id: 2 },
-        ClientMsg::SetOrder { ids: vec![2, 0, 1] },
-        ClientMsg::SetMirror { enabled: true },
-        ClientMsg::SetPrimary { id: 1 },
-        ClientMsg::SetAudio { enabled: true },
         ClientMsg::SetMic { enabled: false },
         ClientMsg::Mic {
             pcm: vec![1, 0, 2, 0],
         },
-        ClientMsg::SetMonitors {
-            sizes: vec![(2560, 1440), (1440, 2560)],
-            primary: 1,
-        },
-        ClientMsg::SetLayout {
+        ClientMsg::Arrange {
             rows: vec![
-                LayoutRow {
-                    entries: vec![LayoutEntry {
-                        id: 3,
+                Row {
+                    entries: vec![Placed {
+                        id: DisplayId(3),
                         center: Some(-1280),
                         middle: Some(-1500),
                     }],
                 },
-                LayoutRow {
+                Row {
                     entries: vec![
-                        LayoutEntry {
-                            id: 0,
+                        Placed {
+                            id: DisplayId(0),
                             center: Some(-2560),
                             middle: Some(0),
                         },
-                        LayoutEntry {
-                            id: 1,
+                        Placed {
+                            id: DisplayId(100_000),
                             center: None,
                             middle: None,
                         },
@@ -198,29 +328,15 @@ pub(crate) fn client_samples() -> Vec<ClientMsg> {
                 },
             ],
         },
-        ClientMsg::Presence { worn: true },
-        ClientMsg::SetPcSettings {
-            settings: PcSettings {
-                quality: 50,
-                codec: Codec::H265,
-                software: true,
-                sharp: false,
-            },
+        ClientMsg::Gaze {
+            display: Some(DisplayId(3)),
+            u: 100,
+            v: 65535,
         },
-        ClientMsg::Battery {
-            percent: 72,
-            charging: true,
-        },
-        ClientMsg::DetachWindow,
-        ClientMsg::WindowHere { id: 1 },
-        ClientMsg::Screenshot { id: 0 },
-        ClientMsg::FindMouse,
-        ClientMsg::SetNotifications { enabled: true },
-        ClientMsg::SetSoundFromScreen { enabled: true },
         ClientMsg::MouseTo {
-            id: 2,
-            x: 1,
-            y: 65535,
+            id: DisplayId(2),
+            u: 1,
+            v: 65535,
         },
         ClientMsg::PairBegin {
             headset_shows: true,
@@ -231,7 +347,9 @@ pub(crate) fn client_samples() -> Vec<ClientMsg> {
         ClientMsg::Ping { seq: 0 },
         ClientMsg::Pong { seq: 3 },
         ClientMsg::Goodbye { reason: 1 },
-    ]
+    ];
+    samples.extend(headset_state().parts());
+    samples
 }
 
 /// Every message reads back as it was written, and the samples cover every tag.
@@ -274,7 +392,9 @@ fn every_message_round_trips() {
 #[test]
 fn media_by_hand_matches_the_declared_fields() {
     let frame = HostMsg::Frame {
-        id: 4,
+        id: DisplayId(4),
+        generation: Gen(2),
+        seq: 9,
         keyframe: false,
         pts_us: 77,
         data: vec![9; 1000],
@@ -293,9 +413,10 @@ fn media_by_hand_matches_the_declared_fields() {
     let mut payload = Vec::new();
     mic.put_fields(&mut payload).unwrap();
     assert_eq!(client_bytes(&mic), framed(tag::MIC, &payload));
-    // A frame whose keyframe byte is not a boolean.
+    // A frame whose keyframe byte is not a boolean: after the header, the id, the
+    // generation and the number.
     let mut bad = host_bytes(&frame);
-    bad[6] = 2;
+    bad[5 + 12] = 2;
     assert_wire(read_host(&bad), WireError::BadBool(2));
     // Shorter than its header.
     assert_wire(
@@ -375,21 +496,29 @@ fn the_version_handshake_is_frozen() {
 #[test]
 fn messages_are_read_strictly() {
     // Bytes left over after a known message.
-    let mut longer = host_bytes(&HostMsg::StreamEnd { id: 1 });
-    longer[1] = 2;
+    let end = HostMsg::StreamEnd {
+        id: DisplayId(1),
+        generation: Gen(1),
+    };
+    let mut longer = host_bytes(&end);
+    longer[1] += 1;
     longer.push(0);
     assert_wire(read_host(&longer), WireError::Trailing(1));
-    // A codec this build does not know, inside the settings.
+    // A codec this build does not know, in a stream's start: after the id, the
+    // generation and the size.
     let mut payload = Vec::new();
-    HostMsg::PcSettings {
-        settings: settings(),
-        encoders: 1,
+    HostMsg::StreamStart {
+        id: DisplayId(1),
+        generation: Gen(1),
+        w: 640,
+        h: 360,
+        codec: Codec::H264,
     }
     .put_fields(&mut payload)
     .unwrap();
-    payload[4] = 9;
+    payload[16] = 9;
     assert_wire(
-        read_host(&framed(18, &payload)),
+        read_host(&framed(2, &payload)),
         WireError::UnknownTag {
             what: "Codec",
             tag: 9,
@@ -405,60 +534,79 @@ fn messages_are_read_strictly() {
             tag: 2,
         },
     );
-    // A name that is not UTF-8.
-    let mut payload = vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    payload.extend_from_slice(&[2, 0, 0xff, 0xfe]);
-    assert_wire(read_host(&framed(2, &payload)), WireError::BadUtf8);
+    // A text that is not UTF-8.
+    assert_wire(
+        read_host(&framed(20, &[2, 0, 0xff, 0xfe])),
+        WireError::BadUtf8,
+    );
     // Frozen text is UTF-8 too.
     assert_wire(read_host(&framed(6, &[0xc3])), WireError::BadUtf8);
-    // A set of monitors cut off in the middle of a size: one size, its width, half
-    // its height.
+    // An arrangement cut off in the middle of an entry: one row, one entry, half its id.
     assert_wire(
-        read_client(&framed(116, &[1, 0, 1, 0, 0, 0, 2, 0])),
+        read_client(&framed(133, &[1, 0, 1, 0, 7, 0])),
         WireError::Truncated,
+    );
+    // A known kind of request with a byte too many.
+    let mut add = Vec::new();
+    ClientMsg::request(ReqId(1), Request::FindMouse)
+        .put_fields(&mut add)
+        .unwrap();
+    add.push(0);
+    assert_wire(read_client(&framed(131, &add)), WireError::Trailing(1));
+}
+
+/// A request of a kind this build does not know reads with its number, so it can be
+/// answered: its fields are skipped.
+#[test]
+fn a_request_of_an_unknown_kind_keeps_its_number() {
+    let mut payload = 77u32.to_le_bytes().to_vec();
+    payload.extend_from_slice(&[250, 1, 2, 3, 4]);
+    assert_eq!(
+        read_client(&framed(131, &payload)).unwrap(),
+        ClientMsg::Request {
+            req: ReqId(77),
+            asked: Asked::Unknown { kind: 250 },
+        }
     );
 }
 
 #[test]
 fn lists_cannot_hold_more_than_there_can_be() {
-    // 17 ids in an order: one more than a layout may hold.
-    let mut payload = vec![17, 0];
-    payload.extend(0..17);
-    assert_wire(read_host(&framed(8, &payload)), too_long(17, 16));
-    assert_wire(read_client(&framed(108, &payload)), too_long(17, 16));
-    // 17 sizes.
-    let mut payload = vec![17, 0];
-    payload.extend(std::iter::repeat_n(0, 17 * 8));
-    payload.push(0);
-    assert_wire(read_client(&framed(116, &payload)), too_long(17, 16));
-    // 100 empty rows: small on the wire, but not a layout.
-    let mut payload = vec![100, 0];
-    payload.extend(std::iter::repeat_n(0, 200));
-    assert_wire(read_client(&framed(117, &payload)), too_long(100, 16));
-    // Each row within its limit, but 18 monitors in all.
-    let entry = LayoutEntry {
-        id: 0,
-        center: None,
-        middle: None,
-    };
-    let row = LayoutRow {
-        entries: vec![entry; 9],
+    let max = state::MAX_DISPLAYS;
+    // One display more than a list may hold.
+    let many = Displays {
+        displays: (0..=max as u32)
+            .map(|i| display(i, DisplayKind::Virtual))
+            .collect(),
+        primary: None,
     };
     let mut payload = Vec::new();
-    wire::Limited::put(&vec![row.clone(), row], &mut payload, 16).unwrap();
-    assert_wire(read_client(&framed(117, &payload)), too_long(18, 16));
-    // A monitor in two places.
-    let entry = |id| LayoutEntry {
-        id,
+    wire::Limited::put(&many.displays, &mut payload, usize::MAX).unwrap();
+    payload.push(0);
+    assert_wire(read_host(&framed(31, &payload)), too_long(max + 1, max));
+    // 100 empty rows: small on the wire, but not an arrangement.
+    let mut payload = vec![100, 0];
+    payload.extend(std::iter::repeat_n(0, 200));
+    assert_wire(read_client(&framed(133, &payload)), too_long(100, max));
+    // Each row within its limit, but 34 displays in all.
+    let entry = |id| Placed {
+        id: DisplayId(id),
         center: None,
         middle: None,
     };
-    let twice = ClientMsg::SetLayout {
+    let row = |from: u32| Row {
+        entries: (from..from + 17).map(entry).collect(),
+    };
+    let mut payload = Vec::new();
+    wire::Limited::put(&vec![row(0), row(17)], &mut payload, max).unwrap();
+    assert_wire(read_client(&framed(133, &payload)), too_long(34, max));
+    // A display in two places.
+    let twice = ClientMsg::Arrange {
         rows: vec![
-            LayoutRow {
+            Row {
                 entries: vec![entry(0), entry(1)],
             },
-            LayoutRow {
+            Row {
                 entries: vec![entry(1)],
             },
         ],
@@ -474,15 +622,23 @@ fn lists_cannot_hold_more_than_there_can_be() {
 /// A message over its limits is not sent: an error for this connection, not a crash.
 #[test]
 fn a_message_over_its_limits_is_not_sent() {
-    let order = HostMsg::Order {
-        ids: (0..17).collect(),
+    let too_many = HostMsg::Displays {
+        part: Displays {
+            displays: (0..=state::MAX_DISPLAYS as u32)
+                .map(|i| display(i, DisplayKind::Virtual))
+                .collect(),
+            primary: None,
+        },
     };
     let mut out = Vec::new();
-    let err = order.write(&mut out).unwrap_err();
+    let err = too_many.write(&mut out).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     assert_eq!(
         wire_error(&err),
-        Some(&WireError::TooLong { len: 17, max: 16 })
+        Some(&WireError::TooLong {
+            len: state::MAX_DISPLAYS + 1,
+            max: state::MAX_DISPLAYS
+        })
     );
     assert!(out.is_empty(), "nothing half written");
     let name = ClientMsg::PairBegin {
@@ -502,16 +658,16 @@ fn a_pc_message_before_the_session_cannot_be_huge() {
     assert!(host_read(&mut big.as_slice()).is_ok());
     let err = HostMsg::read_setup(&mut big.as_slice()).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-    let opened = host_bytes(&HostMsg::Opened);
+    let required = host_bytes(&HostMsg::PairingRequired);
     assert_eq!(
-        HostMsg::read_setup(&mut opened.as_slice()).unwrap(),
-        HostMsg::Opened
+        HostMsg::read_setup(&mut required.as_slice()).unwrap(),
+        HostMsg::PairingRequired
     );
 }
 
 #[test]
 fn a_headset_message_cannot_be_huge() {
-    let mut big = vec![117];
+    let mut big = vec![133];
     big.extend_from_slice(&(1u32 << 20).to_le_bytes());
     big.extend(std::iter::repeat_n(0u8, 1 << 20));
     let too_large = |big: &[u8]| {
@@ -528,10 +684,15 @@ fn a_headset_message_cannot_be_huge() {
 /// A message from a newer peer is skipped and the next one still reads.
 #[test]
 fn skips_unknown_messages() {
+    let focus = HostMsg::Focus {
+        part: Focus {
+            display: Some(DisplayId(1)),
+        },
+    };
     let mut buf = framed(250, &[1, 2, 3]);
-    HostMsg::Focus { id: Some(1) }.write(&mut buf).unwrap();
+    focus.write(&mut buf).unwrap();
     let mut r = buf.as_slice();
-    assert_eq!(host_read(&mut r).unwrap(), HostMsg::Focus { id: Some(1) });
+    assert_eq!(host_read(&mut r).unwrap(), focus);
     assert!(r.is_empty());
 
     let mut buf = framed(251, &[7; 10]);
@@ -618,6 +779,158 @@ fn development_revisions() {
     assert!(!peer_is_newer(PROTOCOL_VERSION - 1, "0.1.3"));
 }
 
+/// The tags of earlier development builds never come back.
+#[test]
+fn retired_tags_stay_unused() {
+    for tag in RETIRED_HOST_TAGS {
+        assert!(
+            !HostMsg::TAGS.contains(tag),
+            "PC message tag {tag} is retired"
+        );
+    }
+    for tag in RETIRED_CLIENT_TAGS {
+        assert!(
+            !ClientMsg::TAGS.contains(tag),
+            "headset message tag {tag} is retired"
+        );
+    }
+}
+
+/// A snapshot holds every part, read by the same code as the part on its own: the
+/// state from it is the state the parts make one by one. A part this build does not
+/// know is skipped; one twice is an error.
+#[test]
+fn a_snapshot_is_the_parts_together() {
+    let state = pc_state();
+    let HostMsg::Snapshot { parts } = state.snapshot().unwrap() else {
+        panic!("not a snapshot")
+    };
+    assert_eq!(parts[0].tag, 31, "the displays first");
+    assert_eq!(PcState::from_snapshot(&parts).unwrap(), state);
+    let mut one_by_one = PcState::default();
+    for msg in state.parts() {
+        let bytes = host_bytes(&msg);
+        assert_eq!(one_by_one.apply(read_host(&bytes).unwrap()), Ok(None));
+    }
+    assert_eq!(one_by_one, state);
+    // Read back through the wire, whole.
+    let HostMsg::Snapshot { parts: back } =
+        read_host(&host_bytes(&state.snapshot().unwrap())).unwrap()
+    else {
+        panic!("not a snapshot")
+    };
+    assert_eq!(PcState::from_snapshot(&back).unwrap(), state);
+    // A newer PC's part, and a message that is not a part, are skipped.
+    let mut more = parts.clone();
+    more.insert(
+        1,
+        Part {
+            tag: 250,
+            body: vec![1, 2, 3],
+        },
+    );
+    more.push(Part {
+        tag: 25,
+        body: vec![0; 4],
+    });
+    assert_eq!(PcState::from_snapshot(&more).unwrap(), state);
+    let mut twice = parts.clone();
+    twice.push(parts[0].clone());
+    assert!(PcState::from_snapshot(&twice).is_err());
+    // Only what changed goes, the displays first.
+    let mut moved = state.clone();
+    moved.focus = Some(Focus {
+        display: Some(DisplayId(3)),
+    });
+    moved.displays.as_mut().unwrap().primary = None;
+    let changed: Vec<u8> = moved
+        .changed(&state)
+        .iter()
+        .map(HostMsg::wire_tag)
+        .collect();
+    assert_eq!(changed, [31, 16]);
+    assert!(state.changed(&state).is_empty());
+}
+
+/// The headset's state comes the same way in `Open`, which must name what it can do.
+#[test]
+fn open_is_the_headsets_parts_together() {
+    let state = headset_state();
+    let ClientMsg::Open { parts } = read_client(&client_bytes(&state.open().unwrap())).unwrap()
+    else {
+        panic!("not Open")
+    };
+    assert_eq!(HeadsetState::from_open(&parts).unwrap(), state);
+    let no_caps = HeadsetState {
+        caps: None,
+        ..state.clone()
+    };
+    let ClientMsg::Open { parts } = no_caps.open().unwrap() else {
+        panic!("not Open")
+    };
+    assert!(HeadsetState::from_open(&parts).is_err());
+}
+
+/// What the other side says is checked: breaking the protocol's rules ends the
+/// session like a message that does not parse.
+#[test]
+fn values_breaking_the_rules_are_refused() {
+    let mut state = pc_state();
+    // A primary display that is not listed.
+    state.displays.as_mut().unwrap().primary = Some(DisplayId(55));
+    let msg = HostMsg::Displays {
+        part: state.displays.clone().unwrap(),
+    };
+    assert!(matches!(
+        wire_error(&read_host(&host_bytes(&msg)).unwrap_err()),
+        Some(WireError::Invalid(_))
+    ));
+    // The mouse on a display that is not listed.
+    let mut state = pc_state();
+    state.focus = Some(Focus {
+        display: Some(DisplayId(55)),
+    });
+    let HostMsg::Snapshot { parts } = state.snapshot().unwrap() else {
+        panic!("not a snapshot")
+    };
+    assert!(PcState::from_snapshot(&parts).is_err());
+    // A decoder of no size.
+    let mut caps = headset_state().caps.unwrap();
+    caps.decoders[0].max_h = 0;
+    let msg = ClientMsg::HeadsetCaps { part: caps };
+    assert!(read_client(&client_bytes(&msg)).is_err());
+}
+
+/// The largest snapshot (32 displays with the longest texts) is far below a frame:
+/// a check that nothing in it grows out of proportion.
+#[test]
+fn the_largest_snapshot_is_small() {
+    let mut state = pc_state();
+    let window = Display {
+        kind: DisplayKind::Window {
+            title: "t".repeat(state::MAX_TITLE),
+        },
+        name: "n".repeat(state::MAX_DISPLAY_NAME),
+        state: DisplayState::Failed {
+            error: ErrorCode::OTHER,
+            detail: "d".repeat(state::MAX_DETAIL),
+        },
+        ..display(0, DisplayKind::Virtual)
+    };
+    state.displays = Some(Displays {
+        displays: (0..state::MAX_DISPLAYS as u32)
+            .map(|i| Display {
+                id: DisplayId(i),
+                ..window.clone()
+            })
+            .collect(),
+        primary: None,
+    });
+    state.focus = None;
+    let bytes = host_bytes(&state.snapshot().unwrap());
+    assert!(bytes.len() < 32 * 1024, "{} bytes", bytes.len());
+}
+
 /// A small random number generator, the same numbers on every run.
 pub(crate) struct Seeded(pub(crate) u64);
 
@@ -680,8 +993,13 @@ fn damaged_messages_never_panic_and_read_back_exactly() {
             Ok(msg) => {
                 read += 1;
                 let taken = &bytes[..bytes.len() - r.len()];
-                // An unknown message skipped before it is not written back.
-                assert!(taken.ends_with(&host_bytes(&msg)), "{msg:?} from {bytes:?}");
+                // An unknown message skipped before it is not written back, and an
+                // unknown part of a snapshot is not either: what was read is.
+                let again = host_bytes(&msg);
+                assert!(
+                    taken.ends_with(&again) || read_host(&again).unwrap() == msg,
+                    "{msg:?} from {bytes:?}"
+                );
             }
             Err(_) => refused += 1,
         }
@@ -694,8 +1012,10 @@ fn damaged_messages_never_panic_and_read_back_exactly() {
             Ok(msg) => {
                 read += 1;
                 let taken = &bytes[..bytes.len() - r.len()];
+                // A request of an unknown kind keeps only its kind.
+                let again = client_bytes(&msg);
                 assert!(
-                    taken.ends_with(&client_bytes(&msg)),
+                    taken.ends_with(&again) || read_client(&again).unwrap() == msg,
                     "{msg:?} from {bytes:?}"
                 );
             }
