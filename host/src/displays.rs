@@ -2168,7 +2168,7 @@ impl Displays {
         };
         // Every applied change makes KWin reconfigure its outputs, which also cuts the
         // laptop mirror's stream: `place` only sends what actually differs.
-        let positions: Vec<(OutputKey, i32, i32)> = plan
+        let mut positions: Vec<(OutputKey, i32, i32)> = plan
             .iter()
             .map(|p| (names[&p.id].clone(), p.x, p.y))
             .collect();
@@ -2181,14 +2181,30 @@ impl Displays {
                 ScreenKind::Physical { key, .. } => Some(OutputKey::new(key.connector.as_str())),
                 _ => s.output_key().cloned(),
             });
+        // A desktop whose primary output is always at (0, 0) moves with it: the whole
+        // plan shifts so that it is, the same for the desktop and the headset's map.
+        let (dx, dy) = if self.desktop.caps().origin_is_primary {
+            let main = primary.clone().or_else(|| {
+                geometries
+                    .iter()
+                    .find(|(_, g)| g.priority == Some(1))
+                    .map(|(key, _)| key.clone())
+            });
+            origin_at(&positions, main.as_ref())
+        } else {
+            (0, 0)
+        };
+        for (_, x, y) in &mut positions {
+            (*x, *y) = (*x - dx, *y - dy);
+        }
         self.desktop
             .place(&DeskPlan { positions, primary }, &geometries)?;
         self.on_desk = plan
             .iter()
             .map(|p| {
                 let rect = state::DeskRect {
-                    x: p.x,
-                    y: p.y,
+                    x: p.x - dx,
+                    y: p.y - dy,
                     w: p.w.max(0) as u32,
                     h: p.h.max(0) as u32,
                 };
@@ -2693,6 +2709,13 @@ fn show_sharing_tip(number: u32) {
     dialogs::notify(t("Показ екрана", "Screen sharing"), &body);
 }
 
+/// How far a plan moves so that output `main` is at (0, 0): where `positions` put it
+/// (nothing, without it).
+fn origin_at(positions: &[(OutputKey, i32, i32)], main: Option<&OutputKey>) -> (i32, i32) {
+    main.and_then(|m| positions.iter().find(|(key, _, _)| key == m))
+        .map_or((0, 0), |(_, x, y)| (*x, *y))
+}
+
 /// Whether the desktop closed `output`. One paused for a while is not closed: it comes
 /// back by itself.
 fn closed(output: &dyn Output) -> bool {
@@ -3049,6 +3072,20 @@ mod tests {
         router.attach(outbox.clone(), headset());
         keyframe(&router, s);
         assert!(sent(&outbox).is_empty());
+    }
+
+    /// On a desktop whose primary output is always at (0, 0), the plan moves with it.
+    #[test]
+    fn a_plan_moves_with_a_primary_at_the_origin() {
+        let key = OutputKey::new;
+        let positions = [
+            (key("a"), -1920, 0),
+            (key("b"), 0, 0),
+            (key("c"), 640, 1080),
+        ];
+        assert_eq!(origin_at(&positions, Some(&key("c"))), (640, 1080));
+        assert_eq!(origin_at(&positions, Some(&key("x"))), (0, 0));
+        assert_eq!(origin_at(&positions, None), (0, 0));
     }
 
     /// A display of the PC is known by its EDID wherever it is plugged in; one that says

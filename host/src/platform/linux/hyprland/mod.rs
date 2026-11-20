@@ -24,7 +24,7 @@ use crate::encoder::Encoder;
 use crate::platform::linux::{is_panel, named_virtual};
 use crate::platform::{
     AddModel, Cursor, DeskPlan, Desktop, DesktopCaps, FrameSource, Geometry, Memory, Origin,
-    Output, OutputHealth, OutputKey, Outputs, PhysicalDisplay, Pointer, Scales, Units, VirtualSpec,
+    Output, OutputHealth, OutputKey, Outputs, PhysicalDisplay, Pointer, Scales, VirtualSpec,
     Windows,
 };
 use screencopy::Capture;
@@ -633,7 +633,6 @@ impl Hyprland {
                 name: "Hyprland",
                 virtual_monitors: Ok(AddModel::OneByOne),
                 has_primary: false,
-                units: Units::Logical,
                 origin_is_primary: false,
                 scales: Scales::Any { min: 50, max: 400 },
                 refresh: vec![60],

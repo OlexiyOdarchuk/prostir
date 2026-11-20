@@ -7,6 +7,12 @@
 //! answer fits all (the capabilities in [`DesktopCaps`], the kind of memory frames live
 //! in, the state of an output), not as more traits.
 //!
+//! Positions and sizes crossing the contract are in logical pixels (an output's pixels
+//! divided by its scale), whatever the desktop works in: one in pixels converts in
+//! [`Desktop::outputs`], [`Desktop::place`], [`Windows::active`] and
+//! [`Pointer::position`]. A window panel's pixel size is its logical size times its
+//! scale (`layout::panel_size`), on every desktop.
+//!
 //! # What is not in the contract
 //!
 //! Services of the operating system that do not depend on the desktop, and run from
@@ -31,16 +37,18 @@
 //!    a monitor answers with its [`Unavailable::error`].
 //! 2. Adding a monitor may restart all of them (an unchanged Virtual Display Driver):
 //!    [`AddModel::RestartsAll`], so their streams breaking together is no failure of
-//!    each. Our own driver, modelled on SudoVDA, is [`AddModel::OneByOne`].
+//!    each. Our own driver, modelled on SudoVDA, is [`AddModel::OneByOne`]; the
+//!    unchanged Virtual Display Driver is ruled out, even as a fallback.
 //! 3. Refresh rates: [`VirtualSpec::refresh`], one of [`DesktopCaps::refresh`]
 //!    (Linux: 60 only).
 //! 4. Scales in steps, through an undocumented call: [`VirtualSpec::scale`] in percent,
 //!    [`Scales::Steps`]; the scales offered to the headset are those of
 //!    [`DesktopCaps::scales`] (`Displays::scales`), and the desktop checks its own.
-//! 5. Physical pixels, the primary output always at (0, 0): [`DesktopCaps::units`] and
-//!    [`DesktopCaps::origin_is_primary`]. The core plans in logical pixels; turning a
-//!    [`DeskPlan`] into the desktop's units and shifting the whole desktop is the work
-//!    of [`Desktop::place`].
+//! 5. Physical pixels, the primary output always at (0, 0): the desktop converts to and
+//!    from logical pixels itself (see above), and with
+//!    [`DesktopCaps::origin_is_primary`] the core shifts its whole plan so the primary
+//!    output is at (0, 0) before [`Desktop::place`], and tells the headset the shifted
+//!    places.
 //! 6. Output names that change (`\\.\DISPLAYn`, `HMONITOR`, the adapter's LUID):
 //!    [`OutputKey`], which the desktop makes and keeps (the serial number our driver
 //!    writes from [`VirtualSpec::id`], the device path or EDID of a real display).
@@ -76,9 +84,10 @@
 //! - Our monitors' frames come straight from the driver's swap chain, real displays
 //!   through Desktop Duplication: [`Origin::Monitor`] beside [`Origin::Capture`].
 //! - Windows moves monitors by itself after each one comes or goes (it closes gaps and
-//!   brings back the places it saved), and a real display can lose its mode when all
-//!   virtual ones go at once: [`Desktop::make`] and the drop of an [`Output`] put the
-//!   layout and the modes back before they return.
+//!   brings back the places it saved): [`Desktop::make`] and the drop of an [`Output`]
+//!   put Prostir's layout back before they return. A real display can also lose its
+//!   mode when all virtual ones go at once: the drop of an [`Output`] puts the modes of
+//!   the real displays back.
 //!
 //! # What GNOME does differently
 //!
@@ -86,7 +95,7 @@
 //!   PipeWire like KWin's: [`Origin::Monitor`], [`Memory::DmaBuf`]; they go with the
 //!   D-Bus connection ([`DesktopCaps::cleans_up_after_crash`]).
 //! - Placement through `DisplayConfig.ApplyMonitorsConfig`, whose layout mode may be
-//!   physical ([`DesktopCaps::units`]) and whose scales are those each mode supports
+//!   physical (converted by the desktop) and whose scales are those each mode supports
 //!   ([`Scales::Steps`]); it has a primary monitor ([`DesktopCaps::has_primary`]).
 //! - No way to move windows or find the mouse without a Shell extension:
 //!   [`Desktop::windows`] and [`Desktop::pointer`] give none, so there are no window
@@ -223,10 +232,10 @@ pub struct AppWindow {
 
 /// The mouse.
 pub trait Pointer {
-    /// Where it is on the desktop, in the desktop's units ([`DesktopCaps::units`]).
+    /// Where it is on the desktop, in logical pixels.
     fn position(&mut self) -> Option<(i32, i32)>;
 
-    /// Puts it at `x`,`y`; whether that worked (never, where
+    /// Puts it at `x`,`y` (logical pixels); whether that worked (never, where
     /// [`DesktopCaps::moves_pointer`] is false).
     fn move_to(&mut self, x: i32, y: i32) -> bool;
 }
@@ -369,14 +378,8 @@ pub struct DesktopCaps {
     pub virtual_monitors: Result<AddModel, Unavailable>,
     /// It has a primary output (where the panel and new windows go).
     pub has_primary: bool,
-    /// What its positions and sizes are in.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "every Linux desktop is logical")
-    )]
-    pub units: Units,
-    /// The primary output is always at (0, 0): the whole desktop moves with it.
-    #[cfg_attr(not(test), expect(dead_code, reason = "Windows only"))]
+    /// The primary output is always at (0, 0): the core shifts its whole plan so that
+    /// it is (the places the headset is told shift with it).
     pub origin_is_primary: bool,
     /// The scales it gives an output, in percent.
     pub scales: Scales,
@@ -415,8 +418,10 @@ pub enum AddModel {
     OneByOne,
     /// Adding or removing one makes every virtual monitor start over (a driver that
     /// restarts its adapter): all their streams break at once, which is no failure of
-    /// each.
-    #[cfg_attr(not(test), expect(dead_code, reason = "Windows only, as a fallback"))]
+    /// each. No driver Prostir ships works so: the unchanged Virtual Display Driver
+    /// does, and the owner ruled it out even as a fallback (it loses the layout and
+    /// the names). Kept so a desktop can say it of a driver it finds.
+    #[cfg_attr(not(test), expect(dead_code, reason = "no driver Prostir uses"))]
     RestartsAll,
 }
 
@@ -427,16 +432,6 @@ pub struct Unavailable {
     pub error: UserError,
     /// What the person at the PC is told.
     pub why: String,
-}
-
-/// What a desktop's positions and sizes are in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Units {
-    /// Logical pixels: an output's size is its pixels divided by its scale.
-    Logical,
-    /// Pixels.
-    #[cfg_attr(not(test), expect(dead_code, reason = "Windows only"))]
-    Physical,
 }
 
 /// The scales a desktop gives an output, in percent.
@@ -497,7 +492,7 @@ impl std::fmt::Display for VirtualSpec {
 /// Where outputs go on the desktop.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DeskPlan {
-    /// Each output's top-left corner, in the desktop's units.
+    /// Each output's top-left corner, in logical pixels.
     pub positions: Vec<(OutputKey, i32, i32)>,
     /// The output to make primary, where the desktop has one.
     pub primary: Option<OutputKey>,
@@ -506,7 +501,7 @@ pub struct DeskPlan {
 /// Every output on the desktop, by key.
 pub type Outputs = HashMap<OutputKey, Geometry>;
 
-/// Where an output is on the desktop: position and size in the desktop's units, and its
+/// Where an output is on the desktop: position and size in logical pixels, and its
 /// priority (1 = primary; only KDE has priorities).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Geometry {
@@ -547,7 +542,7 @@ pub struct ActiveWindow {
         expect(dead_code, reason = "the fake desktop has no windows")
     )]
     pub id: String,
-    /// Size on the desktop, in its units.
+    /// Size on the desktop, in logical pixels.
     pub width: i32,
     pub height: i32,
     /// Scale of the output it is on.
@@ -570,7 +565,6 @@ mod windows_shape {
             name: "Windows",
             virtual_monitors: Ok(AddModel::OneByOne),
             has_primary: true,
-            units: Units::Physical,
             origin_is_primary: true,
             scales: Scales::Steps(vec![100, 125, 150, 175, 200]),
             refresh: vec![60, 72, 90, 120],
@@ -588,7 +582,6 @@ mod windows_shape {
             Some(&AddModel::OneByOne)
         );
         assert!(caps.has_primary && caps.origin_is_primary && caps.cleans_up_after_crash);
-        assert_eq!(caps.units, Units::Physical);
         assert!(caps.scales.allows(125) && !caps.scales.allows(130));
         assert_eq!(caps.refresh_for_new(), 60);
         assert!(caps.screenshot_one_output && caps.moves_pointer);

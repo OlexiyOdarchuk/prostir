@@ -14,8 +14,7 @@ use log::info;
 use crate::encoder::Encoder;
 use crate::platform::{
     AddModel, Cursor, DeskPlan, Desktop, DesktopCaps, FrameSource, Memory, Origin, Output,
-    OutputHealth, OutputKey, Outputs, PhysicalDisplay, Pointer, Scales, Units, VirtualSpec,
-    Windows,
+    OutputHealth, OutputKey, Outputs, PhysicalDisplay, Pointer, Scales, VirtualSpec, Windows,
 };
 use virtual_output::{Screencast, VirtualOutput};
 use windows::KdeWindows;
@@ -44,7 +43,6 @@ impl Kde {
                 name: "KDE Plasma",
                 virtual_monitors: Ok(AddModel::OneByOne),
                 has_primary: true,
-                units: Units::Logical,
                 origin_is_primary: false,
                 scales: Scales::Any { min: 50, max: 400 },
                 refresh: vec![60],

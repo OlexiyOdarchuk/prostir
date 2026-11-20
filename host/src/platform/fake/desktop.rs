@@ -30,7 +30,7 @@ use super::screen::{self, Picture, Screen};
 use crate::encoder::{Encoder, Input};
 use crate::platform::{
     AddModel, Cursor, DeskPlan, Desktop, DesktopCaps, FrameSource, Geometry, Memory, Origin,
-    Output, OutputHealth, OutputKey, Outputs, PhysicalDisplay, Pointer, Scales, Units, VirtualSpec,
+    Output, OutputHealth, OutputKey, Outputs, PhysicalDisplay, Pointer, Scales, VirtualSpec,
     Windows,
 };
 
@@ -138,7 +138,6 @@ impl FakeDesktop {
                 name: "fake",
                 virtual_monitors: Ok(AddModel::OneByOne),
                 has_primary: false,
-                units: Units::Logical,
                 origin_is_primary: false,
                 scales: Scales::Any { min: 50, max: 400 },
                 refresh: vec![60],
