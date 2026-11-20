@@ -70,7 +70,8 @@ fn assert_asleep(pc: &Pc, when: &str) {
 }
 
 /// Waiting for a headset, the PC sleeps: before the first session, while it keeps
-/// the monitors for the headset to come back, and after that once they are gone.
+/// the monitors for the headset to come back, and after that once they are gone; its
+/// local API on the session bus too.
 #[test]
 fn an_idle_pc_sleeps() {
     const LINGER: u64 = 15;
@@ -82,6 +83,10 @@ fn an_idle_pc_sleeps() {
         ..Options::default()
     };
     let mut pc = Pc::start(&dir, &options);
+    // With the local API on its session bus (where there is one), asked once.
+    if let Some(status) = pc.ctl(&["status"]) {
+        assert_eq!(status.code, 0, "{status:?}");
+    }
     assert_asleep(&pc, "before the first headset");
     let mut headset = connect(&pc, &mut keys);
     headset

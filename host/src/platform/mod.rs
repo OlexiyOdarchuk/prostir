@@ -34,6 +34,9 @@
 //! - `notifications::watch`: the PC's desktop notifications, as text.
 //! - `tray`: `spawn`, `Handle`, `set_status`, `set_battery`, `set_settings`,
 //!   `set_pairing`; the tray menu also turns autostart on and off.
+//! - `autostart`: `available`, `enabled`, `set` (starting with the session).
+//! - The local API's transport (`local_api` on Linux: D-Bus): `serve`, and a
+//!   `Client` for `prostir ctl`.
 //! - `dialogs`: `ask_code` (the pairing code typed on the PC), `notify` and
 //!   `notify_and_wait` (desktop notifications).
 //! - System: `config_home`, `single_instance`, `clean_up_after_crash`,
@@ -89,6 +92,10 @@ pub use net::*;
 // Signals that ask the program to quit, the same on every Linux desktop and the fake one.
 mod signals;
 pub use signals::quit_on_signals;
+
+// The local API on the session bus, the same on every Linux desktop and the fake one.
+#[cfg(target_os = "linux")]
+pub mod local_api;
 
 #[cfg(not(any(target_os = "linux", feature = "fake-desktop")))]
 compile_error!("Prostir has no platform layer for this operating system yet (see platform/mod.rs)");
@@ -182,12 +189,10 @@ pub enum TrayCommand {
     SetCounting(bool),
     /// Drop all paired headsets: each must pair again.
     ForgetHeadsets,
-    /// Ask the headset to do something (bring the monitors in front, say); what came
-    /// of it goes to `reply`, as a line, when there is one to tell.
-    Headset {
-        asked: prostir_proto::request::Asked<prostir_proto::request::Command>,
-        reply: Option<std::sync::mpsc::Sender<String>>,
-    },
+    /// Ask the headset to do something (bring the monitors in front, say).
+    Headset(prostir_proto::request::Asked<prostir_proto::request::Command>),
+    /// Open the settings window.
+    ShowSettings,
     Quit,
 }
 

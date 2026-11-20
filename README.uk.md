@@ -489,15 +489,40 @@ Wi-Fi і дає найстабільнішу картинку. Для нього
 Трей показує, чи підключено шолом, скільки моніторів і заряд шолома; коли той падає до
 15 %, ПК показує сповіщення. З трею можна поставити монітори перед собою, змінити якість
 відео й чіткіший текст (ті самі налаштування, що в меню шолома), запуск разом із
-системою (KDE), увімкнути чи вимкнути лічильник користувачів, забути сполучені шоломи й
-вийти.
+системою (KDE), відкрити налаштування, увімкнути чи вимкнути лічильник користувачів,
+забути сполучені шоломи й вийти.
 
 ### Командний рядок
 
 ```
-prostir [--monitor WxH[@scale]]... [--codec h265|h264] [--bitrate MBPS] [--software]
+prostir [serve] [--monitor WxH[@scale]]... [--codec h265|h264] [--bitrate MBPS] [--software]
         [--keep-primary] [--linger SECONDS] [--port PORT] [--no-discovery] [--no-adb]
+prostir open
+prostir ctl КОМАНДА [--json]
 ```
+
+`prostir` (чи `prostir serve`) запускає Prostir. `prostir open`, який запускає значок у
+меню, відкриває вікно налаштувань, а якщо Prostir не працює, спершу запускає його.
+
+`prostir ctl` звертається до Prostir, що працює, з термінала, скрипту чи гарячої
+клавіші (комбінації клавіш KDE, `bind` у Hyprland): `prostir ctl recenter`, `prostir
+ctl profile Робота`, `prostir ctl closer 2`, `prostir ctl monitor add 2560x1440@125%`,
+`prostir ctl quality 50`, `prostir ctl status`, `prostir ctl watch` (рядок на кожну
+зміну, до Ctrl+C). `prostir ctl help` показує всі команди. З `--json` кожна пише JSON.
+Код виходу каже, що вийшло: 0 зроблено, 1 не вдалося, 2 Prostir не працює чи немає
+шолома, 3 немає відповіді вчасно, 64 неправильні аргументи.
+
+Інші програми дістають те саме на сеансовій шині D-Bus як
+`io.github.OlexiyOdarchuk.Prostir` (лише програми вашого ж користувача). Команда шолому
+може тривати до 30 с, довше, ніж `busctl` і `gdbus` чекають за замовчуванням, тож
+дайте їм `--timeout=35`:
+
+```
+busctl --user --timeout=35 call io.github.OlexiyOdarchuk.Prostir \
+    /io/github/OlexiyOdarchuk/Prostir io.github.OlexiyOdarchuk.Prostir1 Recenter
+```
+
+Методи, сигнали, помилки й JSON стану описано в [LOCAL-API.md](LOCAL-API.md).
 
 Без `--monitor` Prostir повертає монітори з минулого сеансу, кожен зі своїм номером,
 тож шолом знаходить його там, де він був. Вони записані в

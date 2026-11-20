@@ -2,7 +2,8 @@
 
 This document describes how the PC program (`host/`) and the Meta Quest app (`client/`)
 talk to each other. It is meant for anyone who wants to understand the connection or
-write their own client or host.
+write their own client or host. How programs on the PC talk to the PC program
+(`prostir ctl`, the settings window, D-Bus) is in [LOCAL-API.md](LOCAL-API.md).
 
 The source of truth is the code: [`proto/src/lib.rs`](proto/src/lib.rs) (messages),
 [`proto/src/state.rs`](proto/src/state.rs) (the state each side keeps),

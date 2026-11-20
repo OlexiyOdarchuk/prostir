@@ -92,6 +92,17 @@
 - The codec you choose in the headset stays chosen when the graphics card has to use
   another one.
 
+### Control from the PC
+
+- `prostir ctl` asks the running Prostir from a terminal, a script or a hot key:
+  `prostir ctl recenter`, `prostir ctl profile Work`, `prostir ctl monitor add
+  2560x1440@125%`, `prostir ctl status`, `prostir ctl watch` (the headset connecting,
+  taken off, put on, leaving), each with `--json` and exit codes for scripts.
+- The same on D-Bus for other programs and hot keys (`io.github.OlexiyOdarchuk.Prostir`
+  on the session bus, see `LOCAL-API.md`).
+- The menu entry runs `prostir open`: it starts Prostir if it is not running and opens
+  the settings window; the tray has "Settings…" too. `prostir` alone works as before.
+
 ### Sound
 
 - The PC tray says when the headset's microphone has no permission to record, so a
