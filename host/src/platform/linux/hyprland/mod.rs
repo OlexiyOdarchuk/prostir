@@ -12,8 +12,8 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -252,46 +252,71 @@ impl Rule {
     }
 }
 
-/// Every rule Prostir has set, by output: a config reload drops runtime rules, and
-/// these are put back afterwards.
-static APPLIED: Mutex<BTreeMap<String, Rule>> = Mutex::new(BTreeMap::new());
-
-/// Which way monitor rules are accepted: 0 not known yet, 1 Lua, 2 keyword.
-static DIALECT: AtomicU8 = AtomicU8::new(0);
-
 fn ok(reply: &str) -> bool {
     reply.trim() == "ok" || reply.lines().all(|l| l.trim() == "ok")
 }
 
-/// Applies monitor rules in one request and remembers them.
-pub fn apply(rules: &[Rule]) -> bool {
-    let mut applied = APPLIED.lock().unwrap();
-    for r in rules {
-        applied.insert(r.name.clone(), r.clone());
-    }
-    drop(applied);
-    send(rules)
+/// What Prostir keeps of Hyprland's monitor rules while it is the desktop: shared by
+/// the desktop, its outputs (which forget their rules when removed) and the thread that
+/// puts the rules back after a config reload.
+#[derive(Default)]
+struct Rules {
+    /// Every rule Prostir has set, by output: a config reload drops runtime rules, and
+    /// these are put back afterwards.
+    applied: Mutex<BTreeMap<String, Rule>>,
+    /// Which way monitor rules are accepted: 0 not known yet, 1 Lua, 2 keyword.
+    dialect: AtomicU8,
+    /// Where real displays stood before Prostir moved them, to put them back after.
+    original: Mutex<BTreeMap<String, (i32, i32)>>,
+    /// The event stream the reload watcher reads, closed when the desktop goes so the
+    /// watcher ends.
+    events: Mutex<Option<UnixStream>>,
 }
 
-/// Hyprland re-reads its config whenever the file is saved, which resets our outputs
-/// to its own rules. Watches for that and puts Prostir's layout back.
-fn keep_rules_after_reloads() {
-    static STARTED: std::sync::Once = std::sync::Once::new();
-    STARTED.call_once(|| {
+impl Rules {
+    /// Applies monitor rules in one request and remembers them.
+    fn apply(&self, rules: &[Rule]) -> bool {
+        let mut applied = self.applied.lock().unwrap();
+        for r in rules {
+            applied.insert(r.name.clone(), r.clone());
+        }
+        drop(applied);
+        self.send(rules)
+    }
+
+    /// Hyprland re-reads its config whenever the file is saved, which resets our
+    /// outputs to its own rules. Watches for that and puts Prostir's layout back, until
+    /// the rules are dropped (see [`Rules::stop_watching`]).
+    fn keep_after_reloads(self: &Arc<Self>) {
+        let rules = Arc::downgrade(self);
         let spawned = std::thread::Builder::new()
             .name("hyprland-events".into())
-            .spawn(|| {
+            .spawn(move || {
                 loop {
                     if let Some(path) = socket("socket2")
                         && let Ok(stream) = UnixStream::connect(path)
                     {
+                        let Some(alive) = rules.upgrade() else {
+                            return;
+                        };
+                        *alive.events.lock().unwrap() = stream.try_clone().ok();
+                        drop(alive);
                         for line in BufReader::new(stream).lines() {
                             let Ok(line) = line else { break };
+                            if rules.strong_count() == 0 {
+                                return;
+                            }
                             if line.starts_with("configreloaded>>") {
                                 std::thread::sleep(Duration::from_millis(200));
-                                reapply();
+                                let Some(alive) = rules.upgrade() else {
+                                    return;
+                                };
+                                alive.reapply();
                             }
                         }
+                    }
+                    if rules.strong_count() == 0 {
+                        return;
                     }
                     std::thread::sleep(Duration::from_secs(2));
                 }
@@ -299,74 +324,211 @@ fn keep_rules_after_reloads() {
         if let Err(e) = spawned {
             warn!("cannot watch Hyprland events: {e}");
         }
-    });
-}
-
-/// Puts back the remembered rules: always for our outputs, and for real displays only
-/// while they are on (the config may have just switched one off, e.g. a closed lid).
-fn reapply() {
-    let present = monitors();
-    let rules: Vec<Rule> = APPLIED
-        .lock()
-        .unwrap()
-        .values()
-        .filter(|r| {
-            r.name.starts_with(PREFIX) || present.iter().any(|m| m.name == r.name && !m.disabled)
-        })
-        .cloned()
-        .collect();
-    if !rules.is_empty() {
-        info!(
-            "Hyprland reloaded its config: restoring {} monitor rules",
-            rules.len()
-        );
-        let _ = send(&rules);
     }
-}
 
-/// Sends `rules` to Hyprland; whether it took them.
-fn send(rules: &[Rule]) -> bool {
-    if rules.is_empty() {
-        return true;
+    /// Ends the reload watcher: its event stream closes under it.
+    fn stop_watching(&self) {
+        if let Some(stream) = self.events.lock().unwrap().take() {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
     }
-    let lua = || {
-        format!(
-            "eval {}",
-            rules.iter().map(Rule::lua).collect::<Vec<_>>().join(" ")
-        )
-    };
-    let keyword = || {
-        let all: Vec<String> = rules.iter().map(Rule::keyword).collect();
-        format!("[[BATCH]]{}", all.join(";"))
-    };
-    let attempt = |dialect: u8| {
-        let command = if dialect == 1 { lua() } else { keyword() };
-        match request(&command) {
-            Ok(reply) if ok(&reply) => true,
-            Ok(reply) => {
-                if DIALECT.load(Ordering::Relaxed) != 0 {
-                    warn!("Hyprland refused {command:?}: {}", reply.trim());
+
+    /// Puts back the remembered rules: always for our outputs, and for real displays
+    /// only while they are on (the config may have just switched one off, e.g. a closed
+    /// lid).
+    fn reapply(&self) {
+        let present = monitors();
+        let rules: Vec<Rule> = self
+            .applied
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|r| {
+                r.name.starts_with(PREFIX)
+                    || present.iter().any(|m| m.name == r.name && !m.disabled)
+            })
+            .cloned()
+            .collect();
+        if !rules.is_empty() {
+            info!(
+                "Hyprland reloaded its config: restoring {} monitor rules",
+                rules.len()
+            );
+            let _ = self.send(&rules);
+        }
+    }
+
+    /// Sends `rules` to Hyprland; whether it took them.
+    fn send(&self, rules: &[Rule]) -> bool {
+        if rules.is_empty() {
+            return true;
+        }
+        let lua = || {
+            format!(
+                "eval {}",
+                rules.iter().map(Rule::lua).collect::<Vec<_>>().join(" ")
+            )
+        };
+        let keyword = || {
+            let all: Vec<String> = rules.iter().map(Rule::keyword).collect();
+            format!("[[BATCH]]{}", all.join(";"))
+        };
+        let attempt = |dialect: u8| {
+            let command = if dialect == 1 { lua() } else { keyword() };
+            match request(&command) {
+                Ok(reply) if ok(&reply) => true,
+                Ok(reply) => {
+                    if self.dialect.load(Ordering::Relaxed) != 0 {
+                        warn!("Hyprland refused {command:?}: {}", reply.trim());
+                    }
+                    false
                 }
+                Err(e) => {
+                    warn!("Hyprland: {e:#}");
+                    false
+                }
+            }
+        };
+        match self.dialect.load(Ordering::Relaxed) {
+            0 => {
+                for dialect in [1, 2] {
+                    if attempt(dialect) {
+                        self.dialect.store(dialect, Ordering::Relaxed);
+                        return true;
+                    }
+                }
+                warn!("Hyprland accepted no monitor rule for {rules:?}");
                 false
             }
-            Err(e) => {
-                warn!("Hyprland: {e:#}");
-                false
+            d => attempt(d),
+        }
+    }
+
+    /// Creates a headless output (or takes over one left from an earlier run) and
+    /// gives it the size of `spec`. Placement comes later, with the whole layout.
+    fn create(&self, spec: &VirtualSpec) -> Result<String> {
+        let number = spec.number;
+        let name = output_name(number);
+        if !monitors().iter().any(|m| m.name == name) {
+            let reply = request(&format!("output create headless {name}"))?;
+            if !ok(&reply) {
+                bail!("Hyprland cannot create {name}: {}", reply.trim());
             }
         }
-    };
-    match DIALECT.load(Ordering::Relaxed) {
-        0 => {
-            for dialect in [1, 2] {
-                if attempt(dialect) {
-                    DIALECT.store(dialect, Ordering::Relaxed);
-                    return true;
+        // Out of the way until the layout is applied, so it overlaps nothing.
+        self.apply(&[Rule {
+            name: name.clone(),
+            width: spec.w as i32,
+            height: spec.h as i32,
+            refresh: f64::from(spec.refresh),
+            x: 100_000 + 10_000 * number as i32,
+            y: 0,
+            scale: spec.factor(),
+        }]);
+        info!("created {name} ({spec})");
+        Ok(name)
+    }
+
+    fn remove(&self, name: &str) {
+        self.applied.lock().unwrap().remove(name);
+        match request(&format!("output remove {name}")) {
+            Ok(reply) if ok(&reply) => info!("removed {name}"),
+            Ok(reply) => warn!("Hyprland did not remove {name}: {}", reply.trim()),
+            Err(e) => warn!("cannot remove {name}: {e:#}"),
+        }
+    }
+
+    /// Removes outputs a previous run left behind (Hyprland keeps headless outputs
+    /// after the program that made them is gone), so the windows on them come back.
+    fn remove_leftovers(&self) {
+        self.restore_real_outputs();
+        for m in monitors() {
+            if m.name.starts_with(PREFIX) {
+                self.remove(&m.name);
+            }
+        }
+    }
+
+    /// Puts the real displays back where they were and forgets the rules for them, so
+    /// a later config reload does not move them again.
+    fn restore_real_outputs(&self) {
+        let original = std::mem::take(&mut *self.original.lock().unwrap());
+        {
+            let mut applied = self.applied.lock().unwrap();
+            for name in original.keys() {
+                applied.remove(name);
+            }
+        }
+        let current = monitors();
+        let rules: Vec<Rule> = original
+            .into_iter()
+            .filter_map(|(name, (x, y))| {
+                let m = current.iter().find(|m| m.name == name && !m.disabled)?;
+                ((m.x, m.y) != (x, y)).then_some(Rule {
+                    name,
+                    width: m.width,
+                    height: m.height,
+                    refresh: m.refresh,
+                    x,
+                    y,
+                    scale: m.scale,
+                })
+            })
+            .collect();
+        if !rules.is_empty() {
+            info!("putting {} display(s) back where they were", rules.len());
+            let _ = self.send(&rules);
+        }
+    }
+
+    /// Moves outputs to new logical positions, keeping their modes and scales; whether
+    /// Hyprland took them.
+    fn place(&self, positions: &[(String, i32, i32)]) -> bool {
+        let current = monitors();
+        {
+            let mut original = self.original.lock().unwrap();
+            for (name, _, _) in positions {
+                if !name.starts_with(PREFIX)
+                    && let Some(m) = current.iter().find(|m| &m.name == name)
+                {
+                    original.entry(name.clone()).or_insert((m.x, m.y));
                 }
             }
-            warn!("Hyprland accepted no monitor rule for {rules:?}");
-            false
         }
-        d => attempt(d),
+        let rules: Vec<Rule> = positions
+            .iter()
+            .filter_map(|(name, x, y)| {
+                let m = current.iter().find(|m| &m.name == name)?;
+                ((m.x, m.y) != (*x, *y)).then(|| Rule {
+                    name: name.clone(),
+                    width: m.width,
+                    height: m.height,
+                    refresh: m.refresh,
+                    x: *x,
+                    y: *y,
+                    scale: m.scale,
+                })
+            })
+            .collect();
+        self.apply_without_overlaps(&current, rules)
+    }
+
+    /// Applies the rules; if doing so one by one would overlap outputs for a moment
+    /// (Hyprland warns about that), first moves the outputs involved out of the way.
+    fn apply_without_overlaps(&self, current: &[Monitor], rules: Vec<Rule>) -> bool {
+        if overlaps_on_the_way(current, &rules) {
+            let aside: Vec<Rule> = rules
+                .iter()
+                .enumerate()
+                .map(|(i, r)| Rule {
+                    x: 200_000 + 10_000 * i as i32,
+                    y: 0,
+                    ..r.clone()
+                })
+                .collect();
+            let _ = self.send(&aside);
+        }
+        self.apply(&rules)
     }
 }
 
@@ -375,116 +537,10 @@ pub fn output_name(number: u32) -> String {
     format!("{PREFIX}{number}")
 }
 
-/// Creates a headless output (or takes over one left from an earlier run) and gives
-/// it the size of `spec`. Placement comes later, with the whole layout.
-fn create(spec: &VirtualSpec) -> Result<String> {
-    let number = spec.number;
-    let name = output_name(number);
-    if !monitors().iter().any(|m| m.name == name) {
-        let reply = request(&format!("output create headless {name}"))?;
-        if !ok(&reply) {
-            bail!("Hyprland cannot create {name}: {}", reply.trim());
-        }
-    }
-    // Out of the way until the layout is applied, so it overlaps nothing.
-    apply(&[Rule {
-        name: name.clone(),
-        width: spec.w as i32,
-        height: spec.h as i32,
-        refresh: f64::from(spec.refresh),
-        x: 100_000 + 10_000 * number as i32,
-        y: 0,
-        scale: spec.factor(),
-    }]);
-    info!("created {name} ({spec})");
-    Ok(name)
-}
-
-fn remove(name: &str) {
-    APPLIED.lock().unwrap().remove(name);
-    match request(&format!("output remove {name}")) {
-        Ok(reply) if ok(&reply) => info!("removed {name}"),
-        Ok(reply) => warn!("Hyprland did not remove {name}: {}", reply.trim()),
-        Err(e) => warn!("cannot remove {name}: {e:#}"),
-    }
-}
-
-/// Removes outputs a previous run left behind (Hyprland keeps headless outputs after
-/// the program that made them is gone), so the windows on them come back.
+/// Removes the outputs a run that crashed left behind, before any desktop is
+/// connected (see `system::clean_up_after_crash`).
 pub fn remove_leftovers() {
-    restore_real_outputs();
-    for m in monitors() {
-        if m.name.starts_with(PREFIX) {
-            remove(&m.name);
-        }
-    }
-}
-
-/// Where real displays stood before Prostir moved them, to put them back after.
-static ORIGINAL: Mutex<BTreeMap<String, (i32, i32)>> = Mutex::new(BTreeMap::new());
-
-/// Puts the real displays back where they were and forgets the rules for them, so a
-/// later config reload does not move them again.
-fn restore_real_outputs() {
-    let original = std::mem::take(&mut *ORIGINAL.lock().unwrap());
-    {
-        let mut applied = APPLIED.lock().unwrap();
-        for name in original.keys() {
-            applied.remove(name);
-        }
-    }
-    let current = monitors();
-    let rules: Vec<Rule> = original
-        .into_iter()
-        .filter_map(|(name, (x, y))| {
-            let m = current.iter().find(|m| m.name == name && !m.disabled)?;
-            ((m.x, m.y) != (x, y)).then_some(Rule {
-                name,
-                width: m.width,
-                height: m.height,
-                refresh: m.refresh,
-                x,
-                y,
-                scale: m.scale,
-            })
-        })
-        .collect();
-    if !rules.is_empty() {
-        info!("putting {} display(s) back where they were", rules.len());
-        let _ = send(&rules);
-    }
-}
-
-/// Moves outputs to new logical positions, keeping their modes and scales; whether
-/// Hyprland took them.
-fn place(positions: &[(String, i32, i32)]) -> bool {
-    let current = monitors();
-    {
-        let mut original = ORIGINAL.lock().unwrap();
-        for (name, _, _) in positions {
-            if !name.starts_with(PREFIX)
-                && let Some(m) = current.iter().find(|m| &m.name == name)
-            {
-                original.entry(name.clone()).or_insert((m.x, m.y));
-            }
-        }
-    }
-    let rules: Vec<Rule> = positions
-        .iter()
-        .filter_map(|(name, x, y)| {
-            let m = current.iter().find(|m| &m.name == name)?;
-            ((m.x, m.y) != (*x, *y)).then(|| Rule {
-                name: name.clone(),
-                width: m.width,
-                height: m.height,
-                refresh: m.refresh,
-                x: *x,
-                y: *y,
-                scale: m.scale,
-            })
-        })
-        .collect();
-    apply_without_overlaps(&current, rules)
+    Rules::default().remove_leftovers();
 }
 
 /// Logical rectangle `(x, y, w, h)` of a rule.
@@ -528,36 +584,20 @@ fn overlaps_on_the_way(current: &[Monitor], rules: &[Rule]) -> bool {
     false
 }
 
-/// Applies the rules; if doing so one by one would overlap outputs for a moment
-/// (Hyprland warns about that), first moves the outputs involved out of the way.
-fn apply_without_overlaps(current: &[Monitor], rules: Vec<Rule>) -> bool {
-    if overlaps_on_the_way(current, &rules) {
-        let aside: Vec<Rule> = rules
-            .iter()
-            .enumerate()
-            .map(|(i, r)| Rule {
-                x: 200_000 + 10_000 * i as i32,
-                y: 0,
-                ..r.clone()
-            })
-            .collect();
-        let _ = send(&aside);
-    }
-    apply(&rules)
-}
-
 /// Hyprland as the desktop.
 pub struct Hyprland {
     caps: DesktopCaps,
     windows: HyprWindows,
+    rules: Arc<Rules>,
 }
 
 impl Hyprland {
     /// Takes over the desktop: removes what an earlier run left and keeps Prostir's
     /// monitor rules across config reloads.
     pub fn connect() -> Self {
-        remove_leftovers();
-        keep_rules_after_reloads();
+        let rules = Arc::new(Rules::default());
+        rules.remove_leftovers();
+        rules.keep_after_reloads();
         Self {
             caps: DesktopCaps {
                 name: "Hyprland",
@@ -573,6 +613,7 @@ impl Hyprland {
                 cleans_up_after_crash: false,
             },
             windows: HyprWindows,
+            rules,
         }
     }
 }
@@ -580,7 +621,8 @@ impl Hyprland {
 impl Drop for Hyprland {
     fn drop(&mut self) {
         // Real displays moved for the layout go back where they were.
-        restore_real_outputs();
+        self.rules.restore_real_outputs();
+        self.rules.stop_watching();
     }
 }
 
@@ -598,11 +640,12 @@ impl Desktop for Hyprland {
     }
 
     fn make(&mut self, spec: &VirtualSpec) -> Result<Box<dyn Output>> {
-        Ok(Box::new(HyprOutput::new(create(spec)?, true)))
+        let name = self.rules.create(spec)?;
+        Ok(Box::new(HyprOutput::new(name, Some(self.rules.clone()))))
     }
 
     fn show(&mut self, key: &OutputKey) -> Result<Box<dyn Output>> {
-        Ok(Box::new(HyprOutput::new(key.to_string(), false)))
+        Ok(Box::new(HyprOutput::new(key.to_string(), None)))
     }
 
     /// Hyprland has no primary output.
@@ -612,7 +655,7 @@ impl Desktop for Hyprland {
             .iter()
             .map(|(key, x, y)| (key.to_string(), *x, *y))
             .collect();
-        anyhow::ensure!(place(&positions), "Hyprland refused the layout");
+        anyhow::ensure!(self.rules.place(&positions), "Hyprland refused the layout");
         Ok(())
     }
 
@@ -629,12 +672,13 @@ impl Desktop for Hyprland {
 struct HyprOutput {
     key: OutputKey,
     capture: Option<Capture>,
-    /// Ours (removed when dropped), not a display of the PC shown as it is.
-    owned: bool,
+    /// Ours (removed when dropped, with its rule), not a display of the PC shown as it
+    /// is.
+    owned: Option<Arc<Rules>>,
 }
 
 impl HyprOutput {
-    fn new(name: String, owned: bool) -> Self {
+    fn new(name: String, owned: Option<Arc<Rules>>) -> Self {
         Self {
             key: OutputKey::new(name),
             capture: None,
@@ -647,8 +691,8 @@ impl Drop for HyprOutput {
     fn drop(&mut self) {
         // Stop capturing before the output goes away.
         self.capture.take();
-        if self.owned {
-            remove(self.key.as_str());
+        if let Some(rules) = &self.owned {
+            rules.remove(self.key.as_str());
         }
     }
 }
