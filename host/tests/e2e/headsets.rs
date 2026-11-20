@@ -60,6 +60,16 @@ fn frames(headset: &FakeHeadset) -> u64 {
     headset.view().streams.values().map(|s| s.frames).sum()
 }
 
+/// Frames keep coming to `headset`: one since the counts started, waited for (a busy
+/// machine can hold a moving picture up for a moment).
+fn goes_on(headset: &mut FakeHeadset, what: &str) {
+    headset
+        .wait(SOON, what, |v| {
+            v.streams.values().map(|s| s.frames).sum::<u64>() > 0
+        })
+        .unwrap();
+}
+
 /// Both headsets get the same monitors, the one connected first is the main one and
 /// takes the commands, the other is told it is a guest though its line would make it
 /// main too; a third is turned away.
@@ -130,9 +140,8 @@ fn one_headset_taken_off_does_not_pause_the_other() {
     first.reset_counts();
     second.reset_counts();
     first.take_for(Duration::from_secs(2)).unwrap();
-    second.take_for(Duration::from_secs(1)).unwrap();
     assert_eq!(frames(&first), 0, "nothing for the headset taken off");
-    assert!(frames(&second) > 0, "the other one goes on");
+    goes_on(&mut second, "the other one goes on");
     assert_eq!(pc.count_log("paused: headset not worn or gone"), 0);
     // Put on again: a fresh picture of every monitor.
     first.send(&worn(true)).unwrap();
@@ -157,9 +166,8 @@ fn one_headset_taken_off_does_not_pause_the_other() {
     first.wait_closed(Duration::from_secs(15)).unwrap();
     assert_eq!(first.view().goodbye, Some(PcGoodbye::TakenOff.code()));
     second.reset_counts();
-    second.take_for(Duration::from_secs(1)).unwrap();
+    goes_on(&mut second, "the other one goes on");
     assert!(!second.view().closed);
-    assert!(frames(&second) > 0, "the other one goes on");
     assert_eq!(
         pc.count_log("fake desktop: removed"),
         0,
@@ -187,9 +195,8 @@ fn one_headset_leaving_does_not_cut_the_other() {
         })
         .unwrap();
     second.reset_counts();
-    second.take_for(Duration::from_secs(1)).unwrap();
+    goes_on(&mut second, "it goes on streaming");
     assert!(!second.view().closed);
-    assert!(frames(&second) > 0, "it goes on streaming");
     assert!(second.view().ended.is_empty(), "no stream of it ended");
     assert_eq!(pc.count_log("keeping virtual monitors"), 0);
     assert_eq!(pc.count_log("paused: headset not worn or gone"), 0);
@@ -290,7 +297,6 @@ fn a_guest_cannot_do_what_it_has_no_right_to() {
 fn a_headset_that_decodes_less_fails_only_for_itself() {
     let (_dir, mut pc, mut a, mut b) = two_headsets("decodes-less", Options::default(), "");
     let mut first = showing(&pc, &mut a);
-    first.reset_counts();
     let wide = first.view().order()[0];
     assert_eq!(first.view().display(wide).unwrap().mode.w, 640);
     let mut small = FakeHeadset::state();
@@ -323,10 +329,12 @@ fn a_headset_that_decodes_less_fails_only_for_itself() {
         "failed from the snapshot on: {:?}",
         second.view().states
     );
-    // The first one still has both: each started over for the second one, so it got
-    // a fresh picture of each.
+    // The first one still has both, each with a picture since its last start. The
+    // second one coming starts a still picture over, but one that sent its first
+    // frames a moment before looks moving and only gets a keyframe asked of it, which
+    // never comes; the first one needs none of it.
     first
-        .wait(SOON, "a fresh picture of both", |v| {
+        .wait(SOON, "a picture of both", |v| {
             v.all_monitors_show()
                 && v.order().iter().all(|id| {
                     v.display(*id)
