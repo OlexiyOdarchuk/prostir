@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.1.3 (not released yet)
+## 0.1.3 (2026-11-20)
+
+Fixes for the PC part. The headset app is the same as in 0.1.2.
 
 ### Monitors and windows
 
@@ -15,6 +17,11 @@
 - A recording no longer starts with old sound or loses its first moments, and sound
   held up by a Wi-Fi hiccup is dropped instead of coming out late: what you say comes
   out about 20 ms later.
+
+### Packages
+
+- The AUR has a source package, `prostir`, next to the prebuilt `prostir-bin`; either
+  one replaces the other.
 
 ## 0.1.2 (2026-11-19)
 
