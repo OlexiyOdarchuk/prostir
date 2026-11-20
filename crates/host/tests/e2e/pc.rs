@@ -193,6 +193,9 @@ pub struct Options {
 /// holds the TCP and UDP sockets (on ports of their own on 127.0.0.1) and starts the
 /// PC app with them when something comes. One `systemd-socket-activate` listens on one
 /// kind of socket, so two run, one inside the other, passing the outer one's socket on.
+/// The outer one listens on the socket that starts it; the inner one finds that socket
+/// ready at once and starts the PC app. No `--now`: systemd 255 (Ubuntu 24.04, CI) has
+/// none.
 pub struct Activate {
     pub tcp: SocketAddr,
     pub udp: SocketAddr,
@@ -238,21 +241,17 @@ impl Activate {
                 None => env.remove(&k),
             };
         }
+        let (tcp, udp) = (self.tcp.to_string(), self.udp.to_string());
+        let (first, then): (&[&str], &[&str]) = if self.by_connection {
+            (&["-l", &tcp], &["-d", "-l", &udp])
+        } else {
+            (&["-d", "-l", &udp], &["-l", &tcp])
+        };
         let mut outer = Command::new("systemd-socket-activate");
-        outer.args(["-l", &self.tcp.to_string()]);
-        if !self.by_connection {
-            outer.arg("--now");
-        }
-        outer.args([
-            "--",
-            "systemd-socket-activate",
-            "-d",
-            "-l",
-            &self.udp.to_string(),
-        ]);
-        if self.by_connection {
-            outer.arg("--now");
-        }
+        outer
+            .args(first)
+            .args(["--", "systemd-socket-activate"])
+            .args(then);
         for (k, v) in env {
             outer.arg(format!("--setenv={k}={v}"));
         }
