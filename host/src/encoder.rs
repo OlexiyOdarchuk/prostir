@@ -308,8 +308,12 @@ impl Encoder {
             std::thread::Builder::new()
                 .name(format!("gst-bus-{node}"))
                 .spawn(move || {
+                    // Sleeps until a message comes: dropping the encoder posts one.
                     while !stop.load(Ordering::Relaxed) {
-                        let Some(msg) = bus.timed_pop(gst::ClockTime::from_mseconds(200)) else {
+                        let Some(msg) = bus.timed_pop(gst::ClockTime::NONE) else {
+                            // The bus is flushing while the pipeline restarts: no message
+                            // can come, so not a loop on the spot.
+                            std::thread::sleep(std::time::Duration::from_millis(100));
                             continue;
                         };
                         match msg.view() {
@@ -425,6 +429,12 @@ fn request_keyframe(sink: &gst_app::AppSink) {
 impl Drop for Encoder {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        // Wakes the bus thread, which then sees `stop`.
+        if let Some(bus) = self.pipeline.bus() {
+            let _ = bus.post(gst::message::Application::new(gst::Structure::new_empty(
+                "prostir-stop",
+            )));
+        }
         let _ = self.pipeline.set_state(gst::State::Null);
         if let Some(t) = self.bus_thread.take() {
             let _ = t.join();
