@@ -76,6 +76,7 @@ pub fn show(ui: &mut Ui, v: &mut View) {
                 Page::Monitors => monitors(ui, v, s, snap.revision),
                 Page::Headsets => headsets(ui, v, s),
                 Page::Sound => sound(ui, v, s),
+                Page::Quality => quality(ui, v, s),
                 Page::FirstRun => first_run(ui, v, s),
                 Page::Look => unreachable!(),
             }
@@ -102,6 +103,7 @@ fn header(ui: &mut Ui, v: &View, page: Page) {
         Page::Monitors => ("mon-title", Some("mon-sub")),
         Page::Headsets => ("hs-title", Some("hs-sub")),
         Page::Sound => ("snd-title", Some("snd-sub")),
+        Page::Quality => ("q-title", Some("q-sub")),
         Page::Look => ("look-title", Some("look-sub")),
         Page::FirstRun => ("fr-title", None),
     };
@@ -136,6 +138,16 @@ fn not_running(ui: &mut Ui, v: &mut View, why: &ClientError, start: &Start) {
             hero(ui, tk, Some(p.danger), &tk.t("nr-title"));
             ui.add_space(6.0);
             text(ui, tk.t("nr-no-bus"), tk.body(), p.text_muted);
+            return;
+        }
+        if *why == ClientError::TooOld {
+            hero(ui, tk, Some(p.warning), &tk.t("nr-old-title"));
+            ui.add_space(6.0);
+            text(ui, tk.t("nr-old-body"), tk.body(), p.text_muted);
+            ui.add_space(tk.th.shape.padding);
+            if w::button(ui, tk, &tk.t("nr-retry"), Kind::Secondary, true).clicked() {
+                v.out.push(Action::Refresh);
+            }
             return;
         }
         if silent(why) {
@@ -408,7 +420,7 @@ fn overview(ui: &mut Ui, v: &mut View, s: &State) {
     ui.add_space(gap);
     w::section_title(ui, tk, &tk.t("ov-monitors"));
     w::card(ui, tk, |ui| {
-        if s.connected().is_none() {
+        if s.displays.is_empty() {
             text(ui, tk.t("ov-monitors-empty"), tk.body(), p.text_muted);
             return;
         }
@@ -418,6 +430,7 @@ fn overview(ui: &mut Ui, v: &mut View, s: &State) {
                 (DisplayState::Failed, _) => (p.danger, "state-failed"),
                 (DisplayState::Starting, _) => (p.accent_ink, "state-starting"),
                 (DisplayState::Absent, _) => (p.text_muted, "state-absent"),
+                (DisplayState::Kept, _) => (p.text_muted, "state-kept"),
                 (_, DisplayKind::Physical) if !d.shown => (p.text_muted, "state-hidden"),
                 (_, DisplayKind::Physical) => (p.ok, "state-shown"),
                 _ => (p.ok, "state-streaming"),
@@ -449,23 +462,38 @@ fn overview(ui: &mut Ui, v: &mut View, s: &State) {
         if let Some(on) = s.autostart {
             w::divider(ui, tk);
             let label = tk.t("ov-autostart");
-            w::row(ui, tk, &label, Some(&tk.t("ov-autostart-desc")), |ui| {
-                if let Some(on) = w::switch(ui, tk, &label, on, true) {
+            let can = !v.ui.unsupported.contains("autostart");
+            let desc = if can {
+                tk.t("ov-autostart-desc")
+            } else {
+                tk.t("ov-autostart-here-not")
+            };
+            w::row(ui, tk, &label, Some(&desc), |ui| {
+                if let Some(on) = w::switch(ui, tk, &label, on, can) {
                     v.out.push(Action::Send(Request::Autostart { on }));
                 }
             });
         }
+        w::divider(ui, tk);
+        let label = tk.t("ov-counting");
+        let can = !v.ui.unsupported.contains("set_counting");
+        w::row(ui, tk, &label, Some(&tk.t("ov-counting-desc")), |ui| {
+            if let Some(on) = w::switch(ui, tk, &label, s.counting, can) {
+                v.out.push(Action::Send(Request::SetCounting { on }));
+            }
+        });
     });
 }
 
 // ------------------------------------------------------------------------- monitors
 
-fn tiles(tk: &Tk, s: &State, pending: Option<(u32, i32, i32, u32)>) -> Vec<Tile> {
+fn tiles(tk: &Tk, s: &State, pending: Option<(u32, i32, i32, Option<u32>)>) -> Vec<Tile> {
     s.displays
         .iter()
         .filter_map(|d| {
             let r = d.desk?;
-            if d.state == DisplayState::Failed || r.w == 0 || r.h == 0 {
+            let elsewhere = matches!(d.state, DisplayState::Failed | DisplayState::Kept);
+            if elsewhere || r.w == 0 || r.h == 0 {
                 return None;
             }
             let mut rect = snap::Rect {
@@ -532,6 +560,7 @@ fn monitors(ui: &mut Ui, v: &mut View, s: &State, _revision: u32) {
         ui.add_space(tk.th.shape.spacing);
         text(ui, tk.t(hint), tk.small(), p.text_muted);
     }
+    kept_monitors(ui, v, s);
     ui.add_space(tk.th.shape.section_gap);
 
     let virtual_count = s
@@ -555,10 +584,10 @@ fn monitors(ui: &mut Ui, v: &mut View, s: &State, _revision: u32) {
             |ui| {
                 w::section_title(ui, tk, &tk.t("mon-add"));
                 w::card(ui, tk, |ui| {
-                    let note = if !online {
-                        tk.t("mon-add-offline")
-                    } else if full {
+                    let note = if full {
                         tk.f("mon-add-full", &[("max", virtual_count.into())])
+                    } else if !online {
+                        tk.t("mon-add-offline")
                     } else {
                         tk.t("mon-add-desc")
                     };
@@ -573,8 +602,7 @@ fn monitors(ui: &mut Ui, v: &mut View, s: &State, _revision: u32) {
                         for [wd, ht] in sizes {
                             let label =
                                 tk.f("mon-size", &[("w", (*wd).into()), ("h", (*ht).into())]);
-                            if w::button(ui, tk, &label, Kind::Secondary, online && !full).clicked()
-                            {
+                            if w::button(ui, tk, &label, Kind::Secondary, !full).clicked() {
                                 v.send(Request::AddMonitor {
                                     w: *wd,
                                     h: *ht,
@@ -632,7 +660,9 @@ fn selected_monitor(ui: &mut Ui, v: &mut View, s: &State) {
         .position(|sc| *sc == d.mode.scale)
         .unwrap_or(usize::MAX);
     w::row(ui, tk, &tk.t("mon-scale"), None, |ui| {
-        if let Some(i) = w::segmented(ui, tk, &labels, current, true) {
+        let can =
+            !v.ui.unsupported.contains("set_scale") && !matches!(d.kind, DisplayKind::Physical);
+        if let Some(i) = w::segmented(ui, tk, &labels, current, can) {
             v.out.push(Action::Send(Request::SetScale {
                 id: d.id,
                 scale: scales[i],
@@ -704,7 +734,7 @@ fn pair_body(ui: &mut Ui, v: &mut View, pr: &Pairing, revision: u32) {
         let checking =
             v.ui.submitted
                 .as_ref()
-                .is_some_and(|(c, rev)| *rev == revision && *c == v.ui.code);
+                .is_some_and(|(c, until)| *c == v.ui.code && until.is_none_or(|r| revision < r));
         let label = tk.t("pair-code");
         let enter = w::code_field(ui, tk, &label, &mut v.ui.code, !checking);
         let wrong = pr.last == Some(PairResult::Wrong)
@@ -749,33 +779,91 @@ fn pairing_card(ui: &mut Ui, v: &mut View, pr: &Pairing, revision: u32) {
     let tk = v.tk;
     let p = tk.p;
     let left = (v.ui.pair.ends - v.now).max(0.0);
+    // 0: pairing has no time limit (a new headset pairs whenever it asks).
+    let limited = pr.seconds_total > 0;
     let total = pr.seconds_total.max(1) as f64;
     w::card(ui, tk, |ui| {
         ui.horizontal(|ui| {
             text(ui, tk.t("pair-title"), tk.heading(), p.text);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                text(
-                    ui,
-                    tk.f("pair-left", &[("time", countdown(left).into())]),
-                    tk.body_m(),
-                    p.text_muted,
-                );
-            });
+            if limited {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    text(
+                        ui,
+                        tk.f("pair-left", &[("time", countdown(left).into())]),
+                        tk.body_m(),
+                        p.text_muted,
+                    );
+                });
+            }
         });
         ui.add_space(tk.th.shape.spacing);
-        // The time left as a line that shrinks: pairing closes by itself.
-        let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 3.0), Sense::hover());
-        ui.painter()
-            .rect_filled(r, CornerRadius::same(2), p.control);
-        let mut f = r;
-        f.set_right(r.left() + r.width() * (left / total).clamp(0.0, 1.0) as f32);
-        ui.painter()
-            .rect_filled(f, CornerRadius::same(2), p.accent_ink);
+        if limited {
+            // The time left as a line that shrinks: pairing closes by itself.
+            let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 3.0), Sense::hover());
+            ui.painter()
+                .rect_filled(r, CornerRadius::same(2), p.control);
+            let mut f = r;
+            f.set_right(r.left() + r.width() * (left / total).clamp(0.0, 1.0) as f32);
+            ui.painter()
+                .rect_filled(f, CornerRadius::same(2), p.accent_ink);
+        }
         ui.add_space(tk.th.shape.padding);
         pair_body(ui, v, pr, revision);
-        ui.add_space(tk.th.shape.spacing);
-        if w::button(ui, tk, &tk.t("pair-stop"), Kind::Quiet, true).clicked() {
-            v.send(Request::StopPairing);
+        if !v.ui.unsupported.contains("stop_pairing") {
+            ui.add_space(tk.th.shape.spacing);
+            if w::button(ui, tk, &tk.t("pair-stop"), Kind::Quiet, true).clicked() {
+                v.send(Request::StopPairing);
+            }
+        }
+    });
+}
+
+/// "Pair a new headset", or where this Prostir does not open pairing from the window
+/// (before step 6.8), what to do instead.
+fn pair_new(ui: &mut Ui, v: &mut View) {
+    let tk = v.tk;
+    if v.ui.unsupported.contains("pair_new_headset") {
+        w::status(ui, tk, tk.p.text_muted, &tk.t("hs-pair-hint"));
+    } else if w::button(ui, tk, &tk.t("ov-pair-new"), Kind::Primary, true).clicked() {
+        v.send(Request::PairNewHeadset);
+    }
+}
+
+/// Monitors kept for the next headset: not on the desktop, so not on the map.
+fn kept_monitors(ui: &mut Ui, v: &mut View, s: &State) {
+    let tk = v.tk;
+    let p = tk.p;
+    let kept: Vec<&Display> = s
+        .displays
+        .iter()
+        .filter(|d| d.state == DisplayState::Kept)
+        .collect();
+    if kept.is_empty() {
+        return;
+    }
+    ui.add_space(tk.th.shape.section_gap);
+    w::section_title(ui, tk, &tk.t("mon-kept"));
+    w::card(ui, tk, |ui| {
+        text(ui, tk.t("mon-kept-desc"), tk.small(), p.text_muted);
+        for d in kept {
+            w::divider(ui, tk);
+            let desc = tk.f(
+                "mon-size-scaled",
+                &[
+                    ("w", d.mode.w.into()),
+                    ("h", d.mode.h.into()),
+                    ("scale", d.mode.scale.into()),
+                ],
+            );
+            w::row(ui, tk, &display_name(tk, d), Some(&desc), |ui| {
+                let named = tk.f("mon-remove-named", &[("name", (&d.name).into())]);
+                if w::button_named(ui, tk, &tk.t("mon-remove"), &named, Kind::Danger, true)
+                    .clicked()
+                {
+                    v.out
+                        .push(Action::Send(Request::RemoveMonitor { id: d.id }));
+                }
+            });
         }
     });
 }
@@ -822,9 +910,7 @@ fn headsets(ui: &mut Ui, v: &mut View, s: &State) {
         outcome_card(ui, v, &o);
         ui.add_space(gap);
     } else if !s.headsets.is_empty() {
-        if w::button(ui, tk, &tk.t("ov-pair-new"), Kind::Primary, true).clicked() {
-            v.send(Request::PairNewHeadset);
-        }
+        pair_new(ui, v);
         ui.add_space(gap);
     }
     if s.headsets.is_empty() {
@@ -834,9 +920,7 @@ fn headsets(ui: &mut Ui, v: &mut View, s: &State) {
                 ui.add_space(6.0);
                 text(ui, tk.t("hs-empty-body"), tk.body(), p.text_muted);
                 ui.add_space(tk.th.shape.padding);
-                if w::button(ui, tk, &tk.t("ov-pair-new"), Kind::Primary, true).clicked() {
-                    v.send(Request::PairNewHeadset);
-                }
+                pair_new(ui, v);
             });
         }
         return;
@@ -880,7 +964,12 @@ fn headsets(ui: &mut Ui, v: &mut View, s: &State) {
                         }
                         ui.add_space(tk.th.shape.padding);
                         ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                            text(ui, &h.name, tk.body_m(), p.text);
+                            let name = if h.role == Role::Guest {
+                                tk.f("hs-guest-name", &[("name", (&h.name).into())])
+                            } else {
+                                h.name.clone()
+                            };
+                            text(ui, name, tk.body_m(), p.text);
                             ui.add_space(2.0);
                             if h.session.is_some() {
                                 ui.horizontal(|ui| {
@@ -932,9 +1021,14 @@ fn sound(ui: &mut Ui, v: &mut View, s: &State) {
             },
         );
         w::divider(ui, tk);
-        let vol = s.sound.volume;
+        let vol = s
+            .sound
+            .volume
+            .filter(|_| !v.ui.unsupported.contains("volume"));
         let desc = if vol.is_some() {
             tk.t("snd-volume-desc")
+        } else if connected.is_some() {
+            tk.t("snd-volume-headset")
         } else {
             tk.t("snd-volume-off")
         };
@@ -961,19 +1055,25 @@ fn sound(ui: &mut Ui, v: &mut View, s: &State) {
     });
     ui.add_space(tk.th.shape.section_gap);
     w::card(ui, tk, |ui| {
-        let label = tk.t("snd-mic");
-        w::row(ui, tk, &label, Some(&tk.t("snd-mic-desc")), |ui| {
-            if let Some(on) = w::switch(ui, tk, &label, s.sound.mic_on, true) {
-                v.out.push(Action::Send(Request::SetMic { on }));
-            }
-        });
+        // The switch is the headset user's: shown here, changed in the headset.
+        let on = connected.map_or(s.sound.mic_on, |(_, session)| session.mic_on);
+        w::row(
+            ui,
+            tk,
+            &tk.t("snd-mic"),
+            Some(&tk.t("snd-mic-desc")),
+            |ui| {
+                text(ui, tk.t(if on { "on" } else { "off" }), tk.body_m(), p.text);
+            },
+        );
+        text(ui, tk.t("snd-mic-in-headset"), tk.small(), p.text_muted);
         w::divider(ui, tk);
         match connected {
-            None if s.sound.mic_on => w::status(ui, tk, p.text_muted, &tk.t("snd-mic-waiting")),
-            Some((_, session)) if s.sound.mic_on && session.mic_allowed == Some(false) => {
+            None if on => w::status(ui, tk, p.text_muted, &tk.t("snd-mic-waiting")),
+            Some((_, session)) if on && session.mic_allowed == Some(false) => {
                 w::status(ui, tk, p.warning, &tk.t("snd-mic-not-allowed"))
             }
-            _ => match (s.sound.mic_on, s.sound.mic) {
+            _ => match (on, s.sound.mic) {
                 (false, _) => w::status(ui, tk, p.text_muted, &tk.t("snd-mic-off")),
                 (true, MicState::Failed) => {
                     let why = s.sound.mic_failure.as_ref().map_or("", |f| f.text.as_str());
@@ -987,6 +1087,100 @@ fn sound(ui: &mut Ui, v: &mut View, s: &State) {
                 (true, MicState::Ready) => w::status(ui, tk, p.ok, &tk.t("snd-mic-ready")),
                 (true, _) => w::status(ui, tk, p.text_muted, &tk.t("snd-mic-waiting")),
             },
+        }
+    });
+}
+
+// ------------------------------------------------------------------------- quality
+
+/// Bitrates offered, Mbit/s per monitor.
+const BITRATES: [u32; 5] = [10, 20, 30, 50, 80];
+
+fn quality(ui: &mut Ui, v: &mut View, s: &State) {
+    let tk = v.tk;
+    let p = tk.p;
+    header(ui, v, Page::Quality);
+    let e = &s.encoding;
+    let can = |v: &View, kind: &str| !v.ui.unsupported.contains(kind);
+    w::card(ui, tk, |ui| {
+        let labels: Vec<String> = BITRATES
+            .iter()
+            .map(|b| tk.f("q-mbit", &[("n", (*b).into())]))
+            .collect();
+        let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let sel = BITRATES
+            .iter()
+            .position(|b| *b == e.bitrate)
+            .unwrap_or(usize::MAX);
+        let desc = tk.f("q-bitrate-desc", &[("n", e.bitrate.into())]);
+        let ok = can(v, "set_quality");
+        w::row(ui, tk, &tk.t("q-bitrate"), Some(&desc), |ui| {
+            if let Some(i) = w::segmented(ui, tk, &labels, sel, ok) {
+                v.out
+                    .push(Action::Send(Request::SetQuality { mbit: BITRATES[i] }));
+            }
+        });
+        w::divider(ui, tk);
+        let label = tk.t("q-sharp");
+        let ok = can(v, "set_sharp");
+        w::row(ui, tk, &label, Some(&tk.t("q-sharp-desc")), |ui| {
+            if let Some(on) = w::switch(ui, tk, &label, e.sharp, ok) {
+                v.out.push(Action::Send(Request::SetSharp { on }));
+            }
+        });
+    });
+    ui.add_space(tk.th.shape.section_gap);
+    w::card(ui, tk, |ui| {
+        let codecs = [CodecChoice::H264, CodecChoice::H265];
+        let labels = ["H.264", "H.265"];
+        let sel = match e.codec {
+            Codec::H264 => 0,
+            Codec::H265 => 1,
+            _ => usize::MAX,
+        };
+        let ok = can(v, "set_codec");
+        w::row(
+            ui,
+            tk,
+            &tk.t("q-codec"),
+            Some(&tk.t("q-codec-desc")),
+            |ui| {
+                if let Some(i) = w::segmented(ui, tk, &labels, sel, ok) {
+                    v.out.push(Action::Send(Request::SetCodec {
+                        codec: codecs[i],
+                        cpu: e.cpu,
+                    }));
+                }
+            },
+        );
+        w::divider(ui, tk);
+        let label = tk.t("q-cpu");
+        w::row(ui, tk, &label, Some(&tk.t("q-cpu-desc")), |ui| {
+            if let Some(cpu) = w::switch(ui, tk, &label, e.cpu, ok) {
+                let codec = match e.codec {
+                    Codec::H264 => CodecChoice::H264,
+                    _ => CodecChoice::H265,
+                };
+                v.out.push(Action::Send(Request::SetCodec { codec, cpu }));
+            }
+        });
+        w::divider(ui, tk);
+        match e.using {
+            Some(u) => {
+                let codec = match u.codec {
+                    Codec::H264 => "H.264",
+                    Codec::H265 => "H.265",
+                    Codec::Av1 => "AV1",
+                    Codec::Other => "?",
+                };
+                let id = if u.hardware {
+                    "q-using-gpu"
+                } else {
+                    "q-using-cpu"
+                };
+                w::status(ui, tk, p.ok, &tk.f(id, &[("codec", codec.into())]));
+            }
+            None => w::status(ui, tk, p.text_muted, &tk.t("q-using-none")),
         }
     });
 }
@@ -1009,6 +1203,10 @@ fn look(ui: &mut Ui, v: &mut View) {
             None => tk.t("look-now-none"),
         });
         let sel = modes.iter().position(|m| *m == current.theme).unwrap_or(0);
+        let current = WindowLook {
+            theme: modes[sel],
+            ..current
+        };
         w::row(ui, tk, &tk.t("look-theme"), now.as_deref(), |ui| {
             if let Some(i) = w::segmented(ui, tk, &labels, sel, true) {
                 v.out.push(Action::Look(WindowLook {
@@ -1224,6 +1422,9 @@ fn first_run(ui: &mut Ui, v: &mut View, s: &State) {
                     Some(name) => {
                         w::status(ui, tk, p.ok, &tk.f("fr-2-found", &[("name", name.into())]))
                     }
+                    None if v.ui.unsupported.contains("pair_new_headset") => {
+                        w::status(ui, tk, p.text_muted, &tk.t("fr-2-asks"));
+                    }
                     None if s.pairing.is_none() => {
                         w::status(ui, tk, p.text_muted, &tk.t("fr-2-closed"));
                         ui.add_space(tk.th.shape.spacing);
@@ -1252,6 +1453,16 @@ fn first_run(ui: &mut Ui, v: &mut View, s: &State) {
                     w::status(ui, tk, p.ok, &tk.f("pair-done", &[("name", name.into())]));
                 } else if let Some(pr) = &s.pairing {
                     pair_body(ui, v, pr, revision);
+                    next_ok = false;
+                } else if let Some(h) = s.headsets.last() {
+                    w::status(
+                        ui,
+                        tk,
+                        p.ok,
+                        &tk.f("pair-done", &[("name", (&h.name).into())]),
+                    );
+                } else if v.ui.unsupported.contains("pair_new_headset") {
+                    w::status(ui, tk, p.text_muted, &tk.t("fr-3-wait"));
                     next_ok = false;
                 } else {
                     text(ui, tk.t("pair-expired"), tk.body(), p.text_muted);

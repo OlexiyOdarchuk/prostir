@@ -72,9 +72,9 @@ fn running_in(proc: &Path, name: &str) -> bool {
     })
 }
 
-/// Starts Prostir unless it runs already: `prostir open` (which wakes the part in
-/// the background however it is run, steps 6.7 and 6.8), and the program itself
-/// where that is not known yet (an older Prostir refuses the word at once).
+/// Starts Prostir unless it runs already: `prostir open`, as the menu entry does
+/// (Prostir starts and asks for the settings window, which is this one: it comes
+/// forward), and the program itself where an older Prostir refuses the word at once.
 pub fn start_prostir() -> io::Result<Started> {
     if running("prostir") {
         return Ok(Started::AlreadyRunning);

@@ -1,6 +1,6 @@
-//! The local API over the session bus (plans/step-6-platform.md, 7.2): `GetState` and
-//! `Call` on `io.github.OlexiyOdarchuk.Prostir1`, the `StateChanged` signal, and the
-//! name coming and going on the bus.
+//! The local API over the session bus (LOCAL-API.md): `GetState` and `Call` on
+//! `io.github.OlexiyOdarchuk.Prostir1`, the `StateChanged` signal, and the name
+//! coming and going on the bus.
 
 use std::time::Duration;
 
@@ -11,8 +11,9 @@ use zbus::{MatchRule, Message};
 
 use crate::api::*;
 
-/// A headset command waits up to 30 s for the headset (step 5); a little more here.
-pub const CALL_TIMEOUT: Duration = Duration::from_secs(35);
+/// A command for the headset waits up to 30 s for the headset; the service answers
+/// within this.
+pub const CALL_TIMEOUT: Duration = Duration::from_secs(CALL_SECONDS);
 
 pub struct DbusClient {
     conn: Connection,
@@ -51,16 +52,18 @@ fn error(e: zbus::Error) -> ClientError {
             let message = detail.unwrap_or_default();
             if let Some(code) = name.strip_prefix(ERROR_PREFIX) {
                 return ClientError::Refused {
-                    code: code.to_owned(),
+                    code: ApiError::from_name(code),
                     message,
                 };
             }
             match name {
                 "org.freedesktop.DBus.Error.ServiceUnknown"
-                | "org.freedesktop.DBus.Error.NameHasNoOwner"
-                | "org.freedesktop.DBus.Error.UnknownObject"
+                | "org.freedesktop.DBus.Error.NameHasNoOwner" => ClientError::NotRunning,
+                // The name is there, the interface or method is not: a Prostir from
+                // before this API (as `prostir ctl` reads it too).
+                "org.freedesktop.DBus.Error.UnknownObject"
                 | "org.freedesktop.DBus.Error.UnknownInterface"
-                | "org.freedesktop.DBus.Error.UnknownMethod" => ClientError::NotRunning,
+                | "org.freedesktop.DBus.Error.UnknownMethod" => ClientError::TooOld,
                 "org.freedesktop.DBus.Error.NoReply" | "org.freedesktop.DBus.Error.Timeout" => {
                     ClientError::TimedOut
                 }
@@ -110,12 +113,12 @@ impl Client for DbusClient {
         state_of(&msg)
     }
 
-    fn call(&self, request: &Request) -> Result<Reply, ClientError> {
+    fn call(&self, request: &Request) -> Result<Answer, ClientError> {
         let json: String = self
             .proxy
             .call("Call", &(request.to_json(),))
             .map_err(error)?;
-        Reply::parse(&json)
+        parse_answer(&json)
     }
 
     fn present(&self) -> Option<bool> {
@@ -236,8 +239,11 @@ pub(crate) mod tests {
             if request.contains("remove_monitor") {
                 return Err(ServiceError::LastDisplay("Keep one monitor.".into()));
             }
+            if request.contains("volume") {
+                return Err(ServiceError::Unsupported("Not yet.".into()));
+            }
             self.revision += 1;
-            Ok(r#"{"id":7}"#.into())
+            Ok(format!(r#"{{"id":7,"revision":{}}}"#, self.revision))
         }
     }
 
@@ -245,6 +251,7 @@ pub(crate) mod tests {
     #[zbus(prefix = "io.github.OlexiyOdarchuk.Prostir1.Error")]
     enum ServiceError {
         LastDisplay(String),
+        Unsupported(String),
     }
 
     fn serve(bus: &Bus) -> Connection {
@@ -281,13 +288,19 @@ pub(crate) mod tests {
                 scale: 100,
             })
             .unwrap();
-        assert_eq!(reply.0["id"], 7);
+        assert_eq!((reply.id, reply.revision), (Some(7), 4));
         assert_eq!(
             client.call(&Request::RemoveMonitor { id: 1 }),
             Err(ClientError::Refused {
-                code: "LastDisplay".into(),
+                code: ApiError::LastDisplay,
                 message: "Keep one monitor.".into()
             })
+        );
+        assert!(
+            client
+                .call(&Request::Volume { level: 3 })
+                .unwrap_err()
+                .unsupported()
         );
 
         service

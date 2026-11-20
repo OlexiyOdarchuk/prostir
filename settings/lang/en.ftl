@@ -11,6 +11,7 @@ nav-overview = Overview
 nav-monitors = Monitors
 nav-headsets = Headsets
 nav-sound = Sound
+nav-quality = Quality
 nav-look = Look
 nav-first-run = First run
 
@@ -24,6 +25,7 @@ side-waiting = Waiting for a headset
 side-failed = A monitor was not added
 side-not-running = Prostir is not running
 side-silent = Prostir does not answer
+side-old = Prostir is older than this window
 side-no-headsets = No headsets yet
 
 ## Overview
@@ -61,6 +63,9 @@ ov-pc-name = Name on the network
 ov-pc-desktop = Desktop
 ov-autostart = Start with the system
 ov-autostart-desc = Prostir waits for the headset after you log in. No window opens then.
+ov-autostart-here-not = Set up with the desktop on this PC.
+ov-counting = Count this PC among users
+ov-counting-desc = Once a day one request that says only that Prostir was used: no name, no address, no settings.
 
 ## How a monitor is doing
 
@@ -68,6 +73,7 @@ state-streaming = Streaming
 state-starting = Starting
 state-failed = Not added
 state-absent = Not connected
+state-kept = Waiting for the headset
 state-shown = Shown in the headset
 state-hidden = Hidden
 
@@ -90,8 +96,8 @@ nr-starting = Starting Prostir
 nr-failed-title = Prostir did not start
 nr-failed-body = Run prostir in a terminal to see what stops it.
 nr-no-program = The prostir program was not found. Check that Prostir is installed.
-nr-old-title = Prostir is running
-nr-old-body = This version of Prostir does not work with the settings window yet. Update Prostir, then try again.
+nr-old-title = This Prostir is older than the window
+nr-old-body = Prostir is running, but this version does not work with the settings window. Update Prostir, then try again.
 nr-retry = Try again
 nr-silent-title = Prostir does not answer
 nr-silent-body = Prostir is running but did not answer this window. The window asks again by itself.
@@ -114,6 +120,7 @@ mon-scale = Scale
 mon-main = Main monitor
 mon-main-desc = The panel and new windows go here.
 mon-remove = Remove monitor
+mon-remove-named = Remove { $name }
 mon-in-headset = In the headset
 mon-shown = Shown
 mon-hidden = Hidden
@@ -122,8 +129,10 @@ mon-pc-screen = PC screen
 mon-add = Add a monitor
 mon-add-desc = A new monitor goes to the right of the last one.
 mon-add-full = No more monitors fit: { $max } are in the headset already.
-mon-add-offline = Monitors can be added while a headset is connected.
+mon-add-offline = The monitor appears in the headset when it connects.
 mon-failed = Not added: { $reason }
+mon-kept = Waiting for the headset
+mon-kept-desc = Kept for the next headset: they appear when it connects.
 
 ## Headsets
 
@@ -151,6 +160,8 @@ hs-forget-ask = Forget { $name }? To connect again, it will need a code.
 hs-cancel = Cancel
 hs-empty-title = No paired headsets yet
 hs-empty-body = Open Prostir in the headset near this PC and pair them with a code.
+hs-pair-hint = To pair a new headset, open Prostir in it near this PC: the PC shows a code here to type in the headset.
+hs-guest-name = { $name } (guest)
 
 ## Pairing
 
@@ -180,13 +191,32 @@ snd-where-desc = In the headset: the PC's speakers are quiet while the headset i
 snd-volume = Volume
 snd-volume-desc = The same as on the headset's buttons and in the system.
 snd-volume-off = The volume can be changed while a headset is connected.
+snd-volume-headset = Changed with the headset's buttons.
 snd-mic = Headset microphone on the PC
 snd-mic-desc = Programs on the PC see it as the "Prostir" microphone.
 snd-mic-ready = The "Prostir" microphone is ready
 snd-mic-off = Off: programs on the PC do not see the headset microphone
+snd-mic-in-headset = Switched on and off in the headset.
 snd-mic-waiting = The microphone appears once a headset connects.
 snd-mic-not-allowed = The headset has not allowed the microphone. Allow it for Prostir in the headset's settings, among the app permissions.
 snd-mic-failed = The microphone could not be made: { $reason }
+
+## Quality
+
+q-title = Quality
+q-sub = How the monitors are encoded for the headset.
+q-bitrate = Bitrate
+q-bitrate-desc = { $n } Mbit/s for each monitor now. More is sharper and needs a faster network.
+q-mbit = { $n }
+q-sharp = Sharper text
+q-sharp-desc = A slower encoder setting that keeps small text clearer.
+q-codec = Codec
+q-codec-desc = H.265 where the PC and the headset can, else H.264.
+q-cpu = Encode on the processor
+q-cpu-desc = Even where the graphics card could.
+q-using-gpu = Now: { $codec } on the graphics card
+q-using-cpu = Now: { $codec } on the processor
+q-using-none = Starts with the monitors.
 
 ## Look
 
@@ -238,8 +268,10 @@ fr-2-body = The headset and the PC need to be on the same Wi-Fi network. The hea
 fr-2-looking = Looking for the headset on the network
 fr-2-found = { $name } sees this PC
 fr-2-closed = Pairing is closed, so a new headset cannot find this PC.
+fr-2-asks = The headset asks for a code as soon as it finds this PC.
 fr-3-title = Pair with a code
 fr-3-body = The code is needed once: after that, this headset connects by itself.
+fr-3-wait = When the headset asks for a code, the PC shows it here.
 fr-4-title = Start Prostir with the system?
 fr-4-body = Then the headset finds the PC right after you log in. No windows and no extra work: while there is no headset, Prostir only waits.
 

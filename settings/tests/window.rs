@@ -12,7 +12,12 @@ use prostir_settings::mock::Mock;
 
 #[test]
 fn pairing_by_name_and_keyboard() {
-    let (mut h, handle) = window(Mock::connected().live(), Setup::default());
+    // As step 6.8 brings it: pairing opened from the window.
+    let mock = Mock::connected()
+        .pairing()
+        .edit(|s| s.pairing = None)
+        .live();
+    let (mut h, handle) = window(mock, Setup::default());
     open(&mut h, Page::Headsets);
     press(&mut h, "Сполучити новий шолом");
     assert_eq!(handle.calls(), [Request::PairNewHeadset]);
@@ -198,7 +203,7 @@ fn a_prostir_that_runs_already_is_not_started_again() {
     };
     let (mut h, handle) = window(Mock::not_running(), setup);
     press(&mut h, "Запустити Prostir");
-    h.get_by_label("Prostir уже працює");
+    h.get_by_label("Ця версія Prostir старіша за вікно");
     assert!(h.query_by_label("Запустити Prostir").is_none());
     // Once it answers, "Try again" finds it.
     handle.set_running_quietly(true);
@@ -271,7 +276,7 @@ fn a_refused_request_says_why_until_closed() {
     let (mut h, handle) = window(Mock::connected(), Setup::default());
     open(&mut h, Page::Monitors);
     handle.refuse_next(ClientError::Refused {
-        code: "Desktop".into(),
+        code: prostir_settings::api::ApiError::Desktop,
         message: "KWin не відповів.".into(),
     });
     press(&mut h, "2560 × 1440");
@@ -343,4 +348,133 @@ fn tab_meets_back_before_next_as_seen() {
     h.key_press(Key::Tab);
     h.run_steps(1);
     assert!(h.get_by_label("Далі").is_focused());
+}
+
+#[test]
+fn pairing_this_prostir_does_not_open_says_what_to_do_instead() {
+    let (mut h, handle) = window(Mock::connected(), Setup::default());
+    open(&mut h, Page::Headsets);
+    press(&mut h, "Сполучити новий шолом");
+    assert_eq!(handle.calls(), [Request::PairNewHeadset]);
+    // No failure: the button gives way to what to do.
+    assert!(h.query_by_label_contains("Не вдалося").is_none());
+    assert!(h.query_by_label("Сполучити новий шолом").is_none());
+    h.get_by_label_contains("ПК покаже тут код");
+}
+
+#[test]
+fn a_code_shown_on_the_pc_has_no_countdown_and_never_runs_out() {
+    let (mut h, handle) = window(Mock::connected().pc_code("482913"), Setup::default());
+    open(&mut h, Page::Headsets);
+    h.get_by_label("Введіть цей код у шоломі:");
+    h.get_by_label("482 913");
+    assert!(h.query_by_label_contains("ще ").is_none(), "no countdown");
+    // The code goes away (paired with another headset or closed): no "time is over".
+    handle.change(|s| s.pairing = None);
+    h.run_steps(3);
+    assert!(h.query_by_label_contains("Час сполучення минув").is_none());
+}
+
+#[test]
+fn monitors_kept_for_the_next_headset() {
+    let (mut h, handle) = window(Mock::waiting(), Setup::default());
+    open(&mut h, Page::Monitors);
+    h.get_by_label("Чекають на шолом");
+    // Added without a headset: kept too.
+    press(&mut h, "1920 × 1080");
+    let added = handle
+        .state()
+        .displays
+        .into_iter()
+        .find(|d| d.name == "Prostir-4")
+        .unwrap();
+    assert_eq!(added.state, prostir_settings::api::DisplayState::Kept);
+    press(&mut h, "Прибрати Prostir-1");
+    assert_eq!(
+        handle.calls().last(),
+        Some(&Request::RemoveMonitor { id: 1 })
+    );
+    open(&mut h, Page::Overview);
+    assert!(h.get_all_by_label("Чекає на шолом").count() >= 3);
+}
+
+#[test]
+fn the_microphone_is_shown_not_switched_and_the_volume_waits() {
+    let (mut h, _) = window(Mock::connected(), Setup::default());
+    open(&mut h, Page::Sound);
+    assert!(
+        h.query_by_role_and_label(Role::Switch, "Мікрофон шолома на ПК")
+            .is_none()
+    );
+    h.get_by_label("Вмикається й вимикається в шоломі.");
+    h.get_by_label("Змінюється кнопками шолома.");
+}
+
+#[test]
+fn an_older_prostir_is_told_apart_from_none() {
+    let mock = Mock::connected();
+    mock.handle().set_old(true);
+    let (mut h, handle) = window(mock, Setup::default());
+    h.get_by_label("Ця версія Prostir старіша за вікно");
+    assert!(h.query_by_label("Запустити Prostir").is_none());
+    h.get_by_label("Prostir старіший за це вікно");
+    handle.set_old(false);
+    press(&mut h, "Спробувати ще раз");
+    assert!(matches!(h.state().conn, Conn::Live { .. }));
+}
+
+#[test]
+fn quality_by_name() {
+    let (mut h, handle) = window(Mock::connected(), Setup::default());
+    open(&mut h, Page::Quality);
+    press(&mut h, "50");
+    press(&mut h, "H.264");
+    press_as(&mut h, Some(Role::Switch), "Чіткіший текст");
+    press_as(&mut h, Some(Role::Switch), "Кодувати процесором");
+    assert_eq!(
+        handle.calls(),
+        [
+            Request::SetQuality { mbit: 50 },
+            Request::SetCodec {
+                codec: prostir_settings::api::CodecChoice::H264,
+                cpu: false
+            },
+            Request::SetSharp { on: true },
+            Request::SetCodec {
+                codec: prostir_settings::api::CodecChoice::H264,
+                cpu: true
+            },
+        ]
+    );
+    let e = handle.state().encoding;
+    assert_eq!((e.bitrate, e.sharp, e.cpu), (50, true, true));
+}
+
+#[test]
+fn what_the_service_does_not_do_is_disabled_quietly() {
+    let (mut h, handle) = window(Mock::connected(), Setup::default());
+    open(&mut h, Page::Quality);
+    handle.refuse_next(ClientError::Refused {
+        code: prostir_settings::api::ApiError::Unsupported,
+        message: "Not on this PC.".into(),
+    });
+    press_as(&mut h, Some(Role::Switch), "Чіткіший текст");
+    assert!(h.query_by_label_contains("Не вдалося").is_none());
+    assert!(h.state().ui.unsupported.contains("set_sharp"));
+    // Disabled now: a press does nothing.
+    press_as(&mut h, Some(Role::Switch), "Чіткіший текст");
+    assert_eq!(handle.calls().len(), 1);
+}
+
+#[test]
+fn a_move_holds_until_the_state_with_it_is_in() {
+    let (mut h, handle) = window(Mock::connected(), Setup::default());
+    open(&mut h, Page::Monitors);
+    h.get_by_label("Prostir-3").focus();
+    h.run_steps(1);
+    h.key_press(Key::ArrowDown);
+    h.run_steps(3);
+    assert!(matches!(handle.calls().last(), Some(Request::Place { .. })));
+    // The answer came with the state that has the move: nothing is held any more.
+    assert_eq!(h.state().ui.pending_place, None);
 }

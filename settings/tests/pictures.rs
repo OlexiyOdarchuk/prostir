@@ -38,11 +38,12 @@ fn picture(h: &mut Harness<'static, App>, all: &mut Pictures, name: &str) {
     all.extend_harness(h);
 }
 
-const PAGES: [(Page, &str); 6] = [
+const PAGES: [(Page, &str); 7] = [
     (Page::Overview, "overview"),
     (Page::Monitors, "monitors"),
     (Page::Headsets, "headsets"),
     (Page::Sound, "sound"),
+    (Page::Quality, "quality"),
     (Page::Look, "look"),
     (Page::FirstRun, "first-run"),
 ];
@@ -80,11 +81,19 @@ fn each_state_of_the_overview() {
         (dark(Mock::failed_monitor()), "overview-failed"),
         (dark(Mock::not_running()), "overview-not-running"),
         (
+            dark({
+                let m = Mock::connected();
+                m.handle().set_old(true);
+                m
+            }),
+            "overview-old",
+        ),
+        (
             dark(Mock::connected().edit(|s| {
                 let session = s.headsets[0].session.as_mut().unwrap();
                 session.worn = false;
                 s.problems.push(prostir_settings::api::Problem {
-                    code: "Desktop".into(),
+                    code: prostir_settings::api::ApiError::Desktop,
                     text: "KWin не відповідає: нові монітори чекають на нього.".into(),
                 });
             })),
@@ -140,25 +149,27 @@ fn each_state_of_the_other_pages() {
     h.key_press(Key::Enter);
     h.run_steps(4);
     picture(&mut h, &mut all, "headsets-pairing-wrong");
-    let pc_code = |code: Option<&'static str>| {
-        move |s: &mut prostir_settings::api::State| {
-            s.pairing = Some(Pairing {
-                seconds_left: 95,
-                seconds_total: 180,
-                pc_code: code.map(Into::into),
-                ..Default::default()
-            });
-        }
-    };
-    let (mut h, _) = window(
-        dark(Mock::connected().edit(pc_code(Some("482913")))),
-        shot(),
-    );
+    // The code the PC shows, as the service does now: no time limit.
+    let (mut h, _) = window(dark(Mock::connected().pc_code("482913")), shot());
     open(&mut h, Page::Headsets);
     picture(&mut h, &mut all, "headsets-pc-code");
-    let (mut h, _) = window(dark(Mock::connected().edit(pc_code(None))), shot());
+    // Pairing from the window (step 6.8), open and waiting for a headset.
+    let waiting = |s: &mut prostir_settings::api::State| {
+        s.pairing = Some(Pairing {
+            seconds_left: 95,
+            seconds_total: 180,
+            ..Default::default()
+        });
+        s.nearby.clear();
+    };
+    let (mut h, _) = window(dark(Mock::connected().pairing().edit(waiting)), shot());
     open(&mut h, Page::Headsets);
     picture(&mut h, &mut all, "headsets-pairing-waiting");
+    // A Prostir that does not open pairing from the window: what to do instead.
+    let (mut h, _) = window(dark(Mock::connected()), shot());
+    open(&mut h, Page::Headsets);
+    press(&mut h, "Сполучити новий шолом");
+    picture(&mut h, &mut all, "headsets-pair-hint");
     let (mut h, _) = window(dark(Mock::no_headsets()), shot());
     open(&mut h, Page::Headsets);
     picture(&mut h, &mut all, "headsets-empty");
@@ -227,7 +238,7 @@ fn a_failed_request_says_why() {
     let (mut h, handle) = window(Mock::connected().look(ThemeMode::Dark, "ink"), shot());
     open(&mut h, Page::Monitors);
     handle.refuse_next(ClientError::Refused {
-        code: "Desktop".into(),
+        code: prostir_settings::api::ApiError::Desktop,
         message: "KWin не відповів.".into(),
     });
     press(&mut h, "2560 × 1440");

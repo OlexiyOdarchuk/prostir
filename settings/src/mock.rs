@@ -1,13 +1,16 @@
-//! A service in memory, for tests, pictures and trying the window before the real one
-//! exists (`PROSTIR_SETTINGS_MOCK=1`). It answers every request the window sends by
-//! changing its state, the way the service is meant to.
+//! A service in memory, for tests, pictures and trying the window without Prostir
+//! (`prostir-settings --mock`). It answers the requests the way the service of
+//! LOCAL-API.md does now: the answer carries the revision of the state that has the
+//! change, monitors asked for while no headset is connected are kept for the next
+//! one, and what the service does not do yet (pairing from the window until step
+//! 6.8, the volume until 6.6, the microphone's switch ever) is `Unsupported`.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::api::*;
 
-/// How long the pairing window stays open.
+/// How long the pairing window stays open (from step 6.8).
 pub const PAIR_SECONDS: u32 = 180;
 
 /// A code that never matches, to try the "wrong code" state.
@@ -20,12 +23,16 @@ struct Inner {
     sink: Option<Arc<Sink>>,
     /// Real time: the pairing window runs out. Frozen: it stays as made (pictures).
     live: bool,
+    /// Pairing from the window as step 6.8 brings it; without, `Unsupported`.
+    pairing_steps: bool,
     pairing_since: Option<Instant>,
     calls: Vec<Request>,
     /// The next request is refused with this error.
     refuse: Option<ClientError>,
     /// Asked for the state, it does not answer in time.
     silent: bool,
+    /// It owns the name but has not this interface: a Prostir older than the window.
+    old: bool,
 }
 
 /// The mock service.
@@ -50,13 +57,23 @@ fn display(id: u32, name: &str, w: u32, h: u32, x: i32, y: i32) -> Display {
         id,
         kind: DisplayKind::Virtual,
         name: name.into(),
-        output: format!("Virtual-{id}"),
+        output: format!("Virtual-{name}"),
         builtin: false,
         shown: true,
         mode: Mode { w, h, scale: 100 },
         desk: Some(DeskRect { x, y, w, h }),
         state: DisplayState::Running,
         failure: None,
+    }
+}
+
+/// A monitor of the set kept for the next headset: no output, nowhere on the desk.
+fn kept(id: u32, name: &str, w: u32, h: u32) -> Display {
+    Display {
+        output: String::new(),
+        desk: None,
+        state: DisplayState::Kept,
+        ..display(id, name, w, h, 0, 0)
     }
 }
 
@@ -82,35 +99,43 @@ fn laptop(id: u32) -> Display {
     }
 }
 
+fn headset(key: &str, name: &str, hours_ago: u64) -> Headset {
+    Headset {
+        key: key.into(),
+        name: name.into(),
+        model: String::new(),
+        last_seen: Some(now_unix() - hours_ago * 3600),
+        role: Role::Main,
+        rights: ["input", "mic", "camera", "clipboard", "changes", "private"]
+            .map(String::from)
+            .to_vec(),
+        session: None,
+    }
+}
+
 fn base() -> State {
     State {
         v: STATE_VERSION,
         pc: Pc {
             name: "workstation".into(),
             app: env!("CARGO_PKG_VERSION").into(),
-            desktop: "KDE Plasma".into(),
+            desktop: String::new(),
+            phase: Phase::Idle,
         },
         window: WindowLook::default(),
         autostart: Some(true),
         headsets: vec![
-            Headset {
-                key: "5f2a9c".into(),
-                name: "Quest 3".into(),
-                model: "Quest 3".into(),
-                last_seen: Some(now_unix() - 2 * 3600),
-                session: None,
-            },
-            Headset {
-                key: "c81e07".into(),
-                name: "Quest 3S".into(),
-                model: "Quest 3S".into(),
-                last_seen: Some(now_unix() - 26 * 3600),
-                session: None,
-            },
+            headset("5f2a9c", "Quest 3", 2),
+            headset("c81e07", "Quest 3S", 26),
         ],
         connecting: None,
-        displays: vec![laptop(4)],
-        primary: Some(4),
+        displays: vec![
+            kept(1, "Prostir-1", 2560, 1440),
+            kept(2, "Prostir-2", 2560, 1440),
+            kept(3, "Prostir-3", 1440, 2560),
+            laptop(4),
+        ],
+        primary: None,
         limits: Limits {
             sizes: vec![
                 [1920, 1080],
@@ -121,16 +146,28 @@ fn base() -> State {
             ],
             scales: vec![100, 125, 150],
             displays_max: Some(6),
+            physical_max: Some(2),
+            streams_max: Some(8),
+            min: Some([640, 360]),
+            max: Some([3840, 2160]),
+        },
+        encoding: Encoding {
+            bitrate: 30,
+            sharp: false,
+            codec: Codec::H265,
+            cpu: false,
+            using: None,
         },
         sound: Sound {
             to_headset: true,
             volume: None,
-            mic_on: true,
+            mic_on: false,
             mic: MicState::Off,
             mic_failure: None,
         },
         pairing: None,
         nearby: Vec::new(),
+        counting: true,
         problems: Vec::new(),
     }
 }
@@ -144,17 +181,22 @@ impl Mock {
                 running,
                 sink: None,
                 live: false,
+                pairing_steps: false,
                 pairing_since: None,
                 calls: Vec::new(),
                 refuse: None,
                 silent: false,
+                old: false,
             })),
         }
     }
 
-    /// A headset in a session with three monitors and the laptop's screen shown.
+    /// The main headset in a session with three monitors and the laptop's screen shown.
     pub fn connected() -> Self {
         let mut s = base();
+        s.pc.desktop = "KDE Plasma".into();
+        s.pc.phase = Phase::Live;
+        s.headsets[0].model = "Quest 3".into();
         s.headsets[0].session = Some(Session {
             via: Via::Wifi,
             worn: true,
@@ -164,8 +206,12 @@ impl Mock {
             }),
             profile: Some("Робота".into()),
             mic_allowed: Some(true),
+            mic_on: true,
+            main: true,
+            commands: true,
+            no_limits: Some(false),
         });
-        s.headsets[0].last_seen = Some(now_unix());
+        s.headsets[0].last_seen = None;
         s.displays = vec![
             display(1, "Prostir-1", 2560, 1440, 0, 560),
             display(2, "Prostir-2", 2560, 1440, 2560, 560),
@@ -173,15 +219,17 @@ impl Mock {
             laptop(4),
         ];
         s.primary = Some(2);
-        s.sound.volume = Some(Volume {
-            level: 64,
-            muted: false,
+        s.encoding.using = Some(Using {
+            codec: Codec::H265,
+            hardware: true,
         });
+        s.sound.mic_on = true;
         s.sound.mic = MicState::Ready;
         Self::with(s, true)
     }
 
-    /// Paired headsets, none connected: only the PC's own screen.
+    /// Paired headsets, none connected: the monitors kept for the next one and the
+    /// PC's own screen.
     pub fn waiting() -> Self {
         Self::with(base(), true)
     }
@@ -200,9 +248,10 @@ impl Mock {
             let mut i = m.inner.lock().unwrap();
             let mut d = display(5, "Prostir-4", 1920, 1080, 0, 0);
             d.desk = None;
+            d.output = String::new();
             d.state = DisplayState::Failed;
             d.failure = Some(Problem {
-                code: "Desktop".into(),
+                code: ApiError::Desktop,
                 text: "KWin не відповів за 10 секунд, Prostir спробує ще раз.".into(),
             });
             i.state.displays.insert(3, d);
@@ -214,6 +263,7 @@ impl Mock {
     pub fn no_headsets() -> Self {
         let mut s = base();
         s.headsets.clear();
+        s.displays = vec![laptop(4)];
         Self::with(s, true)
     }
 
@@ -222,10 +272,13 @@ impl Mock {
         Self::with(base(), false)
     }
 
-    /// With the pairing window open: a headset shows a code to type here.
-    pub fn pairing(mut self) -> Self {
+    /// Pairing from the window as step 6.8 brings it, open now: a headset shows a
+    /// code to type here.
+    pub fn pairing(self) -> Self {
         {
             let mut i = self.inner.lock().unwrap();
+            i.pairing_steps = true;
+            i.live = false;
             i.state.pairing = Some(Pairing {
                 seconds_left: 161,
                 seconds_total: PAIR_SECONDS,
@@ -235,7 +288,16 @@ impl Mock {
             });
             i.state.nearby = vec!["Quest 3S".into()];
         }
-        self = self.frozen();
+        self
+    }
+
+    /// The PC shows a code to type in the headset, as the service does now: no time
+    /// limit, nothing but the code.
+    pub fn pc_code(self, code: &str) -> Self {
+        self.inner.lock().unwrap().state.pairing = Some(Pairing {
+            pc_code: Some(code.into()),
+            ..Default::default()
+        });
         self
     }
 
@@ -255,15 +317,10 @@ impl Mock {
         self
     }
 
-    /// Time runs: the pairing window counts down and closes, a headset turns up
-    /// a few seconds after it opens.
+    /// Time runs: with pairing from the window, its time runs out, and a headset
+    /// turns up a few seconds after it opens.
     pub fn live(self) -> Self {
         self.inner.lock().unwrap().live = true;
-        self
-    }
-
-    fn frozen(self) -> Self {
-        self.inner.lock().unwrap().live = false;
         self
     }
 
@@ -301,8 +358,8 @@ impl MockHandle {
         self.inner.lock().unwrap().refuse = Some(e);
     }
 
-    /// Starts or stops the service without the bus telling the window: what an old
-    /// Prostir, or a missed signal, looks like.
+    /// Starts or stops the service without the bus telling the window: what a missed
+    /// signal looks like.
     pub fn set_running_quietly(&self, on: bool) {
         self.inner.lock().unwrap().running = on;
     }
@@ -310,6 +367,11 @@ impl MockHandle {
     /// Lets the service stop answering for its state, or answer again.
     pub fn set_silent(&self, on: bool) {
         self.inner.lock().unwrap().silent = on;
+    }
+
+    /// Makes it a Prostir older than the window, or this version again.
+    pub fn set_old(&self, on: bool) {
+        self.inner.lock().unwrap().old = on;
     }
 
     /// Every request asked so far.
@@ -321,14 +383,18 @@ impl MockHandle {
         self.inner.lock().unwrap().state.clone()
     }
 
+    /// Changes the state and tells the window, as a change on the PC would.
+    pub fn change(&self, f: impl FnOnce(&mut State)) {
+        let mut i = self.inner.lock().unwrap();
+        f(&mut i.state);
+        i.publish();
+    }
+
     /// Moves time on: the pairing window, a headset turning up (live mocks only).
     pub fn tick(&self) {
-        let changed = {
-            let mut i = self.inner.lock().unwrap();
-            i.tick()
-        };
-        if changed {
-            self.inner.lock().unwrap().publish();
+        let mut i = self.inner.lock().unwrap();
+        if i.tick() {
+            i.publish();
         }
     }
 }
@@ -374,49 +440,79 @@ impl Inner {
             .displays
             .iter_mut()
             .find(|d| d.id == id)
-            .ok_or_else(|| refused("UnknownDisplay", "Такого дисплея немає."))
+            .ok_or_else(|| refused(ApiError::UnknownDisplay, "Такого дисплея немає."))
     }
 
-    fn apply(&mut self, r: &Request) -> Result<Reply, ClientError> {
+    /// What the request changes; `Ok(Some(id))` for a monitor made.
+    fn apply(&mut self, r: &Request) -> Result<Option<u32>, ClientError> {
+        let connected = self.state.connected().is_some();
         let s = &mut self.state;
-        let connected = s.connected().is_some();
-        let mut reply = serde_json::json!({});
+        let virtuals = s
+            .displays
+            .iter()
+            .filter(|d| d.kind == DisplayKind::Virtual)
+            .count();
         match r {
-            Request::AddMonitor { w, h, scale } => {
+            Request::Recenter
+            | Request::LineUp
+            | Request::ShowMouse
+            | Request::ResetArrangement
+            | Request::Profile { .. }
+            | Request::Cinema { .. }
+            | Request::Focus { .. }
+            | Request::Follow { .. }
+            | Request::Distance { .. }
+            | Request::Preset { .. } => {
                 if !connected {
-                    return Err(refused("NotConnected", "Шолом не підключено."));
+                    return Err(refused(ApiError::NotConnected, "Шолом не підключено."));
                 }
-                let count = s
-                    .displays
-                    .iter()
-                    .filter(|d| d.kind == DisplayKind::Virtual)
-                    .count() as u32;
-                if s.limits.displays_max.is_some_and(|m| count >= m) {
-                    return Err(refused("Limit", "Більше моніторів не вміщається."));
+            }
+            Request::NoLimits { on } => {
+                let Some(session) = s.headsets.iter_mut().find_map(|h| h.session.as_mut()) else {
+                    return Err(refused(ApiError::NotConnected, "Шолом не підключено."));
+                };
+                session.no_limits = Some(*on);
+            }
+            Request::AddMonitor { w, h, scale } => {
+                if s.limits.displays_max.is_some_and(|m| virtuals as u32 >= m) {
+                    return Err(refused(ApiError::Limit, "Більше моніторів не вміщається."));
                 }
                 let id = s.displays.iter().map(|d| d.id).max().unwrap_or(0) + 1;
                 let n = (1..)
                     .find(|n| !s.displays.iter().any(|d| d.name == format!("Prostir-{n}")))
                     .unwrap_or(1);
-                let right = s
-                    .displays
-                    .iter()
-                    .filter_map(|d| d.desk)
-                    .map(|r| r.x + r.w as i32)
-                    .max()
-                    .unwrap_or(0);
-                let mut d = display(id, &format!("Prostir-{n}"), *w, *h, right, 0);
+                let name = format!("Prostir-{n}");
+                let mut d = if connected {
+                    let right = s
+                        .displays
+                        .iter()
+                        .filter_map(|d| d.desk)
+                        .map(|r| r.x + r.w as i32)
+                        .max()
+                        .unwrap_or(0);
+                    display(id, &name, *w, *h, right, 0)
+                } else {
+                    // Kept for the next headset.
+                    kept(id, &name, *w, *h)
+                };
                 d.mode.scale = *scale;
-                s.displays.insert(count as usize, d);
-                reply = serde_json::json!({ "id": id });
+                s.displays.insert(virtuals, d);
+                return Ok(Some(id));
             }
             Request::RemoveMonitor { id } => {
-                let before = s.displays.len();
-                s.displays
-                    .retain(|d| !(d.id == *id && d.kind == DisplayKind::Virtual));
-                if s.displays.len() == before {
-                    return Err(refused("UnknownDisplay", "Такого монітора немає."));
+                let Some(d) = s.displays.iter().find(|d| d.id == *id) else {
+                    return Err(refused(ApiError::UnknownDisplay, "Такого монітора немає."));
+                };
+                if d.kind != DisplayKind::Virtual {
+                    return Err(refused(ApiError::UnknownDisplay, "Такого монітора немає."));
                 }
+                if connected && virtuals == 1 {
+                    return Err(refused(
+                        ApiError::LastDisplay,
+                        "Останній монітор лишається.",
+                    ));
+                }
+                s.displays.retain(|d| d.id != *id);
                 if s.primary == Some(*id) {
                     s.primary = s.displays.first().map(|d| d.id);
                 }
@@ -433,17 +529,51 @@ impl Inner {
                 });
             }
             Request::ShowPhysical { id, shown } => self.display_mut(*id)?.shown = *shown,
-            Request::SetScale { id, scale } => self.display_mut(*id)?.mode.scale = *scale,
+            Request::SetScale { id, scale } => {
+                if !self.state.limits.scales.contains(scale) {
+                    return Err(refused(ApiError::BadSize, "Такого масштабу немає."));
+                }
+                self.display_mut(*id)?.mode.scale = *scale;
+            }
             Request::SetPrimary { id } => {
                 self.display_mut(*id)?;
                 self.state.primary = Some(*id);
             }
             Request::Place { id, x, y } => {
+                if !connected {
+                    return Err(refused(
+                        ApiError::Unsupported,
+                        "Монітори ще не на стільниці.",
+                    ));
+                }
                 let d = self.display_mut(*id)?;
                 if let Some(r) = &mut d.desk {
                     r.x = *x;
                     r.y = *y;
                 }
+            }
+            Request::SetQuality { mbit } => {
+                if !(5..=100).contains(mbit) {
+                    return Err(refused(ApiError::BadArgument, "Від 5 до 100 Мбіт/с."));
+                }
+                s.encoding.bitrate = *mbit;
+            }
+            Request::SetSharp { on } => s.encoding.sharp = *on,
+            Request::SetCodec { codec, cpu } => {
+                s.encoding.codec = match codec {
+                    CodecChoice::H264 => Codec::H264,
+                    CodecChoice::H265 | CodecChoice::Auto => Codec::H265,
+                };
+                s.encoding.cpu = *cpu;
+            }
+            Request::SetCounting { on } => s.counting = *on,
+            Request::PairNewHeadset | Request::StopPairing | Request::PairingCode { .. }
+                if !self.pairing_steps =>
+            {
+                return Err(refused(
+                    ApiError::Unsupported,
+                    "Сполучення з вікна з'явиться в наступній версії.",
+                ));
             }
             Request::PairNewHeadset => {
                 s.pairing = Some(Pairing {
@@ -452,7 +582,6 @@ impl Inner {
                     ..Default::default()
                 });
                 self.pairing_since = Some(Instant::now());
-                reply = serde_json::json!({ "seconds_left": PAIR_SECONDS });
             }
             Request::StopPairing => {
                 s.pairing = None;
@@ -461,10 +590,13 @@ impl Inner {
             }
             Request::PairingCode { code } => {
                 let Some(p) = &mut s.pairing else {
-                    return Err(refused("NotAllowed", "Сполучення не відкрито."));
+                    return Err(refused(ApiError::NotAllowed, "Сполучення не відкрито."));
                 };
                 let Some(name) = p.code_for.clone() else {
-                    return Err(refused("NotAllowed", "Жоден шолом не чекає на код."));
+                    return Err(refused(
+                        ApiError::NotAllowed,
+                        "Жоден шолом не чекає на код.",
+                    ));
                 };
                 if code == WRONG_CODE || code.len() != 6 {
                     p.last = Some(PairResult::Wrong);
@@ -475,13 +607,8 @@ impl Inner {
                     } else {
                         format!("{name} ({})", taken + 1)
                     };
-                    s.headsets.push(Headset {
-                        key: format!("{:06x}", 0xa0000 + s.headsets.len()),
-                        name: shown,
-                        model: "Quest 3S".into(),
-                        last_seen: Some(now_unix()),
-                        session: None,
-                    });
+                    let key = format!("{:06x}", 0xa0000 + s.headsets.len());
+                    s.headsets.push(headset(&key, &shown, 0));
                     // Pairing closes once a headset is paired.
                     s.pairing = None;
                     s.nearby.clear();
@@ -490,23 +617,25 @@ impl Inner {
             }
             Request::ForgetHeadset { headset } => {
                 let before = s.headsets.len();
-                s.headsets.retain(|h| h.key != *headset);
+                s.headsets
+                    .retain(|h| h.key != *headset && h.name != *headset);
                 if s.headsets.len() == before {
-                    return Err(refused("BadArgument", "Такого шолома немає."));
+                    return Err(refused(ApiError::BadArgument, "Такого шолома немає."));
                 }
             }
+            Request::ForgetAll => s.headsets.clear(),
             Request::SoundToHeadset { on } => s.sound.to_headset = *on,
-            Request::Volume { level } => match &mut s.sound.volume {
-                Some(v) => v.level = (*level).min(100),
-                None => return Err(refused("NotConnected", "Шолом не підключено.")),
-            },
-            Request::SetMic { on } => {
-                s.sound.mic_on = *on;
-                s.sound.mic = if *on && connected {
-                    MicState::Ready
-                } else {
-                    MicState::Off
-                };
+            Request::Volume { .. } => {
+                return Err(refused(
+                    ApiError::Unsupported,
+                    "Гучність з ПК з'явиться в наступній версії.",
+                ));
+            }
+            Request::SetMic { .. } => {
+                return Err(refused(
+                    ApiError::Unsupported,
+                    "Мікрофон вмикають і вимикають у шоломі.",
+                ));
             }
             Request::Autostart { on } => s.autostart = Some(*on),
             Request::WindowLook {
@@ -520,14 +649,15 @@ impl Inner {
                     language: language.clone(),
                 }
             }
+            Request::ShowSettings | Request::Quit => {}
         }
-        Ok(Reply(reply))
+        Ok(None)
     }
 }
 
-fn refused(code: &str, message: &str) -> ClientError {
+fn refused(code: ApiError, message: &str) -> ClientError {
     ClientError::Refused {
-        code: code.into(),
+        code,
         message: message.into(),
     }
 }
@@ -541,6 +671,9 @@ impl Client for Mock {
         if i.silent {
             return Err(ClientError::TimedOut);
         }
+        if i.old {
+            return Err(ClientError::TooOld);
+        }
         i.tick();
         Ok(Snapshot {
             revision: i.revision,
@@ -548,7 +681,7 @@ impl Client for Mock {
         })
     }
 
-    fn call(&self, request: &Request) -> Result<Reply, ClientError> {
+    fn call(&self, request: &Request) -> Result<Answer, ClientError> {
         let mut i = self.inner.lock().unwrap();
         if !i.running {
             return Err(ClientError::NotRunning);
@@ -557,9 +690,15 @@ impl Client for Mock {
         if let Some(e) = i.refuse.take() {
             return Err(e);
         }
-        let reply = i.apply(request)?;
+        let id = i.apply(request)?;
+        // As the service: the state with the change goes out before the answer.
         i.publish();
-        Ok(reply)
+        Ok(Answer {
+            id,
+            seconds_left: matches!(request, Request::PairNewHeadset).then_some(PAIR_SECONDS),
+            revision: i.revision,
+            ..Default::default()
+        })
     }
 
     fn watch(&self, sink: Sink) -> Result<(), ClientError> {
@@ -592,55 +731,81 @@ impl Client for Mock {
 mod tests {
     use super::*;
 
-    fn call(m: &mut Mock, r: Request) -> Result<Reply, ClientError> {
-        m.call(&r)
-    }
-
     #[test]
-    fn requests_change_the_state() {
-        let mut m = Mock::connected();
-        let reply = call(
-            &mut m,
-            Request::AddMonitor {
+    fn requests_change_the_state_and_answer_its_revision() {
+        let m = Mock::connected();
+        let a = m
+            .call(&Request::AddMonitor {
                 w: 1920,
                 h: 1080,
                 scale: 125,
-            },
-        )
-        .unwrap();
-        let id = reply.0["id"].as_u64().unwrap() as u32;
+            })
+            .unwrap();
+        let id = a.id.unwrap();
+        assert_eq!(a.revision, 2);
         let s = m.state();
         let d = s.display(id).unwrap();
         assert_eq!((d.name.as_str(), d.mode.scale), ("Prostir-4", 125));
-        call(&mut m, Request::SetPrimary { id }).unwrap();
-        call(&mut m, Request::Place { id, x: -1920, y: 0 }).unwrap();
+        m.call(&Request::SetPrimary { id }).unwrap();
+        let a = m.call(&Request::Place { id, x: -1920, y: 0 }).unwrap();
+        assert_eq!(a.revision, 4);
         assert_eq!(m.state().primary, Some(id));
         assert_eq!(m.state().display(id).unwrap().desk.unwrap().x, -1920);
-        call(&mut m, Request::RemoveMonitor { id }).unwrap();
+        m.call(&Request::RemoveMonitor { id }).unwrap();
         assert!(m.state().display(id).is_none());
         assert!(matches!(
-            call(&mut m, Request::RemoveMonitor { id: 4 }),
-            Err(ClientError::Refused { code, .. }) if code == "UnknownDisplay"
+            m.call(&Request::RemoveMonitor { id: 4 }),
+            Err(ClientError::Refused {
+                code: ApiError::UnknownDisplay,
+                ..
+            })
         ));
+        assert!(
+            m.call(&Request::Volume { level: 3 })
+                .unwrap_err()
+                .unsupported()
+        );
+        assert!(
+            m.call(&Request::SetMic { on: false })
+                .unwrap_err()
+                .unsupported()
+        );
+        assert!(m.call(&Request::PairNewHeadset).unwrap_err().unsupported());
     }
 
     #[test]
-    fn pairing_takes_a_right_code_and_closes() {
-        let mut m = Mock::connected().pairing();
-        call(
-            &mut m,
-            Request::PairingCode {
-                code: WRONG_CODE.into(),
-            },
-        )
+    fn without_a_headset_monitors_are_kept_for_the_next() {
+        let m = Mock::waiting();
+        let id = m
+            .call(&Request::AddMonitor {
+                w: 1920,
+                h: 1080,
+                scale: 100,
+            })
+            .unwrap()
+            .id
+            .unwrap();
+        let s = m.state();
+        let d = s.display(id).unwrap();
+        assert_eq!((d.state, d.desk), (DisplayState::Kept, None));
+        assert!(
+            m.call(&Request::Place { id, x: 0, y: 0 })
+                .unwrap_err()
+                .unsupported()
+        );
+    }
+
+    #[test]
+    fn pairing_as_step_6_8_takes_a_right_code_and_closes() {
+        let m = Mock::connected().pairing();
+        m.call(&Request::PairingCode {
+            code: WRONG_CODE.into(),
+        })
         .unwrap();
         assert_eq!(m.state().pairing.unwrap().last, Some(PairResult::Wrong));
-        call(
-            &mut m,
-            Request::PairingCode {
-                code: "482913".into(),
-            },
-        )
+        m.call(&Request::PairingCode {
+            code: "482913".into(),
+        })
         .unwrap();
         let s = m.state();
         assert!(s.pairing.is_none());
@@ -649,11 +814,8 @@ mod tests {
 
     #[test]
     fn not_running_says_so() {
-        let mut m = Mock::not_running();
+        let m = Mock::not_running();
         assert_eq!(m.get_state(), Err(ClientError::NotRunning));
-        assert_eq!(
-            call(&mut m, Request::StopPairing),
-            Err(ClientError::NotRunning)
-        );
+        assert_eq!(m.call(&Request::StopPairing), Err(ClientError::NotRunning));
     }
 }

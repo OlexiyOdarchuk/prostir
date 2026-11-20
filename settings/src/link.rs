@@ -12,7 +12,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::api::{Change, Client, ClientError, Reply, Request, Sink, Snapshot};
+use crate::api::{Answer, Change, Client, ClientError, Request, Sink, Snapshot};
 
 /// What the window learns.
 #[derive(Clone, Debug, PartialEq)]
@@ -24,7 +24,7 @@ pub enum Update {
     /// A request was answered.
     Replied {
         request: Request,
-        result: Result<Reply, ClientError>,
+        result: Result<Answer, ClientError>,
     },
 }
 
@@ -76,7 +76,7 @@ impl Follower {
         // Asked again later only when it is there and did not answer; gone, the bus
         // says when it is back.
         self.failures = match e {
-            ClientError::NotRunning | ClientError::NoBus(_) => 0,
+            ClientError::NotRunning | ClientError::NoBus(_) | ClientError::TooOld => 0,
             _ => self.failures + 1,
         };
         vec![Update::Absent(e)]
@@ -381,9 +381,9 @@ mod tests {
             Ok(Snapshot::default())
         }
 
-        fn call(&self, _: &Request) -> Result<Reply, ClientError> {
+        fn call(&self, _: &Request) -> Result<Answer, ClientError> {
             let _ = self.release.lock().unwrap().recv();
-            Ok(Reply::default())
+            Ok(Answer::default())
         }
 
         fn watch(&self, sink: Sink) -> Result<(), ClientError> {
@@ -404,7 +404,7 @@ mod tests {
             fn get_state(&self) -> Result<Snapshot, ClientError> {
                 self.0.get_state()
             }
-            fn call(&self, r: &Request) -> Result<Reply, ClientError> {
+            fn call(&self, r: &Request) -> Result<Answer, ClientError> {
                 self.0.call(r)
             }
             fn watch(&self, sink: Sink) -> Result<(), ClientError> {

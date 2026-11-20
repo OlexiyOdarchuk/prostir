@@ -3676,6 +3676,7 @@ dependencies = [
  "egui_kittest",
  "env_logger",
  "log",
+ "prostir-api",
  "prostir-lang",
  "serde",
  "serde_json",

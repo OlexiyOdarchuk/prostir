@@ -3,6 +3,7 @@
 //! asks the service for every change. What is its own is how it looks right now (the
 //! page, the selected monitor, a code being typed, the cross-fade).
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use eframe::egui::{
@@ -37,6 +38,7 @@ pub enum Page {
     Monitors,
     Headsets,
     Sound,
+    Quality,
     Look,
     FirstRun,
 }
@@ -110,14 +112,19 @@ pub struct UiState {
     pub map: MapState,
     pub arc_view: bool,
     pub selected: Option<u32>,
-    /// A monitor moved here, shown so until a newer state says where it is.
-    pub pending_place: Option<(u32, i32, i32, u32)>,
+    /// A monitor moved here, shown so until the state with the move is in: the
+    /// answer's revision (none while the answer is awaited).
+    pub pending_place: Option<(u32, i32, i32, Option<u32>)>,
+    /// Requests (by name) the service does not do yet: their controls are disabled
+    /// with a reason, never reported as a failure.
+    pub unsupported: BTreeSet<String>,
     /// The volume while its slider is held.
     pub volume_drag: Option<u8>,
     pub forget_ask: Option<String>,
     pub code: String,
-    /// The code sent, and the state's revision when it was.
-    pub submitted: Option<(String, u32)>,
+    /// The code sent, and the revision of the state with its result (none while the
+    /// answer is awaited).
+    pub submitted: Option<(String, Option<u32>)>,
     pub pair: PairWatch,
     pub fr_step: usize,
     pub notice: Option<String>,
@@ -194,6 +201,7 @@ impl App {
                 arc_view: false,
                 selected: None,
                 pending_place: None,
+                unsupported: BTreeSet::new(),
                 volume_drag: None,
                 forget_ask: None,
                 code: String::new(),
@@ -233,7 +241,7 @@ impl App {
                 if self
                     .ui
                     .pending_place
-                    .is_some_and(|(.., rev)| snap.revision > rev)
+                    .is_some_and(|(.., until)| until.is_some_and(|r| snap.revision >= r))
                 {
                     self.ui.pending_place = None;
                 }
@@ -264,17 +272,48 @@ impl App {
                 request,
                 result: Err(e),
             } => {
-                // Not running is shown by the page itself; a look chosen without the
-                // service still holds for this window.
-                if !(matches!(request, Request::WindowLook { .. }) && e == ClientError::NotRunning)
+                if e.unsupported() {
+                    // Not done by this Prostir (yet): the control says so itself.
+                    self.ui.unsupported.insert(crate::api::kind(&request));
+                    self.ui.volume_drag = None;
+                } else if !(matches!(request, Request::WindowLook { .. })
+                    && matches!(e, ClientError::NotRunning | ClientError::TooOld))
                 {
+                    // Not running is shown by the page itself; a look chosen without
+                    // the service still holds for this window.
                     self.ui.notice = Some(self.error_text(&e));
                 }
-                if matches!(request, Request::Place { .. }) {
-                    self.ui.pending_place = None;
+                match request {
+                    Request::Place { .. } => self.ui.pending_place = None,
+                    Request::PairingCode { .. } => self.ui.submitted = None,
+                    _ => {}
                 }
             }
-            Update::Replied { .. } => {}
+            Update::Replied {
+                request,
+                result: Ok(answer),
+            } => {
+                let now_rev = match &self.conn {
+                    Conn::Live { snap, .. } => snap.revision,
+                    _ => 0,
+                };
+                let done = now_rev >= answer.revision;
+                match request {
+                    Request::Place { .. } => {
+                        if done {
+                            self.ui.pending_place = None;
+                        } else if let Some(p) = &mut self.ui.pending_place {
+                            p.3 = Some(answer.revision);
+                        }
+                    }
+                    Request::PairingCode { .. } => {
+                        if let Some(s) = &mut self.ui.submitted {
+                            s.1 = Some(answer.revision);
+                        }
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 
@@ -285,11 +324,18 @@ impl App {
                 "notice-failed",
                 &[(
                     "why",
-                    if message.is_empty() { code } else { message }.into(),
+                    if message.is_empty() {
+                        code.name()
+                    } else {
+                        message
+                    }
+                    .into(),
                 )],
             ),
             ClientError::TimedOut => s.t("notice-timeout"),
-            ClientError::NotRunning | ClientError::NoBus(_) => s.t("notice-not-running"),
+            ClientError::NotRunning | ClientError::NoBus(_) | ClientError::TooOld => {
+                s.t("notice-not-running")
+            }
             ClientError::Broken(why) => s.f("notice-broken", &[("why", why.into())]),
         }
     }
@@ -311,7 +357,12 @@ impl App {
                     self.ui.code.clear();
                     self.ui.submitted = None;
                 }
-                pw.ends = now + p.seconds_left as f64;
+                // No time limit (0): it never runs out, so it never "expired".
+                pw.ends = if p.seconds_total == 0 {
+                    f64::INFINITY
+                } else {
+                    now + p.seconds_left as f64
+                };
             }
             (None, true) => {
                 pw.open = false;
@@ -332,18 +383,10 @@ impl App {
         match a {
             Action::Send(r) => {
                 if let Request::Place { id, x, y } = r {
-                    let rev = match &self.conn {
-                        Conn::Live { snap, .. } => snap.revision,
-                        _ => 0,
-                    };
-                    self.ui.pending_place = Some((id, x, y, rev));
+                    self.ui.pending_place = Some((id, x, y, None));
                 }
                 if let Request::PairingCode { code } = &r {
-                    let rev = match &self.conn {
-                        Conn::Live { snap, .. } => snap.revision,
-                        _ => 0,
-                    };
-                    self.ui.submitted = Some((code.clone(), rev));
+                    self.ui.submitted = Some((code.clone(), None));
                 }
                 self.link.send(r);
             }
@@ -416,7 +459,7 @@ impl App {
         match self.look.theme {
             ThemeMode::Light => Scheme::Light,
             ThemeMode::Dark => Scheme::Dark,
-            ThemeMode::System => self
+            ThemeMode::System | ThemeMode::Other => self
                 .system
                 .get()
                 .or_else(|| {
@@ -686,6 +729,10 @@ fn status_line(tk: &Tk, conn: &Conn) -> (egui::Color32, String) {
     let p = tk.p;
     match conn {
         Conn::Loading => (p.text_muted, tk.t("side-loading")),
+        Conn::Absent {
+            why: ClientError::TooOld,
+            ..
+        } => (p.warning, tk.t("side-old")),
         Conn::Absent { why, .. } if crate::pages::silent(why) => (p.warning, tk.t("side-silent")),
         Conn::Absent { .. } => (p.warning, tk.t("side-not-running")),
         Conn::Live { snap, .. } => {
@@ -741,6 +788,7 @@ fn sidebar(
         (Page::Monitors, "nav-monitors"),
         (Page::Headsets, "nav-headsets"),
         (Page::Sound, "nav-sound"),
+        (Page::Quality, "nav-quality"),
         (Page::Look, "nav-look"),
     ] {
         nav_item(ui, tk, st.page, page, id, out);

@@ -36,7 +36,7 @@ impl api::Client for NoBus {
         Err(api::ClientError::NoBus(self.0.clone()))
     }
 
-    fn call(&self, _: &api::Request) -> Result<api::Reply, api::ClientError> {
+    fn call(&self, _: &api::Request) -> Result<api::Answer, api::ClientError> {
         Err(api::ClientError::NoBus(self.0.clone()))
     }
 
