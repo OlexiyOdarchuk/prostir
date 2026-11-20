@@ -42,3 +42,5 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 
 [dev-dependencies]
 tiny-skia = { version = "0.12", features = ["png-format"] }
+# The plural forms of counts are checked against Fluent's.
+prostir-lang = { path = "../lang" }

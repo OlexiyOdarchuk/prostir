@@ -154,8 +154,9 @@ pub struct UiState {
     pub date: String,
     /// The paired PC waiting for a second press to be forgotten.
     pub confirm_forget: Option<usize>,
-    /// The physical display is being shown (its lid is open).
-    pub mirror_active: bool,
+    /// What the display of the PC the switch shows or hides is called; none while no
+    /// display of the PC is connected (the lid closed, no monitor).
+    pub mirror_name: Option<String>,
     pub settings: Settings,
     pub room_available: bool,
     pub panorama_available: bool,
@@ -1078,10 +1079,7 @@ impl Panel {
             return y + 62.0;
         }
         for line in [
-            l.t(
-                "Введіть код, який показує ноутбук",
-                "Type the code the PC shows",
-            ),
+            l.t("Введіть код, який показує ПК", "Type the code the PC shows"),
             l.t(
                 "(сповіщення або іконка Prostir у треї):",
                 "(a notification or the Prostir tray icon):",
@@ -1769,17 +1767,19 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
         ));
         y += 58.0;
     }
-    // Physical display mirror: shown or hidden, said by the highlighted option.
+    // A display of the PC: shown or hidden, said by the highlighted option, named; with
+    // none connected (the lid closed, no monitor) there is nothing to switch.
+    let connected = s.mirror_name.is_some();
+    let name = s
+        .mirror_name
+        .clone()
+        .unwrap_or_else(|| l.t("Екран ПК", "PC display").to_owned());
     let title = if let Some((note, _)) = s.ask_note(Asked::Mirror) {
-        format!("{} · {note}", l.t("Екран ноутбука", "Laptop screen"))
-    } else if s.mirror_wanted && !s.mirror_active {
-        format!(
-            "{} · {}",
-            l.t("Екран ноутбука", "Laptop screen"),
-            l.t("кришка закрита", "lid closed")
-        )
+        format!("{name} · {note}")
+    } else if !connected {
+        format!("{name} · {}", l.t("не підключено", "not connected"))
     } else {
-        l.t("Екран ноутбука", "Laptop screen").to_owned()
+        name
     };
     y += 34.0;
     segmented(
@@ -1793,13 +1793,13 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
                 l.t("Показано", "Shown"),
                 Action::SetMirror(true),
                 s.mirror_wanted,
-                true,
+                connected,
             ),
             (
                 l.t("Приховано", "Hidden"),
                 Action::SetMirror(false),
                 !s.mirror_wanted,
-                true,
+                connected,
             ),
         ],
     );
@@ -1946,7 +1946,11 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
             &format!(
                 "{} {max} {}",
                 l.t("Максимум", "At most"),
-                l.t("моніторів", "monitors")
+                l.count(
+                    max as u64,
+                    ["монітор", "монітори", "моніторів"],
+                    ["monitor", "monitors"]
+                )
             ),
         ));
         y += 10.0;
@@ -2553,8 +2557,8 @@ fn build_intro(l: Lang, items: &mut Vec<Item>, x: f32, w: f32) {
         (
             "Зняли шолом",
             "Headset off",
-            "Через 10 с вікна, звук і мікрофон повертаються на ноутбук.",
-            "After 10 s, windows, sound and microphone go back to the laptop.",
+            "Через 10 с вікна, звук і мікрофон повертаються на ПК.",
+            "After 10 s, windows, sound and microphone go back to the PC.",
         ),
     ];
     for (uk_title, en_title, uk, en) in tips {
@@ -3679,7 +3683,7 @@ mod tests {
             mirror_wanted: true,
             audio_wanted: true,
             mic_wanted: true,
-            mirror_active: true,
+            mirror_name: Some("Екран HDMI-A-1".into()),
             settings: Settings::default(),
             room_available: true,
             panorama_available: true,
@@ -3802,6 +3806,40 @@ mod tests {
         assert!(adds(&s).iter().all(|(_, on)| !on), "before the PC said");
     }
 
+    /// The switch of the PC's display names the display it acts on; with none of the
+    /// PC's displays connected it says so and switches nothing.
+    #[test]
+    fn the_pc_display_switch_names_its_display() {
+        let items = |s: &UiState| Panel::new().build(s);
+        let switches = |s: &UiState| {
+            items(s)
+                .into_iter()
+                .filter(|i| {
+                    matches!(
+                        i,
+                        Item::Button {
+                            action: Some(Action::SetMirror(_)),
+                            ..
+                        }
+                    )
+                })
+                .count()
+        };
+        let says = |s: &UiState, what: &str| {
+            items(s)
+                .iter()
+                .any(|i| matches!(i, Item::Text { text, .. } if text == what))
+        };
+        let mut s = sample_state();
+        s.tab = Tab::Monitors;
+        s.mirror_wanted = false;
+        assert!(says(&s, "Екран HDMI-A-1"));
+        assert_eq!(switches(&s), 1, "the option not chosen");
+        s.mirror_name = None;
+        assert!(says(&s, "Екран ПК · не підключено"));
+        assert_eq!(switches(&s), 0);
+    }
+
     /// Every page and state, in both languages, without text that does not fit.
     #[test]
     fn wedges_are_hit_where_drawn() {
@@ -3849,6 +3887,7 @@ mod tests {
                 st.mic_wanted = false;
                 st.audio_wanted = false;
                 st.mirror_wanted = false;
+                st.mirror_name = None;
                 st.active_profile = Some(1);
                 st.error = Some(format!(
                     "{} 6",

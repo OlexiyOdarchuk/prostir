@@ -3604,6 +3604,7 @@ dependencies = [
  "ndk-context",
  "ndk-sys",
  "openxr",
+ "prostir-lang",
  "prostir-layout",
  "prostir-proto",
  "tiny-skia",

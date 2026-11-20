@@ -137,7 +137,7 @@ fn main() {
         mirror_wanted: true,
         audio_wanted: true,
         mic_wanted: true,
-        mirror_active: true,
+        mirror_name: Some("Екран HDMI-A-1".into()),
         settings: Settings::default(),
         room_available: true,
         panorama_available: true,
