@@ -14,6 +14,7 @@ use prostir_proto::stats::{Histogram, Period};
 use prostir_proto::{Codec, HostMsg, MAX_MONITORS};
 
 use crate::encoder::{Encoder, EncoderConfig, EncoderEvent};
+use crate::errors::{Counted, UserError, code_of};
 use crate::layout::panel_size;
 use crate::outbox::Outbox;
 use crate::platform::audio::{AudioOut, MicIn};
@@ -484,6 +485,8 @@ pub struct Displays {
     layout_retry: (Instant, u32),
     /// When the PC's own displays are looked at next (see `sync_physical`).
     physical_due: Instant,
+    /// When a headset last asked for a keyframe of each screen.
+    keyframes_asked: BTreeMap<ScreenId, Instant>,
     /// The settings as last applied from the store (see [`Displays::apply`]).
     settings: Settings,
     /// PC sound to the headset, while one is connected.
@@ -537,6 +540,7 @@ impl Displays {
             layout_waits: false,
             layout_retry: (Instant::now(), 0),
             physical_due: Instant::now(),
+            keyframes_asked: BTreeMap::new(),
             settings: settings.clone(),
             audio: None,
             mic: None,
@@ -612,7 +616,9 @@ impl Displays {
             return Err(e);
         }
         match set.primary {
-            Some(id) if displays.is_monitor(id) => displays.set_primary(id),
+            Some(id) if displays.is_monitor(id) || displays.is_physical(id) => {
+                let _ = displays.set_primary(id);
+            }
             _ => displays.ensure_primary(),
         }
         displays.tick(new_id);
@@ -653,22 +659,20 @@ impl Displays {
         self.screens.get(&id).is_some_and(Screen::is_virtual)
     }
 
-    /// Adds monitor `id` (a number never given before); its output takes the lowest
-    /// free `Prostir-N`, so KScreen keeps the position and scale it remembers for that
-    /// name. One that cannot start is not added.
-    pub fn add(&mut self, id: ScreenId, spec: MonitorSpec) -> Result<()> {
-        if self.monitor_count() >= MAX_MONITORS {
-            bail!(
-                "{} {MAX_MONITORS} {}",
-                t("Максимум", "At most"),
-                t("моніторів", "monitors")
-            );
+    /// Adds monitor `id` (a number never given before), at most `max` of them; its
+    /// output takes the lowest free `Prostir-N`, so KScreen keeps the position and
+    /// scale it remembers for that name. One that cannot start stays, `Failed`, and
+    /// keeps its place (it is tried again at the next session).
+    pub fn add(&mut self, id: ScreenId, spec: MonitorSpec, max: usize) -> Result<()> {
+        if self.monitor_count() >= max {
+            bail!(UserError::Limit {
+                max,
+                of: Counted::Monitors
+            });
         }
         let number = self.free_number();
         if let Err(e) = self.add_as(id, number, spec) {
-            self.screens.remove(&id);
-            self.forget(id);
-            return Err(e);
+            warn!("{id} stays, failed: {e:#}");
         }
         Ok(())
     }
@@ -702,7 +706,14 @@ impl Displays {
         let output = screen.output.take();
         let number = screen.number;
         let started = output
-            .map_or_else(|| self.desktop.create(number, &spec), Ok)
+            .map_or_else(
+                || {
+                    self.desktop
+                        .create(number, &spec)
+                        .context(UserError::Desktop)
+                },
+                Ok,
+            )
             .and_then(|mut output| match self.start_stream(id, &mut output) {
                 Ok(encoder) => Ok((output, encoder)),
                 // The output stays for the next try.
@@ -730,6 +741,7 @@ impl Displays {
             Err(e) => {
                 error!("{} cannot start: {e:#}", screen.name());
                 screen.state = ScreenState::Failed {
+                    error: code_of(&e),
                     why: format!("{e:#}"),
                 };
                 Err(e)
@@ -756,6 +768,7 @@ impl Displays {
     /// that fails, nothing of the stream stays registered.
     fn start_stream(&self, id: ScreenId, output: &mut Output) -> Result<Encoder> {
         self.start_encoder(id, output, &self.cfg)
+            .context(UserError::Encoder)
             .inspect_err(|_| self.router.remove_stream(id))
     }
 
@@ -1052,7 +1065,9 @@ impl Displays {
             }
             Err(e) => {
                 warn!("cannot show {name}: {e:#}");
+                let e = e.context(UserError::Capture);
                 s.state = ScreenState::Failed {
+                    error: code_of(&e),
                     why: format!("{e:#}"),
                 };
             }
@@ -1073,19 +1088,28 @@ impl Displays {
         }
     }
 
-    /// Shows or hides display `id` of the PC in the headset; the choice is also what a
-    /// display seen for the first time gets. `false` when there is no such display.
-    pub fn show_physical(&mut self, id: ScreenId, show: bool) -> bool {
-        let Some(s) = self.screens.get_mut(&id) else {
-            return false;
+    /// Shows or hides display `id` of the PC in the headset, with at most `max` of them
+    /// shown.
+    pub fn show_physical(&mut self, id: ScreenId, show: bool, max: usize) -> Result<()> {
+        let others = self
+            .physical()
+            .filter(|s| s.id != id && s.is_shown_physical())
+            .count();
+        let Some(ScreenKind::Physical { shown, .. }) =
+            self.screens.get_mut(&id).map(|s| &mut s.kind)
+        else {
+            bail!(UserError::UnknownDisplay);
         };
-        let ScreenKind::Physical { shown, .. } = &mut s.kind else {
-            return false;
-        };
+        if show && others >= max {
+            bail!(UserError::Limit {
+                max,
+                of: Counted::Physical
+            });
+        }
         *shown = show;
         // Streamed or stopped at the next look, right away.
         self.physical_due = Instant::now();
-        true
+        Ok(())
     }
 
     /// The displays of the PC itself, connected or not.
@@ -1239,8 +1263,8 @@ impl Displays {
                 let state = match &s.state {
                     ScreenState::Starting => DisplayState::Starting,
                     ScreenState::Running => DisplayState::Running,
-                    ScreenState::Failed { why } => DisplayState::Failed {
-                        error: state::ErrorCode::OTHER,
+                    ScreenState::Failed { error, why } => DisplayState::Failed {
+                        error: *error,
                         detail: clip(why, state::MAX_DETAIL),
                     },
                     ScreenState::Absent => DisplayState::Absent,
@@ -1296,7 +1320,7 @@ impl Displays {
         let mic = match (&self.mic, &self.mic_failed) {
             (Some(_), _) => state::MicDevice::Ready,
             (None, Some(why)) if self.settings.mic => state::MicDevice::Failed {
-                error: state::ErrorCode::SOUND,
+                error: UserError::Sound.code(),
                 detail: state::clip(why, state::MAX_DETAIL),
             },
             (None, _) => state::MicDevice::Off,
@@ -1361,9 +1385,10 @@ impl Displays {
         if (codec, software) == self.encoding_now() {
             return Ok(());
         }
-        let (backend, codec) = crate::encoder::pick(codec, software)?;
+        let (backend, codec) = crate::encoder::pick(codec, software).context(UserError::Encoder)?;
         info!("encoding with {backend:?} {codec:?} (from the headset menu)");
         self.switch_encoding(backend, codec)
+            .context(UserError::Encoder)
     }
 
     /// Encodes with `backend` and `codec` from now on: every monitor's stream starts
@@ -1439,6 +1464,7 @@ impl Displays {
                 if let Some(screen) = self.screens.get_mut(&id) {
                     screen.output = Some(output);
                     screen.state = ScreenState::Failed {
+                        error: state::ErrorCode::ENCODER,
                         why: result
                             .as_ref()
                             .err()
@@ -1579,16 +1605,10 @@ impl Displays {
             return Ok(());
         }
         if !self.is_monitor(id) {
-            bail!("{} {}", t("Немає монітора", "No monitor"), id.number() + 1);
+            bail!(UserError::UnknownDisplay);
         }
         if self.monitor_count() == 1 {
-            bail!(
-                "{}",
-                t(
-                    "Останній монітор прибрати не можна",
-                    "The last monitor cannot be removed"
-                )
-            );
+            bail!(UserError::LastDisplay);
         }
         self.screens.remove(&id);
         self.forget(id);
@@ -1621,9 +1641,15 @@ impl Displays {
             .collect()
     }
 
-    pub fn set_primary(&mut self, id: ScreenId) {
-        let Some(s) = self.screens.get(&id).filter(|s| s.is_virtual()) else {
-            return;
+    /// Makes monitor or display of the PC `id` the desktop's primary one (where the
+    /// panel lives).
+    pub fn set_primary(&mut self, id: ScreenId) -> Result<()> {
+        let Some(s) = self
+            .screens
+            .get(&id)
+            .filter(|s| s.is_virtual() || s.is_physical())
+        else {
+            bail!(UserError::UnknownDisplay);
         };
         if self.manage_primary
             && let Some(o) = &s.output
@@ -1632,6 +1658,7 @@ impl Displays {
         }
         self.primary = Some(id);
         self.layout_changed();
+        Ok(())
     }
 
     /// Lays the outputs out on the desktop like they stand in the headset (see
@@ -1662,6 +1689,15 @@ impl Displays {
                 let failures = self.layout_retry.1 + 1;
                 let wait = Duration::from_secs((1u64 << failures.min(5)).min(30));
                 warn!("{e:#}; trying again in {} s", wait.as_secs());
+                // Once for each time it starts failing: the headset's map is not the
+                // desktop's meanwhile.
+                if failures == 1 {
+                    self.router.send(HostMsg::Problem {
+                        error: state::ErrorCode::DESKTOP,
+                        detail: state::clip(&format!("{e:#}"), state::MAX_DETAIL),
+                        display: None,
+                    });
+                }
                 self.layout_retry = (Instant::now() + wait, failures);
             }
         }
@@ -1766,11 +1802,15 @@ impl Displays {
             .iter()
             .map(|p| (names[&p.id].clone(), p.x, p.y))
             .collect();
+        // A display of the PC is the primary one under its connector, shown or not.
         let primary = self
             .primary
             .and_then(|p| self.screens.get(&p))
             .filter(|_| self.manage_primary)
-            .and_then(Screen::output_name);
+            .and_then(|s| match &s.kind {
+                ScreenKind::Physical { key, .. } => Some(key.connector.as_str()),
+                _ => s.output_name(),
+            });
         self.desktop.place(&positions, primary, &geometries)?;
         self.on_desk = plan
             .iter()
@@ -1838,7 +1878,7 @@ impl Displays {
         for (slot, spec) in plan.iter_mut().zip(specs) {
             if slot.is_none() {
                 let id = new_id();
-                self.add(id, spec.clone())?;
+                self.add(id, spec.clone(), usize::MAX)?;
                 *slot = Some(id);
             }
         }
@@ -1848,7 +1888,7 @@ impl Displays {
         let ids: Vec<ScreenId> = plan.into_iter().flatten().collect();
         self.set_order(&ids)?;
         if let Some(&p) = primary.and_then(|i| ids.get(i)) {
-            self.set_primary(p);
+            self.set_primary(p)?;
         }
         Ok(ids)
     }
@@ -1954,12 +1994,15 @@ impl Displays {
 
     /// Without a chosen primary, the middle monitor gets the Plasma panel.
     fn ensure_primary(&mut self) {
-        if self.primary.is_some_and(|p| self.is_monitor(p)) {
+        if self
+            .primary
+            .is_some_and(|p| self.is_monitor(p) || self.is_physical(p))
+        {
             return;
         }
         let ids = self.order();
         if let Some(&id) = ids.get(ids.len().saturating_sub(1) / 2) {
-            self.set_primary(id);
+            let _ = self.set_primary(id);
         } else {
             self.layout_changed();
         }
@@ -1985,18 +2028,14 @@ impl Displays {
     /// given before): an output its size, which the headset shows as a floating panel.
     pub fn detach_window(&mut self, id: ScreenId) -> Result<()> {
         if self.windows().count() >= WINDOWS_MAX {
-            bail!(
-                "{}",
-                t(
-                    "Відкріплених вікон уже три: закрийте одне",
-                    "Three windows are detached already: close one first"
-                )
-            );
+            bail!(UserError::Limit {
+                max: WINDOWS_MAX,
+                of: Counted::Windows
+            });
         }
-        let window = windows::active().context(t(
-            "Немає активного вікна на ПК",
-            "No active window on the PC",
-        ))?;
+        let Some(window) = windows::active() else {
+            bail!(UserError::NoWindow);
+        };
         let (width, height) = panel_size(&window);
         let spec = MonitorSpec {
             width,
@@ -2010,10 +2049,14 @@ impl Displays {
         };
         // Listed before its stream starts, so the stream knows its name.
         self.screens.insert(id, Screen::starting(id, number, kind));
-        let started = self.desktop.create(number, &spec).and_then(|mut output| {
-            let encoder = self.start_stream(id, &mut output)?;
-            Ok((output, encoder))
-        });
+        let started = self
+            .desktop
+            .create(number, &spec)
+            .context(UserError::Desktop)
+            .and_then(|mut output| {
+                let encoder = self.start_stream(id, &mut output)?;
+                Ok((output, encoder))
+            });
         let (output, encoder) = match started {
             Ok(started) => started,
             Err(e) => {
@@ -2030,7 +2073,7 @@ impl Displays {
         self.layout_changed();
         if let Err(e) = windows::move_to(&window, &name, true) {
             self.close_window_panel(id);
-            return Err(e);
+            return Err(e.context(UserError::Desktop));
         }
         if !self.streaming
             && let Some(e) = self.screens.get(&id).and_then(|s| s.stream.as_ref())
@@ -2097,18 +2140,19 @@ impl Displays {
 
     /// Moves the PC's active window to monitor `id` (the one the user looks at).
     pub fn window_here(&self, id: ScreenId) -> Result<()> {
-        let output = self
+        let Some(output) = self
             .screens
             .get(&id)
             .filter(|s| s.is_virtual() || (s.is_physical() && s.output.is_some()))
             .and_then(Screen::output_name)
             .map(str::to_owned)
-            .context(t("Немає такого монітора", "No such monitor"))?;
-        let window = windows::active().context(t(
-            "Немає активного вікна на ПК",
-            "No active window on the PC",
-        ))?;
-        windows::move_to(&window, &output, false)
+        else {
+            bail!(UserError::UnknownDisplay);
+        };
+        let Some(window) = windows::active() else {
+            bail!(UserError::NoWindow);
+        };
+        windows::move_to(&window, &output, false).context(UserError::Desktop)
     }
 
     /// Saves a picture of monitor `id` (all of them where only that is possible).
@@ -2117,6 +2161,9 @@ impl Displays {
             .screens
             .get(&id)
             .filter(|s| s.is_virtual() || s.is_window());
+        if screen.is_none() {
+            bail!(UserError::UnknownDisplay);
+        }
         // Where the desktop's screenshot tool cannot take one output by name, the
         // monitor's own stream can. A fresh keyframe, decoded into a PNG; the whole
         // desktop if not.
@@ -2137,7 +2184,7 @@ impl Displays {
                 Err(e) => warn!("screenshot from the stream: {e:#}; taking the whole desktop"),
             }
         }
-        windows::screenshot(screen.and_then(Screen::output_name))
+        windows::screenshot(screen.and_then(Screen::output_name)).context(UserError::Capture)
     }
 
     /// A fresh picture of screen `id` as a keyframe, though nothing on it moves: the
@@ -2148,6 +2195,21 @@ impl Displays {
         {
             e.set_paused(false);
         }
+    }
+
+    /// A headset asks for a keyframe of screen `id`: at most every 300 ms for each
+    /// screen, whoever asks, or keyframes would follow one another.
+    pub fn keyframe_asked(&mut self, id: ScreenId) {
+        let now = Instant::now();
+        if self
+            .keyframes_asked
+            .get(&id)
+            .is_some_and(|t| now.duration_since(*t) < Duration::from_millis(300))
+        {
+            return;
+        }
+        self.keyframes_asked.insert(id, now);
+        self.force_keyframe(id);
     }
 
     pub fn force_keyframe(&self, id: ScreenId) {

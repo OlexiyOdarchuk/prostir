@@ -81,6 +81,16 @@ impl Publisher {
         self.headset.prefs.unwrap_or_default()
     }
 
+    /// What the PC allows this headset now. "No limits" of a guest is for its own
+    /// budgets: the PC's limits follow the main headset's.
+    pub fn limits(&self, displays: &Displays) -> Limits {
+        let prefs = Prefs {
+            no_limits: self.prefs().no_limits && self.access.is_main(),
+            ..self.prefs()
+        };
+        limits(&prefs, self.caps(), displays.codec())
+    }
+
     /// The PC's state now, as this headset is told it.
     pub fn state(&self, src: &Sources) -> PcState {
         let headset = self.caps();
@@ -100,7 +110,7 @@ impl Publisher {
             info: Some(pc_info(src.displays)),
             caps: Some(host_caps(src.displays)),
             access: Some(self.access),
-            limits: Some(limits(&prefs, headset, src.displays.codec())),
+            limits: Some(self.limits(src.displays)),
             encoding: Some(src.displays.encoding_part(src.wanted, headset)),
             sound: Some(src.displays.sound_part()),
             focus: Some(focus),

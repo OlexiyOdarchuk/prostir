@@ -7,6 +7,7 @@ mod failures;
 mod goodbye;
 mod link;
 mod pc;
+mod requests;
 mod resize;
 mod saved;
 

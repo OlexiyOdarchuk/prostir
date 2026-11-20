@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use fontdue::{Font, FontSettings, Metrics};
 use prostir_proto::Codec;
-use prostir_proto::state::Encoding;
+use prostir_proto::state::{Encoding, ErrorCode};
 use tiny_skia::{FillRule, Paint, Path, PathBuilder, Pixmap, Rect, Stroke, Transform};
 
 use crate::i18n::{Lang, Language};
@@ -158,6 +158,141 @@ pub struct UiState {
     pub profiles: Vec<Profile>,
     /// The profile last switched to (until something is changed by hand).
     pub active_profile: Option<usize>,
+    /// What the menu asked the PC for and has no answer to yet, or that failed lately:
+    /// shown by the control that asked.
+    pub asks: Vec<AskView>,
+}
+
+/// Which control asked the PC for something (see [`AskView`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Asked {
+    AddMonitor,
+    Remove(ScreenId),
+    MakePrimary(ScreenId),
+    Mirror,
+    Sound,
+    Encoding,
+    DetachWindow,
+    WindowHere,
+    Screenshot,
+    FindMouse,
+    Profile(usize),
+}
+
+/// Why a request failed: the PC's code, or something on this side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Failure {
+    Pc(ErrorCode),
+    /// Not sent: no connection.
+    NotConnected,
+    /// The connection broke before the answer.
+    Disconnected,
+    /// No answer in time.
+    TimedOut,
+}
+
+impl Failure {
+    /// What the person reads, in their language; `None` where only the PC's detail
+    /// says what happened.
+    pub fn text(self, l: Lang) -> Option<&'static str> {
+        Some(match self {
+            Self::NotConnected => l.t("Немає з'єднання з ПК", "No connection to the PC"),
+            Self::Disconnected => l.t(
+                "З'єднання з ПК обірвалося",
+                "The connection to the PC broke",
+            ),
+            Self::TimedOut => l.t("ПК не відповідає", "The PC does not answer"),
+            Self::Pc(code) => match code.known() {
+                ErrorCode::UNSUPPORTED => l.t("ПК цього не вміє", "The PC cannot do this"),
+                ErrorCode::NOT_ALLOWED => {
+                    l.t("Цьому шолому не дозволено", "Not allowed for this headset")
+                }
+                ErrorCode::UNKNOWN_DISPLAY => {
+                    l.t("Такого екрана вже немає", "That display is gone")
+                }
+                ErrorCode::LIMIT => l.t("Досягнуто межі", "The limit is reached"),
+                ErrorCode::BAD_SIZE => l.t(
+                    "ПК не створює такий розмір",
+                    "The PC does not make this size",
+                ),
+                ErrorCode::LAST_DISPLAY => {
+                    l.t("Останній монітор лишається", "The last monitor stays")
+                }
+                ErrorCode::NO_WINDOW => {
+                    l.t("На ПК немає активного вікна", "No active window on the PC")
+                }
+                ErrorCode::DESKTOP => l.t(
+                    "Стільниця ПК цього не зробила",
+                    "The PC's desktop did not do it",
+                ),
+                ErrorCode::ENCODER => l.t(
+                    "Кодувальник ПК не запустився",
+                    "The PC's encoder did not start",
+                ),
+                ErrorCode::CAPTURE => l.t("Зображення не знято", "The picture could not be taken"),
+                ErrorCode::SOUND => l.t("Звук не перемкнувся", "The sound could not be switched"),
+                ErrorCode::NOT_ON_DISPLAYS => {
+                    l.t("Миша не на моніторах", "The mouse is not on the monitors")
+                }
+                ErrorCode::NO_SUCH_PROFILE => l.t("Немає такого профілю", "No such profile"),
+                ErrorCode::BAD_ARGUMENT => l.t("Неправильне значення", "A value out of range"),
+                _ => return None,
+            },
+        })
+    }
+}
+
+/// How a request of the menu stands.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AskState {
+    Waiting,
+    /// Why, and the PC's detail (technical, in the PC's language).
+    Failed {
+        why: Failure,
+        detail: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AskView {
+    pub what: Asked,
+    pub state: AskState,
+}
+
+impl UiState {
+    /// How the request of control `what` stands, if one is waiting or failed lately.
+    fn ask(&self, what: Asked) -> Option<&AskState> {
+        self.asks
+            .iter()
+            .rev()
+            .find(|a| a.what == what)
+            .map(|a| &a.state)
+    }
+
+    /// A short line for control `what`: waiting, or why it failed (the code's text,
+    /// else the PC's detail), and whether it is a failure.
+    fn ask_note(&self, what: Asked) -> Option<(String, bool)> {
+        let l = self.lang;
+        Some(match self.ask(what)? {
+            AskState::Waiting => (l.t("Зачекайте…", "Working…").to_owned(), false),
+            AskState::Failed { why, detail } => (
+                why.text(l).map_or_else(|| detail.clone(), str::to_owned),
+                true,
+            ),
+        })
+    }
+
+    /// The PC's detail under a failure of control `what`, when there is a text above it.
+    fn ask_detail(&self, what: Asked) -> Option<&str> {
+        match self.ask(what)? {
+            AskState::Failed { why, detail }
+                if why.text(self.lang).is_some() && !detail.is_empty() =>
+            {
+                Some(detail)
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Pages of the menu.
@@ -1489,15 +1624,24 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
             TEXT,
             &format!("{} {}", l.t("Монітор", "Monitor"), m.id + 1),
         ));
+        // Removing it or making it primary: how that stands, in place of its size.
+        let note = s
+            .ask_note(Asked::Remove(m.id))
+            .or_else(|| s.ask_note(Asked::MakePrimary(m.id)));
         items.push(text(
             lx,
             y + 50.0,
             16.0,
             false,
-            MUTED,
-            &match m.place.name(l) {
-                Some(place) => format!("{} × {} · {place}", m.width, m.height),
-                None => format!("{} × {}", m.width, m.height),
+            if note.as_ref().is_some_and(|n| n.1) {
+                DANGER
+            } else {
+                MUTED
+            },
+            &match (note.as_ref(), m.place.name(l)) {
+                (Some((note, _)), _) => note.clone(),
+                (None, Some(place)) => format!("{} × {} · {place}", m.width, m.height),
+                (None, None) => format!("{} × {}", m.width, m.height),
             },
         ));
         let remove = rect(lx + lw - 58.0, y + 7.0, 48.0, 48.0);
@@ -1572,7 +1716,9 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
         y += 58.0;
     }
     // Physical display mirror: shown or hidden, said by the highlighted option.
-    let title = if s.mirror_wanted && !s.mirror_active {
+    let title = if let Some((note, _)) = s.ask_note(Asked::Mirror) {
+        format!("{} · {note}", l.t("Екран ноутбука", "Laptop screen"))
+    } else if s.mirror_wanted && !s.mirror_active {
         format!(
             "{} · {}",
             l.t("Екран ноутбука", "Laptop screen"),
@@ -1718,7 +1864,16 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
         items.push(button(r, label, style, action));
     }
     y += 2.0 * 58.0 + 40.0;
-    if s.monitors.len() >= MAX_MONITORS {
+    // How the last "add" stands: waiting, or why it failed and the PC's detail.
+    if let Some((note, failed)) = s.ask_note(Asked::AddMonitor) {
+        let color = if failed { DANGER } else { MUTED };
+        items.push(text(rx, y - 22.0, 18.0, true, color, &note));
+        if let Some(detail) = s.ask_detail(Asked::AddMonitor) {
+            items.push(text(rx, y, 15.0, false, MUTED, detail));
+            y += 20.0;
+        }
+        y += 10.0;
+    } else if s.monitors.len() >= MAX_MONITORS {
         items.push(text(
             rx,
             y - 22.0,
@@ -2371,6 +2526,7 @@ fn tile(
     state: &str,
     on: bool,
     action: Option<Action>,
+    note: Option<(String, bool)>,
 ) {
     let style = match (&action, on) {
         (None, _) => Style::Disabled,
@@ -2384,12 +2540,18 @@ fn tile(
         (TEXT, MUTED)
     };
     items.push(text(r.left() + 26.0, r.top() + 62.0, 27.0, true, fg, title));
+    // What it asked the PC for and how that stands, in place of its state.
+    let (state, color) = match &note {
+        Some((note, true)) => (note.as_str(), DANGER),
+        Some((note, false)) => (note.as_str(), sub),
+        None => (state, sub),
+    };
     items.push(text(
         r.left() + 24.0,
         r.top() + 104.0,
         19.0,
         false,
-        sub,
+        color,
         state,
     ));
 }
@@ -2424,6 +2586,10 @@ fn build_quick(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
         };
         let action = (connected && !active).then_some(Action::ApplyProfile(i));
         items.push(button(r, name, style, action));
+        if let Some((note, failed)) = s.ask_note(Asked::Profile(i)) {
+            let color = if failed { DANGER } else { MUTED };
+            items.push(text(r.left(), r.bottom() + 22.0, 17.0, false, color, &note));
+        }
     }
     y += 72.0 + 40.0;
     let on_off = |on: bool| {
@@ -2511,6 +2677,17 @@ fn build_quick(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
             connected.then_some(Action::Screenshot),
         ),
     ];
+    let asked = [
+        None,
+        None,
+        None,
+        None,
+        Some(Asked::Sound),
+        None,
+        Some(Asked::DetachWindow),
+        Some(Asked::WindowHere),
+        Some(Asked::Screenshot),
+    ];
     for (i, (title, state, on, action)) in tiles.into_iter().enumerate() {
         let r = rect(
             x + (i % 3) as f32 * (tw + 12.0),
@@ -2518,7 +2695,8 @@ fn build_quick(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
             tw,
             th,
         );
-        tile(items, r, title, &state, on, action);
+        let note = asked[i].and_then(|what| s.ask_note(what));
+        tile(items, r, title, &state, on, action, note);
     }
 }
 
@@ -2971,12 +3149,17 @@ fn build_pc(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -> f
     let any_gpu = pc.choices.iter().any(|(_, gpu)| *gpu);
     let set = |change: EncodingChange| Action::SetEncoding(change);
     let none = EncodingChange::default();
+    // How the last change stands, after the first title.
+    let title = match s.ask_note(Asked::Encoding) {
+        Some((note, _)) => format!("{} · {note}", l.t("Якість відео", "Video quality")),
+        None => l.t("Якість відео", "Video quality").to_owned(),
+    };
     segmented(
         items,
         x,
         w,
         &mut y,
-        l.t("Якість відео", "Video quality"),
+        &title,
         [
             (15, l.t("Економна", "Economy")),
             (30, l.t("Звичайна", "Normal")),
@@ -3095,12 +3278,16 @@ fn build_sound(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32)
     let l = s.lang;
     // The current state is the highlighted option, not a button label to decode.
     y += 18.0;
+    let title = match s.ask_note(Asked::Sound) {
+        Some((note, _)) => format!("{} · {note}", l.t("Звук ПК грає", "PC sound plays")),
+        None => l.t("Звук ПК грає", "PC sound plays").to_owned(),
+    };
     segmented(
         items,
         lx,
         lw,
         &mut y,
-        l.t("Звук ПК грає", "PC sound plays"),
+        &title,
         vec![
             (
                 l.t("У шоломі", "In the headset"),
@@ -3417,6 +3604,7 @@ mod tests {
                 .map(Profile::default_for)
                 .collect(),
             active_profile: None,
+            asks: Vec::new(),
         }
     }
 
@@ -3487,6 +3675,46 @@ mod tests {
                     lang.t("Максимум моніторів:", "At most monitors:")
                 ));
                 states.push(st.clone());
+                // Every control waiting for the PC, then every one failed, on the
+                // pages that have them.
+                let asks_here = matches!(
+                    tab,
+                    Tab::Quick | Tab::Monitors | Tab::Settings(Section::Sound | Section::Pc)
+                );
+                let every = [
+                    Asked::AddMonitor,
+                    Asked::Remove(1),
+                    Asked::MakePrimary(2),
+                    Asked::Mirror,
+                    Asked::Sound,
+                    Asked::Encoding,
+                    Asked::DetachWindow,
+                    Asked::WindowHere,
+                    Asked::Screenshot,
+                    Asked::Profile(0),
+                ];
+                let answers = [
+                    AskState::Waiting,
+                    AskState::Failed {
+                        why: Failure::Pc(ErrorCode::LIMIT),
+                        detail: "At most 6 monitors".into(),
+                    },
+                    AskState::Failed {
+                        why: Failure::Disconnected,
+                        detail: String::new(),
+                    },
+                ];
+                for state in answers.iter().filter(|_| asks_here) {
+                    let mut asking = st.clone();
+                    asking.asks = every
+                        .iter()
+                        .map(|&what| AskView {
+                            what,
+                            state: state.clone(),
+                        })
+                        .collect();
+                    states.push(asking);
+                }
                 // Many paired PCs.
                 let mut many = st.clone();
                 many.paired = (0..5).map(|i| format!("pc-{i}")).collect();

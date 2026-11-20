@@ -374,6 +374,10 @@ struct Scene {
     pc_displays: Option<state::Displays>,
     /// The number of the last request to the PC in this session.
     last_req: u32,
+    /// Requests to the PC without an answer yet: which control asked, and when.
+    asks: std::collections::BTreeMap<ReqId, (ui::Asked, Instant)>,
+    /// Requests that failed lately: the control, why, the PC's detail, and when.
+    failed_asks: Vec<(ui::Asked, ui::Failure, String, Instant)>,
     /// An unknown PC waiting for "Pair" or "Not now" (survives the disconnect that
     /// follows the question).
     pair_offer: Option<(String, crate::ui::OfferWhy)>,
@@ -1500,21 +1504,85 @@ impl Scene {
         }
     }
 
-    /// Asks the PC to change something: one reply comes with its number. Without a
-    /// connection nothing is sent (and nothing kept to send later: repeating "add a
-    /// monitor" after reconnecting could add two).
-    fn request(&mut self, asked: Request) -> Option<ReqId> {
+    /// Control `what` asks the PC to change something: one reply comes with its
+    /// number, and the control shows how it stands meanwhile. Without a connection
+    /// nothing is sent (and nothing kept to send later: repeating "add a monitor"
+    /// after reconnecting could add two).
+    fn request(&mut self, asked: Request, what: ui::Asked) -> Option<ReqId> {
+        self.failed_asks.retain(|f| f.0 != what);
         if self.feedback.is_none() {
-            let what = self
-                .lang()
-                .t("Немає з'єднання з ПК", "No connection to the PC");
-            self.show_error(what.into());
+            self.ask_failed(what, ui::Failure::NotConnected, String::new());
             return None;
         }
         self.last_req += 1;
         let req = ReqId(self.last_req);
         self.send(ClientMsg::request(req, asked));
+        self.asks.insert(req, (what, Instant::now()));
         Some(req)
+    }
+
+    /// Request `req` was answered: which control asked it, `None` for one this side
+    /// does not wait for (answered after it gave up on it).
+    fn answered(&mut self, req: ReqId, outcome: &Outcome) -> Option<ui::Asked> {
+        let Some((what, _)) = self.asks.remove(&req) else {
+            info!("an answer to request {}, which nothing waits for", req.0);
+            return None;
+        };
+        if let Outcome::Failed { error, detail } = outcome {
+            warn!("request {} failed (code {})", req.0, error.code());
+            self.ask_failed(what, ui::Failure::Pc(*error), detail.clone());
+        }
+        Some(what)
+    }
+
+    /// Request of control `what` failed: the control says why. A control the menu
+    /// does not show while it works (a profile closes the menu, the palm menu finds the
+    /// mouse) says it with a short message.
+    fn ask_failed(&mut self, what: ui::Asked, why: ui::Failure, detail: String) {
+        if matches!(what, ui::Asked::Profile(_) | ui::Asked::FindMouse) {
+            let text = why
+                .text(self.lang())
+                .map_or_else(|| detail.clone(), str::to_owned);
+            self.show_toast(text);
+        }
+        self.failed_asks.push((what, why, detail, Instant::now()));
+    }
+
+    /// Requests without an answer for 30 s count as failed (a late answer is let go),
+    /// and failures are shown for a while.
+    fn expire_asks(&mut self) {
+        const ANSWER_WITHIN: Duration = Duration::from_secs(30);
+        let late: Vec<ReqId> = self
+            .asks
+            .iter()
+            .filter(|(_, (_, at))| at.elapsed() >= ANSWER_WITHIN)
+            .map(|(req, _)| *req)
+            .collect();
+        for req in late {
+            if let Some((what, _)) = self.asks.remove(&req) {
+                self.ask_failed(what, ui::Failure::TimedOut, String::new());
+            }
+        }
+        self.failed_asks.retain(|f| f.3.elapsed() < ERROR_SHOWN_FOR);
+    }
+
+    /// How each control's request stands, for the menu.
+    fn ask_views(&self) -> Vec<ui::AskView> {
+        let failed = self
+            .failed_asks
+            .iter()
+            .map(|(what, why, detail, _)| ui::AskView {
+                what: *what,
+                state: ui::AskState::Failed {
+                    why: *why,
+                    detail: detail.clone(),
+                },
+            });
+        let waiting = self.asks.values().map(|(what, _)| ui::AskView {
+            what: *what,
+            state: ui::AskState::Waiting,
+        });
+        failed.chain(waiting).collect()
     }
 
     fn send(&mut self, msg: ClientMsg) {
@@ -1641,6 +1709,7 @@ impl Scene {
             update: self.update_needed.clone(),
             profiles: self.profiles.to_vec(),
             active_profile: self.active_profile,
+            asks: self.ask_views(),
         }
     }
 }
@@ -1913,6 +1982,8 @@ fn run(app: &AndroidApp) -> Result<()> {
         pc: None,
         pc_displays: None,
         last_req: 0,
+        asks: std::collections::BTreeMap::new(),
+        failed_asks: Vec::new(),
         steering,
         offline_since: Some(Instant::now()),
         feedback: None,
@@ -2226,6 +2297,7 @@ fn run(app: &AndroidApp) -> Result<()> {
             scene.tidy_up();
         }
         scene.place_button();
+        scene.expire_asks();
         // The headset's battery: on the palm menu (fresh when it appears, then every 15 s)
         // and for the PC's tray (once a minute).
         let palm_opened = scene.wrist.is_some() && !palm_was_shown;
@@ -3184,20 +3256,17 @@ fn handle_net_event(
         }
         NetEvent::Recenter => scene.recenter(),
         NetEvent::Notice(text) => scene.show_toast(text),
-        NetEvent::Reply { req, outcome } => match outcome {
-            Outcome::Failed { detail, .. } => {
-                warn!("request {} failed", req.0);
-                scene.show_error(detail);
-            }
-            Outcome::Saved { path } => {
+        NetEvent::Reply { req, outcome } => match (scene.answered(req, &outcome), outcome) {
+            (None, _) | (_, Outcome::Failed { .. }) => {}
+            (_, Outcome::Saved { path }) => {
                 let saved = scene.lang().t("Знімок збережено:", "Screenshot saved:");
                 scene.show_toast(format!("{saved} {path}"));
             }
-            Outcome::Pointer { id, u, v } => {
+            (_, Outcome::Pointer { id, u, v }) => {
                 let f = |v: u16| f32::from(v) / 65535.0;
                 scene.finder = Some((id.0, Vec2::new(f(u), f(v)), Instant::now()));
             }
-            Outcome::Done | Outcome::Added { .. } | Outcome::Ids { .. } => {}
+            (_, Outcome::Done | Outcome::Added { .. } | Outcome::Ids { .. }) => {}
         },
         NetEvent::Problem { error, detail } => {
             warn!("a problem on the PC (code {})", error.code());
@@ -3229,6 +3298,10 @@ fn handle_net_event(
             scene.update_needed = Some((pc_newer, pc_app));
         }
         NetEvent::Disconnected { why } => {
+            // What waited for an answer gets none.
+            for (what, _) in std::mem::take(&mut scene.asks).into_values() {
+                scene.ask_failed(what, ui::Failure::Disconnected, String::new());
+            }
             scene.offline_since = Some(Instant::now());
             scene.pairing = None;
             scene.host = None;
@@ -3475,9 +3548,12 @@ fn handle_action(
     }
     match action {
         Action::Add { width, height } => {
-            scene.request(Request::AddDisplay {
-                mode: Mode::new(width, height),
-            });
+            scene.request(
+                Request::AddDisplay {
+                    mode: Mode::new(width, height),
+                },
+                ui::Asked::AddMonitor,
+            );
         }
         Action::Remove(id) => {
             let confirmed = scene
@@ -3485,7 +3561,10 @@ fn handle_action(
                 .is_some_and(|(c, at)| c == id && at.elapsed() < CONFIRM_FOR);
             if confirmed {
                 scene.confirm_remove = None;
-                scene.request(Request::RemoveDisplay { id: DisplayId(id) });
+                scene.request(
+                    Request::RemoveDisplay { id: DisplayId(id) },
+                    ui::Asked::Remove(id),
+                );
             } else {
                 scene.confirm_remove = Some((id, Instant::now()));
             }
@@ -3534,22 +3613,31 @@ fn handle_action(
             scene.prefs_changed();
         }
         Action::DetachWindow => {
-            scene.request(Request::DetachWindow);
+            scene.request(Request::DetachWindow, ui::Asked::DetachWindow);
             // The panel appears in front: the menu steps aside.
             scene.panel_open = false;
         }
         Action::WindowHere => {
             if let Some(id) = scene.monitor_in_front() {
-                scene.request(Request::WindowHere { id: DisplayId(id) });
+                scene.request(
+                    Request::WindowHere { id: DisplayId(id) },
+                    ui::Asked::WindowHere,
+                );
             }
         }
         Action::Screenshot => {
             if let Some(id) = scene.monitor_in_front() {
-                scene.request(Request::Screenshot { id: DisplayId(id) });
+                scene.request(
+                    Request::Screenshot { id: DisplayId(id) },
+                    ui::Asked::Screenshot,
+                );
             }
         }
         Action::CloseWindow(id) => {
-            scene.request(Request::RemoveDisplay { id: DisplayId(id) });
+            scene.request(
+                Request::RemoveDisplay { id: DisplayId(id) },
+                ui::Asked::Remove(id),
+            );
         }
         Action::Tidy => scene.tidy_up(),
         Action::SelectMonitor(id) => {
@@ -3557,7 +3645,7 @@ fn handle_action(
             scene.confirm_remove = None;
         }
         Action::FindMouse => {
-            scene.request(Request::FindMouse);
+            scene.request(Request::FindMouse, ui::Asked::FindMouse);
         }
         Action::GazeMouse(on) => {
             scene.settings.gaze_mouse = on;
@@ -3640,7 +3728,10 @@ fn handle_action(
             controls.hands_enabled = mode == HandMode::Control;
         }
         Action::MakePrimary(id) => {
-            scene.request(Request::SetPrimary { id: DisplayId(id) });
+            scene.request(
+                Request::SetPrimary { id: DisplayId(id) },
+                ui::Asked::MakePrimary(id),
+            );
         }
         // Swaps the places of a monitor and its neighbour in the order; the others
         // stay.
@@ -3673,17 +3764,23 @@ fn handle_action(
         }
         Action::SetAudio(enabled) => {
             scene.audio_wanted = enabled;
-            scene.request(Request::SetSound {
-                to_headset: enabled,
-            });
+            scene.request(
+                Request::SetSound {
+                    to_headset: enabled,
+                },
+                ui::Asked::Sound,
+            );
         }
         Action::SetMirror(enabled) => {
             if let Some(id) = scene.physical_id() {
                 scene.mirror_wanted = enabled;
-                scene.request(Request::ShowPhysical {
-                    id: DisplayId(id),
-                    shown: enabled,
-                });
+                scene.request(
+                    Request::ShowPhysical {
+                        id: DisplayId(id),
+                        shown: enabled,
+                    },
+                    ui::Asked::Mirror,
+                );
             }
         }
         Action::Preset(preset) => {
@@ -3720,11 +3817,14 @@ fn handle_action(
                 .into_iter()
                 .collect();
             scene.mirror_wanted = p.mirror;
-            scene.request(Request::SetDisplays {
-                modes: p.sizes.iter().map(|&(w, h)| Mode::new(w, h)).collect(),
-                primary: Some(Primary::Index { index: p.primary }),
-                shown_physical,
-            });
+            scene.request(
+                Request::SetDisplays {
+                    modes: p.sizes.iter().map(|&(w, h)| Mode::new(w, h)).collect(),
+                    primary: Some(Primary::Index { index: p.primary }),
+                    shown_physical,
+                },
+                ui::Asked::Profile(i),
+            );
             let s = &mut scene.settings;
             s.preset = p.settings.preset;
             s.curve = p.settings.curve;
@@ -3793,12 +3893,15 @@ fn handle_action(
                 w.software = change.software.unwrap_or(w.software);
                 w.sharp = change.sharp.unwrap_or(w.sharp);
             }
-            scene.request(Request::SetEncoding {
-                bitrate: change.bitrate,
-                codec: change.codec,
-                software: change.software,
-                sharp: change.sharp,
-            });
+            scene.request(
+                Request::SetEncoding {
+                    bitrate: change.bitrate,
+                    codec: change.codec,
+                    software: change.software,
+                    sharp: change.sharp,
+                },
+                ui::Asked::Encoding,
+            );
         }
         Action::ShowTips => {
             scene.settings.intro_seen = false;

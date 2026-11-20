@@ -1,96 +1,175 @@
 //! The headset's requests: each changes the PC's state and gets exactly one outcome.
-//! The parts it changed go out before the reply (see `publish`).
+//! The parts it changed go out before the reply (see `publish`). A request this
+//! headset has no right to gets `NOT_ALLOWED`; arguments out of range get their own
+//! code, and nothing changes. A request that makes displays answers with all it made,
+//! also those that did not start: they stand in the list as `Failed`, keeping their
+//! place.
 
+use anyhow::{Result, bail};
 use log::info;
+use prostir_proto::Codec;
 use prostir_proto::request::{Outcome, Primary, Request};
-use prostir_proto::state::{ErrorCode, HeadsetCaps, Mode, caps};
+use prostir_proto::state::{Access, ErrorCode, HeadsetCaps, Limits, Mode, caps, perms};
 
 use crate::displays::Displays;
+use crate::errors::{self, Counted, UserError};
 use crate::keep_screens;
 use crate::platform::MonitorSpec;
 use crate::screen::ScreenId;
 use crate::store::Store;
 
-/// Carries out `request` for a headset that can do what `headset` says.
+/// Who asks: what the headset can do, what the PC allows it, its rights.
+pub struct Asker<'a> {
+    pub caps: &'a HeadsetCaps,
+    pub limits: &'a Limits,
+    pub access: Access,
+}
+
+/// The rights a request needs.
+fn needs(request: &Request) -> u32 {
+    match request {
+        Request::AddDisplay { .. }
+        | Request::RemoveDisplay { .. }
+        | Request::SetDisplays { .. }
+        | Request::SetPrimary { .. }
+        | Request::ShowPhysical { .. }
+        | Request::SetEncoding { .. }
+        | Request::SetSound { .. } => perms::CHANGES,
+        Request::DetachWindow => perms::CHANGES | perms::PRIVATE,
+        Request::WindowHere { .. } => perms::INPUT,
+        Request::Screenshot { .. } => perms::PRIVATE,
+        Request::FindMouse => 0,
+    }
+}
+
+/// Carries out `request` for `asker`: its outcome.
 pub fn handle(
     request: Request,
     displays: &mut Displays,
     store: &mut Store,
-    headset: &HeadsetCaps,
+    asker: &Asker,
 ) -> Outcome {
-    let failed = |e: anyhow::Error| Outcome::failed(ErrorCode::OTHER, &format!("{e:#}"));
-    match request {
+    if !asker.access.may(needs(&request)) {
+        info!("the headset has no right to {request:?}");
+        return Outcome::failed(ErrorCode::NOT_ALLOWED, &UserError::NotAllowed.to_string());
+    }
+    carry_out(request, displays, store, asker).unwrap_or_else(|e| errors::outcome(&e))
+}
+
+fn carry_out(
+    request: Request,
+    displays: &mut Displays,
+    store: &mut Store,
+    asker: &Asker,
+) -> Result<Outcome> {
+    let limits = asker.limits;
+    Ok(match request {
         Request::AddDisplay { mode } => {
-            let id = store.new_id();
-            match displays.add(id, spec(mode)) {
-                Ok(()) => {
-                    info!("headset added {id}");
-                    displays.force_keyframe(id);
-                    keep_screens(store, displays, true);
-                    displays.sync_wallpapers();
-                    Outcome::Added { id: id.wire() }
-                }
-                Err(e) => failed(e),
+            let spec = checked(mode, limits)?;
+            let max = usize::from(limits.virtual_max);
+            if displays.monitor_count() >= max {
+                bail!(UserError::Limit {
+                    max,
+                    of: Counted::Monitors
+                });
             }
+            let id = store.new_id();
+            displays.add(id, spec, max)?;
+            info!("headset added {id}");
+            displays.force_keyframe(id);
+            keep_screens(store, displays, true);
+            displays.sync_wallpapers();
+            Outcome::Added { id: id.wire() }
         }
         Request::RemoveDisplay { id } => {
             let id = ScreenId::from_wire(id);
             let monitor = displays.is_monitor(id);
-            match displays.remove(id) {
-                Ok(()) => {
-                    info!("headset removed {id}");
-                    keep_screens(store, displays, monitor);
-                    Outcome::Done
-                }
-                Err(e) => failed(e),
-            }
+            displays.remove(id)?;
+            info!("headset removed {id}");
+            keep_screens(store, displays, monitor);
+            Outcome::Done
         }
         Request::SetDisplays {
             modes,
             primary,
             shown_physical,
         } => {
-            let specs: Vec<MonitorSpec> = modes.into_iter().map(spec).collect();
-            let primary = match primary {
-                Some(Primary::Index { index }) => Some(usize::from(index)),
-                _ => None,
+            // Everything checked before anything changes.
+            let max = usize::from(limits.virtual_max);
+            if modes.is_empty() {
+                bail!(UserError::BadArgument);
+            }
+            if modes.len() > max {
+                bail!(UserError::Limit {
+                    max,
+                    of: Counted::Monitors
+                });
+            }
+            let specs = modes
+                .into_iter()
+                .map(|m| checked(m, limits))
+                .collect::<Result<Vec<MonitorSpec>>>()?;
+            let physical = displays.physical_ids();
+            let physical_max = usize::from(limits.physical_max);
+            let shown: Vec<ScreenId> = shown_physical
+                .into_iter()
+                .map(ScreenId::from_wire)
+                .collect();
+            if shown.iter().any(|id| !physical.contains(id)) {
+                bail!(UserError::UnknownDisplay);
+            }
+            if shown.len() > physical_max {
+                bail!(UserError::Limit {
+                    max: physical_max,
+                    of: Counted::Physical
+                });
+            }
+            let (index, main) = match primary {
+                Some(Primary::Index { index }) if usize::from(index) < specs.len() => {
+                    (Some(usize::from(index)), None)
+                }
+                Some(Primary::Display { id }) if physical.contains(&ScreenId::from_wire(id)) => {
+                    (None, Some(ScreenId::from_wire(id)))
+                }
+                Some(Primary::Index { .. }) => bail!(UserError::BadArgument),
+                Some(Primary::Display { .. }) => bail!(UserError::UnknownDisplay),
+                None => (None, None),
             };
-            if headset.has(caps::headset::PHYSICAL) {
-                for id in displays.physical_ids() {
-                    let show = shown_physical.contains(&id.wire());
-                    displays.show_physical(id, show);
+            if asker.caps.has(caps::headset::PHYSICAL) {
+                // Those to hide first, so those to show stay within the limit.
+                for show in [false, true] {
+                    for id in physical.iter().filter(|id| shown.contains(id) == show) {
+                        displays.show_physical(*id, show, physical_max)?;
+                    }
                 }
             }
-            let result = displays.set_monitors(&specs, primary, &mut || store.new_id());
+            let ids = displays.set_monitors(&specs, index, &mut || store.new_id());
+            if let (Ok(_), Some(id)) = (&ids, main) {
+                displays.set_primary(id)?;
+            }
             displays.force_keyframes();
             keep_screens(store, displays, true);
             displays.sync_wallpapers();
-            match result {
-                Ok(ids) => {
-                    info!("headset switched to {} monitor(s)", ids.len());
-                    Outcome::Ids {
-                        ids: ids.into_iter().map(ScreenId::wire).collect(),
-                    }
-                }
-                Err(e) => failed(e),
+            let ids = ids?;
+            info!("headset switched to {} monitor(s)", ids.len());
+            Outcome::Ids {
+                ids: ids.into_iter().map(ScreenId::wire).collect(),
             }
         }
         Request::SetPrimary { id } => {
             let id = ScreenId::from_wire(id);
-            if !displays.is_monitor(id) {
-                return Outcome::failed(ErrorCode::OTHER, &format!("no {id}"));
-            }
-            info!("headset made {id} the primary monitor");
-            displays.set_primary(id);
+            displays.set_primary(id)?;
+            info!("headset made {id} the primary display");
             keep_screens(store, displays, false);
             displays.sync_wallpapers();
             Outcome::Done
         }
         Request::ShowPhysical { id, shown } => {
-            let id = ScreenId::from_wire(id);
-            if !displays.show_physical(id, shown) {
-                return Outcome::failed(ErrorCode::OTHER, &format!("no {id}"));
+            if !asker.caps.has(caps::headset::PHYSICAL) {
+                bail!(UserError::Unsupported);
             }
+            let id = ScreenId::from_wire(id);
+            displays.show_physical(id, shown, usize::from(limits.physical_max))?;
             // What a display seen for the first time gets, from now on.
             store.change(|s| s.mirror = shown);
             displays.apply(&store.wanted());
@@ -103,6 +182,9 @@ pub fn handle(
             software,
             sharp,
         } => {
+            if codec.is_some_and(|c| c != Codec::H264 && !asker.caps.decodes(c)) {
+                bail!(UserError::BadArgument);
+            }
             let now = store.wanted();
             // Kept as asked: the codec stays chosen when another one encodes.
             let bitrate = bitrate.map_or(now.bitrate, |b| u32::from(b).clamp(5, 100));
@@ -112,13 +194,11 @@ pub fn handle(
             // Quality and clearer text apply even when the codec cannot change.
             displays.apply(&store.wanted());
             let result = displays.encode_with(codec, software);
-            displays.fit_codec(headset);
+            displays.fit_codec(asker.caps);
             // A monitor whose stream could not start again is gone.
             keep_screens(store, displays, false);
-            match result {
-                Ok(()) => Outcome::Done,
-                Err(e) => failed(e),
-            }
+            result?;
+            Outcome::Done
         }
         Request::SetSound { to_headset } => {
             store.change(|s| s.audio = to_headset);
@@ -126,43 +206,56 @@ pub fn handle(
             Outcome::Done
         }
         Request::DetachWindow => {
-            let id = store.new_id();
-            match displays.detach_window(id) {
-                Ok(()) => Outcome::Added { id: id.wire() },
-                Err(e) => failed(e),
+            if !asker.caps.has(caps::headset::WINDOWS) {
+                bail!(UserError::Unsupported);
             }
+            let id = store.new_id();
+            displays.detach_window(id)?;
+            Outcome::Added { id: id.wire() }
         }
-        Request::WindowHere { id } => match displays.window_here(ScreenId::from_wire(id)) {
-            Ok(()) => Outcome::Done,
-            Err(e) => failed(e),
-        },
-        Request::Screenshot { id } => match displays.screenshot(ScreenId::from_wire(id)) {
-            Ok(path) => Outcome::Saved {
+        Request::WindowHere { id } => {
+            displays.window_here(ScreenId::from_wire(id))?;
+            Outcome::Done
+        }
+        Request::Screenshot { id } => {
+            let path = displays.screenshot(ScreenId::from_wire(id))?;
+            Outcome::Saved {
                 path: prostir_proto::state::clip(
                     &home_relative(&path),
                     prostir_proto::request::MAX_PATH,
                 ),
-            },
-            Err(e) => failed(e),
-        },
+            }
+        }
         Request::FindMouse => match displays.find_mouse() {
             Some((id, u, v)) => Outcome::Pointer {
                 id: id.wire(),
                 u,
                 v,
             },
-            None => Outcome::failed(ErrorCode::OTHER, "the mouse is on none of the displays"),
+            None => bail!(UserError::NotOnDisplays),
         },
-    }
+    })
 }
 
-/// The monitor a mode asks for: its size, and its scale (percent) as KWin's.
-fn spec(mode: Mode) -> MonitorSpec {
-    MonitorSpec {
+/// The monitor `mode` asks for, if the PC makes it: a size within its limits and one
+/// of its scales.
+fn checked(mode: Mode, limits: &Limits) -> Result<MonitorSpec> {
+    let fits = (limits.min.0..=limits.max.0).contains(&mode.w)
+        && (limits.min.1..=limits.max.1).contains(&mode.h)
+        && limits.scales.contains(&mode.scale);
+    let spec = MonitorSpec {
         width: mode.w,
         height: mode.h,
-        scale: f64::from(mode.scale.max(1)) / 100.0,
+        scale: f64::from(mode.scale) / 100.0,
+    };
+    if !fits || spec.validate().is_err() {
+        bail!(UserError::BadSize {
+            w: mode.w,
+            h: mode.h,
+            scale: mode.scale
+        });
     }
+    Ok(spec)
 }
 
 /// `~/Pictures/…` rather than the full path, for showing.
@@ -173,5 +266,65 @@ fn home_relative(path: &std::path::Path) -> String {
             format!("~{}", &shown[home.len()..])
         }
         _ => shown,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn limits() -> Limits {
+        crate::publish::limits(&Default::default(), &HeadsetCaps::default(), Codec::H264)
+    }
+
+    /// Only sizes within the PC's limits and only its scales.
+    #[test]
+    fn sizes_are_checked() {
+        let l = limits();
+        assert!(checked(Mode::new(2560, 1440), &l).is_ok());
+        let larger_text = Mode {
+            scale: 150,
+            ..Mode::new(2560, 1440)
+        };
+        assert_eq!(checked(larger_text, &l).unwrap().scale, 1.5);
+        for bad in [
+            Mode::new(100, 100),
+            Mode::new(9000, 1440),
+            Mode {
+                scale: 110,
+                ..Mode::new(1920, 1080)
+            },
+        ] {
+            let e = checked(bad, &l).unwrap_err();
+            assert_eq!(errors::code_of(&e), ErrorCode::BAD_SIZE, "{bad:?}");
+        }
+    }
+
+    /// Each kind of request needs its right; finding the mouse needs none.
+    #[test]
+    fn rights_per_request() {
+        let guest = Access {
+            role: prostir_proto::state::role::GUEST,
+            perms: perms::INPUT,
+        };
+        assert!(guest.may(needs(&Request::FindMouse)));
+        assert!(guest.may(needs(&Request::WindowHere {
+            id: prostir_proto::state::DisplayId(1)
+        })));
+        assert!(!guest.may(needs(&Request::AddDisplay {
+            mode: Mode::new(1920, 1080)
+        })));
+        assert!(!guest.may(needs(&Request::Screenshot {
+            id: prostir_proto::state::DisplayId(1)
+        })));
+        let changes = Access {
+            perms: perms::CHANGES,
+            ..guest
+        };
+        assert!(
+            !changes.may(needs(&Request::DetachWindow)),
+            "titles are private"
+        );
+        assert!(Access::MAIN.may(needs(&Request::DetachWindow)));
     }
 }

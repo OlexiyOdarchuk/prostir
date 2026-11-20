@@ -85,6 +85,7 @@ pub enum ScreenState {
     /// Its output or encoder could not start: it keeps its place in the set and the
     /// rows, and is tried again at the next session.
     Failed {
+        error: prostir_proto::state::ErrorCode,
         why: String,
     },
     /// A display of the PC that is not connected now (the lid closed, the cable out):

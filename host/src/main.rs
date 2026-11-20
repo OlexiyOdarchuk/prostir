@@ -2,6 +2,7 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 mod displays;
 mod encoder;
+mod errors;
 mod i18n;
 mod layout;
 mod outbox;
@@ -25,7 +26,7 @@ use clap::Parser;
 use log::{debug, error, info, warn};
 use prostir_proto::link::{Closer, Link, Via};
 use prostir_proto::request::{Asked, Outcome};
-use prostir_proto::state::{ErrorCode, HeadsetState, Part, clip};
+use prostir_proto::state::{ErrorCode, HeadsetState, Part, clip, perms};
 use prostir_proto::stats::Period;
 use prostir_proto::{ClientMsg, Codec, HeadsetGoodbye, HostMsg, PcGoodbye};
 
@@ -432,7 +433,13 @@ fn serve_client(
                 break (Ok(()), Some(PcGoodbye::TakenOff));
             }
             if !displays.healthy() {
-                warn!("a virtual monitor or encoder stopped on the PC");
+                let why = "a virtual monitor or encoder stopped on the PC";
+                warn!("{why}");
+                displays.router.send(HostMsg::Problem {
+                    error: ErrorCode::ENCODER,
+                    detail: why.into(),
+                    display: None,
+                });
                 let failed = anyhow::anyhow!("virtual monitor or encoder stopped");
                 break (Err(failed), Some(PcGoodbye::Failed));
             }
@@ -522,11 +529,15 @@ impl Session {
         }
     }
 
-    /// Follows what the headset said about itself: worn or not, its battery, and the
-    /// watchers its preferences ask for.
+    /// Follows what the headset said about itself: worn or not (the main headset
+    /// pauses the desktop), its battery, and the watchers its preferences ask for
+    /// (notifications only for a headset with the right to private things).
     fn headset_changed(&mut self, displays: &mut Displays, control: &Control) {
+        let access = self.publisher.access;
         let headset = &self.publisher.headset;
-        if let Some(p) = headset.presence {
+        if let Some(p) = headset.presence
+            && access.is_main()
+        {
             displays.set_worn(p.worn);
         }
         if let Some(b) = headset.battery {
@@ -538,7 +549,7 @@ impl Session {
             }
         }
         let prefs = self.publisher.prefs();
-        self.notifications = if prefs.notifications {
+        self.notifications = if prefs.notifications && access.may(perms::PRIVATE) {
             self.notifications.take().or_else(|| {
                 let router = displays.router.clone();
                 notifications::watch(move |text| {
@@ -572,7 +583,7 @@ impl Session {
             ClientMsg::RequestKeyframe { id, generation } => {
                 let id = ScreenId::from_wire(id);
                 if displays.router.is_current(id, generation) {
-                    displays.force_keyframe(id);
+                    displays.keyframe_asked(id);
                 }
             }
             ClientMsg::FrameShown {
@@ -587,7 +598,13 @@ impl Session {
             ClientMsg::Request { req, asked } => {
                 let outcome = match asked {
                     Asked::Known(request) => {
-                        requests::handle(request, displays, store, self.publisher.caps())
+                        let limits = self.publisher.limits(displays);
+                        let asker = requests::Asker {
+                            caps: self.publisher.caps(),
+                            limits: &limits,
+                            access: self.publisher.access,
+                        };
+                        requests::handle(request, displays, store, &asker)
                     }
                     Asked::Unknown { kind } => {
                         info!("the headset asked for something unknown (kind {kind})");
@@ -600,18 +617,21 @@ impl Session {
                 self.replies.push(HostMsg::Reply { req, outcome });
                 control.show(None, Some(displays), store);
             }
-            ClientMsg::Arrange { rows } => {
+            // Only the main headset's arrangement is the desktop's.
+            ClientMsg::Arrange { rows } if self.publisher.access.is_main() => {
                 displays.set_layout(&rows);
                 keep_screens(store, displays, false);
             }
+            ClientMsg::Arrange { .. } => info!("a guest's arrangement leaves the desktop as it is"),
             ClientMsg::Mic { pcm } => displays.push_mic(pcm),
             ClientMsg::SetMic { enabled } => {
                 store.change(|s| s.mic = enabled);
                 displays.apply(&store.wanted());
             }
-            ClientMsg::MouseTo { id, u, v } => {
+            ClientMsg::MouseTo { id, u, v } if self.publisher.access.may(perms::INPUT) => {
                 displays.mouse_to(ScreenId::from_wire(id), u, v);
             }
+            ClientMsg::MouseTo { .. } => info!("the headset has no right to move the mouse"),
             // Used for priorities from step 10 on.
             ClientMsg::Gaze { .. } => {}
             other => warn!("ignoring {other:?}"),

@@ -140,6 +140,7 @@ fn main() {
             .map(prostir::profiles::Profile::default_for)
             .collect(),
         active_profile: Some(0),
+        asks: Vec::new(),
         lang: if std::env::var("LANG_UI").as_deref() == Ok("en") {
             Lang::En
         } else {

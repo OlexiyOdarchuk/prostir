@@ -65,6 +65,22 @@ impl TestDir {
         std::fs::write(path, text).unwrap();
     }
 
+    /// The set of screens the PC app starts with, as this version saves it.
+    pub fn save_screens(&self, text: &str) {
+        self.save("screens.txt", text);
+    }
+
+    /// The settings the PC app starts with, as this version saves them.
+    pub fn save_settings(&self, text: &str) {
+        self.save("settings.txt", text);
+    }
+
+    fn save(&self, name: &str, text: &str) {
+        let path = self.config().join("prostir").join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
     /// A file the PC app keeps in its settings directory (`screens.txt`, say).
     pub fn saved(&self, name: &str) -> String {
         std::fs::read_to_string(self.config().join("prostir").join(name)).unwrap_or_default()
