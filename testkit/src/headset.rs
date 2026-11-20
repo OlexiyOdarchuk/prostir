@@ -14,8 +14,8 @@ use prostir_proto::packet::{self, Assembler, FRAGMENT, lane};
 use prostir_proto::request::{Asked, Command, Outcome, Request};
 use prostir_proto::secure::{Identity, Pairing, TrustStore, confirmation, tags_match};
 use prostir_proto::state::{
-    Decoder, Display, DisplayId, Encoding, Gen, HeadsetCaps, HeadsetState, PcState, Prefs,
-    Presence, ReqId, UpFormat, UpKind, UpState, VolumeAsk, caps, permission,
+    Decoder, Display, DisplayId, DisplayState, Encoding, Gen, HeadsetCaps, HeadsetState, PcState,
+    Prefs, Presence, ReqId, UpFormat, UpKind, UpState, VolumeAsk, caps, permission,
 };
 use prostir_proto::stats::{Gaps, Pings};
 use prostir_proto::volume::HeadsetVolume;
@@ -204,6 +204,9 @@ pub struct View {
     pub commands: Vec<Asked<Command>>,
     /// The PC's requests to take its volume, in order (the reader answers them).
     pub volume_asks: Vec<VolumeAsk>,
+    /// Every state each display had, in order, from the snapshot on: a new entry
+    /// when its state changes.
+    pub states: Vec<(DisplayId, DisplayState)>,
     /// The displays of the last `Displays`.
     listed: Vec<DisplayId>,
 }
@@ -342,10 +345,21 @@ impl View {
         self.round_trips.extend(arrived.round_trip);
     }
 
+    /// The states of `displays` that changed since they were last seen.
+    fn note_states(&mut self, displays: &prostir_proto::state::Displays) {
+        for d in &displays.displays {
+            let last = self.states.iter().rev().find(|(id, _)| *id == d.id);
+            if last.is_none_or(|(_, s)| *s != d.state) {
+                self.states.push((d.id, d.state.clone()));
+            }
+        }
+    }
+
     /// A part of the state came (already in `pc`).
     fn part(&mut self, msg: &HostMsg) {
         match msg {
             HostMsg::Displays { part } => {
+                self.note_states(part);
                 let ids: Vec<DisplayId> = part.ids().collect();
                 self.arrivals.push(Arrival::Displays(ids.clone()));
                 let listed: Vec<DisplayId> = self.listed.clone();
@@ -642,10 +656,16 @@ impl FakeHeadset {
             writer,
             shared,
             incoming,
-            view: View {
-                pc,
-                listed,
-                ..View::default()
+            view: {
+                let mut view = View {
+                    pc,
+                    listed,
+                    ..View::default()
+                };
+                if let Some(displays) = view.pc.displays.clone() {
+                    view.note_states(&displays);
+                }
+                view
             },
             last_req: 0,
             version,

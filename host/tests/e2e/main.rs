@@ -557,6 +557,105 @@ fn a_codec_the_headset_cannot_show_a_monitor_in_is_refused() {
     assert!(headset.view().broken.is_empty());
 }
 
+/// A monitor and a display of the PC too big for the headset in H.265 (it decodes
+/// H.265 up to 4096, H.264 up to 8192) stand failed; switched to H.264 they stream,
+/// and `Displays` says so. Only where the PC encodes H.265 on its graphics card.
+#[test]
+fn displays_too_big_in_one_codec_stream_in_another() {
+    use prostir_proto::state::{Decoder, DisplayState, ErrorCode};
+    let options = Options {
+        physical: "HDMI-A-1=Wide 0x1 0@5120x1440".into(),
+        software: false,
+        ..Options::default()
+    };
+    let dir = TestDir::new("codec-fits");
+    dir.save_screens("next 200\nrow\nscreen 0 640x360\nscreen 1 5120x1440\n");
+    dir.save_settings("codec h265\nsoftware off\nmirror on\n");
+    let mut keys = dir.pair();
+    let pc = Pc::start(&dir, &options);
+    let mut state = FakeHeadset::state();
+    let decoder = |codec, max_w, max_h| Decoder {
+        codec,
+        max_w,
+        max_h,
+    };
+    state.caps.as_mut().unwrap().decoders = vec![decoder(0, 8192, 4320), decoder(1, 4096, 4096)];
+    let mut headset = FakeHeadset::connect_saying(pc.addr, &mut keys, &state)
+        .unwrap_or_else(|e| panic!("connecting: {e}"));
+    let using = headset.view().encoding().unwrap().using;
+    if using != Some((Codec::H265, true)) {
+        eprintln!("not H.265 on the graphics card here ({using:?}): nothing to try");
+        return;
+    }
+    let wide = |v: &View| -> Vec<(DisplayId, DisplayState)> {
+        v.displays()
+            .iter()
+            .filter(|d| d.mode.w == 5120 || d.is_physical())
+            .map(|d| (d.id, d.state.clone()))
+            .collect()
+    };
+    headset
+        .wait(SOON, "both wide ones failed, too big", |v| {
+            let w = wide(v);
+            w.len() == 2
+                && w.iter().all(|(_, s)| {
+                    matches!(s, DisplayState::Failed { error, .. } if *error == ErrorCode::BAD_SIZE)
+                })
+        })
+        .unwrap();
+    // No flap: they stay failed while nothing changes.
+    headset.take_for(Duration::from_secs(2)).unwrap();
+    assert!(
+        wide(headset.view())
+            .iter()
+            .all(|(_, s)| matches!(s, DisplayState::Failed { .. })),
+        "{:?}",
+        wide(headset.view())
+    );
+    // Connected again, they are failed from the snapshot on, never running between.
+    headset.disconnect();
+    let mut headset = FakeHeadset::connect_saying(pc.addr, &mut keys, &state)
+        .unwrap_or_else(|e| panic!("connecting again: {e}"));
+    headset.take_for(Duration::from_secs(2)).unwrap();
+    let wide_ids: Vec<DisplayId> = wide(headset.view()).iter().map(|(id, _)| *id).collect();
+    assert_eq!(wide_ids.len(), 2);
+    let flapped: Vec<_> = headset
+        .view()
+        .states
+        .iter()
+        .filter(|(id, s)| wide_ids.contains(id) && !matches!(s, DisplayState::Failed { .. }))
+        .collect();
+    assert!(flapped.is_empty(), "{flapped:?}");
+    // By their numbers from here: the encoder may make a wide one narrower in H.264
+    // (graphics cards that encode H.264 only up to 4096 scale it down).
+    let ids: Vec<DisplayId> = wide(headset.view()).iter().map(|(id, _)| *id).collect();
+    let state_of = |v: &View, id: DisplayId| v.display(id).map(|d| d.state.clone());
+    let switched = headset
+        .ask(Request::SetEncoding {
+            bitrate: None,
+            codec: Some(Codec::H264),
+            software: Some(false),
+            sharp: None,
+        })
+        .unwrap();
+    assert_eq!(switched, Outcome::Done);
+    headset
+        .wait(SOON, "both wide ones running and streaming in H.264", |v| {
+            ids.iter().all(|id| {
+                state_of(v, *id) == Some(DisplayState::Running)
+                    && v.streams
+                        .get(id)
+                        .is_some_and(|st| st.codec == Codec::H264 && st.has_picture())
+            })
+        })
+        .unwrap();
+    assert!(
+        headset.view().broken.is_empty(),
+        "{:?}",
+        headset.view().broken
+    );
+}
+
 /// Another codec from the headset menu restarts every stream with what the PC really
 /// encodes with now, as far as it said it can (`choices` in `Encoding`): H.265 on
 /// the graphics card where it can, else H.264 there, else the CPU's H.264 again.

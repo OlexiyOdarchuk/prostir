@@ -115,6 +115,9 @@ pub struct Options {
     pub broken_monitors: String,
     /// The fake PC's own displays (`PROSTIR_FAKE_PHYSICAL`: `eDP-1=EDID@1920x1080;…`).
     pub physical: String,
+    /// `--software`: encode on the CPU whatever the settings say (the default, the same
+    /// everywhere); without it, as `settings.txt` says.
+    pub software: bool,
 }
 
 impl Default for Options {
@@ -128,6 +131,7 @@ impl Default for Options {
             typed_code: None,
             broken_monitors: String::new(),
             physical: String::new(),
+            software: true,
         }
     }
 }
@@ -154,7 +158,8 @@ impl Pc {
         // SAFETY: a valid path, for a pipe of our own.
         assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0, "mkfifo");
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_prostir"));
-        cmd.args(["--port", "0", "--no-discovery", "--no-adb", "--software"])
+        cmd.args(["--port", "0", "--no-discovery", "--no-adb"])
+            .args(options.software.then_some("--software"))
             .args(["--bitrate", &options.bitrate.to_string()])
             .args(["--linger", &options.linger.to_string()])
             .env("XDG_CONFIG_HOME", root.join("config"))

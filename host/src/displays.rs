@@ -220,7 +220,30 @@ impl Router {
             }
         }
         inner.headset = Some(headset);
-        self.too_big.lock().unwrap().extend(too_big);
+        // What was found for another headset is not this one's.
+        *self.too_big.lock().unwrap() = too_big;
+    }
+
+    /// Whether stream `id` is still larger than the headset decodes (a stream found
+    /// too big may have started over since, in another size or codec).
+    fn still_too_big(&self, id: ScreenId) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .streams
+            .get(&id)
+            .is_some_and(|s| s.too_big)
+    }
+
+    /// Whether a headset is connected that decodes a picture of `size` in `codec`
+    /// (without one, a display too big for the last one waits for the next).
+    fn fits(&self, codec: Codec, (w, h): (u32, u32)) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .headset
+            .as_ref()
+            .is_some_and(|headset| headset.fits(codec, w, h))
     }
 
     /// Streams found larger than the headset decodes since the last call.
@@ -307,6 +330,7 @@ impl Router {
         inner.tx = None;
         inner.headset = None;
         inner.published.clear();
+        self.too_big.lock().unwrap().clear();
     }
 
     /// Sends a control message to the connected client, if any. Never blocks.
@@ -562,6 +586,9 @@ pub struct Displays {
     /// When each display of the PC was last connected, in seconds since 1970 (0: not
     /// known), to forget the least recently seen of those not connected.
     physical_seen: BTreeMap<ScreenId, u64>,
+    /// Displays larger than the headset decodes (see [`Displays::stop_too_big`]): the
+    /// size and codec they did not fit in, until a headset or codec they fit.
+    too_big: BTreeMap<ScreenId, ((u32, u32), Codec)>,
     /// When a headset last asked for a keyframe of each screen.
     keyframes_asked: BTreeMap<ScreenId, Instant>,
     /// The settings as last applied from the store (see [`Displays::apply`]).
@@ -622,6 +649,7 @@ impl Displays {
             layout_retry: (Instant::now(), 0),
             physical_due: Instant::now(),
             physical_seen: set.physical.iter().map(|(id, p)| (*id, p.seen)).collect(),
+            too_big: BTreeMap::new(),
             keyframes_asked: BTreeMap::new(),
             settings: settings.clone(),
             audio: None,
@@ -834,13 +862,27 @@ impl Displays {
         result
     }
 
-    /// Displays of the PC too big for the last headset or codec are tried again (the
-    /// monitors are, with the others that failed).
+    /// Displays too big for the last headset or codec are tried again where they fit
+    /// the headset and codec now; the others stay failed, without a start that would
+    /// only fail again.
     fn retry_too_big(&mut self) {
-        for s in self.screens.values_mut() {
-            if s.is_physical() && Self::too_big(s) {
-                s.state = ScreenState::Starting;
+        let codec = self.cfg.codec;
+        let fit: Vec<ScreenId> = self
+            .too_big
+            .iter()
+            .filter(|(_, (size, _))| self.router.fits(codec, *size))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in fit {
+            self.too_big.remove(&id);
+            let physical = self.is_physical(id);
+            if physical {
+                if let Some(s) = self.screens.get_mut(&id) {
+                    s.state = ScreenState::Starting;
+                }
                 self.physical_due = Instant::now();
+            } else {
+                let _ = self.start(id);
             }
         }
     }
@@ -851,6 +893,7 @@ impl Displays {
         let failed: Vec<ScreenId> = self
             .monitors()
             .filter(|s| matches!(s.state, ScreenState::Failed { .. }))
+            .filter(|s| !self.too_big.contains_key(&s.id))
             .map(|s| s.id)
             .collect();
         for id in failed {
@@ -909,6 +952,9 @@ impl Displays {
             let Some(s) = self.screens.get(&id) else {
                 continue;
             };
+            if !self.router.still_too_big(id) {
+                continue;
+            }
             let name = s.name();
             let why = format!(
                 "{name}: {w}x{h} {} {codec:?}",
@@ -939,13 +985,14 @@ impl Displays {
                     why,
                 };
             }
+            self.too_big.insert(id, ((w, h), codec));
             self.layout_changed();
         }
     }
 
-    /// Whether `s` stands failed for being larger than the headset decodes.
-    fn too_big(s: &Screen) -> bool {
-        matches!(s.state, ScreenState::Failed { error, .. } if error == state::ErrorCode::BAD_SIZE)
+    /// Whether display `id` waits for a headset or codec it fits.
+    fn is_too_big(&self, id: ScreenId) -> bool {
+        self.too_big.contains_key(&id)
     }
 
     /// The first display streaming now that `headset` would not decode in `codec`:
@@ -1147,7 +1194,7 @@ impl Displays {
                     s.state = ScreenState::Running;
                     changed = true;
                 }
-            } else if !streaming && !self.screens.get(&id).is_some_and(Self::too_big) {
+            } else if !streaming && !self.is_too_big(id) {
                 // One too big for this headset waits for another headset or codec.
                 self.start_physical(id);
                 changed = true;
@@ -1651,6 +1698,8 @@ impl Displays {
             self.stop_physical(id);
         }
         self.physical_due = Instant::now();
+        // Displays too big for the codec before may fit this one.
+        self.retry_too_big();
         Ok(())
     }
 
@@ -1659,6 +1708,18 @@ impl Displays {
     /// codecs for one stream. Returns why the current settings did not work. A monitor
     /// whose stream cannot start at all stays in the set, Failed.
     fn restart_monitor(&mut self, id: ScreenId, fallback: Option<&EncoderConfig>) -> Result<()> {
+        // One too big for the headset starts again only where it fits now (it is
+        // tried again with the next headset otherwise).
+        let size = self
+            .screens
+            .get(&id)
+            .and_then(|s| s.kind.spec())
+            .map(|m| (m.width, m.height));
+        if self.too_big.contains_key(&id)
+            && size.is_some_and(|size| !self.router.fits(self.cfg.codec, size))
+        {
+            return Ok(());
+        }
         let Some(screen) = self.screens.get_mut(&id) else {
             return Ok(());
         };
@@ -1681,10 +1742,15 @@ impl Displays {
         match encoder {
             Some(encoder) => {
                 encoder.force_keyframe();
+                // Streams again (one too big for the headset is found again by the
+                // router once its encoder says its size).
+                self.too_big.remove(&id);
                 if let Some(screen) = self.screens.get_mut(&id) {
                     screen.stream = Some(encoder);
                     screen.output = Some(output);
+                    screen.state = ScreenState::Running;
                 }
+                self.layout_changed();
             }
             // It keeps its place, and is tried again at the next session.
             None => {
@@ -2452,7 +2518,8 @@ impl Displays {
     /// made anew for the next session.
     pub fn healthy(&self) -> bool {
         // Monitors too big for this headset are not broken: they wait for another.
-        self.monitors().any(|s| s.running() || Self::too_big(s))
+        self.monitors()
+            .any(|s| s.running() || self.too_big.contains_key(&s.id))
             && !self.router.failed.load(Ordering::Relaxed)
             && !self
                 .screens
@@ -2819,13 +2886,21 @@ mod tests {
         let outbox = Arc::new(Outbox::default());
         let mut small = headset();
         small.decoders[0].max_w = 32;
-        router.attach(outbox.clone(), small);
+        router.attach(outbox.clone(), small.clone());
         let s = ScreenId::from_wire(state::DisplayId(5));
         router.publish(&BTreeSet::from([s]));
         router.add_stream(s, Codec::H264, "test".into(), false);
         keyframe(&router, s);
         assert!(sent(&outbox).is_empty(), "nothing of it goes");
+        assert!(router.still_too_big(s));
+        // What was found for a headset that left is let go.
+        router.detach();
+        assert!(router.take_too_big().is_empty());
+        router.attach(outbox.clone(), small);
         assert_eq!(router.take_too_big(), [(s, (64, 32), Codec::H264)]);
+        // A stream started over is not too big until its encoder says its size.
+        router.add_stream(s, Codec::H264, "test".into(), false);
+        assert!(!router.still_too_big(s));
         // The same stream fits another headset.
         router.attach(outbox.clone(), headset());
         router.publish(&BTreeSet::from([s]));
