@@ -445,15 +445,28 @@ fn command(line: &str) -> Result<()> {
             let (from, to, ms): (u8, u8, u64) = (from.parse()?, to.parse()?, ms.parse()?);
             let steps = u64::from(from.abs_diff(to) / 2).max(1);
             std::thread::spawn(move || {
+                // How long the drag stood still at most between two steps (a busy
+                // machine may hold this thread up), for tests to know what the PC saw.
+                let mut longest = Duration::ZERO;
+                let mut last: Option<Instant> = None;
                 for i in 0..=steps {
                     let level = if to >= from {
                         from + (u64::from(to - from) * i / steps) as u8
                     } else {
                         from - (u64::from(from - to) * i / steps) as u8
                     };
+                    let now = Instant::now();
+                    if let Some(t) = last {
+                        longest = longest.max(now - t);
+                    }
+                    last = Some(now);
                     device(level, false);
                     std::thread::sleep(Duration::from_millis(ms / steps));
                 }
+                info!(
+                    "fake desktop: drag done, longest pause {} ms",
+                    longest.as_millis()
+                );
             });
             return Ok(());
         }

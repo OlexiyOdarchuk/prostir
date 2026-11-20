@@ -37,7 +37,7 @@ fn wait_written(pc: &Pc, headset: &mut FakeHeadset, level: u8) {
 /// dragged, the device is not set until it rests, and then once; quiet after.
 #[test]
 fn one_volume_for_the_slider_and_the_buttons() {
-    let (_dir, pc, _keys, mut headset) = session("volume", &Options::default());
+    let (_dir, mut pc, _keys, mut headset) = session("volume", &Options::default());
     wait_written(&pc, &mut headset, FIRST_VOLUME);
     headset.press_volume(73).unwrap();
     wait_written(&pc, &mut headset, 73);
@@ -53,23 +53,34 @@ fn one_volume_for_the_slider_and_the_buttons() {
     assert_eq!(headset.volume(), Some(quest_step(21)));
     assert_eq!(headset.view().volume_asks.len(), 1);
 
-    // Dragged from 0 to 100 in a second: the slider never jumps back while it moves,
-    // and rests on the headset's level. (A level may be written on the way where the
-    // drag itself stood still a moment, a busy test machine, say: what the slider
-    // must never do is go back.)
+    // Dragged from 0 to 100 in a second: no level written while it moves, once when
+    // it rests. Only where the drag itself stood still as long as the PC waits for a
+    // slider to rest (a busy test machine held the fake slider up) may a level be
+    // written on the way; the slider then never goes back.
     let before = written(&pc).len();
     let asks_before = headset.view().volume_asks.len();
     pc.desktop("drag 0 100 1000");
     wait_written(&pc, &mut headset, 100);
+    let done = pc.wait_log(SOON, "fake desktop: drag done, longest pause");
+    let longest: u64 = done
+        .rsplit("longest pause ")
+        .next()
+        .and_then(|t| t.trim_end_matches(" ms").trim().parse().ok())
+        .unwrap();
     let during: Vec<u8> = written(&pc)[before..]
         .iter()
         .map(|l| l.parse().unwrap())
         .collect();
-    assert!(
-        during.windows(2).all(|w| w[0] <= w[1]),
-        "the slider went back: {during:?}"
-    );
-    assert_eq!(during.last(), Some(&100));
+    if longest < prostir_proto::volume::ASK_EVERY.as_millis() as u64 {
+        assert_eq!(during, [100], "written once, when it rested");
+    } else {
+        eprintln!("the drag stood still for {longest} ms: levels on the way allowed");
+        assert!(
+            during.windows(2).all(|w| w[0] <= w[1]),
+            "the slider went back: {during:?}"
+        );
+        assert_eq!(during.last(), Some(&100));
+    }
     let asks = headset.view().volume_asks.len() - asks_before;
     assert!((1..=25).contains(&asks), "{asks} requests");
     assert_eq!(headset.volume(), Some(100));
