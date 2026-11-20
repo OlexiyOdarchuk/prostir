@@ -175,3 +175,28 @@ fn pairing_does_not_hold_up_a_trusted_headset() {
     }
     assert_eq!(stranger.trusted.len(), 1, "paired all the same");
 }
+
+/// `--linger` as long as a number holds keeps the monitors for good: the PC neither
+/// overflows its clock nor removes them, and the headset finds them when it is back.
+#[test]
+fn a_linger_too_long_to_reckon_keeps_the_monitors() {
+    let options = Options {
+        linger: u64::MAX,
+        ..Options::default()
+    };
+    let (_dir, mut pc, mut keys, headset) = session("linger-forever", &options);
+    headset.disconnect();
+    pc.wait_log(
+        SOON,
+        &format!("keeping virtual monitors for {} s", u64::MAX),
+    );
+    let mut back = connect(&pc, &mut keys);
+    back.wait(START, "every monitor showing", View::all_monitors_show)
+        .unwrap();
+    assert_eq!(
+        pc.count_log("fake desktop: created"),
+        2,
+        "the same monitors"
+    );
+    assert_eq!(pc.count_log("panicked"), 0);
+}

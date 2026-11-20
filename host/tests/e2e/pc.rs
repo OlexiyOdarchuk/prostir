@@ -118,7 +118,7 @@ pub struct Options {
     /// How long making each fake monitor takes.
     pub slow_monitors: Duration,
     /// `--linger`: seconds the monitors stay after the headset leaves.
-    pub linger: u32,
+    pub linger: u64,
     /// The pairing code the person at the PC types, if asked.
     pub typed_code: Option<String>,
     /// How long the person at the PC takes to type it.
