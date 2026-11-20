@@ -632,6 +632,15 @@ pub struct Displays {
     manage_primary: bool,
 }
 
+impl Drop for Displays {
+    /// Window panels close first, while the desktop is still there: each window goes
+    /// back where it was, out of full screen, and the desktop stops watching it (on KDE,
+    /// its KWin script is unloaded). The outputs and the desktop go after.
+    fn drop(&mut self) {
+        self.close_window_panels();
+    }
+}
+
 impl Displays {
     /// The screens of `set`, each with its own number, streaming with `cfg`; sound,
     /// microphone and the laptop screen as `settings` say. A display of the PC seen for
