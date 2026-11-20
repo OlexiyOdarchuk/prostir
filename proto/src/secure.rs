@@ -30,13 +30,28 @@ pub struct Identity {
 
 impl Identity {
     /// Loads the key pair from `path` (`private public`, hex), creating it — readable
-    /// by the owner only — on first use.
+    /// by the owner only — on first use. A file that is there but cannot be read, or
+    /// does not read as a key pair, is an error: replacing it would make every paired
+    /// device a stranger without a word.
     pub fn load_or_create(path: &Path) -> io::Result<Self> {
-        if let Ok(text) = std::fs::read_to_string(path)
-            && let Some((private, public)) = text.trim().split_once(' ')
-            && let (Some(private), Some(public)) = (from_hex(private), from_hex(public))
-        {
-            return Ok(Self { private, public });
+        match std::fs::read_to_string(path) {
+            Ok(text) => {
+                let pair = text.trim().split_once(' ');
+                return match pair.map(|(a, b)| (from_hex(a), from_hex(b))) {
+                    Some((Some(private), Some(public))) => Ok(Self { private, public }),
+                    _ => Err(err(format!(
+                        "{} is no key pair (move it away to make a new key, and pair again)",
+                        path.display()
+                    ))),
+                };
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(io::Error::new(
+                    e.kind(),
+                    format!("cannot read the key in {}: {e}", path.display()),
+                ));
+            }
         }
         let keypair = snow::Builder::new(NOISE.parse().map_err(err)?)
             .generate_keypair()
@@ -103,19 +118,39 @@ pub struct TrustStore {
 }
 
 impl TrustStore {
+    /// The store in `path`, empty when there is no file yet (or it cannot be read:
+    /// where that would let strangers in, use [`TrustStore::try_load`]).
     pub fn load(path: &Path) -> Self {
-        let entries = std::fs::read_to_string(path)
-            .unwrap_or_default()
+        Self::try_load(path).unwrap_or_else(|_| Self {
+            path: path.to_owned(),
+            entries: Vec::new(),
+        })
+    }
+
+    /// The store in `path`, empty when there is no file yet; an error when the file is
+    /// there but cannot be read.
+    pub fn try_load(path: &Path) -> io::Result<Self> {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+            Err(e) => {
+                return Err(io::Error::new(
+                    e.kind(),
+                    format!("cannot read {}: {e}", path.display()),
+                ));
+            }
+        };
+        let entries = text
             .lines()
             .filter_map(|l| {
                 let (key, label) = l.split_once(' ').unwrap_or((l, ""));
                 Some((from_hex(key.trim())?, label.trim().to_owned()))
             })
             .collect();
-        Self {
+        Ok(Self {
             path: path.to_owned(),
             entries,
-        }
+        })
     }
 
     pub fn contains(&self, key: &[u8; 32]) -> bool {
@@ -329,5 +364,25 @@ mod tests {
         std::fs::remove_file(path).unwrap();
         let code = pairing_code();
         assert_eq!(code.len(), 6);
+    }
+
+    /// A store or a key that is there but does not read is an error, never an empty
+    /// store or a new key.
+    #[test]
+    fn unreadable_files_fail_closed() {
+        let dir = std::env::temp_dir().join(format!("prostir-closed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(TrustStore::try_load(&dir.join("none")).unwrap().is_empty());
+        // A directory where the file should be cannot be read as one.
+        assert!(TrustStore::try_load(&dir).is_err());
+        assert!(Identity::load_or_create(&dir).is_err());
+        let key = dir.join("key");
+        std::fs::write(&key, "broken\n").unwrap();
+        assert!(Identity::load_or_create(&key).is_err());
+        assert_eq!(std::fs::read_to_string(&key).unwrap(), "broken\n", "kept");
+        std::fs::remove_file(&key).unwrap();
+        let made = Identity::load_or_create(&key).unwrap();
+        assert_eq!(Identity::load_or_create(&key).unwrap().public, made.public);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

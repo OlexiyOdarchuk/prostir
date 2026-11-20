@@ -58,7 +58,28 @@ impl TestDir {
         TrustStore::load(&self.config().join("prostir/paired_headsets"))
             .add(keys.identity.public, name)
             .unwrap();
+        // And the find secret its first session would give it.
+        keys.learn_find_secret(pc.public, self.find_secret())
+            .unwrap();
         keys
+    }
+
+    /// The PC's find secret, made as the PC makes it when there is none yet.
+    pub fn find_secret(&self) -> prostir_proto::discovery::FindSecret {
+        let path = self.config().join("prostir/find_secret");
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            let text = text.trim();
+            let mut secret = [0u8; 32];
+            for (i, b) in secret.iter_mut().enumerate() {
+                *b = u8::from_str_radix(&text[i * 2..i * 2 + 2], 16).unwrap();
+            }
+            return secret;
+        }
+        let secret = prostir_proto::discovery::new_secret();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let hex = prostir_proto::secure::to_hex(&secret);
+        prostir_proto::secure::write_atomic(&path, format!("{hex}\n").as_bytes()).unwrap();
+        secret
     }
 
     /// The PC's key (made on first use), as headsets know it.

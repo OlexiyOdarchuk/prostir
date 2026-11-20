@@ -109,7 +109,8 @@
   no pairing), Prostir leaves after 10 s, and the headset's next visit starts it
   again. `prostir serve --stay` keeps it running, as before.
 - A headset can find its PC by asking, and the PC answers every headset only until it
-  is paired, then only its own, so others nearby do not see it. A headset can also ask
+  is paired, then only its own, so others nearby do not see it. A headset the PC
+  forgot can no longer find it. A headset can also ask
   a PC it knows straight at its address, through a VPN such as Tailscale or WireGuard
   too, with no port opened on the router. The PC still announces itself while it
   runs, for headsets that do not ask yet.

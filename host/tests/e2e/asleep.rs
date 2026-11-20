@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use prostir_api::{BUS_NAME, INTERFACE, OBJECT_PATH, SETTINGS_NAME, State};
-use prostir_proto::discovery::{Answer, MIN_QUERY, flags};
+use prostir_proto::discovery::{Answer, MIN_QUERY, Query, flags};
 use prostir_testkit::{FakeHeadset, Keys, View, find};
 
 use crate::pc::{Activate, Options, Pc, TestDir, wakeups_of};
@@ -71,15 +71,23 @@ fn the_pc_answers_everyone_until_paired_then_only_its_own() {
     let a = asks(to, &stranger, "Quest 3S").expect("an unpaired PC answers everyone");
     assert_eq!(a.flags, flags::ANSWERS_ALL);
     assert_eq!((a.port, a.name.as_str()), (pc.addr.port(), "fake-pc"));
-    assert!(a.from_pc(&dir.pc_key()));
+    assert!(a.from_pc(&dir.find_secret()));
     pc.quit();
 
     let keys = dir.pair();
+    let mut other = dir.pair_headset("other");
     let mut pc = Pc::start(&dir, &options);
     let to = pc.discovery.unwrap();
     let a = asks(to, &keys, "").expect("its own headset gets an answer");
     assert_eq!(a.flags, 0);
-    assert!(a.from_pc(&dir.pc_key()));
+    assert!(a.from_pc(&dir.find_secret()));
+    assert!(
+        !a.from_pc(&dir.pc_key()),
+        "not made with the PC's public key"
+    );
+    // The PC's public key (anyone who connects sees it) makes no tag it answers.
+    let with_public_key = Query::new([&dir.pc_key()], "");
+    assert!(find::ask(to, &with_public_key, SILENCE).is_none());
     assert!(silent(to, &stranger, "Quest 3S"), "a stranger gets none");
     pc.wait_log(SOON, "notification: New headset nearby: Pair it? [Pair]");
     assert!(silent(to, &stranger, "Quest 3S"));
@@ -105,6 +113,21 @@ fn the_pc_answers_everyone_until_paired_then_only_its_own() {
         own.len()
     );
     assert!(find::send(to, &own[..MIN_QUERY - 1], SILENCE).is_none());
+
+    // Forgotten: its tags no longer work. The other headset gets the new secret in
+    // its session and is answered again.
+    if let Some(ctl) = pc.ctl(&[
+        "forget",
+        &prostir_proto::secure::to_hex(&keys.identity.public),
+    ]) {
+        assert_eq!(ctl.code, 0, "{ctl:?}");
+        pc.wait_log(SOON, "a new find secret");
+        assert!(silent(to, &keys, ""), "the forgotten headset");
+        assert!(silent(to, &other, ""), "the old secret");
+        let mut headset = connect(&pc, &mut other);
+        headset.learn_find_secret(&mut other, SOON).unwrap();
+        assert!(asks(to, &other, "").is_some(), "with the new secret");
+    }
     pc.quit();
 }
 
@@ -196,7 +219,7 @@ fn a_headset_pairs_through_the_settings_window() {
     let addr = pc.addr;
     let pairing = std::thread::spawn(move || {
         let mut code = || "123456".to_owned();
-        FakeHeadset::connect(addr, &mut new, Some(&mut code)).map(|_| ())
+        FakeHeadset::connect(addr, &mut new, Some(&mut code)).map(|h| (h, new))
     });
     let s = wait_state(&pc, "a headset waits for its code", |s| {
         s.pairing.as_ref().and_then(|p| p.code_for.as_deref()) == Some("prostir-testkit")
@@ -204,7 +227,12 @@ fn a_headset_pairs_through_the_settings_window() {
     .unwrap();
     assert_eq!(s.pairing.unwrap().seconds_total, 180);
     call(r#"{"request": "pairing_code", "code": "123 456"}"#).unwrap();
-    pairing.join().unwrap().expect("paired and connected");
+    let (mut headset, mut new) = pairing.join().unwrap().expect("paired and connected");
+    // Its session gives it what it finds the PC with from now on.
+    headset.learn_find_secret(&mut new, SOON).unwrap();
+    let to = pc.discovery.unwrap();
+    let a = asks(to, &new, "").expect("the new headset finds its PC");
+    assert!(a.from_pc(&dir.find_secret()));
     pc.wait_log(SOON, "a headset paired: the pairing window closes");
     let s = wait_state(&pc, "pairing closed", |s| s.pairing.is_none()).unwrap();
     assert_eq!(s.headsets.len(), 2);

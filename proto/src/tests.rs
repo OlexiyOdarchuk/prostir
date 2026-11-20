@@ -292,6 +292,7 @@ pub(crate) fn host_samples() -> Vec<HostMsg> {
         HostMsg::Notice {
             text: "Нове повідомлення".into(),
         },
+        HostMsg::FindSecret { secret: [7; 32] },
         HostMsg::PairingRequired,
         HostMsg::PairMsg { msg: [4; 33] },
         HostMsg::PairResult { tag: Some([1; 32]) },

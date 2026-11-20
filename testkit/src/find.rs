@@ -8,10 +8,16 @@ use prostir_proto::discovery::{Answer, Query};
 
 use crate::Keys;
 
-/// A query for every PC `keys` trusts, with the headset's `name` (empty unless it
-/// looks for a PC to pair with).
+/// A query for every PC `keys` trusts and has the find secret of (each PC sends it in
+/// the session), with the headset's `name` (empty unless it looks for a PC to pair
+/// with).
 pub fn query(keys: &Keys, name: &str) -> Query {
-    Query::new(keys.trusted.entries().iter().map(|(k, _)| k), name)
+    let secrets = keys
+        .trusted
+        .entries()
+        .iter()
+        .filter_map(|(k, _)| keys.find_secrets.get(k));
+    Query::new(secrets, name)
 }
 
 /// Sends `datagram` to `to` and waits up to `timeout` for what comes back; `None`

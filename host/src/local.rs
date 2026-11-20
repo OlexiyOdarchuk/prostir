@@ -602,6 +602,14 @@ impl Brain {
             "forgot headset {}",
             prostir_proto::secure::fingerprint(&key)
         );
+        // It can no longer find the PC; the headsets still trusted get the new secret
+        // now, in their sessions, or at their next.
+        let secret = self.security.new_find_secret();
+        for (other, session) in &self.sessions {
+            if *other != key {
+                session.send(prostir_proto::HostMsg::FindSecret { secret });
+            }
+        }
         self.end_session(
             key,
             Some(prostir_proto::PcGoodbye::Forgotten),

@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
+use prostir_proto::discovery::FindSecret;
 use prostir_proto::handshake::{self, Answer};
 use prostir_proto::link::tcp::{NoiseTcp, Plain, SocketOptions};
 use prostir_proto::link::{Closer, Link, PeerInfo, RecordReceiver, RecordSender};
@@ -44,21 +45,59 @@ pub fn quest_step(level: u8) -> u8 {
     (step * 100.0 / 15.0).round() as u8
 }
 
-/// A headset's long-term key and the PCs it trusts, kept in a directory.
+/// A headset's long-term key, the PCs it trusts, and their find secrets (what its
+/// discovery queries for each are made with), kept in a directory.
 pub struct Keys {
     pub identity: Identity,
     pub trusted: TrustStore,
+    /// Each PC's find secret, by the PC's key (`find_secrets`: `key secret` in hex,
+    /// a line each).
+    pub find_secrets: BTreeMap<[u8; 32], FindSecret>,
+    dir: std::path::PathBuf,
+}
+
+/// 32 bytes from 64 hex digits.
+fn from_hex32(s: &str) -> Option<[u8; 32]> {
+    let mut out = [0; 32];
+    for (i, o) in out.iter_mut().enumerate() {
+        *o = u8::from_str_radix(s.get(i * 2..i * 2 + 2)?, 16).ok()?;
+    }
+    (s.len() == 64).then_some(out)
 }
 
 impl Keys {
-    /// The keys in `dir` (`identity`, `paired_hosts`), made on first use.
+    /// The keys in `dir` (`identity`, `paired_hosts`, `find_secrets`), made on first
+    /// use.
     pub fn load(dir: &Path) -> Result<Self> {
         let identity = Identity::load_or_create(&dir.join("identity"))
             .with_context(|| format!("headset key in {}", dir.display()))?;
+        let find_secrets = std::fs::read_to_string(dir.join("find_secrets"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| {
+                let (key, secret) = l.split_once(' ')?;
+                Some((from_hex32(key)?, from_hex32(secret.trim())?))
+            })
+            .collect();
         Ok(Self {
             identity,
             trusted: TrustStore::load(&dir.join("paired_hosts")),
+            find_secrets,
+            dir: dir.to_owned(),
         })
+    }
+
+    /// Keeps `secret` as the find secret of the PC whose key is `pc`.
+    pub fn learn_find_secret(&mut self, pc: [u8; 32], secret: FindSecret) -> Result<()> {
+        use prostir_proto::secure::{to_hex, write_atomic};
+        self.find_secrets.insert(pc, secret);
+        let text: String = self
+            .find_secrets
+            .iter()
+            .map(|(k, s)| format!("{} {}\n", to_hex(k), to_hex(s)))
+            .collect();
+        write_atomic(&self.dir.join("find_secrets"), text.as_bytes())?;
+        Ok(())
     }
 }
 
@@ -186,6 +225,8 @@ pub struct View {
     /// Round trips of this headset's pings, as their pongs came.
     pub round_trips: Vec<Duration>,
     pub messages: u64,
+    /// The PC's find secret, once it sent it (right after the snapshot).
+    pub find_secret: Option<FindSecret>,
     /// The PC closed the connection.
     pub closed: bool,
     /// Why reading stopped: `UnexpectedEof` when the PC closed the connection,
@@ -346,6 +387,7 @@ impl View {
             }
             HostMsg::Error { text } => self.errors.push(text),
             HostMsg::Notice { text } => self.notices.push(text),
+            HostMsg::FindSecret { secret } => self.find_secret = Some(secret),
             HostMsg::Ping { .. } => self.pings += 1,
             HostMsg::Goodbye { reason } => self.goodbye = Some(reason),
             other => self.arrivals.push(Arrival::Other(other_name(&other))),
@@ -531,9 +573,19 @@ pub struct FakeHeadset {
     /// The PC's protocol version and language, from its welcome.
     pub version: u32,
     pub language: String,
+    /// The PC's key, as the handshake showed it.
+    pub pc_key: [u8; 32],
 }
 
 impl FakeHeadset {
+    /// Waits up to `timeout` for the PC's find secret (sent right after the snapshot)
+    /// and keeps it in `keys`, as the Quest app keeps it to ask for this PC.
+    pub fn learn_find_secret(&mut self, keys: &mut Keys, timeout: Duration) -> Result<()> {
+        self.wait(timeout, "the find secret", |v| v.find_secret.is_some())?;
+        let secret = self.view.find_secret.expect("waited for it");
+        keys.learn_find_secret(self.pc_key, secret)
+    }
+
     /// What this fake headset says about itself in `Open`: it shows everything the
     /// Quest app shows and decodes what it decodes, worn.
     pub fn state() -> HeadsetState {
@@ -682,6 +734,7 @@ impl FakeHeadset {
             last_req: 0,
             version,
             language,
+            pc_key: peer.key,
         })
     }
 

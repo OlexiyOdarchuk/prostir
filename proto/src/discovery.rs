@@ -4,10 +4,19 @@
 //! ([`Answer`], `PRSA`) to the address and port the query came from, and only to it.
 //!
 //! Who a PC answers: everyone while it has no paired headset or while its pairing
-//! window is open; otherwise only a query that carries its own tag ([`find_tag`]), the
-//! tag a headset that knows the PC's key makes. The tag hides which PC is looked for
-//! (the nonce is new each time), and the PC learns nothing of the other PCs the
-//! headset knows.
+//! window is open; otherwise only a query that carries its own tag ([`find_tag`]). A
+//! tag is made with the PC's find secret ([`FindSecret`]), a random value the PC gives
+//! only to the headsets it trusts, inside the encrypted session
+//! (`HostMsg::FindSecret`), and makes anew when it forgets one: knowing the PC's
+//! public key, or having connected to it once, is not enough to make a tag. With a new
+//! nonce each time, the tags hide which PC is looked for, and the PC learns nothing of
+//! the other PCs the headset knows. A query carries at least [`MIN_TAGS`] tags (random
+//! ones where the headset knows fewer PCs, in a random order), so the count does not
+//! tell headsets apart either.
+//!
+//! What the tags do not hide: that a headset asks (and from which address), its name
+//! while it looks for a PC to pair with, and that a PC answered. A query is not bound to
+//! a time: someone who captured one can send it again and get the same PC's answer.
 //!
 //! A query is at least [`MIN_QUERY`] bytes (padded with zeros) and an answer always
 //! smaller ([`MAX_ANSWER`]): a forged sender address gets less from a PC than was
@@ -31,6 +40,8 @@ pub const MIN_QUERY: usize = 128;
 pub const MAX_QUERY: usize = 512;
 /// The most PCs one query looks for.
 pub const MAX_TAGS: usize = 32;
+/// The fewest tags a query carries: random ones fill it up.
+pub const MIN_TAGS: usize = 8;
 /// The longest headset name in a query, bytes.
 pub const MAX_HEADSET_NAME: usize = 32;
 /// The longest PC name in an answer, bytes.
@@ -53,22 +64,33 @@ pub mod flags {
     pub const ANSWERS_ALL: u8 = 2;
 }
 
-/// A tag of the PC whose key is `pc_key`, for a query with `nonce`: the headset puts
-/// it in to look for that PC.
-pub fn find_tag(pc_key: &[u8; 32], nonce: &[u8; NONCE]) -> [u8; TAG] {
-    tag(b"prostir-find", pc_key, nonce)
+/// A PC's find secret: what its tags are made with. Random, kept by the PC, given to
+/// the headsets it trusts in the encrypted session, and made anew when it forgets one.
+pub type FindSecret = [u8; 32];
+
+/// A new find secret.
+pub fn new_secret() -> FindSecret {
+    let mut secret = [0; 32];
+    getrandom::fill(&mut secret).expect("system randomness");
+    secret
+}
+
+/// A tag of the PC whose find secret is `secret`, for a query with `nonce`: the
+/// headset puts it in to look for that PC.
+pub fn find_tag(secret: &FindSecret, nonce: &[u8; NONCE]) -> [u8; TAG] {
+    tag(b"prostir-find", secret, nonce)
 }
 
 /// The tag a PC puts in its answer to a query with `nonce`: the headset tells which of
 /// the PCs it knows answered before it connects.
-pub fn here_tag(pc_key: &[u8; 32], nonce: &[u8; NONCE]) -> [u8; TAG] {
-    tag(b"prostir-here", pc_key, nonce)
+pub fn here_tag(secret: &FindSecret, nonce: &[u8; NONCE]) -> [u8; TAG] {
+    tag(b"prostir-here", secret, nonce)
 }
 
-fn tag(label: &[u8], pc_key: &[u8; 32], nonce: &[u8; NONCE]) -> [u8; TAG] {
+fn tag(label: &[u8], secret: &FindSecret, nonce: &[u8; NONCE]) -> [u8; TAG] {
     let mut h = Sha256::new();
     h.update(label);
-    h.update(pc_key);
+    h.update(secret);
     h.update(nonce);
     let digest = h.finalize();
     let mut out = [0; TAG];
@@ -91,8 +113,9 @@ fn cut(text: &str, max: usize) -> &str {
 /// 0     4  "PRSQ"
 /// 4     1  version (1)
 /// 5    16  nonce
-/// 21    1  count (0 to 32)
-/// 22  8×n  a tag for each PC looked for (find_tag)
+/// 21    1  count (8 to 32 from this build; a PC reads 0 to 32)
+/// 22  8×n  a tag for each PC looked for (find_tag), random ones up to 8, in a random
+///          order
 /// .     1  name_len (0 to 32)
 /// .     n  the headset's name, UTF-8: empty but while it looks for a PC to pair with
 /// .     .  zeros up to 128 bytes at least, 512 at most
@@ -106,25 +129,39 @@ pub struct Query {
 }
 
 impl Query {
-    /// A query for the PCs whose keys are `pcs` (the first [`MAX_TAGS`]), with a new
-    /// nonce; `name` is cut to [`MAX_HEADSET_NAME`] bytes.
-    pub fn new<'a>(pcs: impl IntoIterator<Item = &'a [u8; 32]>, name: &str) -> Self {
+    /// A query for the PCs whose find secrets are `pcs` (the first [`MAX_TAGS`]), with
+    /// a new nonce, filled up to [`MIN_TAGS`] with random tags and shuffled; `name` is
+    /// cut to [`MAX_HEADSET_NAME`] bytes.
+    pub fn new<'a>(pcs: impl IntoIterator<Item = &'a FindSecret>, name: &str) -> Self {
         let mut nonce = [0; NONCE];
         getrandom::fill(&mut nonce).expect("system randomness");
+        let mut tags: Vec<[u8; TAG]> = pcs
+            .into_iter()
+            .take(MAX_TAGS)
+            .map(|secret| find_tag(secret, &nonce))
+            .collect();
+        while tags.len() < MIN_TAGS {
+            let mut dummy = [0; TAG];
+            getrandom::fill(&mut dummy).expect("system randomness");
+            tags.push(dummy);
+        }
+        // Fisher-Yates, so where the real tags are tells nothing.
+        let mut random = [0u8; MAX_TAGS * 4];
+        getrandom::fill(&mut random).expect("system randomness");
+        for i in (1..tags.len()).rev() {
+            let r = u32::from_le_bytes(random[i * 4..i * 4 + 4].try_into().unwrap());
+            tags.swap(i, r as usize % (i + 1));
+        }
         Self {
             nonce,
-            tags: pcs
-                .into_iter()
-                .take(MAX_TAGS)
-                .map(|key| find_tag(key, &nonce))
-                .collect(),
+            tags,
             name: cut(name, MAX_HEADSET_NAME).to_owned(),
         }
     }
 
-    /// Whether it looks for the PC whose key is `pc_key`.
-    pub fn looks_for(&self, pc_key: &[u8; 32]) -> bool {
-        let ours = find_tag(pc_key, &self.nonce);
+    /// Whether it looks for the PC whose find secret is `secret`.
+    pub fn looks_for(&self, secret: &FindSecret) -> bool {
+        let ours = find_tag(secret, &self.nonce);
         self.tags.contains(&ours)
     }
 
@@ -200,21 +237,21 @@ pub struct Answer {
 }
 
 impl Answer {
-    /// The answer of the PC whose key is `pc_key` to `query`; `name` is cut to
+    /// The answer of the PC whose find secret is `secret` to `query`; `name` is cut to
     /// [`MAX_PC_NAME`] bytes.
-    pub fn to(query: &Query, pc_key: &[u8; 32], port: u16, flags: u8, name: &str) -> Self {
+    pub fn to(query: &Query, secret: &FindSecret, port: u16, flags: u8, name: &str) -> Self {
         Self {
             nonce: query.nonce,
-            tag: here_tag(pc_key, &query.nonce),
+            tag: here_tag(secret, &query.nonce),
             port,
             flags,
             name: cut(name, MAX_PC_NAME).to_owned(),
         }
     }
 
-    /// Whether it comes from the PC whose key is `pc_key`.
-    pub fn from_pc(&self, pc_key: &[u8; 32]) -> bool {
-        here_tag(pc_key, &self.nonce) == self.tag
+    /// Whether it comes from the PC whose find secret is `secret`.
+    pub fn from_pc(&self, secret: &FindSecret) -> bool {
+        here_tag(secret, &self.nonce) == self.tag
     }
 
     /// The datagram: [`MAX_ANSWER`] bytes at most.
@@ -284,6 +321,28 @@ mod tests {
         assert_ne!(again.tags[0], q.tags[0]);
     }
 
+    /// Fewer PCs than eight: random tags fill the query up, in a random order, so the
+    /// count and the places tell nothing.
+    #[test]
+    fn a_query_always_carries_eight_tags_or_more() {
+        let q = Query::new([&PC], "");
+        assert_eq!(q.tags.len(), MIN_TAGS);
+        assert!(q.looks_for(&PC));
+        let none = Query::new([], "");
+        assert_eq!(none.tags.len(), MIN_TAGS);
+        assert!(!none.looks_for(&PC));
+        let keys: Vec<[u8; 32]> = (0..9u8).map(|i| [i; 32]).collect();
+        assert_eq!(Query::new(keys.iter(), "").tags.len(), 9);
+        // The real tag is not always first.
+        let first = (0..64)
+            .filter(|_| {
+                let q = Query::new([&PC], "");
+                q.tags[0] == find_tag(&PC, &q.nonce)
+            })
+            .count();
+        assert!(first < 32, "first {first} times of 64");
+    }
+
     #[test]
     fn a_query_with_every_tag_fits() {
         let keys: Vec<[u8; 32]> = (0..40u8).map(|i| [i; 32]).collect();
@@ -321,11 +380,12 @@ mod tests {
         count[21] = 33;
         assert!(Query::decode(&count).is_none(), "more tags than allowed");
         let mut name = bytes.clone();
-        name[22 + 8] = 33;
+        let name_at = 22 + TAG * MIN_TAGS;
+        name[name_at] = 33;
         assert!(Query::decode(&name).is_none(), "a name too long");
         let mut utf8 = bytes.clone();
-        utf8[22 + 8] = 1;
-        utf8[22 + 8 + 1] = 0xff;
+        utf8[name_at] = 1;
+        utf8[name_at + 1] = 0xff;
         assert!(Query::decode(&utf8).is_none(), "a name that is not UTF-8");
         // The beacon is no query.
         let mut beacon = crate::encode_beacon(47830, "desk");
@@ -334,7 +394,7 @@ mod tests {
         // A newer version adds after the fields of this one.
         let mut newer = bytes.clone();
         newer[4] = 2;
-        newer[60] = 0x55;
+        newer[name_at + 4] = 0x55;
         assert_eq!(
             Query::decode(&newer).unwrap().tags,
             Query::decode(&bytes).unwrap().tags
@@ -355,7 +415,7 @@ mod tests {
         assert!(!back.from_pc(&OTHER));
         assert_eq!(back.nonce, q.nonce);
         // The tag of an answer is not the query's: a query cannot be sent back as one.
-        assert_ne!(back.tag, q.tags[0]);
+        assert!(!q.tags.contains(&back.tag));
         assert!(Answer::decode(&bytes[..bytes.len() - 1]).is_none());
         assert!(Answer::decode(&q.encode()).is_none());
         let mut more = bytes.clone();

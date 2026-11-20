@@ -569,6 +569,10 @@ impl Brain {
         ) {
             Ok(mut session) => {
                 session.set_answers(self.answers.clone());
+                // Right after the snapshot: what it asks for this PC with.
+                session.send(HostMsg::FindSecret {
+                    secret: self.security.find_secret(),
+                });
                 let via = session.api_session().via;
                 self.worn_told.insert(key, session.worn());
                 self.sessions.insert(key, session);
@@ -826,6 +830,7 @@ impl Brain {
                     warn!("cannot forget headsets: {e}");
                 }
                 drop(trusted);
+                self.security.new_find_secret();
                 let keys: Vec<[u8; 32]> = self.sessions.keys().copied().collect();
                 self.end_sessions(
                     keys,
@@ -1194,7 +1199,7 @@ fn full_with(
     let security = Arc::new(pairing::Security::load()?);
     let pairing_open = find::PairingOpen::default();
     if let Some(udp) = sockets.udp {
-        let responder = find::Responder::new(security.identity.public, port, platform::hostname());
+        let responder = find::Responder::new(port, platform::hostname());
         find::spawn(
             udp,
             responder,

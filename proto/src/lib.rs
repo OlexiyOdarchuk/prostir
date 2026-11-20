@@ -78,7 +78,7 @@ pub fn compatible(version: u32, min: u32) -> bool {
 /// PC turn a build of another revision away with a clear word instead of a session
 /// that fails to parse. `None` in released builds, where the protocol version alone
 /// decides.
-pub const PROTO_REVISION: Option<u32> = Some(5);
+pub const PROTO_REVISION: Option<u32> = Some(6);
 
 /// The app version this build says in the handshake: `base` (the crate version), with
 /// `-dev+pN` on a development branch (see [`PROTO_REVISION`]).
@@ -333,6 +333,11 @@ wire_enum! {
             #[wire(max = MAX_TEXT)]
             text: String,
         },
+        /// The PC's find secret, which the headset makes its discovery tags for this PC
+        /// with (see [`discovery`]): right after the [`HostMsg::Snapshot`] of every
+        /// session, so a headset always has the latest (the PC makes a new one when it
+        /// forgets a headset). The headset keeps it with the PC's key.
+        41 => FindSecret { secret: discovery::FindSecret },
         /// The PC does not know this headset yet: pair first (the answer to
         /// [`ClientMsg::Open`]).
         9 => PairingRequired,

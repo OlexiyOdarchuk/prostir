@@ -78,6 +78,9 @@ pub fn new_headset_notice() -> Option<Notice> {
 struct Sorter {
     responder: Responder,
     trust: PathBuf,
+    /// The PC's find secret's file (the full program makes a new one when it forgets a
+    /// headset).
+    secret: PathBuf,
     door: Door,
     notice: Option<(Notice, Instant)>,
 }
@@ -85,10 +88,13 @@ struct Sorter {
 impl Sorter {
     fn new(port: u16) -> Result<Self> {
         let dir = crate::pairing::config_dir();
-        let identity = prostir_proto::secure::Identity::load_or_create(&dir.join("identity"))?;
+        let secret = crate::pairing::find_secret_file(&dir);
+        // Made here on the first start, as the full program would.
+        crate::pairing::load_find_secret(&secret)?;
         Ok(Self {
-            responder: Responder::new(identity.public, port, crate::platform::hostname()),
+            responder: Responder::new(port, crate::platform::hostname()),
             trust: dir.join("paired_headsets"),
+            secret,
             door: Door::default(),
             notice: None,
         })
@@ -97,11 +103,34 @@ impl Sorter {
     /// Answers the datagram waiting on `udp`: [`Wake::Headset`] when one of the PC's
     /// own headsets asked. A stranger it does not answer brings the notice.
     fn query(&mut self, udp: &std::net::UdpSocket) -> Option<Wake> {
-        let trust = &self.trust;
-        let open = || find::Open {
-            paired: !prostir_proto::secure::TrustStore::load(trust).is_empty(),
-            pairing: false,
+        let (trust, secret) = (&self.trust, &self.secret);
+        let open = || {
+            let trusted = prostir_proto::secure::TrustStore::try_load(trust);
+            let secret = crate::pairing::load_find_secret(secret);
+            match (trusted, secret) {
+                (Ok(trusted), Ok(secret)) => find::Open {
+                    paired: !trusted.is_empty(),
+                    pairing: false,
+                    secret,
+                },
+                // Closed rather than open: an unreadable file must not make every
+                // stranger welcome.
+                (trusted, secret) => {
+                    if let Err(e) = &trusted {
+                        warn!("discovery: {e}");
+                    }
+                    if let Err(e) = &secret {
+                        warn!("discovery: {e:#}");
+                    }
+                    find::Open {
+                        paired: true,
+                        pairing: false,
+                        secret: secret.unwrap_or_else(|_| prostir_proto::discovery::new_secret()),
+                    }
+                }
+            }
         };
+
         let asker = match find::answer_one(udp, &mut self.responder, open) {
             Ok(Some(asker)) => asker,
             Ok(None) => return None,

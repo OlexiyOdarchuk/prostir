@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use log::{debug, info, warn};
-use prostir_proto::discovery::{Answer, MAX_QUERY, Query, flags};
+use prostir_proto::discovery::{Answer, FindSecret, MAX_QUERY, Query, flags};
 
 use crate::events::{Event, EventSink};
 use crate::pairing::Security;
@@ -23,13 +23,15 @@ use crate::platform;
 /// Answers sent in a second, at most, whoever asks.
 const ANSWERS_PER_SECOND: usize = 20;
 
-/// Who may get an answer now.
+/// Who may get an answer now, and the find secret the PC's own headsets make their
+/// tags with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Open {
     /// The PC trusts at least one headset.
     pub paired: bool,
     /// The pairing window is open.
     pub pairing: bool,
+    pub secret: FindSecret,
 }
 
 impl Open {
@@ -43,7 +45,8 @@ impl Open {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Asker {
     pub from: SocketAddr,
-    /// Its query carries this PC's tag: one of its own headsets (it knows the PC's key).
+    /// Its query carries this PC's tag: one of its own headsets (it has the PC's find
+    /// secret).
     pub ours: bool,
     /// The name it gave (only while it looks for a PC to pair with).
     pub name: String,
@@ -51,10 +54,9 @@ pub struct Asker {
     pub answered: bool,
 }
 
-/// What the PC answers with: its key, its port and name, and a limit on how many
-/// answers go out a second.
+/// What the PC answers with: its port and name, and a limit on how many answers go
+/// out a second.
 pub struct Responder {
-    key: [u8; 32],
     port: u16,
     name: String,
     /// When the last answers went, at most [`ANSWERS_PER_SECOND`] of them.
@@ -62,9 +64,8 @@ pub struct Responder {
 }
 
 impl Responder {
-    pub fn new(key: [u8; 32], port: u16, name: String) -> Self {
+    pub fn new(port: u16, name: String) -> Self {
         Self {
-            key,
             port,
             name,
             sent: VecDeque::with_capacity(ANSWERS_PER_SECOND),
@@ -82,7 +83,7 @@ impl Responder {
         now: Instant,
     ) -> Option<(Asker, Option<Vec<u8>>)> {
         let query = Query::decode(datagram)?;
-        let ours = query.looks_for(&self.key);
+        let ours = query.looks_for(&open.secret);
         let mut answer = None;
         if (ours || open.answers_all()) && self.may_send(now) {
             let mut bits = 0;
@@ -92,7 +93,7 @@ impl Responder {
             if open.answers_all() {
                 bits |= flags::ANSWERS_ALL;
             }
-            let bytes = Answer::to(&query, &self.key, self.port, bits, &self.name).encode();
+            let bytes = Answer::to(&query, &open.secret, self.port, bits, &self.name).encode();
             debug_assert!(bytes.len() < datagram.len());
             answer = Some(bytes);
         }
@@ -185,7 +186,9 @@ pub fn spawn(
                 let open = || Open {
                     paired: !security.trusted.lock().unwrap().is_empty(),
                     pairing: pairing.get(),
+                    secret: security.find_secret(),
                 };
+
                 let asker = match answer_one(&socket, &mut responder, open) {
                     Ok(Some(asker)) => asker,
                     Ok(None) => continue,
@@ -248,12 +251,13 @@ mod tests {
     }
 
     fn responder() -> Responder {
-        Responder::new(PC, 47830, "desk".into())
+        Responder::new(47830, "desk".into())
     }
 
     const PAIRED: Open = Open {
         paired: true,
         pairing: false,
+        secret: PC,
     };
 
     fn ask(r: &mut Responder, q: &Query, open: Open, now: Instant) -> (Asker, Option<Answer>) {
@@ -302,12 +306,14 @@ mod tests {
         let unpaired = Open {
             paired: false,
             pairing: false,
+            secret: PC,
         };
         let a = ask(&mut r, &stranger, unpaired, now).1.unwrap();
         assert_eq!(a.flags, flags::ANSWERS_ALL);
         let pairing = Open {
             paired: true,
             pairing: true,
+            secret: PC,
         };
         let a = ask(&mut r, &stranger, pairing, now).1.unwrap();
         assert_eq!(a.flags, flags::ANSWERS_ALL | flags::PAIRING);
@@ -323,6 +329,7 @@ mod tests {
         let open = Open {
             paired: false,
             pairing: true,
+            secret: PC,
         };
         let bytes = Query::new([&PC], "").encode();
         assert!(

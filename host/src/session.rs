@@ -553,6 +553,11 @@ impl Session {
         self.answers = answers;
     }
 
+    /// Sends `msg` to the headset in the control lane, after what went before it.
+    pub fn send(&self, msg: HostMsg) {
+        self.outbox.control(msg);
+    }
+
     /// What the PC allows this headset, as its limits say now.
     pub fn limits(&self, displays: &Displays) -> state::Limits {
         self.publisher.limits(displays, self.standing.no_limits)

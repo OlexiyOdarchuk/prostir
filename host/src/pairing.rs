@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use log::{debug, info, warn};
+use prostir_proto::discovery::{FindSecret, new_secret};
 use prostir_proto::handshake::{self, First};
 use prostir_proto::link::tcp::NoiseTcp;
 use prostir_proto::link::{Closer, Link, PeerInfo};
@@ -300,18 +301,91 @@ pub fn config_dir() -> PathBuf {
 pub struct Security {
     pub identity: Identity,
     pub trusted: Mutex<TrustStore>,
+    /// What the trusted headsets' discovery tags for this PC are made with (see
+    /// `prostir_proto::discovery`): given to them in the session, made anew when the
+    /// PC forgets a headset.
+    pub find: Mutex<FindSecret>,
+    /// Where the find secret is kept.
+    find_file: PathBuf,
+}
+
+/// The file of the find secret, in `dir`.
+pub fn find_secret_file(dir: &std::path::Path) -> PathBuf {
+    dir.join("find_secret")
+}
+
+/// The find secret kept in `path`, made on first use. A file that is there but does
+/// not read is an error, as for the PC's key: a new one would leave every headset
+/// unable to find the PC without a word.
+pub fn load_find_secret(path: &std::path::Path) -> Result<FindSecret> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => {
+            let text = text.trim();
+            let mut secret = [0u8; 32];
+            let ok = text.len() == 64
+                && secret.iter_mut().enumerate().all(|(i, b)| {
+                    text.get(i * 2..i * 2 + 2)
+                        .and_then(|h| u8::from_str_radix(h, 16).ok())
+                        .map(|v| *b = v)
+                        .is_some()
+                });
+            anyhow::ensure!(
+                ok,
+                "{} is no find secret (move it away to make a new one; headsets get it at \
+                 their next session)",
+                path.display()
+            );
+            Ok(secret)
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => save_find_secret(path, new_secret()),
+        Err(e) => Err(anyhow::anyhow!("cannot read {}: {e}", path.display())),
+    }
+}
+
+fn save_find_secret(path: &std::path::Path, secret: FindSecret) -> Result<FindSecret> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    secure::write_atomic(path, format!("{}\n", secure::to_hex(&secret)).as_bytes())
+        .with_context(|| format!("cannot write {}", path.display()))?;
+    Ok(secret)
 }
 
 impl Security {
     pub fn load() -> Result<Self> {
         let dir = config_dir();
-        let identity = Identity::load_or_create(&dir.join("identity"))
-            .context("cannot create the PC's key")?;
+        let identity =
+            Identity::load_or_create(&dir.join("identity")).context("cannot load the PC's key")?;
         info!("PC key {}", secure::fingerprint(&identity.public));
+        // Unreadable, it would read as no headset at all: everyone answered.
+        let trusted = TrustStore::try_load(&dir.join("paired_headsets"))
+            .context("cannot read the paired headsets")?;
+        let find_file = find_secret_file(&dir);
+        let find = load_find_secret(&find_file)?;
         Ok(Self {
             identity,
-            trusted: Mutex::new(TrustStore::load(&dir.join("paired_headsets"))),
+            trusted: Mutex::new(trusted),
+            find: Mutex::new(find),
+            find_file,
         })
+    }
+
+    /// A new find secret (a headset was forgotten): queries made with the old one get
+    /// no answer any more. The new one: the headsets still trusted get it in their
+    /// session.
+    pub fn new_find_secret(&self) -> FindSecret {
+        let secret = new_secret();
+        if let Err(e) = save_find_secret(&self.find_file, secret) {
+            warn!("{e:#}");
+        }
+        *self.find.lock().unwrap() = secret;
+        info!("a new find secret: a forgotten headset can no longer find this PC");
+        secret
+    }
+
+    /// The find secret now.
+    pub fn find_secret(&self) -> FindSecret {
+        *self.find.lock().unwrap()
     }
 }
 
@@ -942,9 +1016,34 @@ mod tests {
             let security = Security {
                 identity: Identity::load_or_create(&dir.join("key")).unwrap(),
                 trusted: Mutex::new(TrustStore::load(&dir.join("trusted"))),
+                find: Mutex::new([5; 32]),
+                find_file: find_secret_file(&dir),
             };
             Self { dir, security }
         }
+    }
+
+    /// The find secret is made once and kept; a file that does not read is an error,
+    /// not a new secret; a new one replaces it in the file and in memory.
+    #[test]
+    fn the_find_secret_is_kept_and_made_anew_on_purpose_only() {
+        let pc = TestPc::new("find-secret");
+        let path = find_secret_file(&pc.dir);
+        let first = load_find_secret(&path).unwrap();
+        assert_eq!(load_find_secret(&path).unwrap(), first, "kept");
+        let security = Security {
+            identity: Identity::load_or_create(&pc.dir.join("key")).unwrap(),
+            trusted: Mutex::new(TrustStore::load(&pc.dir.join("trusted"))),
+            find: Mutex::new(first),
+            find_file: path.clone(),
+        };
+        let second = security.new_find_secret();
+        assert_ne!(second, first);
+        assert_eq!(security.find_secret(), second);
+        assert_eq!(load_find_secret(&path).unwrap(), second, "written");
+        std::fs::write(&path, "not hex\n").unwrap();
+        assert!(load_find_secret(&path).is_err(), "not replaced silently");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "not hex\n");
     }
 
     impl Drop for TestPc {

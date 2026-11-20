@@ -85,16 +85,20 @@ Query, at least 128 and at most 512 bytes:
 | 0 | 4 | `PRSQ` in ASCII |
 | 4 | 1 | version, `1` |
 | 5 | 16 | nonce, random, new for every query |
-| 21 | 1 | `count`, 0 to 32 |
-| 22 | 8 × `count` | a tag for each PC looked for |
+| 21 | 1 | `count`, 0 to 32 (a headset sends at least 8) |
+| 22 | 8 × `count` | a tag for each PC looked for, random ones up to 8, in a random order |
 | . | 1 | `name_len`, 0 to 32 |
 | . | `name_len` | the headset's name, UTF-8; empty except while it looks for a PC to pair with |
 | . | . | zeros, up to 128 bytes at least |
 
-`tag = SHA-256("prostir-find" ‖ pc_key ‖ nonce)[0..8]`, where `pc_key` is the PC's
-static key (32 bytes, see [Static keys and identity](#static-keys-and-identity)): a
-headset makes one for each PC it trusts. A query of a newer version is read by the
-fields of version 1 (a newer version only adds after them).
+`tag = SHA-256("prostir-find" ‖ find_secret ‖ nonce)[0..8]`, where `find_secret` is
+the PC's find secret: 32 random bytes the PC gives only to the headsets it trusts, in
+`FindSecret` right after the `Snapshot` of every session, and makes anew whenever it
+forgets a headset (the others get the new one at their next session). Not the PC's
+static key: Noise `XX` shows that key to anyone who connects, so it would let anyone
+make tags. A headset makes a tag for each PC it trusts and keeps each PC's secret with
+its key. A query of a newer version is read by the fields of version 1 (a newer
+version only adds after them).
 
 Answer, at most 97 bytes:
 
@@ -103,7 +107,7 @@ Answer, at most 97 bytes:
 | 0 | 4 | `PRSA` in ASCII |
 | 4 | 1 | version, `1` |
 | 5 | 16 | the query's nonce |
-| 21 | 8 | `SHA-256("prostir-here" ‖ pc_key ‖ nonce)[0..8]` |
+| 21 | 8 | `SHA-256("prostir-here" ‖ find_secret ‖ nonce)[0..8]` |
 | 29 | 2 | the PC's TCP port, `u16` little-endian |
 | 31 | 1 | flags: `1` pairing open, `2` the PC answers every query |
 | 32 | 1 | `name_len`, 0 to 64 |
@@ -117,9 +121,22 @@ Whom a PC answers:
 - every query while it has no paired headset, or while its pairing window is open
   ("Pair a new headset" in the tray, the settings window or `prostir ctl pair`, 3
   minutes, closed early by a pairing that succeeds or by "Stop pairing");
-- otherwise only a query that carries its own tag. Someone listening does not learn
-  which PC is looked for (the nonce changes every time), and the PC does not learn
-  which other PCs the headset knows.
+- otherwise only a query that carries its own tag.
+
+What the tags hide, and what they do not:
+
+- Someone without the PC's find secret cannot make a tag the PC answers: knowing its
+  public key, or having connected to it, is not enough, and a headset the PC forgot
+  can no longer make one (the secret changed).
+- Someone listening does not learn which PC is looked for (the nonce changes every
+  time), nor tell headsets apart by how many PCs they know (8 tags at least, random
+  ones among them, in a random order); the PC does not learn which other PCs the
+  headset knows.
+- Not hidden: that a headset asks, from which address, its name while it looks for a
+  PC to pair with, and that a PC answers (with its name and port). A query is not
+  bound to a time: someone who captured a headset's query can send it again and get
+  the same PC's answer, which tells them that PC is still there.
+
 
 Limits: a datagram that is not a whole query of 128 to 512 bytes is dropped unread
 (the host drops it in the kernel, with a socket filter); an answer is always smaller
@@ -873,6 +890,7 @@ are marked as such (their bytes never change). "Part" marks a part of the state 
 | 4 | `StreamEnd` | `id:DisplayId, generation:u32` | The stream of this generation stopped. Never "the display is gone": only `Displays` says that. |
 | 12 | `Audio` | `pcm:bytes*` | A slice of PC sound. Lane 1. |
 | 20 | `Notice` | `text:str(8192)` | A desktop notification of the PC, while `Prefs.notifications` is on and the headset has the private right. |
+| 41 | `FindSecret` | `secret:[u8; 32]` | Right after `Snapshot` in every session: the PC's find secret, which the headset makes its discovery tags for this PC with (see [Discovery](#discovery)); kept with the PC's key, replacing the one before. |
 | 25 | `Ping` | `seq:u32` | Every second in the session; answer with `Pong` at once. |
 | 26 | `Pong` | `seq:u32` | The answer to the headset's `Ping`. |
 | 27 | `Goodbye` | `reason:u8` | The host ends the session on purpose (see [End of session](#end-of-session)). |
