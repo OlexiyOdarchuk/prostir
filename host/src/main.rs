@@ -136,9 +136,9 @@ impl Control {
                 TrayCommand::ForgetHeadsets => {
                     info!(
                         "forgetting {} paired headset(s)",
-                        self.security.trusted.len()
+                        self.security.trusted.lock().unwrap().len()
                     );
-                    if let Err(e) = self.security.trusted.clear() {
+                    if let Err(e) = self.security.trusted.lock().unwrap().clear() {
                         warn!("cannot forget headsets: {e}");
                     }
                     forgot = true;
@@ -1115,7 +1115,7 @@ fn main() -> Result<()> {
                     continue;
                 }
                 let (mut conn, open) =
-                    match pairing::accept(stream, &mut control.security, control.tray.as_ref()) {
+                    match pairing::accept(stream, &control.security, control.tray.as_ref()) {
                         Ok(accepted) => accepted,
                         Err(e) if e.is::<pairing::TurnedAwayAgain>() => {
                             debug!("rejected connection from {addr}: {e:#}");

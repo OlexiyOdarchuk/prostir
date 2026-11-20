@@ -149,9 +149,11 @@ pub fn config_dir() -> PathBuf {
         .join("prostir")
 }
 
+/// The PC's key and the headsets it trusts, shared by the connections being set up
+/// (each on a thread of its own) and the control loop, which forgets them.
 pub struct Security {
     pub identity: Identity,
-    pub trusted: TrustStore,
+    pub trusted: Mutex<TrustStore>,
 }
 
 impl Security {
@@ -162,7 +164,7 @@ impl Security {
         info!("PC key {}", secure::fingerprint(&identity.public));
         Ok(Self {
             identity,
-            trusted: TrustStore::load(&dir.join("paired_headsets")),
+            trusted: Mutex::new(TrustStore::load(&dir.join("paired_headsets"))),
         })
     }
 }
@@ -200,7 +202,7 @@ impl Connection {
 /// running), or an `Error` saying why it cannot.
 pub fn accept(
     stream: TcpStream,
-    security: &mut Security,
+    security: &Security,
     tray: Option<&tray::Handle>,
 ) -> Result<(Connection, Vec<Part>)> {
     accept_within(stream, security, tray, SETUP_TIME)
@@ -209,7 +211,7 @@ pub fn accept(
 /// As [`accept`], with `setup` for everything up to `Open` (but pairing).
 fn accept_within(
     stream: TcpStream,
-    security: &mut Security,
+    security: &Security,
     tray: Option<&tray::Handle>,
     setup: Duration,
 ) -> Result<(Connection, Vec<Part>)> {
@@ -295,7 +297,7 @@ fn accept_within(
     let mut attempts = 0;
     loop {
         match conn.recv()? {
-            ClientMsg::Open { parts } if security.trusted.contains(&peer.key) => {
+            ClientMsg::Open { parts } if security.trusted.lock().unwrap().contains(&peer.key) => {
                 conn.link.receiver.set_idle_limit(None);
                 drop(deadline);
                 return Ok((conn, parts));
@@ -386,7 +388,7 @@ fn accept_within(
                         } else {
                             name
                         };
-                        security.trusted.add(peer.key, &label)?;
+                        security.trusted.lock().unwrap().add(peer.key, &label)?;
                         info!("paired with {label} ({})", secure::fingerprint(&peer.key));
                         notify(
                             t("Шолом сполучено", "Headset paired"),
@@ -749,7 +751,7 @@ mod tests {
             let dir = std::env::temp_dir().join(format!("prostir-{name}-p-{}", std::process::id()));
             let security = Security {
                 identity: Identity::load_or_create(&dir.join("key")).unwrap(),
-                trusted: TrustStore::load(&dir.join("trusted")),
+                trusted: Mutex::new(TrustStore::load(&dir.join("trusted"))),
             };
             Self { dir, security }
         }
@@ -785,7 +787,7 @@ mod tests {
         let (s, _) = l.accept().unwrap();
         // The headset reads until the PC hangs up.
         // A snapshot, as the session would send it, then the PC hangs up.
-        let accepted = accept(s, &mut pc.security, None).map(|(mut conn, _)| {
+        let accepted = accept(s, &pc.security, None).map(|(mut conn, _)| {
             let _ = conn.send(HostMsg::Snapshot { parts: Vec::new() });
             conn.link.closer.close();
         });
@@ -905,7 +907,7 @@ mod tests {
         });
         assert!(refused.is_err(), "no pairing and no session");
         assert_told_to_update(&msgs);
-        assert!(pc.security.trusted.is_empty());
+        assert!(pc.security.trusted.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -949,7 +951,7 @@ mod tests {
     #[test]
     fn a_trickling_peer_is_cut_off_in_time() {
         use std::io::Write;
-        let mut pc = TestPc::new("trickle");
+        let pc = TestPc::new("trickle");
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = l.local_addr().unwrap();
         let peer = std::thread::spawn(move || {
@@ -961,7 +963,7 @@ mod tests {
         });
         let (s, _) = l.accept().unwrap();
         let start = Instant::now();
-        let refused = accept_within(s, &mut pc.security, None, Duration::from_millis(500));
+        let refused = accept_within(s, &pc.security, None, Duration::from_millis(500));
         assert!(refused.is_err(), "no session");
         assert!(
             start.elapsed() < Duration::from_secs(3),
@@ -986,7 +988,12 @@ mod tests {
         let key = Identity::load_or_create(&std::env::temp_dir().join(name).join("key"))
             .unwrap()
             .public;
-        pc.security.trusted.add(key, "test headset").unwrap();
+        pc.security
+            .trusted
+            .lock()
+            .unwrap()
+            .add(key, "test headset")
+            .unwrap();
         let (refused, after) = connect(&mut pc, |h| {
             assert!(matches!(h.hello(PROTOCOL_VERSION), Answer::Welcome { .. }));
             h.send(ClientMsg::request(
@@ -1038,6 +1045,6 @@ mod tests {
         assert!(ok, "the codes must match");
         assert_eq!(opened, HostMsg::Snapshot { parts: Vec::new() });
         assert!(accepted.is_ok());
-        assert_eq!(pc.security.trusted.len(), 1);
+        assert_eq!(pc.security.trusted.lock().unwrap().len(), 1);
     }
 }
