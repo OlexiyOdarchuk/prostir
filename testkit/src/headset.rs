@@ -196,8 +196,8 @@ pub struct View {
     pub sound_between_fragments: u32,
     /// What came, in order.
     pub arrivals: Vec<Arrival>,
-    /// Broken rules: a stream started for a display not in `Displays`, a frame of a
-    /// generation that never started, a frame number out of order.
+    /// Broken rules: a stream started for a display no `Displays` of this session listed, a
+    /// frame of a generation that never started, a frame number out of order.
     pub broken: Vec<String>,
     /// Commands from the PC, in order (the reader answers them, see
     /// [`FakeHeadset::stop_answering`]).
@@ -209,6 +209,8 @@ pub struct View {
     pub states: Vec<(DisplayId, DisplayState)>,
     /// The displays of the last `Displays`.
     listed: Vec<DisplayId>,
+    /// The name of every display listed in this session, removed since or not.
+    named: BTreeMap<DisplayId, String>,
 }
 
 impl View {
@@ -236,8 +238,12 @@ impl View {
                 codec,
             } => {
                 self.arrivals.push(Arrival::StreamStart(id, generation));
-                let name = match self.display(id) {
-                    Some(d) => d.name.clone(),
+                // Lanes are not ordered with each other: a start the PC queued while
+                // the display was listed can come after the `Displays` that removed it
+                // (its `StreamEnd` follows in the same lane). Only a display never
+                // listed breaks the rule.
+                let name = match self.named.get(&id) {
+                    Some(name) => name.clone(),
                     None => {
                         self.broken
                             .push(format!("{id} started before it was listed"));
@@ -347,9 +353,11 @@ impl View {
         self.round_trips.extend(arrived.round_trip);
     }
 
-    /// The states of `displays` that changed since they were last seen.
-    fn note_states(&mut self, displays: &prostir_proto::state::Displays) {
+    /// The names of `displays`, and their states that changed since they were last
+    /// seen.
+    fn note_displays(&mut self, displays: &prostir_proto::state::Displays) {
         for d in &displays.displays {
+            self.named.insert(d.id, d.name.clone());
             let last = self.states.iter().rev().find(|(id, _)| *id == d.id);
             if last.is_none_or(|(_, s)| *s != d.state) {
                 self.states.push((d.id, d.state.clone()));
@@ -361,7 +369,7 @@ impl View {
     fn part(&mut self, msg: &HostMsg) {
         match msg {
             HostMsg::Displays { part } => {
-                self.note_states(part);
+                self.note_displays(part);
                 let ids: Vec<DisplayId> = part.ids().collect();
                 self.arrivals.push(Arrival::Displays(ids.clone()));
                 let listed: Vec<DisplayId> = self.listed.clone();
@@ -667,7 +675,7 @@ impl FakeHeadset {
                     ..View::default()
                 };
                 if let Some(displays) = view.pc.displays.clone() {
-                    view.note_states(&displays);
+                    view.note_displays(&displays);
                 }
                 view
             },
@@ -1208,5 +1216,67 @@ fn exchange_codes(
             "the codes did not match".into(),
         )),
         other => Err(anyhow!("unexpected {other:?} after pairing").into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use prostir_proto::state::{DisplayKind, Displays, Mode};
+
+    use super::*;
+
+    fn arrived(msg: HostMsg) -> Arrived {
+        Arrived {
+            msg,
+            at: Instant::now(),
+            monotonic_ns: 0,
+            round_trip: None,
+            between_fragments: false,
+        }
+    }
+
+    fn listing(ids: &[u32]) -> HostMsg {
+        let displays = ids
+            .iter()
+            .map(|&id| Display {
+                id: DisplayId(id),
+                kind: DisplayKind::Virtual,
+                name: format!("Prostir-{id}"),
+                mode: Mode::new(640, 360),
+                desk: None,
+                state: DisplayState::Running,
+            })
+            .collect();
+        HostMsg::Displays {
+            part: Displays {
+                displays,
+                primary: None,
+            },
+        }
+    }
+
+    fn start(id: u32, generation: u32) -> HostMsg {
+        HostMsg::StreamStart {
+            id: DisplayId(id),
+            generation: Gen(generation),
+            w: 640,
+            h: 360,
+            codec: Codec::H264,
+        }
+    }
+
+    /// A start queued while its display was listed may come after the `Displays` that
+    /// removed it (lanes are not ordered with each other); one for a display never
+    /// listed is the PC's bug.
+    #[test]
+    fn only_a_display_never_listed_breaks_a_start() {
+        let mut view = View::default();
+        for msg in [listing(&[0, 5]), listing(&[0]), start(5, 1)] {
+            view.apply(&arrived(msg));
+        }
+        assert!(view.broken.is_empty(), "{:?}", view.broken);
+        assert_eq!(view.streams[&DisplayId(5)].name, "Prostir-5");
+        view.apply(&arrived(start(7, 2)));
+        assert_eq!(view.broken, ["display 7 started before it was listed"]);
     }
 }
