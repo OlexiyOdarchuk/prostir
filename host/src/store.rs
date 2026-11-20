@@ -255,9 +255,12 @@ pub fn startup_set(saved: &SavedScreens, args: &[MonitorSpec]) -> Option<SavedSc
 struct Kept {
     version: u32,
     unknown: Vec<String>,
-    /// Headsets whose `access` line is mistyped: their line stays as it was, among the
-    /// unknown ones, for the user to put right.
+    /// Headsets with a mistyped `access` line: their line stays as it was, among the
+    /// unknown ones, for the user to put right, and they have no rights meanwhile,
+    /// whatever other line they have.
     mistyped: std::collections::BTreeSet<String>,
+    /// The well-formed `access` lines of those headsets, written back as they were.
+    beside_mistyped: BTreeMap<String, Access>,
 }
 
 impl Kept {
@@ -328,6 +331,11 @@ fn parse_settings(text: &str) -> (Settings, Kept) {
                 true
             }
             ("access", _) => match parse_access(value) {
+                // A mistyped line for the same headset wins, before or after.
+                Some((key, a, false)) if kept.mistyped.contains(&key) => {
+                    kept.beside_mistyped.insert(key, a);
+                    true
+                }
                 Some((key, a, false)) => {
                     s.access.insert(key, a);
                     true
@@ -337,7 +345,11 @@ fn parse_settings(text: &str) -> (Settings, Kept) {
                         "settings.txt: \"{line}\" has a word that is no role or right: \
                          that headset gets no rights until it is put right"
                     );
-                    s.access.insert(key.clone(), a);
+                    if let Some(good) = s.access.insert(key.clone(), a)
+                        && !kept.mistyped.contains(&key)
+                    {
+                        kept.beside_mistyped.insert(key.clone(), good);
+                    }
                     kept.mistyped.insert(key);
                     false
                 }
@@ -364,9 +376,17 @@ fn settings_text(s: &Settings, kept: &Kept) -> String {
         on_off(s.mirror),
         on_off(s.count),
     );
-    for (key, a) in s.access.iter().filter(|(k, _)| !kept.mistyped.contains(*k)) {
-        text.push_str(&access_text(key, a));
-        text.push('\n');
+    for (key, a) in &s.access {
+        // A headset with a mistyped line keeps its other line as it was.
+        let a = if kept.mistyped.contains(key) {
+            kept.beside_mistyped.get(key)
+        } else {
+            Some(a)
+        };
+        if let Some(a) = a {
+            text.push_str(&access_text(key, a));
+            text.push('\n');
+        }
     }
     text
 }
@@ -1106,6 +1126,20 @@ mod tests {
             let text = settings_text(&s, &kept);
             assert_eq!(text.matches("access ").count(), 1, "{text}");
             assert_eq!(parse_settings(&text).0.access_of(&key), a, "the same again");
+        }
+        // A mistyped line beside a good one for the same headset, in either order:
+        // no rights while the mistyped one is there, and both lines kept as they were.
+        let good = format!("access {} guest input", "ab".repeat(32));
+        let typo = format!("access {} guest inptu", "ab".repeat(32));
+        for text in [format!("{good}\n{typo}\n"), format!("{typo}\n{good}\n")] {
+            let (s, kept) = parse_settings(&text);
+            assert_eq!(s.access_of(&key).perms, 0, "{text}");
+            let saved = settings_text(&s, &kept);
+            assert!(saved.contains(&format!("{good}\n")), "{saved}");
+            assert!(saved.contains(&format!("{typo}\n")), "{saved}");
+            let (again, kept_again) = parse_settings(&saved);
+            assert_eq!(again.access_of(&key).perms, 0);
+            assert_eq!(settings_text(&again, &kept_again), saved, "stable");
         }
     }
 
