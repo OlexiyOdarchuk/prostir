@@ -47,6 +47,11 @@ pub struct Sources<'a> {
     pub sound_from: Option<ScreenId>,
     /// The PC can share the volume with the headset (its sound device follows).
     pub volume: bool,
+    /// This headset's microphone is the PC's end of the headset microphone (the
+    /// microphone goes from one headset only).
+    pub mic: bool,
+    /// "No limits" of the main headset, which the PC's limits follow.
+    pub no_limits: bool,
 }
 
 /// One session's view of the PC's state: the headset's own state, and what it was
@@ -81,12 +86,12 @@ impl Publisher {
     }
 
     /// What the PC allows this headset now. "No limits" of a guest is for its own
-    /// budgets: the PC's limits follow the main headset's. Only scales the desktop
-    /// gives an output of every size offered are offered, so any pair the headset
-    /// picks can be made.
-    pub fn limits(&self, displays: &Displays) -> Limits {
+    /// budgets: the PC's limits follow the main headset's (`no_limits`). Only scales
+    /// the desktop gives an output of every size offered are offered, so any pair the
+    /// headset picks can be made.
+    pub fn limits(&self, displays: &Displays, no_limits: bool) -> Limits {
         let prefs = Prefs {
-            no_limits: self.prefs().no_limits && self.access.is_main(),
+            no_limits,
             ..self.prefs()
         };
         let mut limits = limits(&prefs, self.caps(), displays.codec());
@@ -109,10 +114,11 @@ impl Publisher {
         let sound_from = prefs.sound_from_screen.then(|| SoundFrom {
             display: listed(src.sound_from),
         });
-        // The microphone as an up stream, where both sides do it.
+        // The microphone as an up stream, where both sides do it: wanted of the one
+        // headset whose microphone the PC takes.
         let mut up_wanted = BTreeMap::new();
         if headset.has(caps::headset::MIC) {
-            let on = src.displays.recording();
+            let on = src.mic && src.displays.recording();
             up_wanted.insert(
                 UpKind::Mic,
                 UpWanted {
@@ -125,9 +131,9 @@ impl Publisher {
             info: Some(pc_info(src.displays)),
             caps: Some(host_caps(src.displays, src.volume)),
             access: Some(self.access),
-            limits: Some(self.limits(src.displays)),
+            limits: Some(self.limits(src.displays, src.no_limits)),
             encoding: Some(src.displays.encoding_part(src.wanted, headset)),
-            sound: Some(src.displays.sound_part()),
+            sound: Some(src.displays.sound_part(src.mic)),
             up_wanted,
             focus: Some(focus),
             sound_from,

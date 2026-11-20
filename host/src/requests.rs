@@ -207,7 +207,9 @@ fn carry_out(
             // Quality and clearer text apply even when the codec cannot change.
             displays.apply(&store.wanted());
             let result = displays.encode_with(codec, software);
-            displays.fit_codec(asker.caps);
+            // In a codec every headset decodes (this one among them).
+            let headsets = displays.router.headsets();
+            displays.fit_codec(&headsets);
             // A monitor whose stream could not start again is gone.
             keep_screens(store, displays, false);
             result?;

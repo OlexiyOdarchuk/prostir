@@ -631,6 +631,13 @@ right, so a single headset can do everything; a line of its own with a word that
 no role or right gives it no rights (a guest), never every right. A request without its right fails
 `NOT_ALLOWED`; anything else without its right is dropped and logged.
 
+One session at a time is the main one. Of several headsets whose line makes them the
+main one, the session that was main already stays so, else the first connected; the
+others are told `role` guest (with the rights of their line) until it ends, and then
+the next is told `role` main. Where several headsets have a session at once (a host
+may take only one), each gets every display and its own state; the host's commands
+go to the main headset, else to the first connected.
+
 | What | Needs |
 |---|---|
 | `AddDisplay`, `RemoveDisplay`, `SetDisplays`, `SetPrimary`, `ShowPhysical`, `SetEncoding`, `SetSound` | changes |
@@ -640,7 +647,7 @@ no role or right gives it no rights (a guest), never every right. A request with
 | `FindMouse`, `RequestKeyframe`, `Gaze` | nothing (keyframes at most every 300 ms for a display, from all sessions together) |
 | `UpStart` | the microphone (or the camera, by kind) |
 | `Arrange`, `Volume` | the main headset: a guest's arrangement does not move the desktop, its volume does not move the PC's |
-| `Presence` | anyone, but only the main headset pauses the desktop and ends the session when taken off |
+| `Presence` | anyone: the host sends no frames and no sound to a headset not worn, pauses the desktop once no headset is worn, and ends the session of one taken off (see [End of session](#end-of-session)) |
 | `Prefs.no_limits` | changes the host's `Limits` only from the main headset |
 | sent by the host | `Notice` and window titles only with private (else the title is empty) |
 
@@ -725,9 +732,9 @@ Without a goodbye, implementation-defined details of the current apps:
 - Both: a write blocked for 5 s ends the session.
 - Host: TCP keepalive (idle 4 s, interval 2 s, 3 probes) and `TCP_USER_TIMEOUT` 10 s
   also notice a headset that vanished, already while pairing.
-- Host: the main headset reported as not worn (`Presence{worn: false}`) for 10 s ends
-  the session (with goodbye `2`); the host then removes its virtual monitors until the
-  headset connects again.
+- Host: a headset reported as not worn (`Presence{worn: false}`) for 10 s has its
+  session ended (with goodbye `2`); the other sessions go on. When it was the last
+  one, the host then removes its virtual monitors until a headset connects again.
 - Host: after a session it keeps the virtual monitors for 30 s (`--linger`).
 
 ### Forward compatibility
@@ -968,7 +975,10 @@ display whose picture would be larger (a display of the PC, a monitor kept from 
 session in H.265 when the PC now encodes H.264) stands in `Displays` as
 `Failed{BAD_SIZE}` with its size in the detail, sends nothing, and is tried again with
 the next headset or codec; a window panel that large is closed, with a
-`Problem{BAD_SIZE}`. A client that still gets a stream it cannot decode (from an older
+`Problem{BAD_SIZE}`. With several headsets this is each headset's own: a display
+another headset decodes keeps streaming to that one and stands `Failed{BAD_SIZE}`
+only in the `Displays` of the headset that does not; the host encodes in a codec every
+headset with a session decodes (H.264 when one does not decode the one chosen). A client that still gets a stream it cannot decode (from an older
 host) shows nothing of that display and goes on with the others.
 
 At most `Limits.streams_max` streams go at once (30 at most: a lane each; never more
@@ -1073,7 +1083,10 @@ is not taken (the stream is dropped and logged).
   (a part, in `Open` and on every change). The host makes its end of the microphone
   (a virtual input programs record from; its state in `Sound.mic`) while the switch of
   a headset with the microphone right is on, and shows in its tray when the system does
-  not let the headset record.
+  not let the headset record. Of several headsets one only is that microphone: the
+  main headset if it has the right, else the first connected with the right. The
+  others are told `Sound.mic` off and never `UpWanted{Mic, on: true}`, and what they
+  stream does not reach the PC.
 - While a program on the PC records from it, the host says `UpWanted{Mic, on: true}`;
   the headset then streams its microphone while its own switch is on, and ends the
   stream with `UpEnd` once `UpWanted` is off or the switch goes off. The switch is the

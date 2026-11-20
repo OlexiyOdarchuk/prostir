@@ -223,6 +223,20 @@ impl ksni::Tray for Tray {
             }
             .into(),
         ]);
+        if self.status.others > 0 {
+            items.push(
+                StandardItem {
+                    label: format!(
+                        "{}: {}",
+                        t("Інших шоломів", "Other headsets"),
+                        self.status.others
+                    ),
+                    enabled: false,
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
         if self.status.mic_denied {
             items.push(
                 StandardItem {

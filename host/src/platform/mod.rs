@@ -184,8 +184,10 @@ pub enum TrayCommand {
 /// What the tray shows.
 #[derive(Clone, Default, PartialEq)]
 pub struct TrayStatus {
-    /// "Wi-Fi" or "USB" while a headset is connected.
+    /// "Wi-Fi" or "USB" while a headset is connected (the main one, else the first).
     pub connected: Option<&'static str>,
+    /// Other headsets connected besides it.
+    pub others: usize,
     pub monitors: usize,
     pub mirror: bool,
     /// Connected, but the headset is not worn: streaming paused.
