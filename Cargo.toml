@@ -10,7 +10,7 @@ license = "GPL-3.0-or-later"
 authors = ["Prostir contributors"]
 repository = "https://github.com/OlexiyOdarchuk/prostir"
 homepage = "https://prostir.ishawyha.dev"
-rust-version = "1.90"
+rust-version = "1.96"
 
 [profile.release]
 lto = "thin"
