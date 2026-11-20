@@ -6,6 +6,83 @@
 //! What differs between desktops and operating systems is said as data where one
 //! answer fits all (the capabilities in [`DesktopCaps`], the kind of memory frames live
 //! in, the state of an output), not as more traits.
+//!
+//! # What Windows does differently, and where the contract says it
+//!
+//! From the Windows prototype (`plans/windows-prototype.md`, sections 6 and 10). The
+//! fields marked for Windows are provisional until its desktop is written (step 11c);
+//! on Linux they hold the plain answer. The test `windows_shape` below builds what a
+//! Windows desktop would report.
+//!
+//! 1. The display driver may be missing: [`DesktopCaps::virtual_monitors`] is an
+//!    [`Unavailable`] saying why; the PC's own displays work all the same, and adding
+//!    a monitor answers with its [`Unavailable::error`].
+//! 2. Adding a monitor may restart all of them (an unchanged Virtual Display Driver):
+//!    [`AddModel::RestartsAll`], so their streams breaking together is no failure of
+//!    each. Our own driver, modelled on SudoVDA, is [`AddModel::OneByOne`].
+//! 3. Refresh rates: [`VirtualSpec::refresh`], one of [`DesktopCaps::refresh`]
+//!    (Linux: 60 only).
+//! 4. Scales in steps, through an undocumented call: [`VirtualSpec::scale`] in percent,
+//!    [`Scales::Steps`]; the scales offered to the headset are those of
+//!    [`DesktopCaps::scales`] (`Displays::scales`), and the desktop checks its own.
+//! 5. Physical pixels, the primary output always at (0, 0): [`DesktopCaps::units`] and
+//!    [`DesktopCaps::origin_is_primary`]. The core plans in logical pixels; turning a
+//!    [`DeskPlan`] into the desktop's units and shifting the whole desktop is the work
+//!    of [`Desktop::place`].
+//! 6. Output names that change (`\\.\DISPLAYn`, `HMONITOR`, the adapter's LUID):
+//!    [`OutputKey`], which the desktop makes and keeps (the serial number our driver
+//!    writes from [`VirtualSpec::id`], the device path or EDID of a real display).
+//!    Whether an output is virtual is the desktop's to tell, in
+//!    [`Geometry::is_virtual`], by the LUID of our driver's adapter or the hardware id
+//!    of another's (both drivers say HDMI); whether a display is a laptop's own panel,
+//!    in [`PhysicalDisplay::builtin`].
+//! 7. An output out for a while (the lock screen, a UAC prompt, a mode change; Desktop
+//!    Duplication comes back by itself after up to 2.3 s): [`OutputHealth::Paused`],
+//!    neither started over nor laid out again.
+//! 8. The graphics card is part of an output: [`FrameSource::memory`]
+//!    ([`Memory::D3D11`]) and [`FrameSource::adapter`], for an encoder picked per output
+//!    on the same card (step 6.5), which shares one device per card with every capture
+//!    and encoder: neither an output nor an encoder makes its own.
+//! 9. A limit on encoder sessions: found when an encoder does not start (step 6.5), not
+//!    a field here.
+//! 10. The cursor in the frames or apart: [`FrameSource::cursor`].
+//! 11. Sound also in the speakers, and no microphone without VB-CABLE: the sound module
+//!     of step 6.6 (`Route`, `MicAvailability`, an explicit output device to capture
+//!     from), not the desktop.
+//! 12. No signals: the system module (`on_quit_request`, step 6.8). Cleaning up after a
+//!     crash is the desktop's when it connects, and nothing at all where
+//!     [`DesktopCaps::cleans_up_after_crash`] (our driver's watchdog).
+//! 13. No desktop notifications without a package identity: `notifications::watch`
+//!     gives none (already so).
+//! 14. Calls that can hang (`SetDisplayConfig`, `DeviceIoControl`): every method here
+//!     may block, and the desktop's worker thread of step 6.4 calls them with a
+//!     timeout; the contract asks nothing more.
+//! 15. `broadcast_addresses` and virtual network adapters: goes with the beacon (step
+//!     7), not the desktop.
+//!
+//! Also from the prototype:
+//! - Our monitors' frames come straight from the driver's swap chain, real displays
+//!   through Desktop Duplication: [`Origin::Monitor`] beside [`Origin::Capture`].
+//! - Windows moves monitors by itself after each one comes or goes (it closes gaps and
+//!   brings back the places it saved), and a real display can lose its mode when all
+//!   virtual ones go at once: [`Desktop::make`] and the drop of an [`Output`] put the
+//!   layout and the modes back before they return.
+//!
+//! # What GNOME does differently
+//!
+//! - Virtual monitors through Mutter's `ScreenCast.RecordVirtual`, streamed over
+//!   PipeWire like KWin's: [`Origin::Monitor`], [`Memory::DmaBuf`]; they go with the
+//!   D-Bus connection ([`DesktopCaps::cleans_up_after_crash`]).
+//! - Placement through `DisplayConfig.ApplyMonitorsConfig`, whose layout mode may be
+//!   physical ([`DesktopCaps::units`]) and whose scales are those each mode supports
+//!   ([`Scales::Steps`]); it has a primary monitor ([`DesktopCaps::has_primary`]).
+//! - No way to move windows or find the mouse without a Shell extension:
+//!   [`Desktop::windows`] and [`Desktop::pointer`] give none, so there are no window
+//!   panels and the headset is not offered to move the mouse
+//!   ([`DesktopCaps::moves_pointer`]).
+//! - Without [`Windows`] there is no screenshot tool either: with
+//!   [`DesktopCaps::screenshot_one_output`] false, a monitor's picture comes from its
+//!   own stream.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
