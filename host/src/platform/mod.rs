@@ -36,7 +36,8 @@
 //! - `notifications::watch`: the PC's desktop notifications, as text.
 //! - `tray`: `spawn`, `Handle`, `set_status`, `set_battery`, `set_settings`,
 //!   `set_pairing`; the tray menu also turns autostart on and off.
-//! - `autostart`: `available`, `enabled`, `set` (starting with the session),
+//! - `autostart`: `available`, `enabled`, `set` (starting with the session), `first_start`
+//!   (on by default), `refresh`,
 //!   `quit_until_login`, `start_service`, `socket_waits` (what holds the sockets
 //!   while Prostir sleeps, where the system does: systemd's socket on Linux).
 //! - The local API's transport (`local_api` on Linux: D-Bus): `serve`, and a
@@ -227,6 +228,8 @@ pub enum TrayCommand {
     Headset(prostir_proto::request::Asked<prostir_proto::request::Command>),
     /// Open the settings window.
     ShowSettings,
+    /// Start with the session (`true`) or not; the choice is kept.
+    SetAutostart(bool),
     /// Open the pairing window: a new headset can pair (and is answered when it asks
     /// for the PC) for a while.
     PairNewHeadset,

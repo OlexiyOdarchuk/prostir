@@ -360,7 +360,11 @@ impl ksni::Tray for Tray {
                 checked: autostart::enabled(),
                 // Hyprland (without uwsm) ignores XDG autostart: its own config starts it.
                 visible: !crate::platform::linux::hyprland::running(),
-                activate: Box::new(|_: &mut Self| autostart::set(!autostart::enabled())),
+                // The control loop sets it and keeps the choice (never turned on again).
+                activate: Box::new(|tray: &mut Self| {
+                    tray.commands
+                        .tray(Command::SetAutostart(!autostart::enabled()));
+                }),
                 ..Default::default()
             }
             .into(),

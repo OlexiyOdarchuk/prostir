@@ -339,3 +339,25 @@ fn a_display_of_the_pc_comes_back_with_its_number() {
         "{again:?}"
     );
 }
+
+/// Starting with the session is on by default: the first start turns it on and keeps
+/// that it did; later starts do nothing to it, and once turned off it stays off.
+#[test]
+fn autostart_is_on_by_default_and_off_stays_off() {
+    let dir = TestDir::new("autostart");
+    let pc = Pc::start(&dir, &Options::default());
+    assert_eq!(pc.count_log("fake autostart: the first start"), 1);
+    pc.quit();
+    assert!(dir.saved("settings.txt").contains("autostart on\n"));
+
+    let mut pc = Pc::start(&dir, &Options::default());
+    assert_eq!(pc.count_log("fake autostart"), 0, "kept, not set again");
+    pc.tray("autostart off");
+    pc.wait_log(SOON, "fake autostart: off");
+    pc.quit();
+    assert!(dir.saved("settings.txt").contains("autostart off\n"));
+
+    let pc = Pc::start(&dir, &Options::default());
+    assert_eq!(pc.count_log("fake autostart"), 0, "off stays off");
+    pc.quit();
+}

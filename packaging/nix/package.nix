@@ -133,10 +133,13 @@ rustPlatform.buildRustPackage {
     install -Dm644 packaging/prostir.svg $out/share/icons/hicolor/scalable/apps/prostir.svg
     install -Dm644 packaging/io.github.OlexiyOdarchuk.Prostir.Settings.desktop \
       $out/share/applications/io.github.OlexiyOdarchuk.Prostir.Settings.desktop
-    # Installed, not enabled: "Start with the system" in the tray enables the socket
-    # (on NixOS, `systemd.packages = [ prostir ];` makes the units known).
+    # Not enabled here: Prostir's first start enables the socket for its user (on
+    # NixOS, `systemd.packages = [ prostir ];` makes the units and the preset known);
+    # the tray turns it off for good.
     install -Dm644 packaging/systemd/prostir.socket $out/lib/systemd/user/prostir.socket
     install -Dm644 packaging/systemd/prostir.service $out/lib/systemd/user/prostir.service
+    install -Dm644 packaging/systemd/80-prostir.preset \
+      $out/lib/systemd/user-preset/80-prostir.preset
     substituteInPlace $out/lib/systemd/user/prostir.service \
       --replace-fail /usr/bin/prostir $out/bin/prostir
     # A Quest plugged in starts it where the socket is on (`services.udev.packages`).

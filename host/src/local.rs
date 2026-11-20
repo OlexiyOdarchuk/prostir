@@ -153,6 +153,17 @@ impl Brain {
 
     /// The code a headset shows, typed in the settings window: it goes to the
     /// connection waiting for it, and the answer comes once that attempt ends.
+    /// Starting with the session on or off (the tray, `ctl`, the settings window): set,
+    /// and the choice kept, so no later start or update turns it on again.
+    pub(crate) fn set_autostart(&mut self, on: bool) {
+        info!(
+            "starting with the session: {}",
+            if on { "on" } else { "off" }
+        );
+        platform::autostart::set(on);
+        self.store.change(|s| s.autostart = Some(on));
+    }
+
     fn code_typed(&mut self, code: String, reply: Reply) {
         let digits = code
             .chars()
@@ -309,7 +320,7 @@ impl Brain {
                         "Starting with the session is not set from here on this PC",
                     ));
                 }
-                platform::autostart::set(on);
+                self.set_autostart(on);
                 done()
             }
             Request::WindowLook {

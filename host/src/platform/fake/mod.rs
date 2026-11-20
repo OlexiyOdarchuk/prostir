@@ -648,17 +648,30 @@ pub mod notifications {
     }
 }
 
-/// Starting with the session: the fake PC cannot.
+/// Starting with the session, in memory: what is set goes to the log (`fake autostart:
+/// on`), for the tests to read, and nothing outside the process changes.
 pub mod autostart {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static ON: AtomicBool = AtomicBool::new(false);
+
     pub fn available() -> bool {
-        false
+        true
     }
 
     pub fn enabled() -> bool {
-        false
+        ON.load(Ordering::Relaxed)
     }
 
-    pub fn set(_on: bool) {}
+    pub fn set(on: bool) {
+        ON.store(on, Ordering::Relaxed);
+        log::info!("fake autostart: {}", if on { "on" } else { "off" });
+    }
+
+    pub fn first_start() {
+        log::info!("fake autostart: the first start");
+        set(true);
+    }
 
     pub fn quit_until_login() {}
 
@@ -673,7 +686,8 @@ pub mod autostart {
 
 /// A tray without an icon: a test "clicks" its items by writing their names, one a
 /// line, to `$XDG_RUNTIME_DIR/fake-tray` (`forget`, `recenter`, `settings`, `pair`,
-/// `pair stop`, `quit`, `sharp on`, `sharp off`, `quality 15`, `quality 50`), which is
+/// `pair stop`, `autostart on`, `autostart off`, `quit`, `sharp on`, `sharp off`,
+/// `quality 15`, `quality 50`), which is
 /// read and removed once written.
 pub mod tray {
     use crate::events::EventSink;
@@ -694,6 +708,8 @@ pub mod tray {
                     "pair" => TrayCommand::PairNewHeadset,
                     "pair stop" => TrayCommand::StopPairing,
                     "quit" => TrayCommand::Quit,
+                    "autostart on" => TrayCommand::SetAutostart(true),
+                    "autostart off" => TrayCommand::SetAutostart(false),
                     "sharp on" => TrayCommand::SetSharp(true),
                     "sharp off" => TrayCommand::SetSharp(false),
                     "quality 15" => TrayCommand::SetBitrate(15),

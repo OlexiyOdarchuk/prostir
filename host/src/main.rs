@@ -829,6 +829,7 @@ impl Brain {
                 info!("counting this PC among users: {on}");
                 self.store.change(|s| s.count = on);
             }
+            TrayCommand::SetAutostart(on) => self.set_autostart(on),
             TrayCommand::Headset(asked) => {
                 self.control.for_headset.push_back((asked, None));
                 if self.sessions.is_empty() {
@@ -1220,6 +1221,12 @@ fn full_with(
     };
     let mut store = Store::open(store::config_dir(), run);
     store.start_with(&args.monitors);
+    // Starting with the session is on by default: the first start turns it on, and
+    // the choice is kept, so turned off it stays off through every update.
+    if store.wanted().autostart.is_none() {
+        platform::autostart::first_start();
+        store.change(|s| s.autostart = Some(true));
+    }
     // The first start says that this build counts its users and how to turn it off,
     // a day before the first count.
     usage::announce_once(store.wanted().count);

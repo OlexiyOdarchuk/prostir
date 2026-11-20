@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Installs the Prostir PC program for the current user, without root:
 #   ~/.local/bin/prostir and prostir-settings, the icon, the application menu
-#   entries and the systemd user units (installed, not enabled).
+#   entries and the systemd user units (Prostir's first start enables them).
 #
 #   ./install.sh                       install (or update: run it again)
-#   ./install.sh --autostart           also start Prostir when you log in
+#   ./install.sh --autostart           start Prostir when you log in now, not at its first start
 #   ./install.sh --uninstall           remove everything this script installed
 #   ./install.sh --uninstall --purge   also remove settings and pairings (~/.config/prostir)
 #
@@ -173,5 +173,6 @@ elif (( autostart )); then
 elif [[ -f "$AUTOSTART" ]] || { user_systemd && systemctl --user -q is-enabled prostir.socket 2>/dev/null; }; then
     echo "   It starts when you log in (tray: \"Start with the system\")."
 else
-    echo "   To start it when you log in: tray menu, \"Start with the system\", or run this script with --autostart."
+    echo "   Its first start sets it to start when you log in (turn that off in the tray: \"Start with the system\");"
+    echo "   --autostart does it now."
 fi

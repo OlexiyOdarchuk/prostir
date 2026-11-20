@@ -94,12 +94,15 @@
 
 ### Nothing runs while the headset is off
 
-- With "Start with the system" on KDE Plasma (and other desktops with systemd),
-  nothing of Prostir runs until a headset comes: systemd waits for it
-  (`prostir.socket`) and starts Prostir when the headset connects, asks for the PC or
-  is plugged in by USB. Packages install `prostir.socket` and `prostir.service` and
-  enable nothing; the tray item, or `prostir ctl autostart on`, turns the socket on
-  and removes the autostart entry of 0.1.
+- Prostir starts with the system by default: its first start turns that on, and
+  from then on it is kept as you choose it. Turn it off in the tray ("Start with the
+  system"), the settings window or with `prostir ctl autostart off`; it stays off,
+  also after updates.
+- On KDE Plasma (and other desktops with systemd) nothing of Prostir runs until a
+  headset comes: systemd waits for it (`prostir.socket`) and starts Prostir when the
+  headset connects, asks for the PC or is plugged in by USB. Turning it on enables
+  the socket and removes the autostart entry of 0.1. Packages install the units and a
+  preset that enables the socket for new users.
 - Without systemd, and on Hyprland (`exec-once = prostir`), `prostir` sleeps in a
   small watcher that wakes for nothing (about 1 MB of its own memory) and starts the
   rest when a headset comes. A Quest plugged in by USB is noticed without waking for

@@ -61,6 +61,10 @@ pub struct Settings {
     pub mirror: bool,
     /// Count this PC among users (see `usage`).
     pub count: bool,
+    /// Starting with the session, as the person chose it (`autostart on|off`); none
+    /// yet before the first start, which turns it on (see `platform::autostart`).
+    /// Once kept, an update never changes it.
+    pub autostart: Option<bool>,
     /// The settings window's look (`window-theme`, `window-palette`,
     /// `window-language`), written only when not the default.
     pub window: prostir_api::WindowLook,
@@ -154,6 +158,7 @@ impl Default for Settings {
             audio: true,
             mirror: true,
             count: true,
+            autostart: None,
             window: prostir_api::WindowLook::default(),
             access: BTreeMap::new(),
         }
@@ -351,6 +356,10 @@ fn parse_settings(text: &str) -> (Settings, Kept) {
                 s.count = v;
                 true
             }
+            ("autostart", Some(v)) => {
+                s.autostart = Some(v);
+                true
+            }
             ("window-theme", _) => match value {
                 "system" => Some(prostir_api::ThemeMode::System),
                 "light" => Some(prostir_api::ThemeMode::Light),
@@ -413,6 +422,9 @@ fn settings_text(s: &Settings, kept: &Kept) -> String {
         on_off(s.mirror),
         on_off(s.count),
     );
+    if let Some(on) = s.autostart {
+        text.push_str(&format!("autostart {}\n", on_off(on)));
+    }
     let window = prostir_api::WindowLook::default();
     if s.window.theme != window.theme {
         text.push_str(&format!("window-theme {}\n", s.window.theme.name()));
@@ -1049,6 +1061,7 @@ mod tests {
                 audio: false,
                 mirror: true,
                 count: true,
+                autostart: None,
                 window: prostir_api::WindowLook::default(),
                 access: BTreeMap::new(),
             }
@@ -1080,6 +1093,22 @@ mod tests {
         let (s, kept) = parse_settings("window-theme purple\nwindow-palette a b\n");
         assert_eq!(s.window, prostir_api::WindowLook::default());
         assert_eq!(kept.unknown.len(), 2);
+    }
+
+    /// The choice to start with the session is kept once made, and written only then:
+    /// none before the first start.
+    #[test]
+    fn the_autostart_choice_is_kept() {
+        let (s, kept) = parse_settings("bitrate 30\n");
+        assert_eq!(s.autostart, None);
+        assert!(!settings_text(&s, &kept).contains("autostart"));
+        for (line, on) in [("autostart off\n", false), ("autostart on\n", true)] {
+            let (s, kept) = parse_settings(line);
+            assert_eq!(s.autostart, Some(on));
+            let text = settings_text(&s, &kept);
+            assert!(text.contains(line), "{text}");
+            assert_eq!(parse_settings(&text).0.autostart, Some(on));
+        }
     }
 
     /// The six monitors of 2026-11-19, as 0.1.2 saved them.

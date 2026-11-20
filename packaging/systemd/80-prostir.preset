@@ -1,0 +1,4 @@
+# Prostir waits for the headset from the first login of a new user, on distributions
+# that apply presets to users (`systemctl --user preset`). Prostir's first start also
+# turns it on, and "Start with the system" in its menu turns it off for good.
+enable prostir.socket

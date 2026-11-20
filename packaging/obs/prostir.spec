@@ -121,9 +121,11 @@ install -Dm755 target/release/prostir-settings %{buildroot}%{_bindir}/prostir-se
 install -Dm644 packaging/prostir.desktop %{buildroot}%{_datadir}/applications/prostir.desktop
 install -Dm644 packaging/io.github.OlexiyOdarchuk.Prostir.Settings.desktop %{buildroot}%{_datadir}/applications/io.github.OlexiyOdarchuk.Prostir.Settings.desktop
 install -Dm644 packaging/prostir.svg %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/prostir.svg
-# Installed, not enabled: "Start with the system" in the tray enables the socket.
+# Not enabled here: Prostir's first start enables the socket for its user (and the
+# preset for new users, where presets apply); the tray turns it off for good.
 install -Dm644 packaging/systemd/prostir.socket %{buildroot}%{_prefix}/lib/systemd/user/prostir.socket
 install -Dm644 packaging/systemd/prostir.service %{buildroot}%{_prefix}/lib/systemd/user/prostir.service
+install -Dm644 packaging/systemd/80-prostir.preset %{buildroot}%{_prefix}/lib/systemd/user-preset/80-prostir.preset
 install -Dm644 packaging/udev/70-prostir-quest.rules %{buildroot}%{_prefix}/lib/udev/rules.d/70-prostir-quest.rules
 
 %check
@@ -150,6 +152,8 @@ cargo test --frozen --release \
 %dir %{_prefix}/lib/systemd/user
 %{_prefix}/lib/systemd/user/prostir.socket
 %{_prefix}/lib/systemd/user/prostir.service
+%dir %{_prefix}/lib/systemd/user-preset
+%{_prefix}/lib/systemd/user-preset/80-prostir.preset
 %{_prefix}/lib/udev/rules.d/70-prostir-quest.rules
 
 %changelog

@@ -1,7 +1,8 @@
 # Prostir waits for the headset here while nothing of it runs: a headset that
-# connects or asks for this PC starts prostir.service. Installed, not enabled:
-# "Start with the system" in Prostir's menu, or `prostir ctl autostart on`, enables it
-# (systemctl --user enable prostir.socket).
+# connects or asks for this PC starts prostir.service. On by default: Prostir's first
+# start enables it for its user (and 80-prostir.preset for new users, where presets
+# apply); "Start with the system" in Prostir's menu, or `prostir ctl autostart off`,
+# turns it off for good.
 [Unit]
 Description=Prostir: wait for the headset
 Documentation=https://prostir.ishawyha.dev
