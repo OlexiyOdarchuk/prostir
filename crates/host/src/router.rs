@@ -107,6 +107,9 @@ struct StreamSlot {
     keyframer: Option<crate::encoder::Keyframer>,
     /// When a headset last asked for a keyframe of it.
     headset_asked: Option<Instant>,
+    /// Where a frame's deliveries are listed, kept between frames so a frame
+    /// allocates nothing for them (see [`Router::fan_out`]).
+    outs: Vec<Out>,
 }
 
 /// Keyframes headsets ask for, of one stream, at most this often.
@@ -604,6 +607,7 @@ impl Router {
             last_frames: [None; 2],
             keyframer: None,
             headset_asked: None,
+            outs: Vec::new(),
         };
         inner.streams.insert(id, slot);
         for r in inner.receivers.values_mut() {
@@ -853,7 +857,7 @@ impl Router {
         // the headsets that wait for one (`want_key`).
         let mut key_now = false;
         let mut want_key: Vec<SessionId> = Vec::new();
-        let mut outs: Vec<Out> = Vec::new();
+        let mut outs = std::mem::take(&mut slot.outs);
         // Headsets the stream goes to now.
         let mut takers = 0;
         for (session, r) in receivers.iter_mut() {
@@ -906,7 +910,7 @@ impl Router {
         let mut data = Some(data);
         let mut frames = outs.iter().filter(|o| o.frame).count();
         let mut over = Vec::new();
-        for out in outs {
+        for out in outs.drain(..) {
             let Some(r) = receivers.get_mut(&out.session) else {
                 continue;
             };
@@ -963,6 +967,8 @@ impl Router {
                 want_key.push(out.session);
             }
         }
+        // Empty again, its room kept for the next frame.
+        slot.outs = outs;
         for session in over {
             receivers.remove(&session);
         }
