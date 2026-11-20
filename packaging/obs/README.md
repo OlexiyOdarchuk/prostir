@@ -247,6 +247,12 @@ cd /tmp/build && dpkg-buildpackage -b -us -uc
 
 `osc build` against the OBS project does the same in OBS's own build root.
 
+An arm64 image runs under qemu-user on an x86_64 PC (`podman run --arch arm64`): the
+build works, slowly, but two tests that start programs (`run_stops_a_program_that_hangs`,
+`kwin_scripts_parse`) fail there, because qemu-user reports a program that cannot be
+started as one that exited with 127. Add `DEB_BUILD_OPTIONS=nocheck` (deb) or
+`--nocheck` (rpmbuild) for such a build; OBS builds aarch64 on ARM machines.
+
 ## Files
 
 - `make-sources.sh`: makes the four files for a tag.
