@@ -1240,7 +1240,7 @@ once; a reader rejects any other as invalid, and the connection ends.
 between values matter; the origin is arbitrary.
 
 The current client plans the PC desktop itself, from how it shows the displays (the
-same code the host runs, `crates/layout/src/desk.rs`), and sends that plan: each display's
+same code the host runs, `crates/layout/src/desk/`), and sends that plan: each display's
 place on it, a rectangle of its stream's size, as its top-left corner plus half its
 size, rounded down (`x + w / 2`, `y + h / 2` in whole pixels). So a host that plans
 from these rectangles gets the client's plan back to the pixel, and the client's map
@@ -1264,7 +1264,7 @@ displays' own pixel sizes.
 
 ### What the host does with it
 
-(Implementation-defined; `crates/host/src/displays/` and `crates/layout/src/desk.rs`, a crate
+(Implementation-defined; `crates/host/src/displays/` and `crates/layout/src/desk/`, a crate
 the client uses too to plan the desktop it sends and shows on its map.)
 
 1. Clamps every known `center` and `middle` to ±100000.
