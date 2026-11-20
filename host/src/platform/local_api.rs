@@ -12,11 +12,14 @@
 //! something comes, so an idle PC still does not wake.
 
 use std::collections::VecDeque;
+use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use log::{info, warn};
+use log::{debug, info, warn};
 use zbus::blocking::Connection;
 
 use crate::api::{
@@ -29,69 +32,184 @@ use crate::events::{Event, EventSink};
 /// The state as `GetState` gives it: its revision and its JSON.
 type Shown = Arc<Mutex<(u32, String)>>;
 
-/// The service while it runs: dropping it leaves the bus.
-pub struct Service {
-    _bus: Connection,
+/// What the service's parts share: the way to the control loop and back, the state
+/// `GetState` gives, the connection (none while the bus is away), and whether
+/// Prostir is quitting.
+struct Shared {
+    events: EventSink,
     outlet: Outlet,
+    shown: Shown,
+    bus: Mutex<Option<Connection>>,
+    quitting: AtomicBool,
+    /// Requests handed to the control loop and not answered yet.
+    asking: Mutex<usize>,
+    answered: Condvar,
+}
+
+impl Shared {
+    fn bus(&self) -> Option<Connection> {
+        self.bus.lock().unwrap().clone()
+    }
+}
+
+/// The service while it runs.
+pub struct Service {
+    shared: Arc<Shared>,
 }
 
 impl Service {
     /// Leaves the bus once every reply given so far went out (`quit` is answered
-    /// too), waiting a second at most.
+    /// too), a second at most; requests from now on are told Prostir is quitting.
     pub fn finish(self) {
+        let shared = &self.shared;
+        shared.quitting.store(true, Ordering::Release);
         let (tx, rx) = std::sync::mpsc::channel();
-        self.outlet.send(Note::Answer(Box::new(move |_| {
+        shared.outlet.send(Note::Answer(Box::new(move |_| {
             let _ = tx.send(());
         })));
+        let until = Instant::now() + Duration::from_secs(1);
         let _ = rx.recv_timeout(Duration::from_secs(1));
-        // The replies handed to zbus a moment ago are written by its own thread.
-        std::thread::sleep(Duration::from_millis(50));
+        // Each request still answering holds the connection until its reply is
+        // written; then nothing else does, and it closes.
+        let mut asking = shared.asking.lock().unwrap();
+        while *asking > 0 {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            asking = shared.answered.wait_timeout(asking, left).unwrap().0;
+        }
+        drop(asking);
+        let Some(bus) = shared.bus.lock().unwrap().take() else {
+            return;
+        };
+        let (done, closed) = std::sync::mpsc::channel();
+        let left = until.saturating_duration_since(Instant::now());
+        let shutdown = std::thread::Builder::new()
+            .name("local-api-end".into())
+            .spawn(move || {
+                bus.graceful_shutdown();
+                let _ = done.send(());
+            });
+        if shutdown.is_ok() {
+            let _ = closed.recv_timeout(left.max(Duration::from_millis(100)));
+        }
     }
 }
 
 /// Offers the API on the session bus: requests go to the control loop as events,
 /// and what the control loop sends to `outlet`'s other end (`notes`) goes out. `None`
-/// (logged) without a session bus, or when another program has the name.
+/// (logged) without a session bus, or when another program has the name. A bus
+/// that goes away later (dbus-daemon restarted) is taken again once it is back, with
+/// pauses of 1 s growing to a minute between tries.
 pub fn serve(events: EventSink, outlet: Outlet, notes: Receiver<Note>) -> Option<Service> {
     // The first state, there before the name is: `GetState` always has one.
     let mut first = (0, String::new());
     if let Ok(Note::State(revision, state)) = notes.try_recv() {
         first = (revision, state.to_json());
     }
-    let shown: Shown = Arc::new(Mutex::new(first));
-    let object = Object {
+    let shared = Arc::new(Shared {
         events,
-        outlet: outlet.clone(),
-        shown: shown.clone(),
-    };
-    let bus = session()
-        .and_then(|b| b.name(BUS_NAME))
-        .and_then(|b| b.serve_at(OBJECT_PATH, object))
-        .and_then(|b| b.build());
-    let bus = match bus {
-        Ok(bus) => bus,
+        outlet,
+        shown: Arc::new(Mutex::new(first)),
+        bus: Mutex::new(None),
+        quitting: AtomicBool::new(false),
+        asking: Mutex::new(0),
+        answered: Condvar::new(),
+    });
+    let gone = match offer(&shared) {
+        Ok(gone) => gone,
         Err(e) => {
             warn!("no local API on D-Bus ({BUS_NAME}): {e}");
             return None;
         }
     };
-    let out = bus.clone();
+    let out = shared.clone();
     let started = std::thread::Builder::new()
         .name("local-api".into())
-        .spawn(move || send_out(&out, &notes, &shown));
+        .spawn(move || send_out(&out, &notes));
     if let Err(e) = started {
         warn!("no local API on D-Bus: {e}");
         return None;
     }
+    if let Some(gone) = gone {
+        let watched = shared.clone();
+        let watching = std::thread::Builder::new()
+            .name("local-api-bus".into())
+            .spawn(move || keep_on_the_bus(&watched, gone));
+        if let Err(e) = watching {
+            warn!("the local API will not come back after the session bus restarts: {e}");
+        }
+    }
     info!("local API on D-Bus as {BUS_NAME}");
-    Some(Service { _bus: bus, outlet })
+    Some(Service { shared })
 }
 
-/// A connection to the session bus, its socket connected here: zbus connecting by
-/// itself does it on a thread of its pool, which stays and wakes twice a second for
-/// good, and an idle PC must not wake at all.
-fn session() -> zbus::Result<zbus::blocking::connection::Builder<'static>> {
-    use std::os::unix::net::UnixStream;
+/// Takes the name and serves the object on a new connection to the session bus:
+/// the socket to watch for the bus going away, where there is one.
+fn offer(shared: &Arc<Shared>) -> zbus::Result<Option<UnixStream>> {
+    let (builder, socket) = session()?;
+    let bus = builder
+        .name(BUS_NAME)?
+        .serve_at(
+            OBJECT_PATH,
+            Object {
+                shared: shared.clone(),
+            },
+        )?
+        .build()?;
+    *shared.bus.lock().unwrap() = Some(bus);
+    Ok(socket)
+}
+
+/// Sleeps until the session bus closes `socket`, then takes the name again once the
+/// bus is back, and so on (while Prostir runs, which this thread does not outlive).
+fn keep_on_the_bus(shared: &Arc<Shared>, mut socket: UnixStream) {
+    loop {
+        // Asleep in the kernel until the other end hangs up: no wakeups meanwhile.
+        let mut fd = libc::pollfd {
+            fd: socket.as_raw_fd(),
+            events: libc::POLLRDHUP,
+            revents: 0,
+        };
+        // SAFETY: one valid pollfd, for a socket this thread owns.
+        let woke = unsafe { libc::poll(&mut fd, 1, -1) };
+        if woke < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return;
+        }
+        if shared.quitting.load(Ordering::Acquire) {
+            return;
+        }
+        warn!("the session bus went away: offering the local API again once it is back");
+        *shared.bus.lock().unwrap() = None;
+        let mut pause = Duration::from_secs(1);
+        socket = loop {
+            std::thread::sleep(pause);
+            if shared.quitting.load(Ordering::Acquire) {
+                return;
+            }
+            match offer(shared) {
+                Ok(Some(socket)) => break socket,
+                Ok(None) => return,
+                Err(e) => debug!("the session bus is not back yet: {e}"),
+            }
+            pause = (pause * 2).min(Duration::from_secs(60));
+        };
+        info!("local API on D-Bus as {BUS_NAME} again");
+    }
+}
+
+/// A connection to the session bus, its socket connected here (and that socket,
+/// to watch): zbus connecting by itself does it on a thread of its pool, which stays
+/// and wakes twice a second for good, and an idle PC must not wake at all. Only a
+/// bus address that is no unix socket is left to zbus (said once).
+fn session() -> zbus::Result<(
+    zbus::blocking::connection::Builder<'static>,
+    Option<UnixStream>,
+)> {
     use zbus::address::transport::{Transport, UnixSocket};
     let address = zbus::Address::session()?;
     if let Transport::Unix(unix) = address.transport() {
@@ -106,19 +224,27 @@ fn session() -> zbus::Result<zbus::blocking::connection::Builder<'static>> {
             _ => None,
         };
         if let Some(stream) = stream {
-            return Ok(zbus::blocking::connection::Builder::async_io_unix_stream(
-                stream,
-            ));
+            let watch = stream.try_clone().ok();
+            let builder = zbus::blocking::connection::Builder::async_io_unix_stream(stream);
+            return Ok((builder, watch));
         }
     }
-    zbus::blocking::connection::Builder::session()
+    static SAID: std::sync::Once = std::sync::Once::new();
+    SAID.call_once(|| {
+        info!(
+            "the session bus is not at a unix socket: zbus connects to it, and a thread of \
+             its own then wakes twice a second while idle"
+        );
+    });
+    Ok((zbus::blocking::connection::Builder::session()?, None))
 }
 
 /// The shortest time between two `StateChanged`.
 const STATE_GAP: Duration = Duration::from_millis(1000 / STATES_PER_SECOND as u64);
 
 /// Sends out what the control loop gives, in order, until it is gone.
-fn send_out(bus: &Connection, notes: &Receiver<Note>, shown: &Shown) {
+fn send_out(shared: &Shared, notes: &Receiver<Note>) {
+    let shown = &shared.shown;
     // A state not sent yet (it came too soon after the last one), what came after it
     // (held so the order stays), and when the last state went.
     let mut waiting: Option<u32> = None;
@@ -126,11 +252,11 @@ fn send_out(bus: &Connection, notes: &Receiver<Note>, shown: &Shown) {
     let mut last: Option<Instant> = None;
     let emit = |revision: u32, last: &mut Option<Instant>| {
         let json = shown.lock().unwrap().1.clone();
-        signal(bus, "StateChanged", &(revision, json));
+        signal(shared, "StateChanged", &(revision, json));
         *last = Some(Instant::now());
     };
     let deliver = |note: Note| match note {
-        Note::Event(event) => headset_signal(bus, &event),
+        Note::Event(event) => headset_signal(shared, &event),
         Note::Answer(deliver) => deliver(shown.lock().unwrap().0),
         Note::State(..) => unreachable!("states are never held"),
     };
@@ -176,16 +302,20 @@ fn send_out(bus: &Connection, notes: &Receiver<Note>, shown: &Shown) {
     }
 }
 
-fn signal<B>(bus: &Connection, name: &str, body: &B)
+fn signal<B>(shared: &Shared, name: &str, body: &B)
 where
     B: serde::Serialize + zbus::zvariant::DynamicType,
 {
+    // While the bus is away, nobody hears it.
+    let Some(bus) = shared.bus() else {
+        return;
+    };
     if let Err(e) = bus.emit_signal(None::<()>, OBJECT_PATH, INTERFACE, name, body) {
         warn!("D-Bus signal {name}: {e}");
     }
 }
 
-fn headset_signal(bus: &Connection, event: &api::Event) {
+fn headset_signal(bus: &Shared, event: &api::Event) {
     match event {
         api::Event::HeadsetConnected { headset, name, via } => signal(
             bus,
@@ -259,28 +389,56 @@ impl From<Failure> for BusError {
 
 /// The object on the bus.
 struct Object {
-    events: EventSink,
-    outlet: Outlet,
-    shown: Shown,
+    shared: Arc<Shared>,
+}
+
+/// One more request waits for its answer while it lives.
+struct Asking<'a>(&'a Shared);
+
+impl<'a> Asking<'a> {
+    fn new(shared: &'a Shared) -> Self {
+        *shared.asking.lock().unwrap() += 1;
+        Self(shared)
+    }
+}
+
+impl Drop for Asking<'_> {
+    fn drop(&mut self) {
+        *self.0.asking.lock().unwrap() -= 1;
+        self.0.answered.notify_all();
+    }
+}
+
+/// Requests longer than this are refused unread.
+const MAX_REQUEST: usize = 64 * 1024;
+
+fn quitting() -> BusError {
+    Failure::new(
+        ApiError::Other,
+        crate::i18n::t("Prostir завершує роботу", "Prostir is quitting"),
+    )
+    .into()
 }
 
 impl Object {
     /// Hands `request` to the control loop and waits for what came of it (asleep).
     async fn ask(&self, request: Request) -> Result<Answer, BusError> {
+        let shared = &self.shared;
+        if shared.quitting.load(Ordering::Acquire) {
+            return Err(quitting());
+        }
+        let _asking = Asking::new(shared);
         let (tx, rx) = async_channel::bounded(1);
-        let outlet = self.outlet.clone();
+        let outlet = shared.outlet.clone();
         let reply = Reply::new(move |reply: CtlReply| {
             outlet.send(Note::Answer(Box::new(move |revision| {
                 let _ = tx.try_send(reply.answer(revision));
             })));
         });
-        if !self.events.send(Event::Ctl(request, reply)) {
-            return Err(Failure::new(ApiError::Other, "Prostir is quitting").into());
+        if !shared.events.send(Event::Ctl(request, reply)) {
+            return Err(quitting());
         }
-        let answer = rx
-            .recv()
-            .await
-            .map_err(|_| BusError::from(Failure::new(ApiError::Other, "Prostir is quitting")))?;
+        let answer = rx.recv().await.map_err(|_| quitting())?;
         match answer.failure() {
             Some(failure) => Err(failure.into()),
             None => Ok(answer),
@@ -297,13 +455,16 @@ impl Object {
 impl Object {
     /// Any request, as JSON; the answer as JSON (a failure is a D-Bus error).
     async fn call(&self, request_json: String) -> Result<String, BusError> {
+        if request_json.len() > MAX_REQUEST {
+            return Err(Failure::new(ApiError::BadArgument, "a request over 64 KiB").into());
+        }
         let request = Request::from_json(&request_json)?;
         Ok(self.ask(request).await?.to_json())
     }
 
     /// The whole state: its revision and its JSON.
     fn get_state(&self) -> (u32, String) {
-        self.shown.lock().unwrap().clone()
+        self.shared.shown.lock().unwrap().clone()
     }
 
     async fn recenter(&self) -> Result<(), BusError> {
@@ -458,7 +619,7 @@ impl Client {
     /// The session bus, with a reply waited for `timeout` at most.
     pub fn connect(timeout: Duration) -> Result<Self, ClientError> {
         session()
-            .map(|b| b.method_timeout(timeout))
+            .map(|(b, _)| b.method_timeout(timeout))
             .and_then(|b| b.build())
             .map(|bus| Self { bus })
             .map_err(|e| ClientError::NoBus(e.to_string()))
@@ -550,6 +711,12 @@ impl CtlClient for Client {
         let messages = zbus::blocking::MessageIterator::from(&self.bus);
         dbus.add_match_rule(ours).map_err(broken)?;
         dbus.add_match_rule(owner).map_err(broken)?;
+        // Who has the name: only its signals are Prostir's (any program may send a
+        // signal of this interface).
+        let mut prostir: Option<String> = dbus
+            .get_name_owner(BUS_NAME.try_into().expect("a valid name"))
+            .ok()
+            .map(|o| o.to_string());
         for msg in messages {
             let msg = msg.map_err(broken)?;
             let header = msg.header();
@@ -557,16 +724,35 @@ impl CtlClient for Client {
                 continue;
             }
             let member = header.member().map(|m| m.to_string()).unwrap_or_default();
+            let sender = header.sender().map(|s| s.to_string());
             let body = msg.body();
+            if member == "NameOwnerChanged" {
+                let Ok((name, _, new)) = body.deserialize::<(String, String, String)>() else {
+                    continue;
+                };
+                if name != BUS_NAME || sender.as_deref() != Some("org.freedesktop.DBus") {
+                    continue;
+                }
+                let seen = if new.is_empty() {
+                    prostir = None;
+                    each(Watched::Vanished)
+                } else {
+                    prostir = Some(new);
+                    // What it shows from the start: it may say nothing for a while.
+                    each(Watched::Appeared)
+                        && self.state().map_or(true, |(revision, json)| {
+                            each(Watched::State(revision, json))
+                        })
+                };
+                if !seen {
+                    return Ok(());
+                }
+                continue;
+            }
+            if prostir.is_none() || sender != prostir {
+                continue;
+            }
             let seen = match member.as_str() {
-                "NameOwnerChanged" => match body.deserialize::<(String, String, String)>() {
-                    Ok((name, _, new)) if name == BUS_NAME => Some(if new.is_empty() {
-                        Watched::Vanished
-                    } else {
-                        Watched::Appeared
-                    }),
-                    _ => None,
-                },
                 "StateChanged" => body
                     .deserialize::<(u32, String)>()
                     .ok()

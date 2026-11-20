@@ -331,9 +331,13 @@ fn typed_methods_from_busctl() {
             .stdin(Stdio::null())
             .output()
     };
-    let Ok(recenter) = busctl(&["Recenter"]) else {
-        eprintln!("no busctl: the typed methods are not tried");
-        return;
+    let recenter = match busctl(&["Recenter"]) {
+        Ok(r) => r,
+        Err(e) if std::env::var_os("CI").is_some() => panic!("no busctl in CI: {e}"),
+        Err(e) => {
+            eprintln!("\n*** no busctl ({e}): the typed methods are SKIPPED ***\n");
+            return;
+        }
     };
     assert!(recenter.status.success(), "{recenter:?}");
     let distance = busctl(&["Distance", "n", "-2"]).unwrap();
@@ -520,4 +524,170 @@ fn a_command_that_does_not_fit_is_refused() {
     let unknown = pc.ctl(&["cinema", "on", "--json"]).unwrap();
     assert_eq!(unknown.code, 1, "{unknown:?}");
     assert_eq!(unknown.json()["error"], "Unsupported");
+}
+
+/// The session bus restarted: the PC app takes its name again and answers as before.
+#[test]
+fn the_api_comes_back_after_the_bus_restarts() {
+    let (_dir, mut pc, _keys, _headset) = session("api-bus-again", &Options::default());
+    if !pc.restart_bus() {
+        return;
+    }
+    pc.wait_log(
+        SOON,
+        "local API on D-Bus as io.github.OlexiyOdarchuk.Prostir again",
+    );
+    let status = pc.ctl(&["status", "--json"]).unwrap();
+    assert_eq!(status.code, 0, "{status:?}");
+    assert_eq!(status.json()["pc"]["phase"], "live");
+    let done = pc.ctl(&["recenter"]).unwrap();
+    assert_eq!(done.code, 0, "{done:?}");
+}
+
+/// Without a headset the set kept for the next one stands `kept`, and is changed there.
+#[test]
+fn the_kept_set_without_a_headset() {
+    let dir = TestDir::new("api-kept");
+    dir.save_monitors(TWO_MONITORS);
+    let pc = Pc::start(&dir, &Options::default());
+    let Some(bus) = &pc.bus else {
+        return;
+    };
+    let bus = bus.connect();
+    let (_, state) = get_state(&bus);
+    assert_eq!(state.pc.phase, prostir_api::Phase::Idle);
+    assert_eq!(state.displays.len(), 2);
+    assert!(
+        state
+            .displays
+            .iter()
+            .all(|d| d.state == prostir_api::DisplayState::Kept),
+        "{:?}",
+        state.displays
+    );
+    let first = state.displays[0].id;
+    let scale = *state.limits.scales.iter().find(|s| **s != 100).unwrap();
+    let rescaled = pc
+        .ctl(&["--json", "monitor", "retry", &first.to_string()])
+        .unwrap();
+    assert_eq!(rescaled.code, 0, "{rescaled:?}");
+    let unknown = pc.ctl(&["--json", "monitor", "retry", "99999"]).unwrap();
+    assert_eq!(unknown.json()["error"], "UnknownDisplay");
+    let reply: String = call(
+        &bus,
+        "Call",
+        &(format!(
+            r#"{{"request":"set_scale","id":{first},"scale":{scale}}}"#
+        ),),
+    )
+    .unwrap()
+    .body()
+    .deserialize()
+    .unwrap();
+    assert!(reply.contains("revision"), "{reply}");
+    let (_, state) = get_state(&bus);
+    assert_eq!(state.display(first).unwrap().mode.scale, scale);
+    let place = call(
+        &bus,
+        "Call",
+        &(r#"{"request":"place","id":1,"x":0,"y":0}"#,),
+    )
+    .unwrap_err();
+    assert_eq!(error_name(&place), "Unsupported");
+}
+
+/// Monitors placed from the PC (a map in the settings window): another scale keeps
+/// the monitor's id, and a monitor moved above the row gets a row of its own there.
+#[test]
+fn monitors_scaled_and_placed_from_the_pc() {
+    let (_dir, pc, _keys, mut headset) = session("api-place", &Options::default());
+    let Some(bus) = &pc.bus else {
+        return;
+    };
+    let bus = bus.connect();
+    let started = Instant::now();
+    let state = loop {
+        let (_, state) = get_state(&bus);
+        let placed = state.displays.iter().all(|d| d.desk.is_some());
+        if (placed && state.displays.len() == 2) || started.elapsed() > SOON {
+            break state;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let (a, b) = (state.displays[0].clone(), state.displays[1].clone());
+    let (da, db) = (a.desk.unwrap(), b.desk.unwrap());
+    assert_eq!(da.y.min(db.y), da.y.min(db.y), "one row");
+    // B above A.
+    let request = format!(
+        r#"{{"request":"place","id":{},"x":{},"y":{}}}"#,
+        b.id,
+        da.x,
+        da.y - 2 * db.h as i32
+    );
+    let reply: String = call(&bus, "Call", &(request.as_str(),))
+        .unwrap()
+        .body()
+        .deserialize()
+        .unwrap();
+    assert!(reply.contains("revision"), "{reply}");
+    let started = Instant::now();
+    loop {
+        let (_, state) = get_state(&bus);
+        let (na, nb) = (
+            state.display(a.id).unwrap().desk.unwrap(),
+            state.display(b.id).unwrap().desk.unwrap(),
+        );
+        if nb.y + nb.h as i32 <= na.y {
+            break;
+        }
+        assert!(started.elapsed() < SOON, "not above: {na:?} and {nb:?}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Another scale: the same monitor, made anew at it.
+    let scale = *state
+        .limits
+        .scales
+        .iter()
+        .find(|s| **s != a.mode.scale)
+        .expect("another scale");
+    let request = format!(r#"{{"request":"set_scale","id":{},"scale":{scale}}}"#, a.id);
+    call(&bus, "Call", &(request.as_str(),)).unwrap();
+    let started = Instant::now();
+    loop {
+        let (_, state) = get_state(&bus);
+        let d = state.display(a.id).expect("the same id");
+        if d.mode.scale == scale && d.state == prostir_api::DisplayState::Running {
+            break;
+        }
+        assert!(started.elapsed() < START, "{d:?}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    headset
+        .wait(SOON, "the new scale", |v| {
+            v.display(prostir_proto::state::DisplayId(a.id))
+                .is_some_and(|d| d.mode.scale == scale)
+        })
+        .unwrap();
+    let bad = call(
+        &bus,
+        "Call",
+        &(format!(r#"{{"request":"set_scale","id":{},"scale":30}}"#, a.id).as_str(),),
+    )
+    .unwrap_err();
+    assert_eq!(error_name(&bad), "BadSize");
+}
+
+/// A request over 64 KiB is refused unread.
+#[test]
+fn a_huge_request_is_refused() {
+    let dir = TestDir::new("api-huge");
+    dir.save_monitors(TWO_MONITORS);
+    let pc = Pc::start(&dir, &Options::default());
+    let Some(bus) = &pc.bus else {
+        return;
+    };
+    let bus = bus.connect();
+    let huge = format!(r#"{{"request":"profile","name":"{}"}}"#, "x".repeat(70_000));
+    let refused = call(&bus, "Call", &(huge.as_str(),)).unwrap_err();
+    assert_eq!(error_name(&refused), "BadArgument");
 }

@@ -107,6 +107,9 @@ struct Args {
     /// Do not run `adb reverse` for USB connections.
     #[arg(long)]
     no_adb: bool,
+    /// Open the settings window once Prostir is ready (`prostir open` starts it so).
+    #[arg(long)]
+    open_settings: bool,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
@@ -965,7 +968,6 @@ fn serve(args: Args) -> Result<()> {
     usage::announce_once(store.wanted().count);
     // Monitors from a run that crashed: without the headset nobody sees their windows.
     platform::clean_up_after_crash();
-    gstreamer::init().context("GStreamer init")?;
 
     let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, args.port))
         .with_context(|| format!("cannot listen on port {}", args.port))?;
@@ -1021,6 +1023,14 @@ fn serve(args: Args) -> Result<()> {
     // The local API has a state to give from the moment it is on the bus.
     brain.publish_api();
     let api = platform::local_api::serve(brain.events.clone(), brain.api.clone(), notes);
+    // On the bus as early as the state can be: GStreamer's start (a scan of its
+    // plugins, the first time) comes after.
+    gstreamer::init().context("GStreamer init")?;
+    if args.open_settings
+        && let Err(e) = local::open_settings()
+    {
+        warn!("{e}");
+    }
     brain.run(&received);
     if let Some(api) = api {
         api.finish();

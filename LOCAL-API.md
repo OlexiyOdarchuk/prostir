@@ -36,11 +36,20 @@ object a line; nothing else of this document changes.
 Prostir is not D-Bus activatable: when it is not running, calls fail with
 `org.freedesktop.DBus.Error.ServiceUnknown` at once. `prostir open` starts it.
 
+If the session bus goes away while Prostir runs (dbus-daemon restarted), Prostir
+takes its name again once the bus is back, trying after 1 s, then after pauses that
+double up to a minute; meanwhile signals are not sent. Prostir connects the bus's unix
+socket itself, so an idle Prostir does not wake at all; with a bus address that is no
+unix socket (`tcp:`, which a desktop session does not use) zbus connects instead, a
+thread of its own then wakes twice a second while idle, and the log says so once.
+Without a session bus at the start, Prostir runs without the local API (the log says
+so) and does not look for one later.
+
 ## Methods
 
 | Method | In | Out | What it does |
 |---|---|---|---|
-| `Call` | `s request_json` | `s answer_json` | any [request](#requests); the window and `ctl` use it |
+| `Call` | `s request_json` | `s answer_json` | any [request](#requests), at most 64 KiB; the window and `ctl` use it |
 | `GetState` | | `u revision, s state_json` | the whole [state](#state) |
 | `Recenter`, `LineUp`, `ShowMouse`, `ResetArrangement` | | | commands for the headset |
 | `Profile` | `s name` | | |
@@ -96,8 +105,14 @@ the PC noticed the old connection was lost gets `HeadsetDisconnected` (`other`) 
 
 **Order.** An answer goes out after the `StateChanged` that shows what it changed: a
 client that has the answer has the state with the change too (its revision is the
-answer's `revision` or later). `GetState` always has the latest state, also while a
-`StateChanged` waits for its turn under the limit of 10 a second.
+answer's `revision` or later). That holds for a command for the headset too: what the
+headset changed and said just before it answered (its "No limits", say) is in that
+state. While a `StateChanged` waits for its turn under the limit of 10 a second, the
+answers and headset signals after it wait behind it, so the order and the limit both
+hold. `GetState` always has the latest state, also while a `StateChanged` waits.
+
+**Revisions** count from 1 each time Prostir starts: after it restarts (the name
+vanished and came back) a smaller revision is a new state, not an old one.
 
 To follow the service coming and going, watch `NameOwnerChanged` for the name: subscribe
 to the signals by path and interface (not by sender), so the subscription holds before
@@ -126,7 +141,7 @@ The D-Bus error name is `io.github.OlexiyOdarchuk.Prostir1.Error.` and one of:
 | `NotConnected` | no headset is connected (for a command for the headset) |
 | `TimedOut` | the headset did not answer within 30 s |
 | `Disconnected` | the headset left before it answered |
-| `Other` | anything else; a client reads a name it does not know as this |
+| `Other` | anything else, also "Prostir is quitting" for a request that comes while it quits; a client reads a name it does not know as this |
 
 The first fourteen are the headset protocol's error codes (`PROTOCOL.md`), by name.
 
@@ -143,7 +158,9 @@ ignored.
 
 ### Commands for the headset
 
-Answered when the headset answers (30 s at most). They go to the **main** headset. A
+Answered when the headset answers (30 s at most). Arguments the headset protocol
+cannot carry (a profile's name over 64 bytes) are refused with `BadArgument` before
+anything goes to the headset. They go to the **main** headset. A
 headset whose line in `settings.txt` makes it a guest is someone else's headset: while
 only guests are connected, commands are refused with `NotAllowed`. Without a headset:
 `NotConnected`. A headset that does not take commands: `Unsupported`.
@@ -160,19 +177,21 @@ only guests are connected, commands are refused with `NotAllowed`. Without a hea
 
 Answered in the same pass of Prostir's control loop that made the change, right after
 the `StateChanged` that shows it. While no headset is connected and no monitors
-exist, monitor requests change the set kept for the next headset (the displays stand
-`absent` in the state).
+exist, monitor requests change the set kept for the next headset (its monitors stand
+`kept` in the state).
 
 | `request` | Arguments | |
 |---|---|---|
 | `add_monitor` | `w`, `h` (pixels), `scale` (percent, default 100) | answers `id`; the monitor stands `starting` until it runs, `failed` if it could not start (it keeps its place) |
 | `remove_monitor` | `id` | `LastDisplay` for the last one |
-| `retry_monitor` | `id` | a failed monitor tried again now |
+| `retry_monitor` | `id` | a failed monitor tried again now; `UnknownDisplay` for no such monitor |
 | `show_physical` | `id`, `shown` (bool) | a display of the PC in the headset |
+| `set_scale` | `id`, `scale` (percent) | another scale for a monitor: its output is made anew under the same name and id (it stands `starting` meanwhile); `BadSize` for a scale the desktop does not give its size |
+| `place` | `id`, `x`, `y` | moves a display on the desktop to about `x`, `y` (its top-left corner, logical pixels): into the row it is then in, between its neighbours left and right, or a row of its own above or under the others; the desktop's arrangement then lines it up. Only while the monitors are on the desktop (`Unsupported` otherwise). The main headset's next arrangement (when the person moves a monitor in the headset) replaces it; the headset's own 3D arrangement is not changed |
 | `set_primary` | `id` | the desktop's primary display |
 | `set_quality` | `mbit` (5 to 100) | per monitor |
 | `set_sharp` | `on` | the slower encoder preset for clearer small text |
-| `set_codec` | `codec` (`h264`, `h265`, `auto`), `cpu` (bool, default false) | `auto`: H.265 where the PC and the headset can |
+| `set_codec` | `codec` (`h264`, `h265`, `auto`), `cpu` (bool, default false) | `auto` is the same as `h265` (H.265 where the PC and every headset can, else H.264), and the state shows it as `h265` |
 | `sound_to_headset` | `on` | the PC's sound in the headset, or on the PC |
 | `set_counting` | `on` | count this PC among users |
 | `autostart` | `on` | start with the session; `Unsupported` where it is not set from here (Hyprland) |
@@ -192,10 +211,8 @@ brings them:
 | `pair_new_headset` | | opens pairing for a while, answers `seconds_left` (step 6.8; until then a new headset pairs whenever it asks) |
 | `stop_pairing` | | (step 6.8) |
 | `pairing_code` | `code` | the code a headset shows, typed in the window (step 6.8) |
-| `set_scale` | `id`, `scale` | another scale for a monitor (with the desktop worker, step 6.4) |
-| `place` | `id`, `x`, `y` | moves a display on the desktop (the main headset's arrangement places them now) |
-| `volume` | `level` | the headset's volume (with the sound step) |
-| `set_mic` | `on` | always: the headset microphone's switch is the headset user's, changed only in the headset |
+| `volume` | `level` | the headset's volume from the PC (step 6.6, sound) |
+| `set_mic` | `on` | always: the headset microphone's switch is the headset user's, changed only in the headset; the state shows it (`session.mic_on`) |
 
 ## Answers
 
@@ -291,12 +308,12 @@ change older clients would misread.
 | `displays[].builtin`, `shown` | a display of the PC: the laptop's panel; shown in the headset |
 | `displays[].mode` | the stream's size and the scale in percent |
 | `displays[].desk` | where it is on the desktop, in logical pixels, while it is there |
-| `displays[].state` | `starting`, `running`, `failed` (see `failure`; it keeps its place and is tried again), `absent` (not on the desktop now: a display of the PC not connected, or every display while there are no monitors) |
+| `displays[].state` | `starting`, `running`, `failed` (see `failure`; it keeps its place and is tried again), `absent` (a display of the PC that is not connected now: the lid closed, the cable out), `kept` (a monitor of the set kept for the next headset, while no monitors are on the desktop) |
 | `primary` | the desktop's primary display |
 | `limits` | for the main headset while one is connected, else what any headset gets: `sizes` to offer `[w, h]`, `scales` (percent), `displays_max` (virtual monitors), `physical_max`, `streams_max`, `min` and `max` size |
 | `encoding` | as chosen: `bitrate` (Mbit/s per monitor), `sharp`, `codec` (`h264`, `h265`, `av1`), `cpu`; `using`: what it encodes with now, while there are monitors |
-| `sound` | `to_headset`; `volume` (the main headset's, while the PC's volume follows it); `mic_on` (the switch of the headset whose microphone the PC takes); `mic` (`off`, `ready`, `failed`: the PC's end, the virtual microphone programs record from) and `mic_failure` |
-| `pairing` | while the PC is pairing: `pc_code` (the code to type in the headset, while the PC shows one), and from step 6.8 `seconds_left`, `seconds_total`, `code_for` (a headset waiting for its code to be typed here), `last` (`{"paired": {"name": …}}`, `"wrong"`) |
+| `sound` | `to_headset`; `volume`: the main headset's volume (`level` 0 to 100, `muted`), while the PC's volume device follows it (one volume for the PC's slider and the headset's buttons), else `null`; `mic_on` (the switch of the headset whose microphone the PC takes, read only: it is changed in the headset); `mic` (`off`, `ready`, `failed`: the PC's end, the virtual microphone programs record from) and `mic_failure` |
+| `pairing` | while the PC is pairing: `pc_code` (the code to type in the headset, while the PC shows one), and from step 6.8 `seconds_left`, `seconds_total` (`0`: pairing has no time limit, as now, where a new headset pairs whenever it asks), `code_for` (a headset waiting for its code to be typed here), `last` (`{"paired": {"name": …}}`, `"wrong"`; anything else reads as other) |
 | `nearby` | headsets that asked for this PC recently, by name (from step 6.8) |
 | `counting` | this PC counts among users |
 | `problems` | what is wrong now: `code` (an error's name) and `text` in the PC's language |
@@ -342,7 +359,10 @@ prostir ctl quit
 
 Without `--json`: one line for people (in the PC's language). With `--json`: one JSON
 object, the answer, the state (`status`), the list (`monitor list`, `headsets`), or a
-failure as `{"error": …, "text": …}`; `watch` one object a line.
+failure, always as `{"error": NAME, "text": …}`: the error names above, and
+`NotRunning` and `NoBus` of `ctl` itself; `watch` one object a line. `watch` takes
+signals only from the program that has the name, and gives the whole state again each
+time Prostir comes back on the bus.
 
 | Exit code | |
 |---|---|
@@ -353,14 +373,17 @@ failure as `{"error": …, "text": …}`; `watch` one object a line.
 | 64 | wrong arguments |
 
 `ctl status` when Prostir is not running does not start it: it says `Not running`
-(`{"running": false}`) and exits with 2.
+(`{"error": "NotRunning", "text": …, "running": false}`) and exits with 2.
 
 ## `prostir open` and the settings window
 
 `prostir` without a command is `prostir serve`, as in 0.1 (`exec-once = prostir`, a
-terminal). The menu entry runs `prostir open`: it starts `prostir serve` on its own
-when Prostir is not running (and waits up to 10 s for it on the bus), then asks it for
-the settings window (`ShowSettings`). Prostir starts `prostir-settings` from next to
+terminal). The menu entry runs `prostir open`. When Prostir runs, it asks it for the
+settings window (`ShowSettings`). When it does not, it starts `prostir serve
+--open-settings` on its own (its log goes where `open`'s errors go: the journal, when
+the desktop started it), which opens the window once it is on the bus; `open` waits
+for that as long as the new Prostir lives, and says so when it ends first. Prostir
+takes its name on the bus before it starts GStreamer, so this is quick. Prostir starts `prostir-settings` from next to
 its own program, else from `PATH`; without it, Prostir still runs and `open` says the
 window is not installed. The tray has the same item ("Settings…").
 

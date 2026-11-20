@@ -14,7 +14,7 @@ use std::sync::Arc;
 use log::{info, warn};
 use prostir_proto::Codec;
 use prostir_proto::request::{Asked, Command, Request as HeadsetRequest};
-use prostir_proto::state::{self as wire, DisplayId, HeadsetCaps, Limits, Mode, caps, perms};
+use prostir_proto::state::{self as wire, DisplayId, HeadsetCaps, Limits, Mode, caps};
 
 use crate::api::{self, ApiError, CodecChoice, CtlReply, Failure, Reply, Request};
 use crate::i18n::t;
@@ -95,8 +95,21 @@ fn unsupported(text: &str) -> CtlReply {
 }
 
 /// The failure for `e` (a `UserError` somewhere in its chain names it).
+/// The failure for `e`: its name, and the text of the `UserError` in it (in the PC's
+/// language); what lay under it (a tool's output, say) goes to the log only.
 fn failed(e: &anyhow::Error) -> CtlReply {
-    CtlReply::failed(api::of_code(errors::code_of(e)), format!("{e:#}"))
+    warn!("local API: {e:#}");
+    let text = e.downcast_ref::<errors::UserError>().map_or_else(
+        || t("Не вдалося", "It did not work").to_owned(),
+        |u| u.to_string(),
+    );
+    CtlReply::failed(api::of_code(errors::code_of(e)), text)
+}
+
+/// The PC's name, as headsets list it: looked up once.
+fn hostname() -> &'static str {
+    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NAME.get_or_init(platform::hostname)
 }
 
 impl Brain {
@@ -165,7 +178,8 @@ impl Brain {
                     .retry(ScreenId::saved(n))
                     .map_or_else(|e| failed(&e), |()| done()),
                 // Every monitor is made anew for the next headset anyway.
-                None => done(),
+                None if self.store.screens().specs.contains_key(&ScreenId::saved(n)) => done(),
+                None => failed(&anyhow::Error::new(errors::UserError::UnknownDisplay)),
             },
             Request::ShowPhysical { id: n, shown } => {
                 if self.displays.is_some() {
@@ -269,9 +283,24 @@ impl Brain {
                     "A new headset pairs by itself when it asks to",
                 ))
             }
-            Request::SetScale { .. } | Request::Place { .. } | Request::Volume { .. } => {
-                unsupported(t("Цей ПК поки цього не вміє", "This PC cannot do this yet"))
-            }
+            Request::SetScale { id: n, scale } => self.rescale(ScreenId::saved(n), scale),
+            Request::Place { id: n, x, y } => match self.displays.as_mut() {
+                Some(d) => match d.move_to(ScreenId::saved(n), x, y) {
+                    Ok(()) => {
+                        crate::keep_screens(&mut self.store, d, false);
+                        done()
+                    }
+                    Err(e) => failed(&e),
+                },
+                None => unsupported(t(
+                    "Монітори розставляються, поки вони є на стільниці",
+                    "Monitors are placed while they are on the desktop",
+                )),
+            },
+            Request::Volume { .. } => unsupported(t(
+                "Гучність шолома з ПК буде з кроком звуку",
+                "The headset's volume from the PC comes with the sound step",
+            )),
             // Handled above.
             Request::Recenter
             | Request::LineUp
@@ -308,8 +337,35 @@ impl Brain {
             limits: &limits,
             access: wire::Access::MAIN,
         };
-        let outcome = requests::handle(request, displays, &mut self.store, &asker);
-        CtlReply::of_outcome(&outcome)
+        match requests::handle_checked(request, displays, &mut self.store, &asker) {
+            Ok(outcome) => CtlReply::of_outcome(&outcome),
+            Err(e) => failed(&e),
+        }
+    }
+
+    /// Another scale for monitor `id`: made anew at it while there are monitors, else
+    /// kept for the next headset.
+    fn rescale(&mut self, id: ScreenId, scale: u16) -> CtlReply {
+        if let Some(d) = self.displays.as_mut() {
+            let result = d.rescale(id, scale);
+            crate::keep_screens(&mut self.store, d, true);
+            return result.map_or_else(|e| failed(&e), |()| done());
+        }
+        let limits = pc_limits(self.store.wanted().codec);
+        if !limits.scales.contains(&scale) {
+            let spec = self.store.screens().specs.get(&id).cloned();
+            let (w, h) = spec.map_or((0, 0), |s| (s.width, s.height));
+            return failed(&anyhow::Error::new(errors::UserError::BadSize {
+                w,
+                h,
+                scale,
+            }));
+        }
+        self.change_saved(id, |set, key| {
+            let spec = set.specs.get_mut(&key)?;
+            spec.scale = f64::from(scale) / 100.0;
+            Some(())
+        })
     }
 
     /// The codec, and whether on the CPU, for now and later.
@@ -594,9 +650,10 @@ impl Brain {
             }
         }
         let mic_session = self
-            .sessions
-            .values()
-            .find(|s| s.api_session().mic_on && s.configured.may(perms::MIC));
+            .roles
+            .mic
+            .and_then(|key| self.sessions.get(&key))
+            .filter(|s| s.mic_on());
         let mic = self
             .displays
             .as_ref()
@@ -638,7 +695,7 @@ impl Brain {
         api::State {
             v: api::STATE_VERSION,
             pc: api::Pc {
-                name: platform::hostname(),
+                name: hostname().to_owned(),
                 app: prostir_proto::app_version(env!("CARGO_PKG_VERSION")),
                 desktop: self
                     .displays
@@ -721,7 +778,7 @@ impl Brain {
                             h: spec.height,
                             scale: spec.percent(),
                         },
-                        state: api::DisplayState::Absent,
+                        state: api::DisplayState::Kept,
                         ..api::Display::default()
                     });
                 }
@@ -830,8 +887,10 @@ pub fn open_settings() -> Result<(), Failure> {
     Ok(())
 }
 
-/// Starts `prostir serve` on its own, apart from this terminal (`prostir open`).
-pub fn start_detached() -> std::io::Result<()> {
+/// Starts `prostir serve --open-settings` on its own, apart from this terminal
+/// (`prostir open`). What it says goes where this program's errors go (the journal,
+/// when the desktop started it).
+pub fn start_detached() -> std::io::Result<std::process::Child> {
     use std::os::unix::process::CommandExt;
     // A wrapper (Nix) names the program to start; else this very file.
     let exe = match std::env::var_os("PROSTIR_EXE").filter(|e| !e.is_empty()) {
@@ -840,10 +899,9 @@ pub fn start_detached() -> std::io::Result<()> {
     };
     let mut command = std::process::Command::new(exe);
     command
-        .arg("serve")
+        .args(["serve", "--open-settings"])
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stdout(std::process::Stdio::null());
     // SAFETY: setsid is async-signal-safe and touches nothing of the parent's.
     unsafe {
         command.pre_exec(|| {
@@ -851,7 +909,7 @@ pub fn start_detached() -> std::io::Result<()> {
             Ok(())
         });
     }
-    command.spawn().map(drop)
+    command.spawn()
 }
 
 #[cfg(test)]

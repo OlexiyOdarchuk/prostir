@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use log::info;
 use prostir_proto::Codec;
 use prostir_proto::request::{Outcome, Primary, Request};
-use prostir_proto::state::{Access, ErrorCode, HeadsetCaps, Limits, Mode, caps, perms};
+use prostir_proto::state::{Access, HeadsetCaps, Limits, Mode, caps, perms};
 
 use crate::displays::Displays;
 use crate::errors::{self, Counted, UserError};
@@ -49,11 +49,22 @@ pub fn handle(
     store: &mut Store,
     asker: &Asker,
 ) -> Outcome {
+    handle_checked(request, displays, store, asker).unwrap_or_else(|e| errors::outcome(&e))
+}
+
+/// As [`handle`], with a failure as the error itself (its `UserError` and what lay
+/// under it), for the PC's own requests.
+pub fn handle_checked(
+    request: Request,
+    displays: &mut Displays,
+    store: &mut Store,
+    asker: &Asker,
+) -> Result<Outcome> {
     if !asker.access.may(needs(&request)) {
         info!("the headset has no right to {request:?}");
-        return Outcome::failed(ErrorCode::NOT_ALLOWED, &UserError::NotAllowed.to_string());
+        bail!(UserError::NotAllowed);
     }
-    carry_out(request, displays, store, asker).unwrap_or_else(|e| errors::outcome(&e))
+    carry_out(request, displays, store, asker)
 }
 
 fn carry_out(
@@ -302,6 +313,7 @@ fn home_relative(path: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prostir_proto::state::ErrorCode;
 
     fn limits() -> Limits {
         crate::publish::limits(&Default::default(), &HeadsetCaps::default(), Codec::H264)

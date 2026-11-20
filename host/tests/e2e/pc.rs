@@ -175,8 +175,14 @@ impl Bus {
             .spawn();
         let mut daemon = match spawned {
             Ok(d) => d,
+            // CI installs it: there the tests of the local API must run.
+            Err(e) if std::env::var_os("CI").is_some() => {
+                panic!("no dbus-daemon ({e}), which CI installs for the local API's tests")
+            }
             Err(e) => {
-                eprintln!("no dbus-daemon ({e}): the tests of the local API are skipped");
+                eprintln!(
+                    "\n*** no dbus-daemon ({e}): the tests of the local API are SKIPPED ***\n"
+                );
                 return None;
             }
         };
@@ -338,6 +344,16 @@ impl Pc {
             pc.wait_log(Duration::from_secs(10), "local API on D-Bus as");
         }
         pc
+    }
+
+    /// Stops its session bus and starts another at the same address, as a session
+    /// bus restarted would be; `false` without one.
+    pub fn restart_bus(&mut self) -> bool {
+        if self.bus.take().is_none() {
+            return false;
+        }
+        self.bus = Bus::start(&self.run_dir);
+        self.bus.is_some()
     }
 
     /// Runs `prostir ctl ARGS` against this PC app; `None` without a session bus

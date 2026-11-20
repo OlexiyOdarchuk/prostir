@@ -40,7 +40,7 @@ lenient!(Phase: Idle, Live, Lingering);
 lenient!(ThemeMode: System, Light, Dark);
 lenient!(Role: Main, Guest);
 lenient!(DisplayKind: Virtual, Physical, Window);
-lenient!(DisplayState: Starting, Running, Failed, Absent);
+lenient!(DisplayState: Starting, Running, Failed, Absent, Kept);
 lenient!(Codec: H264, H265, Av1);
 lenient!(MicState: Off, Ready, Failed);
 
@@ -121,7 +121,7 @@ pub enum Request {
         id: u32,
         shown: bool,
     },
-    /// Another scale for a monitor (not yet: `Unsupported`).
+    /// Another scale for a monitor, percent: made anew at it, same id.
     SetScale {
         id: u32,
         scale: u16,
@@ -129,8 +129,9 @@ pub enum Request {
     SetPrimary {
         id: u32,
     },
-    /// Moves a display on the desktop (not yet: `Unsupported`; the main headset's
-    /// arrangement places them).
+    /// Moves a display on the desktop to about `x`, `y` (its top-left corner, logical
+    /// pixels); the desktop's arrangement lines it up. While the monitors are on the
+    /// desktop; the main headset's next arrangement replaces it.
     Place {
         id: u32,
         x: i32,
@@ -154,7 +155,7 @@ pub enum Request {
     SoundToHeadset {
         on: bool,
     },
-    /// The headset's volume (not yet: `Unsupported`).
+    /// The headset's volume (with step 6.6; until then `Unsupported`).
     Volume {
         level: u8,
     },
@@ -712,9 +713,11 @@ pub enum DisplayState {
     Running,
     /// Could not start; see `failure`. It keeps its place and is tried again.
     Failed,
-    /// Not on the desktop now: a display of the PC not connected, or every display
-    /// while there are no monitors (the set kept for the next headset).
+    /// A display of the PC that is not connected now (the lid closed, the cable out).
     Absent,
+    /// A monitor of the set kept for the next headset, while there are no monitors on
+    /// the desktop (no headset, or it was taken off).
+    Kept,
     Other,
 }
 
@@ -823,7 +826,7 @@ pub enum MicState {
 pub struct Sound {
     /// The PC's sound plays in the headset.
     pub to_headset: bool,
-    /// The main headset's volume, while one shares it.
+    /// The main headset's volume, while the PC's volume device follows it.
     pub volume: Option<Volume>,
     /// The microphone switch of the headset whose microphone the PC takes is on.
     pub mic_on: bool,
@@ -845,7 +848,7 @@ pub struct Pairing {
     /// Seconds until the pairing window closes, when this state was made (from step
     /// 6.8; 0 until then).
     pub seconds_left: u32,
-    /// How long it was opened for.
+    /// How long it was opened for; 0: no time limit.
     pub seconds_total: u32,
     /// A code made here, to type in the headset, while the PC shows one.
     pub pc_code: Option<String>,

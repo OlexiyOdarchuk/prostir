@@ -7,7 +7,7 @@
 //! a line for `watch`). Exit codes: [`DONE`], [`FAILED`], [`NOT_RUNNING`],
 //! [`TIMED_OUT`], [`USAGE`].
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::api::{
     self, Answer, ApiError, CALL_SECONDS, CodecChoice, DisplayState, Failure, Request, State,
@@ -354,9 +354,10 @@ pub fn run(args: &[String], client: Result<&dyn CtlClient, ClientError>, io: &mu
         Ctl::Status | Ctl::Monitors | Ctl::Headsets | Ctl::AutostartStatus => {
             match client.state() {
                 Ok((revision, text)) => show_state(&ctl, revision, &text, json, io),
-                Err(ClientError::NotRunning) if ctl == Ctl::Status => {
+                Err(e @ ClientError::NotRunning) if ctl == Ctl::Status => {
                     if json {
-                        let _ = writeln!(io.out, r#"{{"running":false}}"#);
+                        let (_, name, text) = what_failed(&e, false);
+                        let _ = writeln!(io.out, "{}", error_json(name, &text, Some(false)));
                     } else {
                         let _ = writeln!(io.out, "{}", t("Не працює", "Not running"));
                     }
@@ -371,39 +372,51 @@ pub fn run(args: &[String], client: Result<&dyn CtlClient, ClientError>, io: &mu
 
 /// The exit code for `e`, saying why.
 fn failed(e: &ClientError, json: bool, io: &mut Output, for_headset: bool) -> i32 {
-    let (code, text) = match e {
+    let (code, name, text) = what_failed(e, for_headset);
+    if json {
+        let _ = writeln!(io.out, "{}", error_json(name, &text, None));
+    }
+    let _ = writeln!(io.err, "prostir ctl: {name}: {text}");
+    code
+}
+
+/// The exit code, the error's name and its text for `e`.
+fn what_failed(e: &ClientError, for_headset: bool) -> (i32, &'static str, String) {
+    match e {
         ClientError::NoBus(why) => (
             NOT_RUNNING,
+            "NoBus",
             format!("{}: {why}", t("Немає сеансової шини", "No session bus")),
         ),
         ClientError::NotRunning => (
             NOT_RUNNING,
+            "NotRunning",
             t("Prostir не працює", "Prostir is not running").to_owned(),
         ),
         ClientError::TimedOut => (
             TIMED_OUT,
+            "TimedOut",
             t("Немає відповіді вчасно", "No answer in time").to_owned(),
         ),
-        ClientError::Broken(why) => (FAILED, why.clone()),
+        ClientError::Broken(why) => (FAILED, ApiError::Other.name(), why.clone()),
         ClientError::Refused(f) => {
             let code = match f.error {
                 ApiError::TimedOut => TIMED_OUT,
                 ApiError::NotConnected if for_headset => NOT_RUNNING,
                 _ => FAILED,
             };
-            if json {
-                let answer = Answer {
-                    error: Some(f.error),
-                    text: Some(f.text.clone()),
-                    ..Answer::default()
-                };
-                let _ = writeln!(io.out, "{}", answer.to_json());
-            }
-            (code, f.to_string())
+            (code, f.error.name(), f.text.clone())
         }
-    };
-    let _ = writeln!(io.err, "prostir ctl: {text}");
-    code
+    }
+}
+
+/// `{"error": name, "text": text}`, with `running` where it says so.
+fn error_json(name: &str, text: &str, running: Option<bool>) -> String {
+    let mut value = serde_json::json!({ "error": name, "text": text });
+    if let Some(running) = running {
+        value["running"] = running.into();
+    }
+    value.to_string()
 }
 
 /// The line for people when a request was done.
@@ -514,7 +527,8 @@ fn display_line(d: &api::Display, primary: Option<u32>) -> String {
         DisplayState::Starting => t("запускається", "starting"),
         DisplayState::Running => t("працює", "running"),
         DisplayState::Failed => t("не вдалося", "failed"),
-        DisplayState::Absent => t("немає", "absent"),
+        DisplayState::Absent => t("не під'єднано", "not connected"),
+        DisplayState::Kept => t("чекає на шолом", "kept for the headset"),
         DisplayState::Other => "",
     };
     let mut line = format!(
@@ -639,22 +653,32 @@ fn event_line(event: &api::Event) -> Option<String> {
     })
 }
 
-/// `prostir open` (the menu entry): the settings window, with Prostir started first
-/// if it is not running. `start` starts it; the window comes from Prostir.
-pub fn open(client: &dyn CtlClient, start: &dyn Fn() -> std::io::Result<()>) -> i32 {
+/// `prostir open` (the menu entry): the settings window, from Prostir. When Prostir
+/// is not running, `start` starts it (`prostir serve --open-settings`, which opens the
+/// window itself once it is on the bus), and this waits for as long as it lives and
+/// is not on the bus yet.
+pub fn open(
+    client: &dyn CtlClient,
+    start: &dyn Fn() -> std::io::Result<std::process::Child>,
+) -> i32 {
     if !client.running() {
-        if let Err(e) = start() {
-            eprintln!("prostir open: {e}");
-            return NOT_RUNNING;
-        }
-        let until = Instant::now() + Duration::from_secs(10);
-        while !client.running() {
-            if Instant::now() >= until {
+        let mut child = match start() {
+            Ok(child) => child,
+            Err(e) => {
+                eprintln!("prostir open: {e}");
+                return NOT_RUNNING;
+            }
+        };
+        loop {
+            if client.running() {
+                return DONE;
+            }
+            if let Ok(Some(status)) = child.try_wait() {
                 eprintln!(
-                    "prostir open: {}",
+                    "prostir open: {} ({status})",
                     t(
-                        "Prostir не запустився за 10 с",
-                        "Prostir did not start within 10 s"
+                        "Prostir завершився, не запустившись",
+                        "Prostir ended before it started"
                     )
                 );
                 return NOT_RUNNING;
@@ -900,10 +924,7 @@ mod tests {
             code, NOT_RUNNING,
             "no headset for a command for the headset"
         );
-        assert_eq!(
-            out.trim(),
-            r#"{"error":"NotConnected","text":"why","revision":0}"#
-        );
+        assert_eq!(out.trim(), r#"{"error":"NotConnected","text":"why"}"#);
         let not_connected = Fake::answering(refused(ApiError::NotConnected));
         assert_eq!(ctl("quality 30", &not_connected).0, FAILED);
         assert_eq!(
@@ -919,7 +940,21 @@ mod tests {
             NOT_RUNNING
         );
         let (code, out, _) = ctl("status --json", &Fake::answering(Ok(Answer::default())));
-        assert_eq!((code, out.trim()), (NOT_RUNNING, r#"{"running":false}"#));
+        assert_eq!(code, NOT_RUNNING);
+        let status: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(status["error"], "NotRunning");
+        assert_eq!(status["running"], false);
+        let (code, out, _) = ctl(
+            "recenter --json",
+            &Fake::answering(Err(ClientError::NotRunning)),
+        );
+        assert_eq!(code, NOT_RUNNING);
+        let gone: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(gone["error"], "NotRunning");
+        assert!(
+            gone.get("revision").is_none(),
+            "no revision without an answer"
+        );
         let (code, _, err) = ctl("cinema maybe", &done);
         assert_eq!(code, USAGE);
         assert!(err.contains("on or off"), "{err}");
@@ -974,7 +1009,7 @@ mod tests {
         let started = std::cell::Cell::new(false);
         let start = || {
             started.set(true);
-            Ok(())
+            std::process::Command::new("true").spawn()
         };
         assert_eq!(open(&running, &start), DONE);
         assert!(!started.get(), "already running");
@@ -982,5 +1017,11 @@ mod tests {
         let gone = Fake::answering(Ok(Answer::default()));
         let fail = || Err(std::io::Error::other("no program"));
         assert_eq!(open(&gone, &fail), NOT_RUNNING);
+        // Started, but it ends without coming on the bus: said at once.
+        let ends = || std::process::Command::new("false").spawn();
+        let began = std::time::Instant::now();
+        assert_eq!(open(&gone, &ends), NOT_RUNNING);
+        assert!(began.elapsed() < Duration::from_secs(5));
+        assert!(gone.asked.borrow().is_empty(), "no window asked of nobody");
     }
 }
