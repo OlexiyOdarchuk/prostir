@@ -1,0 +1,59 @@
+#!/bin/sh
+# A stand-in for `pactl` (PulseAudio's, on PipeWire) for the end-to-end tests: the PC
+# app's real `pactl` code talks to it. Its sound system is files in $FAKE_PACTL_DIR,
+# which the test writes too:
+#   sink        "INDEX NAME" of the one sink (none: no sink)
+#   volume      the sink's level in percent; mute: "yes" or "no"
+#   mic         "INDEX NAME STATE" of the one source programs record from (optional)
+#   events      what `pactl subscribe` says, a line each, appended
+#   calls       every command run here, a line each (for the test to read)
+#   subscribe.pid  the running `pactl subscribe`, for the test to kill
+# $FAKE_PACTL_VERSION is the version it says (17.0 if unset).
+set -u
+dir=${FAKE_PACTL_DIR:?}
+echo "$*" >> "$dir/calls"
+say() { printf '%s\n' "$1" >> "$dir/events"; }
+sink_index() { cut -d' ' -f1 "$dir/sink" 2>/dev/null; }
+sink_name() { cut -d' ' -f2 "$dir/sink" 2>/dev/null; }
+volume_line() {
+    v=$(cat "$dir/volume")
+    raw=$((v * 65536 / 100))
+    echo "Volume: front-left: $raw / $v% / 0.00 dB,   front-right: $raw / $v% / 0.00 dB"
+    echo "        balance 0.00"
+}
+case "$*" in
+--version) echo "pactl ${FAKE_PACTL_VERSION:-17.0}" ;;
+subscribe)
+    echo $$ > "$dir/subscribe.pid"
+    touch "$dir/events"
+    exec tail -n 0 -f "$dir/events" ;;
+"list short sinks")
+    [ -f "$dir/sink" ] && printf '%s\t%s\tPipeWire\ts16le 2ch 48000Hz\tIDLE\n' "$(sink_index)" "$(sink_name)"
+    exit 0 ;;
+"list short sources")
+    if [ -f "$dir/mic" ]; then
+        read -r i n s < "$dir/mic"
+        printf '%s\t%s\tPipeWire\ts16le 1ch 48000Hz\t%s\n' "$i" "$n" "$s"
+    fi
+    exit 0 ;;
+"get-sink-volume @DEFAULT_SINK@") volume_line ;;
+"get-sink-volume "*)
+    [ "$2" = "$(sink_name)" ] || { echo "No such entity" >&2; exit 1; }
+    volume_line ;;
+"get-sink-mute "*)
+    [ "$2" = "$(sink_name)" ] || exit 1
+    echo "Mute: $(cat "$dir/mute")" ;;
+"set-sink-volume "*)
+    [ "$2" = "$(sink_name)" ] || exit 1
+    new=${3%\%}
+    [ "$new" = "$(cat "$dir/volume")" ] && exit 0
+    echo "$new" > "$dir/volume"
+    say "Event 'change' on sink #$(sink_index)" ;;
+"set-sink-mute "*)
+    [ "$2" = "$(sink_name)" ] || exit 1
+    case $3 in 1) new=yes ;; *) new=no ;; esac
+    [ "$new" = "$(cat "$dir/mute")" ] && exit 0
+    echo "$new" > "$dir/mute"
+    say "Event 'change' on sink #$(sink_index)" ;;
+*) exit 0 ;;
+esac

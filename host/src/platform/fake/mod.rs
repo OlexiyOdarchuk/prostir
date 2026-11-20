@@ -14,7 +14,8 @@
 //!   impossible to make.
 //! - Sound is silence, 10 ms at a time, each slice starting with the time it was
 //!   made (see [`audio`]), so a fake headset can tell how late it arrives; the
-//!   microphone goes nowhere.
+//!   microphone goes nowhere. The sound system says its changes as `pactl subscribe`
+//!   lines through a pipe, so the real watcher of the sound system follows it.
 //! - No windows, no mouse, no screenshots (its desktop has no [`crate::platform::Windows`]
 //!   and no [`crate::platform::Pointer`]), no notifications, no USB, and no outside
 //!   programs are run. The tray is a file a test writes menu
@@ -196,18 +197,26 @@ pub fn screenshot_path() -> Result<PathBuf> {
     Ok(dir.join("screenshot.png"))
 }
 
-/// Silence to the headset; the headset microphone goes nowhere.
+/// Silence to the headset; the headset microphone goes nowhere; a sound system in
+/// memory whose changes are written as `pactl subscribe` lines, so the real watcher
+/// (`platform/sound_events.rs`) follows it.
 ///
 /// Every slice of sound starts with the `CLOCK_MONOTONIC` time it was made, in
 /// nanoseconds (`u64`, little-endian): a fake headset on the same machine reads how
 /// long each slice took to arrive (see `prostir-testkit`).
 pub mod audio {
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     use anyhow::Result;
     use prostir_proto::{AUDIO_CHANNELS, AUDIO_RATE};
+
+    use crate::events::EventSink;
+    use crate::platform::sound::{OutputDevice, Route};
+    use crate::platform::sound_events::{self, End, Indices, Reading, SoundSystem, Subscription};
+
+    pub use crate::platform::sound_events::Watcher;
 
     /// 10 ms of 16-bit sound, as the real capture sends it.
     const SLICE_BYTES: usize = (AUDIO_RATE / 100 * AUDIO_CHANNELS * 2) as usize;
@@ -217,7 +226,12 @@ pub mod audio {
     }
 
     impl AudioOut {
+        /// Silence to the headset; with `PROSTIR_FAKE_NO_SOUND=1` the sound device
+        /// cannot be made.
         pub fn start(on_sound: impl Fn(Vec<u8>) + Send + Sync + 'static) -> Result<Self> {
+            if std::env::var_os("PROSTIR_FAKE_NO_SOUND").is_some_and(|v| v == "1") {
+                anyhow::bail!("the fake desktop makes no sound device (PROSTIR_FAKE_NO_SOUND)");
+            }
             let stop = Arc::new(AtomicBool::new(false));
             let stopped = stop.clone();
             std::thread::Builder::new()
@@ -232,6 +246,16 @@ pub mod audio {
                         std::thread::sleep(next.saturating_duration_since(Instant::now()));
                     }
                 })?;
+            let mut sys = system();
+            let sink = sys.number();
+            sys.sink = Some(sink);
+            // A device made anew is at the sound system's level for one (WirePlumber
+            // gives full volume), not the one before.
+            sys.level = Some((NEW_DEVICE_LEVEL, false));
+            log::info!("fake desktop: the headset's sound device made (#{sink})");
+            // The sink, and its monitor with the same number.
+            sys.say("new", "sink", sink);
+            sys.say("new", "source", sink);
             Ok(Self { stop })
         }
     }
@@ -250,7 +274,115 @@ pub mod audio {
     impl Drop for AudioOut {
         fn drop(&mut self) {
             self.stop.store(true, Ordering::Relaxed);
+            let mut sys = system();
+            if let Some(sink) = sys.sink.take() {
+                sys.level = None;
+                log::info!("fake desktop: the headset's sound device removed (#{sink})");
+                sys.say("remove", "source", sink);
+                sys.say("remove", "sink", sink);
+            }
         }
+    }
+
+    impl AudioOut {
+        /// Only in the headset.
+        pub fn route(&self) -> Route {
+            Route::HeadsetOnly
+        }
+
+        pub fn device(&self) -> OutputDevice {
+            OutputDevice("fake_headset".into())
+        }
+    }
+
+    /// The level a sound device made anew has.
+    const NEW_DEVICE_LEVEL: u8 = 100;
+
+    /// The fake sound system, as `pactl` would show it: Prostir's devices with their
+    /// numbers, the headset's device's level, whether a program records, and the
+    /// subscription its changes are written to, a `pactl subscribe` line each.
+    struct System {
+        sink: Option<u32>,
+        mic: Option<u32>,
+        /// Where the headset's device is, once something set or moved it.
+        level: Option<(u8, bool)>,
+        /// How many times the PC set it.
+        writes: u64,
+        /// A program records from the headset's microphone (a test says so).
+        recording: bool,
+        /// The number the next object gets.
+        next: u32,
+        /// The subscription running now: its number, and where its lines go.
+        events: Option<(u64, std::fs::File)>,
+        subscriptions: u64,
+    }
+
+    static SYSTEM: Mutex<System> = Mutex::new(System {
+        sink: None,
+        mic: None,
+        level: None,
+        writes: 0,
+        recording: false,
+        next: 1,
+        events: None,
+        subscriptions: 0,
+    });
+
+    fn system() -> std::sync::MutexGuard<'static, System> {
+        SYSTEM.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    impl System {
+        /// A new object's number.
+        fn number(&mut self) -> u32 {
+            self.next += 1;
+            self.next
+        }
+
+        /// Says a change on the subscription, if one runs; a line it has no room for
+        /// is lost, as the real one would block.
+        fn say(&mut self, what: &str, on: &str, index: u32) {
+            use std::io::Write;
+            if let Some((_, lines)) = self.events.as_mut()
+                && let Err(e) = writeln!(lines, "Event '{what}' on {on} #{index}")
+                && e.kind() != std::io::ErrorKind::WouldBlock
+            {
+                self.events = None;
+            }
+        }
+
+        /// Asking the sound system connects as a client, which it says too.
+        fn asked(&mut self) {
+            let client = self.number();
+            self.say("new", "client", client);
+            self.say("remove", "client", client);
+        }
+    }
+
+    /// The slider of the headset's device moved to `level` (a test's command).
+    pub fn moved(level: u8, muted: bool) {
+        let mut sys = system();
+        sys.level = Some((level, muted));
+        if let Some(sink) = sys.sink {
+            sys.say("change", "sink", sink);
+        }
+    }
+
+    /// A program starts (`on`) or stops recording from the headset's microphone (a
+    /// test's command).
+    pub fn record(on: bool) {
+        let mut sys = system();
+        sys.recording = on;
+        let stream = sys.number();
+        sys.say(if on { "new" } else { "remove" }, "source-output", stream);
+        if let Some(mic) = sys.mic {
+            sys.say("change", "source", mic);
+        }
+    }
+
+    /// The subscription ends, as when `pactl subscribe` dies (a test's command).
+    pub fn stop_events() {
+        system().events = None;
     }
 
     /// The headset's microphone as the fake PC's: what comes is counted and said in
@@ -259,11 +391,12 @@ pub mod audio {
         got: std::sync::atomic::AtomicUsize,
     }
 
-    /// A program of the fake PC records from the headset's microphone.
-    pub static RECORDING: AtomicBool = AtomicBool::new(false);
-
     impl MicIn {
         pub fn start() -> Result<Self> {
+            let mut sys = system();
+            let mic = sys.number();
+            sys.mic = Some(mic);
+            sys.say("new", "source", mic);
             Ok(Self {
                 got: std::sync::atomic::AtomicUsize::new(0),
             })
@@ -280,55 +413,158 @@ pub mod audio {
             }
         }
 
-        /// As slow as asking the real sound system (`pactl` takes a process start),
-        /// so a test notices when it is asked too often.
-        pub fn recording(&self) -> bool {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-            RECORDING.load(Ordering::Relaxed)
+        /// Everything that comes is counted, recorded or not.
+        pub fn set_recording(&self, _on: bool) {}
+    }
+
+    impl Drop for MicIn {
+        fn drop(&mut self) {
+            let mut sys = system();
+            if let Some(mic) = sys.mic.take() {
+                sys.say("remove", "source", mic);
+            }
+        }
+    }
+
+    /// With `PROSTIR_FAKE_PACTL=1` the sound system is `pactl`, as on Linux: whatever
+    /// the test put first on `PATH` under that name (`host/tests/e2e/fake-pactl`).
+    fn real_pactl() -> bool {
+        std::env::var_os("PROSTIR_FAKE_PACTL").is_some_and(|v| v == "1")
+    }
+
+    /// As on Linux, with `pactl`; nothing to find out in memory.
+    pub fn prepare() {
+        if real_pactl() {
+            crate::platform::pulse::prepare(&[]);
         }
     }
 
     /// The fake sound device for the headset: its level is what a test sets (`volume
     /// 40`, `volume 40 muted`, `drag 0 100 1000`: the slider from 0 to 100 in a
-    /// second), and what the PC sets goes into the log.
-    pub struct SinkVolume {
-        changes: std::sync::mpsc::Receiver<(u8, bool, Instant)>,
+    /// second), and what the PC sets goes into the log. With `pactl`, Linux's.
+    pub enum SinkVolume {
+        Memory,
+        Pactl(crate::platform::pulse::SinkVolume),
     }
-
-    /// Where the fake desktop's commands send the device's changes.
-    #[allow(clippy::type_complexity)]
-    pub static VOLUME: std::sync::Mutex<Option<std::sync::mpsc::Sender<(u8, bool, Instant)>>> =
-        std::sync::Mutex::new(None);
-
-    /// Where the fake device is now, once something set or moved it.
-    pub static LEVEL: std::sync::Mutex<Option<(u8, bool)>> = std::sync::Mutex::new(None);
 
     impl SinkVolume {
         pub fn open() -> Option<Self> {
-            let (tx, changes) = std::sync::mpsc::channel();
-            *VOLUME.lock().unwrap() = Some(tx);
-            Some(Self { changes })
+            if real_pactl() {
+                return crate::platform::pulse::SinkVolume::open().map(Self::Pactl);
+            }
+            Some(Self::Memory)
         }
 
+        /// As `pactl` does it: the volume, then the mute, each a change of its own.
         pub fn set(&self, level: u8, muted: bool) {
-            *LEVEL.lock().unwrap() = Some((level, muted));
+            if let Self::Pactl(v) = self {
+                return v.set(level, muted);
+            }
+            let mut sys = system();
+            let was = sys.level;
+            sys.level = Some((level, muted));
+            sys.writes += 1;
             log::info!(
                 "fake desktop: volume set to {level}{}",
                 if muted { " muted" } else { "" }
             );
-            // The device says it changed, as a real one does.
-            if let Some(tx) = VOLUME.lock().unwrap().as_ref() {
-                let _ = tx.send((level, muted, Instant::now()));
+            if let Some(sink) = sys.sink {
+                if was.map(|(l, _)| l) != Some(level) {
+                    sys.say("change", "sink", sink);
+                }
+                if was.map(|(_, m)| m) != Some(muted) {
+                    sys.say("change", "sink", sink);
+                }
             }
-        }
-
-        pub fn changed(&self) -> Option<(u8, bool, Instant)> {
-            self.changes.try_recv().ok()
         }
 
         /// Where the device is now, if known.
         pub fn level(&self) -> Option<(u8, bool)> {
-            *LEVEL.lock().unwrap()
+            match self {
+                Self::Memory => system().level,
+                Self::Pactl(v) => v.level(),
+            }
+        }
+
+        pub fn outdated(&self, writes: u64) -> bool {
+            match self {
+                Self::Memory => writes < system().writes,
+                Self::Pactl(v) => v.outdated(writes),
+            }
+        }
+    }
+
+    /// Follows the fake sound system with the same watcher as the real one (or the
+    /// real one through `pactl`).
+    pub fn watch(events: EventSink) -> Option<Watcher> {
+        if real_pactl() {
+            return Watcher::start(crate::platform::pulse::Pactl::headset(), events);
+        }
+        Watcher::start(Fake, events)
+    }
+
+    struct Fake;
+
+    /// Ends subscription number `.0`, if it still runs.
+    struct Ended(u64);
+
+    impl End for Ended {
+        fn end(&self) {
+            let mut sys = system();
+            if sys.events.as_ref().is_some_and(|(n, _)| *n == self.0) {
+                sys.events = None;
+            }
+        }
+    }
+
+    impl SoundSystem for Fake {
+        fn subscribe(&mut self) -> std::io::Result<Subscription> {
+            use std::os::fd::AsRawFd;
+            let (lines, into) = sound_events::pipe()?;
+            // SAFETY: fcntl on a descriptor this function owns.
+            unsafe {
+                let flags = libc::fcntl(into.as_raw_fd(), libc::F_GETFL);
+                libc::fcntl(into.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK);
+            }
+            let mut sys = system();
+            sys.subscriptions += 1;
+            let n = sys.subscriptions;
+            sys.events = Some((n, into));
+            log::info!("fake desktop: the sound system's events start ({n})");
+            Ok(Subscription {
+                lines,
+                end: Arc::new(Ended(n)),
+            })
+        }
+
+        fn indices(&mut self) -> Option<Indices> {
+            let mut sys = system();
+            sys.asked();
+            Some(Indices {
+                sink: sys.sink,
+                mic: sys.mic,
+            })
+        }
+
+        fn volume(&mut self) -> Option<Reading> {
+            let mut sys = system();
+            sys.asked();
+            let (level, muted) = sys.level?;
+            Some(Reading {
+                level,
+                muted,
+                writes: sys.writes,
+            })
+        }
+
+        /// As slow as asking the real sound system (`pactl` takes a process start), and
+        /// said in the log, so a test sees when and how often it is asked.
+        fn recording(&mut self) -> Option<bool> {
+            std::thread::sleep(Duration::from_millis(20));
+            let mut sys = system();
+            sys.asked();
+            log::info!("fake desktop: asked whether a program records");
+            Some(sys.recording && sys.mic.is_some())
         }
     }
 }

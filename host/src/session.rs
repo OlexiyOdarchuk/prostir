@@ -762,35 +762,56 @@ impl Session {
     }
 
     /// A volume from the headset (in `Open` or since): the main headset's goes to the
-    /// device. The device's own changes come first: one not read yet makes this level
-    /// an old one, which must not be written while the slider moves.
+    /// device. The device's own changes come first: they come through the same channel
+    /// of events (see [`Session::device_volume`]), so one that came before this level
+    /// makes it an old one, which must not be written while the slider moves.
     fn volume_from_headset(&mut self, v: prostir_proto::state::Volume) {
         if !self.standing.main {
             return;
         }
-        self.device_changes();
         if let Some((sink, pc)) = &mut self.volume {
             let act = pc.from_headset(&v, Instant::now());
             do_volume(sink, act, &self.outbox);
         }
     }
 
-    /// The device's changes since the last look, each at the moment it happened: they
-    /// ask the headset.
-    fn device_changes(&mut self) {
+    /// The sound system said the device is at `level` (moved at `at`, read after the
+    /// PC's `writes`th write of it): a move asks the headset, the PC's own write is its
+    /// echo, and a reading from before the PC's last write is old news. A device made
+    /// anew (`new_device`) is at the sound system's level, not the person's: the
+    /// headset owns the level, which goes on it.
+    pub fn device_volume(
+        &mut self,
+        level: u8,
+        muted: bool,
+        at: Instant,
+        writes: u64,
+        new_device: bool,
+    ) {
         let Some((sink, pc)) = &mut self.volume else {
             return;
         };
-        while let Some((level, muted, at)) = sink.changed() {
-            let act = pc.device(level, muted, at);
-            do_volume(sink, act, &self.outbox);
+        if sink.outdated(writes) {
+            return;
         }
+        if new_device {
+            if let Some(v) = self.publisher.headset.volume {
+                info!(
+                    "volume: a new device for the headset at {level}: it takes the headset's {}",
+                    v.level
+                );
+                let act = pc.from_headset(&v, Instant::now());
+                do_volume(sink, act, &self.outbox);
+            }
+            return;
+        }
+        let act = pc.device(level, muted, at);
+        do_volume(sink, act, &self.outbox);
     }
 
-    /// Follows the device's volume: changes ask the headset, its answers go to the
-    /// device once the slider rests.
+    /// Follows the device's volume: a move waiting asks the headset, its answers go to
+    /// the device once the slider rests.
     pub fn volume_due(&mut self) {
-        self.device_changes();
         let Some((sink, pc)) = &mut self.volume else {
             return;
         };

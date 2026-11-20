@@ -42,6 +42,7 @@ use displays::Displays;
 use encoder::EncoderConfig;
 use events::{Accepted, Event, EventSink, SessionId};
 use platform::MonitorSpec;
+use platform::sound::SoundEvent;
 use platform::{TrayCommand, TrayStatus, tray};
 use screen::ScreenId;
 use session::{Closing, Session, Standing, TrayLine};
@@ -334,11 +335,38 @@ impl Brain {
                 };
                 self.end_session(key, None, why, result);
             }
+            Event::Sound(sound) => self.sound(sound),
             Event::Tray(command) => self.tray(command),
             Event::Ctl(request, reply) => self.ctl(request, reply),
             // The next pass shows it.
             Event::Pairing => {}
             Event::Quit => self.quit = true,
+        }
+    }
+
+    /// What the sound system said: the device's level goes to the session that shares
+    /// the PC's volume; a program recording or not, to the microphone.
+    fn sound(&mut self, event: SoundEvent) {
+        let Some(displays) = self.displays.as_mut() else {
+            return;
+        };
+        match event {
+            SoundEvent::Volume {
+                level,
+                muted,
+                at,
+                writes,
+                new_device,
+            } => {
+                for s in self.sessions.values_mut() {
+                    s.device_volume(level, muted, at, writes, new_device);
+                }
+            }
+            SoundEvent::Recording(on) => {
+                displays.set_recording(on);
+                // The microphone may be free to go to the main headset now.
+                self.headsets_changed();
+            }
         }
     }
 
@@ -400,7 +428,7 @@ impl Brain {
             self.displays = None;
         }
         if self.displays.is_none() {
-            match create_displays(self.set_primary, &mut self.store) {
+            match create_displays(self.set_primary, &mut self.store, &self.events) {
                 Ok(d) => self.displays = Some(d),
                 Err(e) => {
                     error!("{e:#}");
@@ -890,7 +918,7 @@ fn spawn_discovery(port: u16) -> Result<()> {
     Ok(())
 }
 
-fn create_displays(set_primary: bool, store: &mut Store) -> Result<Displays> {
+fn create_displays(set_primary: bool, store: &mut Store, events: &EventSink) -> Result<Displays> {
     let wanted = store.wanted();
     let (backend, codec) = encoder::pick(wanted.codec, wanted.software)?;
     info!("encoding with {backend:?} {codec:?}");
@@ -901,7 +929,8 @@ fn create_displays(set_primary: bool, store: &mut Store) -> Result<Displays> {
         sharp: wanted.sharp,
     };
     let set = store.screens().clone();
-    let displays = Displays::create(&set, &wanted, cfg, set_primary, &mut || store.new_id())?;
+    let mut displays = Displays::create(&set, &wanted, cfg, set_primary, &mut || store.new_id())?;
+    displays.send_sound_to(events.clone());
     keep_screens(store, &displays, false);
     Ok(displays)
 }
@@ -951,6 +980,8 @@ fn serve(args: Args) -> Result<()> {
         });
     }
     let _instance = platform::single_instance()?;
+    // Whether the PC can share its volume, found out meanwhile.
+    platform::audio::prepare();
     // The command line holds for this run only.
     let run = store::Run {
         bitrate: args.bitrate,
