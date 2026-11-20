@@ -127,6 +127,10 @@ pub trait View<K> {
     fn between(&self, a: K, b: K) -> bool;
     /// Where the middle of `k` is seen: across (right positive) and up, in any unit.
     fn middle(&self, k: K) -> Option<(f64, f64)>;
+    /// How high `k` is seen, in the unit of [`View::middle`].
+    fn height(&self, _k: K) -> Option<f64> {
+        None
+    }
     /// Where `k` is on a desktop already, if this view is a plan (the headset's, read
     /// back by the PC): its top-left corner, when its box is whole pixels at `size`.
     fn exact(&self, _k: K, _size: Size) -> Option<(i32, i32)> {
@@ -1561,6 +1565,10 @@ impl<K: Copy + Ord> View<K> for Boxes<K> {
 
     fn middle(&self, k: K) -> Option<(f64, f64)> {
         self.get(k).map(|(b, _)| (b.x, -b.y))
+    }
+
+    fn height(&self, k: K) -> Option<f64> {
+        self.get(k).map(|(b, _)| b.h)
     }
 
     fn exact(&self, k: K, size: Size) -> Option<(i32, i32)> {

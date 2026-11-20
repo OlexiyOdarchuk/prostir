@@ -430,14 +430,38 @@ fn a_new_monitor_goes_next_to_the_others() {
 
 /// T1 to T5: "Line up" keeps the rows, covers nothing, puts neighbours side by side,
 /// keeps sizes, and lining up again changes nothing (the primary is not an anchor: each
-/// row keeps its own direction, see `line_up.rs`).
+/// row keeps its own direction, see `line_up.rs`). The same with every monitor moved and
+/// turned by up to a micrometre (and a microradian): what another machine's last bits of
+/// a sine do to the scenes and to lining them up must not change the counts.
 #[test]
 fn lining_up_keeps_rows_and_settles() {
+    let plain = lining_up_counts(None);
+    for seed in [0x51, 0x52] {
+        let shaken = lining_up_counts(Some((1e-6, seed)));
+        assert!(
+            shaken.abs_diff(plain) <= 1 + plain / 10,
+            "{plain} broken as they are, {shaken} moved by a micrometre"
+        );
+    }
+}
+
+/// [`lining_up_keeps_rows_and_settles`] over the hand scenes, every monitor moved and
+/// turned by up to `jitter.0` (from the seed `jitter.1`): how many broke T1, T2 or T5.
+fn lining_up_counts(jitter: Option<(f32, u64)>) -> usize {
     let mut rng = Rng::new(0x3e7a_0007);
+    let mut shake = jitter.map(|(_, seed)| Rng::new(seed));
     let (mut t1, mut t2, mut t5, mut total) = (0, 0, 0, 0);
     let mut first: Option<String> = None;
     for i in 0..cases(800) {
-        let scene = hand_scene(&mut rng);
+        let mut scene = hand_scene(&mut rng);
+        if let (Some((by, _)), Some(r)) = (jitter, shake.as_mut()) {
+            for m in &mut scene.monitors {
+                let mut v = || r.float(-by, by);
+                m.placement.position += Vec3::new(v(), v(), v());
+                let turn = glam::Quat::from_euler(glam::EulerRot::YXZ, v(), v(), v());
+                m.placement.rotation = (turn * m.placement.rotation).normalize();
+            }
+        }
         let room = scene.room();
         let ids: Vec<u8> = scene.monitors.iter().map(|m| m.id).collect();
         let rows = rows_of(&ids, &room, None);
@@ -489,11 +513,20 @@ fn lining_up_keeps_rows_and_settles() {
         }
         total += 1;
     }
-    eprintln!("lining up {total}: rows changed {t1}, covering {t2}, not settled after twice {t5}");
+    let shaken = jitter.map_or(String::new(), |(by, seed)| {
+        format!(" (moved by {by:e}, {seed:#x})")
+    });
+    eprintln!(
+        "lining up {total}{shaken}: rows changed {t1}, covering {t2}, not settled after twice {t5}"
+    );
     if let Some(f) = &first {
         eprintln!("first: {f}");
     }
-    assert!((t1 + t2 + t5) * 20 <= total, "{t1} {t2} {t5} of {total}");
+    assert!(
+        (t1 + t2 + t5) * 20 <= total,
+        "{t1} {t2} {t5} of {total}{shaken}"
+    );
+    t1 + t2 + t5
 }
 
 /// T6: after "Line up", each row's neighbours meet on the desktop exactly where they meet
