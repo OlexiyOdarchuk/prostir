@@ -203,11 +203,20 @@
               <ul class="ways">
                 <li><h4>Arch Linux і похідні</h4>З AUR:
 <pre><code>yay -S prostir-bin</code></pre></li>
-                <li><h4>Debian, Ubuntu</h4>Завантажте файл <code>.deb</code> з релізу, тоді:
-<pre><code>sudo apt install ./prostir_*.deb</code></pre></li>
-                <li><h4>Fedora</h4>Завантажте файл <code>.rpm</code> з релізу, тоді:
-<pre><code>sudo dnf install ./prostir-*.rpm</code></pre>
-                  Файл <code>.rpm</code> зібрано для Fedora. В openSUSE користуйтеся архівом нижче.</li>
+                <li><h4>openSUSE</h4>Tumbleweed; для Slowroll пишіть <code>openSUSE_Slowroll</code>, для Leap 16.0 <code>16.0</code>:
+<pre><code>sudo zypper addrepo --refresh https://download.opensuse.org/repositories/home:iShawyha:prostir/openSUSE_Tumbleweed/home:iShawyha:prostir.repo
+sudo zypper refresh
+sudo zypper install prostir</code></pre></li>
+                <li><h4>Fedora</h4>Fedora 45; для Fedora 44 пишіть <code>Fedora_44</code>:
+<pre><code>sudo dnf config-manager addrepo --from-repofile=https://download.opensuse.org/repositories/home:iShawyha:prostir/Fedora_45/home:iShawyha:prostir.repo
+sudo dnf install prostir</code></pre></li>
+                <li><h4>Debian, Ubuntu</h4>Debian 13; для Ubuntu 26.04 чи 26.10 пишіть <code>xUbuntu_26.04</code> чи <code>xUbuntu_26.10</code>:
+<pre><code>repo=https://download.opensuse.org/repositories/home:/iShawyha:/prostir/Debian_13
+sudo mkdir -p /etc/apt/keyrings
+curl -fsSL "$repo/Release.key" | sudo tee /etc/apt/keyrings/prostir.asc &gt; /dev/null
+echo "deb [signed-by=/etc/apt/keyrings/prostir.asc] $repo/ /" | sudo tee /etc/apt/sources.list.d/prostir.list
+sudo apt update &amp;&amp; sudo apt install prostir</code></pre>
+                  Ці сховища збирає <a href="https://build.opensuse.org/package/show/home:iShawyha:prostir/prostir">openSUSE Build Service</a>, і далі Prostir оновлюється разом із системою. Кожен реліз має ще <code>.deb</code> і <code>.rpm</code>, щоб поставити вручну. Збірки для ARM (aarch64) експериментальні: на ARM без кодувальника H.264 чи H.265 у VA-API (Asahi, Raspberry Pi 5) Prostir кодує процесором, а це навантажує процесор.</li>
                 <li><h4>Nix і NixOS</h4>Репозиторій є flake:
 <pre><code>nix run github:OlexiyOdarchuk/prostir</code></pre>
                   У NixOS додайте його як вхід flake і покладіть <code>inputs.prostir.packages.${pkgs.system}.default</code> у <code>environment.systemPackages</code>.</li>
@@ -264,7 +273,7 @@ cd prostir-*/
           <h3>Оновлення</h3>
           <ul>
             <li>AUR: разом зі звичайним оновленням системи, наприклад <code>yay -Syu</code>.</li>
-            <li><code>.deb</code> або <code>.rpm</code>: встановіть новіший файл так само.</li>
+            <li>Сховища openSUSE, Fedora, Debian і Ubuntu: разом зі звичайним оновленням системи. <code>.deb</code> чи <code>.rpm</code> з релізу: встановіть новіший файл так само.</li>
             <li>Архів: розпакуйте новий реліз і ще раз запустіть <code>./install.sh</code>.</li>
             <li>Шолом: встановіть новий APK поверх старого; налаштування й сполучення лишаються.
 <pre><code>adb install -r prostir-*.apk</code></pre></li>
@@ -274,7 +283,7 @@ cd prostir-*/
         <div id="uninstall">
           <h3>Видалення</h3>
           <ul>
-            <li>AUR: <code>sudo pacman -R prostir-bin</code>. Debian, Ubuntu: <code>sudo apt remove prostir</code>. Fedora: <code>sudo dnf remove prostir</code>.</li>
+            <li>AUR: <code>sudo pacman -R prostir-bin</code>. openSUSE: <code>sudo zypper remove prostir</code>. Debian, Ubuntu: <code>sudo apt remove prostir</code>. Fedora: <code>sudo dnf remove prostir</code>.</li>
             <li>Архів: запустіть <code class="nw">./install.sh --uninstall</code> у розпакованій папці.</li>
             <li>Налаштування й сполучення лишаються в <code>~/.config/prostir</code>. Щоб прибрати їх, видаліть цю папку, а якщо вмикали автозапуск, то й <code>~/.config/autostart/prostir.desktop</code>.</li>
             <li>Шолом: <code>adb uninstall dev.prostir.client</code> або видаліть застосунок у бібліотеці, у «Невідомих джерелах».</li>
