@@ -13,6 +13,9 @@ nav-headsets = Headsets
 nav-sound = Sound
 nav-quality = Quality
 nav-look = Look
+quit-prostir = Quit Prostir
+close-note-title = Prostir keeps running
+close-note = Prostir keeps running in the tray. To open it again: the Prostir icon in the menu or in the tray.
 nav-first-run = First run
 
 ## The status line under the pages

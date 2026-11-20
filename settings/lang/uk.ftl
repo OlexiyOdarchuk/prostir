@@ -10,6 +10,9 @@ nav-headsets = Шоломи
 nav-sound = Звук
 nav-quality = Якість
 nav-look = Вигляд
+quit-prostir = Вийти з Prostir
+close-note-title = Prostir працює далі
+close-note = Prostir працює далі у треї. Відкрити знову: значок Prostir у меню або в треї.
 nav-first-run = Перший запуск
 
 ## Рядок стану під сторінками

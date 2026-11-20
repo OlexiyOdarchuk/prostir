@@ -6,7 +6,7 @@
 use eframe::egui::{self, Role};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use prostir_settings::app::{Page, Started};
+use prostir_settings::app::{CloseNote, Page, Started};
 use prostir_settings::mock::{Mock, MockHandle};
 use prostir_settings::portal::SystemScheme;
 use prostir_settings::{App, Options};
@@ -32,6 +32,8 @@ pub struct Setup {
     pub pictures: bool,
     /// Seconds between frames.
     pub step: f32,
+    /// The note the first time the window closes.
+    pub close_note: Option<CloseNote>,
 }
 
 impl Default for Setup {
@@ -43,6 +45,7 @@ impl Default for Setup {
             started: Started::Launched,
             pictures: false,
             step: 1.0 / 60.0,
+            close_note: None,
         }
     }
 }
@@ -74,6 +77,7 @@ pub fn window(mock: Mock, setup: Setup) -> (Harness<'static, App>, MockHandle) {
                     Ok(started)
                 }),
                 presented: None,
+                close_note: setup.close_note,
             },
         )
     });

@@ -27,6 +27,31 @@ pub fn session() -> Result<Connection, ClientError> {
         .map_err(|e| ClientError::NoBus(e.to_string()))
 }
 
+/// A desktop notification (`org.freedesktop.Notifications`), the same on Plasma and on
+/// Hyprland's notification daemons; an error where none runs.
+pub fn notify(conn: &Connection, summary: &str, body: &str) -> zbus::Result<()> {
+    use std::collections::HashMap;
+    use zbus::zvariant::Value;
+    let hints: HashMap<&str, Value<'_>> = HashMap::new();
+    conn.call_method(
+        Some("org.freedesktop.Notifications"),
+        "/org/freedesktop/Notifications",
+        Some("org.freedesktop.Notifications"),
+        "Notify",
+        &(
+            "Prostir",
+            0u32,
+            "prostir",
+            summary,
+            body,
+            Vec::<&str>::new(),
+            hints,
+            -1i32,
+        ),
+    )
+    .map(drop)
+}
+
 impl DbusClient {
     pub fn new(conn: Connection) -> Result<Self, ClientError> {
         let proxy = zbus::blocking::proxy::Builder::new(&conn)

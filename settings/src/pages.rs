@@ -37,6 +37,8 @@ pub enum Action {
     OpenFolder(PathBuf),
     CreateThemeFile(PathBuf),
     Dismiss,
+    /// Quit the whole program, as the tray's "Quit" does; the window closes with it.
+    QuitProstir,
 }
 
 /// What a page sees and where it puts what it wants.

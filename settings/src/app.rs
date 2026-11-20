@@ -32,6 +32,10 @@ pub const LANG_DOMAIN: &str = "settings";
 /// How long "Starting Prostir" waits for the service to appear.
 const START_WAIT: f64 = 10.0;
 
+/// How long the window waits for Prostir to go after "Quit Prostir" before it closes
+/// all the same.
+const QUIT_WAIT: f64 = 3.0;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
     Overview,
@@ -59,7 +63,20 @@ pub struct Options {
     pub system: SystemScheme,
     pub start: Starter,
     pub presented: Option<Presented>,
+    /// The note the first time the window closes while Prostir runs on; none: never.
+    pub close_note: Option<CloseNote>,
 }
+
+/// The note the first time the window closes while Prostir runs on: it goes on in the
+/// tray, and this is how to open the window again. Said once (`shown`, a file, says it
+/// was), by `notify` (summary and body; whether it was shown).
+pub struct CloseNote {
+    pub shown: PathBuf,
+    pub notify: Notify,
+}
+
+/// Shows a desktop notification (summary, body): whether it was shown.
+pub type Notify = Box<dyn Fn(&str, &str) -> bool>;
 
 /// How starting the service from the window went.
 #[derive(Clone, Debug, PartialEq)]
@@ -151,6 +168,10 @@ pub struct App {
     system: SystemScheme,
     start: Starter,
     presented: Option<Presented>,
+    close_note: Option<CloseNote>,
+    /// "Quit Prostir" was pressed (at this time): the window closes once Prostir is
+    /// gone, or soon anyway.
+    quitting: Option<f64>,
     pub ui: UiState,
 }
 
@@ -195,6 +216,8 @@ impl App {
             system: o.system,
             start: o.start,
             presented: o.presented,
+            close_note: o.close_note,
+            quitting: None,
             ui: UiState {
                 page: Page::Overview,
                 map: MapState::default(),
@@ -211,6 +234,33 @@ impl App {
                 notice: None,
                 opened: false,
             },
+        }
+    }
+
+    /// The window closes: the program goes on in the tray. The first time it closes
+    /// while Prostir runs, a note says so and how to open the window again (once only,
+    /// and not after "Quit Prostir").
+    pub fn window_closes(&mut self) {
+        let Some(note) = &self.close_note else {
+            return;
+        };
+        if self.quitting.is_some() || !matches!(self.conn, Conn::Live { .. }) {
+            return;
+        }
+        if note.shown.exists() {
+            return;
+        }
+        let (summary, body) = (
+            self.strings.t("close-note-title"),
+            self.strings.t("close-note"),
+        );
+        if (note.notify)(&summary, &body) {
+            if let Some(dir) = note.shown.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            if let Err(e) = std::fs::write(&note.shown, "") {
+                log::warn!("could not keep that the note was shown: {e}");
+            }
         }
     }
 
@@ -418,6 +468,10 @@ impl App {
                 self.link.refresh();
             }
             Action::Refresh => self.link.refresh(),
+            Action::QuitProstir => {
+                self.link.send(Request::Quit);
+                self.quitting = Some(now);
+            }
             Action::OpenUrl(url) => ctx.open_url(egui::OpenUrl::new_tab(url)),
             Action::OpenFolder(dir) => {
                 let _ = std::fs::create_dir_all(&dir);
@@ -561,6 +615,15 @@ impl App {
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.ui.notice = None;
             self.ui.forget_ask = None;
+        }
+        if ctx.input(|i| i.viewport().close_requested()) {
+            self.window_closes();
+        }
+        // Prostir asked to quit: the window goes with it once it is gone.
+        if let Some(since) = self.quitting
+            && (!matches!(self.conn, Conn::Live { .. }) || now - since > QUIT_WAIT)
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
 
         let mut actions = Vec::new();
@@ -805,6 +868,13 @@ fn sidebar(
         nav_item(ui, tk, st.page, Page::FirstRun, "nav-first-run", out);
     }
     ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
+        // The whole program quits from here as from the tray, while it runs.
+        if matches!(conn, Conn::Live { .. }) {
+            if w::button(ui, tk, &tk.t("quit-prostir"), Kind::Quiet, true).clicked() {
+                out.push(Action::QuitProstir);
+            }
+            ui.add_space(tk.th.shape.spacing);
+        }
         let (c, s) = status_line(tk, conn);
         ui.horizontal(|ui| {
             let (r, _) = ui.allocate_exact_size(vec2(12.0, 20.0), Sense::hover());

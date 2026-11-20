@@ -600,3 +600,54 @@ fn the_sound_goes_where_the_button_says() {
     );
     assert_eq!(handle.calls().len(), 2);
 }
+
+/// "Вийти з Prostir" quits the whole program as the tray's "Quit" does; it is there
+/// only while Prostir runs.
+#[test]
+fn the_window_quits_prostir() {
+    let (mut h, handle) = window(Mock::connected(), Setup::default());
+    press(&mut h, "Вийти з Prostir");
+    assert_eq!(handle.calls(), [Request::Quit]);
+    let (h, _) = window(Mock::not_running(), Setup::default());
+    assert!(h.query_by_label("Вийти з Prostir").is_none());
+}
+
+/// The first time the window closes while Prostir runs, a note says it goes on in the
+/// tray and how to open the window again; never again after that.
+#[test]
+fn the_first_close_says_prostir_goes_on() {
+    use prostir_settings::app::CloseNote;
+    use std::sync::{Arc, Mutex};
+    let dir = std::env::temp_dir().join(format!("prostir-close-note-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let shown = dir.join("prostir/window-closed-note");
+    let said: Arc<Mutex<Vec<String>>> = Arc::default();
+    let note = |said: Arc<Mutex<Vec<String>>>| CloseNote {
+        shown: shown.clone(),
+        notify: Box::new(move |summary, body| {
+            said.lock().unwrap().push(format!("{summary}: {body}"));
+            true
+        }),
+    };
+    let setup = || Setup {
+        close_note: Some(note(said.clone())),
+        ..Setup::default()
+    };
+    let (mut h, _) = window(Mock::not_running(), setup());
+    h.state_mut().window_closes();
+    assert!(said.lock().unwrap().is_empty(), "nothing goes on");
+    let (mut h, _) = window(Mock::connected(), setup());
+    h.state_mut().window_closes();
+    assert_eq!(
+        *said.lock().unwrap(),
+        [
+            "Prostir працює далі: Prostir працює далі у треї. Відкрити знову: значок Prostir у меню або в треї."
+        ]
+    );
+    assert!(shown.exists());
+    h.state_mut().window_closes();
+    let (mut h, _) = window(Mock::connected(), setup());
+    h.state_mut().window_closes();
+    assert_eq!(said.lock().unwrap().len(), 1, "once only");
+    let _ = std::fs::remove_dir_all(&dir);
+}
