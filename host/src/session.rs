@@ -866,12 +866,14 @@ impl Session {
     }
 
     /// Requests that waited for the desktop until `now` (all of them with `all`, the
-    /// desktop not responding) fail with `DESKTOP`.
-    pub fn give_up_waiting(&mut self, now: Instant, all: bool) {
+    /// desktop not responding) fail with `DESKTOP`: their jobs, which nobody waits for
+    /// now.
+    pub fn give_up_waiting(&mut self, now: Instant, all: bool) -> Vec<crate::worker::JobId> {
         let (over, still): (Vec<_>, Vec<_>) = std::mem::take(&mut self.waiting)
             .into_iter()
             .partition(|(_, _, until)| all || *until <= now);
         self.waiting = still;
+        let jobs = over.iter().map(|(_, job, _)| *job).collect();
         for (req, _, _) in over {
             warn!("request {}: the desktop does not respond", req.0);
             self.replies.push(HostMsg::Reply {
@@ -879,6 +881,7 @@ impl Session {
                 outcome: Outcome::failed(ErrorCode::DESKTOP, &desktop_not_responding()),
             });
         }
+        jobs
     }
 
     /// Tells the headset what changed, then the replies.
@@ -1050,6 +1053,11 @@ impl Session {
                 };
                 let outcome = match answer {
                     requests::Answer::Now(outcome) => outcome,
+                    requests::Answer::Later(job) if displays.desk_stuck() => {
+                        displays.desk().cancel(job);
+                        displays.forget_job(job);
+                        Outcome::failed(ErrorCode::DESKTOP, &desktop_not_responding())
+                    }
                     requests::Answer::Later(job) => {
                         info!(
                             "request {} ({what}): waited {} ms, answered once the desktop did it",

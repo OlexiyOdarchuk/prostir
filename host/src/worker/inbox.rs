@@ -85,6 +85,14 @@ impl<W, J: Mergeable> Inbox<W, J> {
         upto
     }
 
+    /// Takes back the jobs `which` says, of those not taken yet: whether there was one.
+    pub fn cancel(&self, which: impl Fn(&J) -> bool) -> bool {
+        let mut mail = self.mail.lock().unwrap();
+        let before = mail.jobs.len();
+        mail.jobs.retain(|j| !which(j));
+        mail.jobs.len() < before
+    }
+
     /// Asks the worker to end.
     pub fn quit(&self) {
         self.mail.lock().unwrap().quit = true;
@@ -198,16 +206,11 @@ mod tests {
         inbox.ask(Job::Fresh(vec![2, 1]));
         inbox.ask(Job::Shot(2));
         inbox.want(7);
+        // A job nobody waits for any more is taken back.
+        assert!(inbox.cancel(|j| *j == Job::Shot(1)));
+        assert!(!inbox.cancel(|j| *j == Job::Shot(9)));
         let mail = inbox.take(None);
-        assert_eq!(
-            mail.jobs,
-            [
-                Job::Tick,
-                Job::Shot(1),
-                Job::Fresh(vec![1, 2]),
-                Job::Shot(2)
-            ]
-        );
+        assert_eq!(mail.jobs, [Job::Tick, Job::Fresh(vec![1, 2]), Job::Shot(2)]);
         assert_eq!(mail.wanted, Some(7));
         // Each counts, joined or not: the worker that took them took all seven.
         assert_eq!(mail.upto, 7);

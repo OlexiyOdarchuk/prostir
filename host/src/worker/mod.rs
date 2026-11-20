@@ -150,6 +150,19 @@ pub enum Job {
     },
 }
 
+impl Job {
+    /// The number of a job someone waits for.
+    fn id(&self) -> Option<JobId> {
+        match self {
+            Job::Screenshot { job, .. }
+            | Job::FindMouse { job }
+            | Job::WindowHere { job, .. }
+            | Job::Detach { job, .. } => Some(*job),
+            _ => None,
+        }
+    }
+}
+
 impl Mergeable for Job {
     fn merge(&mut self, other: &Self) -> bool {
         match (self, other) {
@@ -262,6 +275,8 @@ pub enum Done {
     /// Nothing left to do of what was handed over, up to the count given (see
     /// `Inbox::want`).
     Settled(u64),
+    /// The worker put everything back and ended.
+    Gone,
 }
 
 /// What the worker starts from.
@@ -294,11 +309,27 @@ pub fn wait_gone(limit: Duration) -> bool {
     *done
 }
 
+/// A worker let go, watched until it is gone: one that hangs while putting everything
+/// back still ends the program after 2 min, with no session left to notice.
+pub struct Retired {
+    pub generation: u64,
+    steps: Arc<Steps>,
+    pub dog: Watchdog,
+}
+
+impl Retired {
+    /// The step under way: since when, and what.
+    pub fn step(&self) -> Option<(Instant, String)> {
+        self.steps.now()
+    }
+}
+
 /// The control loop's side of the worker. Dropped, it asks the worker to put
 /// everything back (window panels first) and end; nothing waits for that.
 pub struct Desk {
     inbox: Arc<Inbox<Wanted, Job>>,
     steps: Arc<Steps>,
+    gone: Gone,
     /// Whether the worker is stuck, as the control loop sees it.
     pub dog: Watchdog,
     /// The wanted state handed over last.
@@ -317,6 +348,7 @@ impl Desk {
         let inbox: Arc<Inbox<Wanted, Job>> = Arc::default();
         let steps = Arc::new(Steps::default());
         let gone: Gone = Arc::default();
+        let gone_here = gone.clone();
         let before = LAST.lock().unwrap().replace(gone.clone());
         static GENERATION: AtomicU64 = AtomicU64::new(0);
         let generation = GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
@@ -338,6 +370,7 @@ impl Desk {
         Self {
             inbox,
             steps,
+            gone: gone_here,
             dog,
             sent: None,
             last_job: 0,
@@ -384,6 +417,27 @@ impl Desk {
     /// The step under way: since when, and what.
     pub fn step(&self) -> Option<(Instant, String)> {
         self.steps.now()
+    }
+
+    /// Takes back a job not taken yet, nobody waiting for it any more.
+    pub fn cancel(&self, job: JobId) {
+        if self.inbox.cancel(|j| j.id() == Some(job)) {
+            log::info!("the desktop's job {} is not needed any more", job.0);
+        }
+    }
+
+    /// Lets the worker go (it puts everything back and ends): what to watch until it
+    /// is gone, unless it is already.
+    pub fn let_go(self) -> Option<Retired> {
+        let gone = *self.gone.0.lock().unwrap();
+        let mut dog = Watchdog::default();
+        // Putting everything back is work handed over.
+        dog.sent();
+        (!gone).then(|| Retired {
+            generation: self.generation,
+            steps: self.steps.clone(),
+            dog,
+        })
     }
 }
 

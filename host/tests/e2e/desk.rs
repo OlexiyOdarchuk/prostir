@@ -6,13 +6,14 @@
 use std::time::{Duration, Instant};
 
 use prostir_proto::request::{Outcome, Request};
-use prostir_proto::state::{DisplayState, Mode};
+use prostir_proto::state::{DisplayState, ErrorCode, Mode};
+use prostir_testkit::{ConnectError, FakeHeadset};
 
 use crate::pc::Options;
 use crate::{SOON, session};
 
 /// A request, answered within a second: its outcome.
-fn ask_at_once(headset: &mut prostir_testkit::FakeHeadset, request: Request) -> Outcome {
+fn ask_at_once(headset: &mut FakeHeadset, request: Request) -> Outcome {
     let started = Instant::now();
     let outcome = headset.ask(request).unwrap();
     let took = started.elapsed();
@@ -83,6 +84,13 @@ fn a_hung_desktop_holds_nothing_up() {
     let line = pc.wait_log(SOON, "the desktop does not respond:");
     assert!(line.contains("placing the outputs"), "{line}");
     pc.wait_log(SOON, "desktop: not responding");
+    // A request only the desktop can answer fails at once now, and is not kept for
+    // later.
+    let mouse = ask_at_once(&mut headset, Request::FindMouse);
+    assert!(
+        matches!(&mouse, Outcome::Failed { error, .. } if *error == ErrorCode::DESKTOP),
+        "{mouse:?}"
+    );
     if let Some(status) = pc.ctl(&["status", "--json"]) {
         let problems = status.json()["problems"].to_string();
         assert!(problems.contains("Desktop"), "{problems}");
@@ -160,6 +168,41 @@ fn a_desktop_hung_too_long_ends_the_program() {
         Some(prostir_proto::PcGoodbye::Failed.code())
     );
     let status = pc.wait_end(SOON);
+    assert_eq!(status.code(), Some(1), "{status}");
+    pc.wait_log(SOON, "quitting, to be started again");
+}
+
+/// A worker let go while it hangs (the headset left, the monitors go with it) is
+/// still watched: the headset back is turned away at once while the new worker waits
+/// for the old one, and once the old one has hung too long the program ends, with no
+/// session to notice it. Shortened to 2 s and 12 s here.
+#[test]
+fn a_hung_worker_let_go_still_ends_the_program() {
+    let options = Options {
+        desk_limits: Some((2, 12)),
+        linger: 0,
+        ..Options::default()
+    };
+    let (_dir, mut pc, mut keys, mut headset) = session("desk-let-go", &options);
+    headset.take_for(Duration::from_secs(1)).unwrap();
+    pc.desktop("hang place 70");
+    pc.wait_log(SOON, "the next place hangs for 70 s");
+    ask_at_once(
+        &mut headset,
+        Request::AddDisplay {
+            mode: Mode::new(320, 240),
+        },
+    );
+    pc.wait_log(SOON, "fake desktop: place hangs for 70 s");
+    headset.disconnect();
+    pc.wait_log(SOON, "headset disconnected");
+    match FakeHeadset::connect(pc.addr, &mut keys, None) {
+        Err(ConnectError::Refused(text)) => assert!(text.contains("does not respond"), "{text}"),
+        Err(e) => panic!("expected Refused, got {e}"),
+        Ok(_) => panic!("a session with a desktop that does not respond"),
+    }
+    pc.wait_log(SOON, "waiting for the last desktop worker to finish");
+    let status = pc.wait_end(Duration::from_secs(20));
     assert_eq!(status.code(), Some(1), "{status}");
     pc.wait_log(SOON, "quitting, to be started again");
 }

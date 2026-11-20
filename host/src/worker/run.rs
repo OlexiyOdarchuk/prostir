@@ -69,14 +69,21 @@ pub fn spawn(shared: Shared, start: Start, before: Option<Gone>, gone: Gone) {
     let spawned = std::thread::Builder::new()
         .name("desk".into())
         .spawn(move || {
+            let (events, generation) = (shared.events.clone(), shared.generation);
             if let Some(before) = before {
+                // A step like any other: a worker before that hangs shows here too.
+                shared
+                    .steps
+                    .begin("waiting for the last desktop worker to finish");
                 let (lock, ring) = &*before;
                 let _done = ring.wait_while(lock.lock().unwrap(), |done| !*done);
+                shared.steps.end();
             }
             if let Some(worker) = Worker::connect(shared, &start) {
                 worker.run();
             }
             mark_gone();
+            events.send(Event::Desk(generation, Done::Gone));
         });
     if let Err(e) = spawned {
         error!("no thread for the desktop: {e}");

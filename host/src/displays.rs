@@ -345,6 +345,13 @@ impl Displays {
         &mut self.desk
     }
 
+    /// Lets the screens go: the desktop's worker puts everything back and ends; what to
+    /// watch until it is gone (see [`Desk::let_go`]).
+    pub fn let_go(self) -> Option<worker::Retired> {
+        let Self { desk, .. } = self;
+        desk.let_go()
+    }
+
     /// The desktop does not respond (see `worker/watch.rs`).
     pub fn desk_stuck(&self) -> bool {
         self.desk.dog.stuck()
@@ -490,8 +497,17 @@ impl Displays {
             Done::Focus(key) => self.focus = key.and_then(|k| self.id_of_output(&k)),
             Done::Job { job, result } => return self.job_done(job, result),
             Done::Settled(upto) => self.desk.settled(upto),
+            // Said after everything else of this worker; the control loop looks at it
+            // before this (see `Brain::desk`).
+            Done::Gone => {}
         }
         DeskNews::None
+    }
+
+    /// Nobody waits for job `job` any more (its request failed): a window panel it
+    /// would make is not wanted.
+    pub fn forget_job(&mut self, job: JobId) {
+        self.detaching.retain(|_, (_, j)| *j != job);
     }
 
     /// A job someone waits for is done.
@@ -514,6 +530,12 @@ impl Displays {
                 key,
                 encoding,
             }) => {
+                if !self.detaching.contains_key(&id) {
+                    // Made too late: the headset was told it failed.
+                    info!("window panel {id} came too late: closing it");
+                    self.desk.ask(Job::ClosePanel { id, put_back: true });
+                    return DeskNews::None;
+                }
                 self.panel_made(id, spec, key, encoding);
                 DeskNews::Job(job, Ok(id.wire()), JobAnswer::Added)
             }

@@ -249,6 +249,8 @@ struct Brain {
     waiting_desk: Vec<Accepted>,
     /// The desktop did not respond for too long: the program ends with an error.
     desk_gave_up: bool,
+    /// Desktop workers let go, until each is gone (see `deskside.rs`).
+    retiring: Vec<worker::Retired>,
 }
 
 impl Brain {
@@ -439,7 +441,7 @@ impl Brain {
             }
         }
         if self.sessions.is_empty() && self.displays.as_ref().is_some_and(|d| !d.healthy()) {
-            self.displays = None;
+            self.let_go_displays();
         }
         if self.displays.is_none() {
             self.displays = Some(create_displays(
@@ -700,7 +702,7 @@ impl Brain {
     /// Removes the monitors (the desktop's worker puts everything back and gives their
     /// memory back).
     fn drop_displays(&mut self) {
-        self.displays = None;
+        self.let_go_displays();
     }
 
     /// An item of the tray.
@@ -910,8 +912,10 @@ impl Brain {
     }
 }
 
-/// How long quitting waits for the desktop's worker to put everything back.
-const DESK_GONE: Duration = Duration::from_secs(10);
+/// How long quitting waits for the desktop's worker to put everything back: with the
+/// headsets' moment to read the goodbye, within the time a quit signal gives
+/// (`signals.rs`).
+const DESK_GONE: Duration = Duration::from_secs(8);
 
 /// Tells a headset why it gets no session, instead of a snapshot, and closes its
 /// connection gently (on a thread of its own: that takes a moment).
@@ -1073,6 +1077,7 @@ fn serve(args: Args) -> Result<()> {
         worn_told: BTreeMap::new(),
         waiting_desk: Vec::new(),
         desk_gave_up: false,
+        retiring: Vec::new(),
     };
     // The local API has a state to give from the moment it is on the bus.
     brain.publish_api();
@@ -1092,6 +1097,9 @@ fn serve(args: Args) -> Result<()> {
         api.finish();
     }
     if let Some(code) = end_now {
+        // What a run that ends this way leaves behind (Hyprland's outputs, the sound
+        // devices), as after a crash.
+        platform::clean_up_after_crash();
         platform::end_now(code);
     }
     // A probe of the encoders still under way (quitting right after the start) is
