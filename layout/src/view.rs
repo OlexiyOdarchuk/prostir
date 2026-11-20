@@ -324,4 +324,8 @@ impl<K: Copy + PartialEq> View<K> for Room<K> {
     fn middle(&self, k: K) -> Option<(f64, f64)> {
         self.get(k).map(|m| (m.seen.center_x(), m.seen.center_y()))
     }
+
+    fn height(&self, k: K) -> Option<f64> {
+        self.get(k).map(|m| m.seen.height())
+    }
 }

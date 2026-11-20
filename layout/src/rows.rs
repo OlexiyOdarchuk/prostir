@@ -135,11 +135,6 @@ pub fn rows_of<K: Copy + Ord, V: View<K>>(
         }
     };
     let first = |row: &[usize]| row.iter().map(|&i| all[i]).min();
-    rows.sort_by(|a, b| {
-        middle_y(b)
-            .total_cmp(&middle_y(a))
-            .then(first(a).cmp(&first(b)))
-    });
     let over = |upper: &[usize], lower: &[usize]| -> f64 {
         let mut votes = 0.0;
         for &u in upper {
@@ -151,16 +146,71 @@ pub fn rows_of<K: Copy + Ord, V: View<K>>(
         }
         votes
     };
-    for _ in 0..rows.len() {
-        let mut swapped = false;
-        for k in 0..rows.len().saturating_sub(1) {
-            if over(&rows[k + 1], &rows[k]) > over(&rows[k], &rows[k + 1]) + 1e-9 {
-                rows.swap(k, k + 1);
-                swapped = true;
+    // With rows worked out before, they keep their order but where one is now clearly
+    // over another: seen over it, or (not one over the other at all) its middle higher
+    // by more than half the lower of the two rows' heights. Rows side by side at about
+    // one height are in no order as the eye sees them; the one they had stays, so a
+    // nudge (or the last bits of a sine) never turns two of them about.
+    let height = |row: &[usize]| {
+        let hs: Vec<f64> = row.iter().filter_map(|&i| view.height(all[i])).collect();
+        (!hs.is_empty()).then(|| hs.iter().sum::<f64>() / hs.len() as f64)
+    };
+    let clearly_over = |upper: &[usize], lower: &[usize]| {
+        let (up, down) = (over(upper, lower), over(lower, upper));
+        if (up - down).abs() > 1e-9 {
+            return up > down;
+        }
+        let margin = match (height(upper), height(lower)) {
+            (Some(a), Some(b)) => a.min(b) / 2.0,
+            _ => 0.0,
+        };
+        middle_y(upper) > middle_y(lower) + margin
+    };
+    match previous {
+        Some(before) => {
+            let was = |row: &[usize]| {
+                row.iter()
+                    .filter_map(|&i| before.iter().position(|r| r.contains(&all[i])))
+                    .min()
+                    .unwrap_or(usize::MAX)
+            };
+            rows.sort_by(|a, b| {
+                was(a)
+                    .cmp(&was(b))
+                    .then(middle_y(b).total_cmp(&middle_y(a)))
+                    .then(first(a).cmp(&first(b)))
+            });
+            for _ in 0..rows.len() {
+                let mut swapped = false;
+                for k in 0..rows.len().saturating_sub(1) {
+                    if clearly_over(&rows[k + 1], &rows[k]) {
+                        rows.swap(k, k + 1);
+                        swapped = true;
+                    }
+                }
+                if !swapped {
+                    break;
+                }
             }
         }
-        if !swapped {
-            break;
+        None => {
+            rows.sort_by(|a, b| {
+                middle_y(b)
+                    .total_cmp(&middle_y(a))
+                    .then(first(a).cmp(&first(b)))
+            });
+            for _ in 0..rows.len() {
+                let mut swapped = false;
+                for k in 0..rows.len().saturating_sub(1) {
+                    if over(&rows[k + 1], &rows[k]) > over(&rows[k], &rows[k + 1]) + 1e-9 {
+                        rows.swap(k, k + 1);
+                        swapped = true;
+                    }
+                }
+                if !swapped {
+                    break;
+                }
+            }
         }
     }
     rows.into_iter()

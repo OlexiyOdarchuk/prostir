@@ -20,7 +20,7 @@
 //!   (0 when they face it square). Monitors turned to face a lower head keep facing it.
 //! - On that surface, in the row's own frame (the axis up): every monitor faces the
 //!   axis, tilted by the row's tilt, without leaning, turned about its own centre; the
-//!   monitors close up side by side in the order they stand around the axis, the mean
+//!   monitors close up side by side in the order of their row, left to right, the mean
 //!   of their directions where it was (the least movement of them all, and no drift
 //!   towards the primary); their mid-lines on one circle, at the mean distance their
 //!   side edges were from the axis; and one line up and down: tops, middles or bottoms,
@@ -28,23 +28,30 @@
 //! - A flat row (monitors parallel and in one plane, a wall) stays in its plane: side
 //!   by side in it, the mean of their centres where it was, one line up and down.
 //!
-//! The rows keep their heights. Only where a row straightened would cover a monitor of
-//! the row before it (outwards from the main one), or come so near in height that the
-//! two could be taken for one row, is it moved along the axis of the whole just far
-//! enough not to. A gap the user left between rows stays: the desktop closes it, the
-//! headset shows it as it was.
+//! The rows are those the eye sees, the laptop screen among them, and they stay so. They
+//! keep their heights. Only where a row straightened would cover a monitor of the row
+//! before it (outwards from the main one), or come so near in height that the two could
+//! be taken for one row, is it moved along the axis of the whole far enough not to, and
+//! [`CLEAR`] more, so that what decides it is not a matter of the last bits of a
+//! number. A gap the user left between rows stays: the desktop closes it, the headset
+//! shows it as it was.
+//!
+//! A row already lined up, to within [`SNUG`] and [`SQUARE`] (far more than rounding
+//! leaves, far less than the eye sees), is left exactly as it is. So lining up twice
+//! changes nothing the second time, on any machine: what the first time left is lined
+//! up whatever the last bits of its sines and square roots.
 //!
 //! Everything is worked out from the monitors themselves around the eye, so turning the
 //! whole arrangement about the eye (any yaw, pitch or roll that leaves its rows the
 //! same) and lining up gives what lining up and turning gives; a mirror-symmetric
-//! arrangement stays symmetric; lining up twice changes nothing the second time.
+//! arrangement stays symmetric.
 
 use std::collections::BTreeMap;
 
 use glam::{Mat3, Quat, Vec3};
 
 use crate::rows::rows_of;
-use crate::space::{Frame, Monitor, PixelSize, Placement, contiguous, covers, facing};
+use crate::space::{Frame, Monitor, PixelSize, Placement, covers, facing, unwrap};
 use crate::view::Room;
 
 /// A row of one or two monitors keeps an axis of its own only past this angle from the
@@ -53,11 +60,21 @@ pub const OWN_TILT: f32 = 10.0 * std::f32::consts::PI / 180.0;
 /// Two monitors propose an axis when their right edges point apart by this much (10°):
 /// nearer to parallel, the direction square to both is not well defined.
 pub const PAIR: f32 = 10.0 * std::f32::consts::PI / 180.0;
-/// Monitors whose faces and right edges point within this angle of each other (and that
-/// stand in one plane) make a flat row, a wall (3°).
+/// Monitors whose faces point within this angle of each other (and that stand in one
+/// plane) make a flat row, a wall (3°), however crooked one of them hangs.
 const FLAT: f32 = 3.0 * std::f32::consts::PI / 180.0;
 /// A monitor fits an axis when it leans off it by no more than this (1°).
 const FITS: f32 = std::f32::consts::PI / 180.0;
+/// An axis is within this angle of the up of every monitor that proposes it (60°).
+const UPRIGHT: f32 = 60.0 * std::f32::consts::PI / 180.0;
+/// A row is lined up already when its monitors lean, tilt apart and turn away from
+/// facing the axis by no more than this (0.05°)...
+pub const SQUARE: f32 = 0.05 * std::f32::consts::PI / 180.0;
+/// ... and their seams, the circle of their mid-lines and their line up and down are
+/// true to this (0.5 mm).
+pub const SNUG: f32 = 0.0005;
+/// A row moved apart from the one before it goes this much further than it needs (1 mm).
+pub const CLEAR: f32 = 0.001;
 
 /// Every monitor lined up (see the module's description), in the room. `main`: the
 /// primary monitor, whose row keeps its place while the others make room.
@@ -71,9 +88,13 @@ pub fn line_up<K: Copy + Ord>(
     previous_rows: Option<&[Vec<K>]>,
     lid: Option<K>,
 ) -> BTreeMap<K, Placement> {
+    // The rows as the eye sees them, the laptop screen among them: what is kept.
+    let ids: Vec<K> = all.iter().map(|m| m.id).collect();
+    let seen_rows = rows_of(&ids, &Room::new(frame, all), previous_rows);
     let monitors: Vec<Monitor<K>> = all.iter().filter(|m| Some(m.id) != lid).copied().collect();
-    let mut lined = line_up_rows(&monitors, frame, main, previous_rows);
-    if let Some(l) = all.iter().find(|m| Some(m.id) == lid) {
+    let screen = all.iter().find(|m| Some(m.id) == lid).copied();
+    let mut lined = line_up_rows(&monitors, frame, main, &seen_rows, screen);
+    if let Some(l) = screen {
         let mut p = frame.unplace(l.placement);
         // Only a monitor lined up over it pushes it down: one that covered it as it
         // stood (a curved monitor's flat chord bulging over it) leaves it be.
@@ -86,11 +107,45 @@ pub fn line_up<K: Copy + Ord>(
             .map(|m| frame.unplace(lined[&m.id]).corners(m.height()))
             .collect();
         let down = p.rotation * Vec3::Y;
+        // Nor does it join a row it was not in.
+        let in_row = |p: &Placement| -> Vec<K> {
+            let mut now: Vec<Monitor<K>> = all
+                .iter()
+                .map(|m| Monitor {
+                    placement: lined.get(&m.id).copied().unwrap_or(m.placement),
+                    ..*m
+                })
+                .collect();
+            if let Some(m) = now.iter_mut().find(|m| m.id == l.id) {
+                m.placement = frame.place(*p);
+            }
+            let rows = rows_of(&ids, &Room::new(frame, &now), Some(&seen_rows));
+            let mut row = rows
+                .into_iter()
+                .find(|r| r.contains(&l.id))
+                .unwrap_or_default();
+            row.sort();
+            row
+        };
+        let mut was = seen_rows
+            .iter()
+            .find(|r| r.contains(&l.id))
+            .cloned()
+            .unwrap_or_default();
+        was.sort();
+        // A centimetre at a time: until nothing lined up covers it, then (30 cm at most)
+        // until it is in no row it was not in.
+        let mut joining = 0;
         for _ in 0..100 {
             let mine = p.corners(l.height());
-            if others.iter().all(|o| !covers(o, &mine, 0.001)) {
+            if others.iter().any(|o| covers(o, &mine, 0.001)) {
+                p.position -= down * 0.01;
+                continue;
+            }
+            if joining == 30 || !in_row(&p).iter().any(|k| !was.contains(k)) {
                 break;
             }
+            joining += 1;
             p.position -= down * 0.01;
         }
         lined.insert(l.id, frame.place(p));
@@ -147,12 +202,17 @@ fn median(mut values: Vec<f32>) -> f32 {
 }
 
 /// The axis fitted to `poses` (see the module's description), pointing to the side of
-/// `up`; `None` when no two right edges point apart by [`PAIR`].
+/// `up`; `None` when no two right edges point apart by [`PAIR`] around an up.
 fn fit_axis(poses: &[Pose], up: Vec3) -> Option<Vec3> {
     let orient = |a: Vec3| if a.dot(up) < 0.0 { -a } else { a };
+    // Right edges apart by a turn around the axis, not by a roll in one plane: two
+    // monitors of a wall, one hanging crooked, would propose the wall's normal. The axis
+    // is within [`UPRIGHT`] of both monitors' ups (tilted back 35°, they are within 35°).
     let proposal = |i: usize, j: usize| -> Option<Vec3> {
         let c = poses[i].right.cross(poses[j].right);
-        (c.length() >= PAIR.sin()).then(|| orient(c.normalize()))
+        let a = orient(c.normalize_or_zero());
+        let upright = |p: &Pose| a.dot(p.up).abs() >= UPRIGHT.cos();
+        (c.length() >= PAIR.sin() && upright(&poses[i]) && upright(&poses[j])).then_some(a)
     };
     // What a proposal of the pair `i`, `j` leaves: the lean of every monitor, and how far
     // each tilts from the pair's own tilt (a monitor that leans on its own then disagrees
@@ -245,9 +305,7 @@ fn is_flat(poses: &[Pose]) -> bool {
     let depth = |p: &Pose| -p.centre.dot(first.face);
     poses.len() > 1
         && poses.iter().all(|p| {
-            p.face.angle_between(first.face) < FLAT
-                && p.right.angle_between(first.right) < FLAT
-                && (depth(p) - depth(first)).abs() < 0.02
+            p.face.angle_between(first.face) < FLAT && (depth(p) - depth(first)).abs() < 0.02
         })
 }
 
@@ -256,22 +314,52 @@ fn line_up_rows<K: Copy + Ord>(
     monitors: &[Monitor<K>],
     frame: &Frame,
     main: Option<K>,
-    previous_rows: Option<&[Vec<K>]>,
+    seen_rows: &[Vec<K>],
+    screen: Option<Monitor<K>>,
 ) -> BTreeMap<K, Placement> {
-    let room = Room::new(frame, monitors);
     let ids: Vec<K> = monitors.iter().map(|m| m.id).collect();
-    let rows = rows_of(&ids, &room, previous_rows);
+    // The rows as seen, without the laptop screen (which is not lined up).
+    let rows: Vec<Vec<K>> = seen_rows
+        .iter()
+        .map(|r| {
+            r.iter()
+                .copied()
+                .filter(|k| ids.contains(k))
+                .collect::<Vec<K>>()
+        })
+        .filter(|r| !r.is_empty())
+        .collect();
     // In the frame: the eye at the origin.
     let local: BTreeMap<K, (Placement, PixelSize)> = monitors
         .iter()
         .map(|m| (m.id, (frame.unplace(m.placement), m.px)))
         .collect();
+    let screen = screen.map(|m| (m.id, (frame.unplace(m.placement), m.px)));
     let pose = |k: K| Pose::of(&local[&k].0, local[&k].1);
     let everyone: Vec<Pose> = ids.iter().map(|&k| pose(k)).collect();
     let all_up = median_direction(&everyone.iter().map(|p| p.up).collect::<Vec<_>>());
-    // Monitors all in one column (right edges parallel) say nothing about the axis by
-    // their edges: then their median up, which three or more keep from a crooked one.
-    let all_axis = fit_axis(&everyone, all_up).or((everyone.len() >= 3).then_some(all_up));
+    // The axis of the whole: where rows of three or more fit their own, the median of
+    // those (they stand square to them once lined up, so it is the same the second
+    // time); else fitted to all monitors. Monitors all in one column (right edges
+    // parallel) say nothing about it by their edges: then their median up, which three
+    // or more keep from a crooked one.
+    let own_axes: Vec<Vec3> = rows
+        .iter()
+        .filter(|r| r.len() >= 3)
+        .filter_map(|r| {
+            let poses: Vec<Pose> = r.iter().map(|&k| pose(k)).collect();
+            if is_flat(&poses) {
+                return None;
+            }
+            let up = median_direction(&poses.iter().map(|p| p.up).collect::<Vec<_>>());
+            fit_axis(&poses, up)
+        })
+        .collect();
+    let all_axis = if own_axes.is_empty() {
+        fit_axis(&everyone, all_up).or((everyone.len() >= 3).then_some(all_up))
+    } else {
+        Some(median_direction(&own_axes))
+    };
 
     let mut out: BTreeMap<K, Placement> = BTreeMap::new();
     let mut axes: Vec<Vec3> = Vec::new();
@@ -309,6 +397,12 @@ fn line_up_rows<K: Copy + Ord>(
                 (k, p, px)
             })
             .collect();
+        if lined_up(&in_row, flat) {
+            for &k in row {
+                out.insert(k, local[&k].0);
+            }
+            continue;
+        }
         let straight = if flat {
             straighten_flat(&in_row)
         } else {
@@ -344,24 +438,49 @@ fn line_up_rows<K: Copy + Ord>(
             .iter()
             .map(|&k| height(k, &out[&k]))
             .fold(0.0f32, f32::max);
-        let ok = |shift: f32| apart(&rows[r], &inner, &out, &local, turn, dir * shift, &rows);
-        let mut shift = 0.0f32;
-        if !ok(0.0) {
+        let ok = |shift: f32| {
+            apart(
+                &rows[r],
+                &inner,
+                &out,
+                &local,
+                screen,
+                turn,
+                dir * shift,
+                seen_rows,
+            )
+        };
+        // The least move, outwards or back (a row lined up over the next one from the
+        // other side goes back), up to four times its height: a row that cannot be kept
+        // apart nearer stays where lining it up put it, rather than far from everything.
+        let least = |way: f32| -> Option<f32> {
             let step = tallest / 8.0;
             let mut hi = step;
-            while !ok(hi) && hi < 64.0 * tallest {
+            while !ok(way * hi) && hi < 4.0 * tallest {
                 hi += step;
+            }
+            if !ok(way * hi) {
+                return None;
             }
             let mut lo = hi - step;
             for _ in 0..40 {
                 let mid = (lo + hi) / 2.0;
-                if ok(mid) {
+                if ok(way * mid) {
                     hi = mid;
                 } else {
                     lo = mid;
                 }
             }
-            shift = hi;
+            Some(hi + CLEAR)
+        };
+        let mut shift = 0.0f32;
+        if !ok(0.0) {
+            shift = match (least(1.0), least(-1.0)) {
+                (Some(out), Some(back)) if back < out => -back,
+                (Some(out), _) => out,
+                (None, Some(back)) => -back,
+                (None, None) => 0.0,
+            };
         }
         if shift != 0.0 {
             for &k in &rows[r] {
@@ -430,6 +549,75 @@ fn one_line(spans: &[(f32, f32)], tall: &[f32]) -> Vec<f32> {
     }
 }
 
+/// Whether a row, in its own frame (its axis along +Y through the eye at the origin;
+/// `flat`: a wall), stands as lining it up would put it, to within [`SQUARE`] and
+/// [`SNUG`]: no monitor leaning, all tilted alike, each facing the axis (or, turned
+/// away from it, its own way, as lining up leaves such a one), side by side in the
+/// row's order, their mid-lines on one circle (a wall: in one plane), on one line up
+/// and down.
+fn lined_up<K>(row: &[(K, Placement, PixelSize)], flat: bool) -> bool {
+    let poses: Vec<Pose> = row.iter().map(|(_, p, px)| Pose::of(p, *px)).collect();
+    let Some(first) = poses.first() else {
+        return true;
+    };
+    let square = SQUARE.sin();
+    let tilt = first.tilt(Vec3::Y);
+    let upright = poses
+        .iter()
+        .all(|p| p.right.y.abs() <= square && (p.tilt(Vec3::Y) - tilt).abs() <= SQUARE);
+    if !upright {
+        return false;
+    }
+    let level = |v: Vec3| Vec3::new(v.x, 0.0, v.z);
+    // Mid-points of the side edges, on the mid-line; neighbours meet across (up and down
+    // they stand on the row's line, below).
+    let sides = |p: &Pose| {
+        (
+            p.centre - p.right * p.width / 2.0,
+            p.centre + p.right * p.width / 2.0,
+        )
+    };
+    let together = poses
+        .windows(2)
+        .all(|w| level(sides(&w[0]).1).distance(level(sides(&w[1]).0)) <= SNUG);
+    let around = if flat {
+        let depth = |p: &Pose| -p.centre.dot(first.face);
+        poses.iter().all(|p| {
+            p.face.angle_between(first.face) <= SQUARE && (depth(p) - depth(first)).abs() <= SNUG
+        })
+    } else {
+        let radius = |p: &Pose| level(sides(p).0).length();
+        let facing_axis = |p: &Pose| {
+            let (c, f) = (
+                level(p.centre).normalize_or_zero(),
+                level(p.face).normalize_or_zero(),
+            );
+            c.cross(f).length() <= square
+        };
+        poses.iter().all(|p| {
+            facing_axis(p)
+                && (radius(p) - radius(first)).abs() <= SNUG
+                && (level(sides(p).1).length() - radius(first)).abs() <= SNUG
+        })
+    };
+    if !together || !around {
+        return false;
+    }
+    let tall: Vec<f32> = poses
+        .iter()
+        .map(|p| p.height * p.tilt(Vec3::Y).cos())
+        .collect();
+    let spans: Vec<(f32, f32)> = poses
+        .iter()
+        .zip(&tall)
+        .map(|(p, h)| (p.centre.y + h / 2.0, p.centre.y - h / 2.0))
+        .collect();
+    one_line(&spans, &tall)
+        .iter()
+        .zip(&poses)
+        .all(|(y, p)| (y - p.centre.y).abs() <= SNUG)
+}
+
 /// One row straightened in its own frame (its axis along +Y through the eye at the
 /// origin): see the module's description.
 fn straighten<K: Copy + Ord>(row: &[(K, Placement, PixelSize)]) -> Vec<(K, Placement)> {
@@ -447,22 +635,19 @@ fn straighten<K: Copy + Ord>(row: &[(K, Placement, PixelSize)]) -> Vec<(K, Place
         r.max(widest / 2.0 * 1.0001)
     };
     let half = |w: f32| f64::from((w / 2.0 / radius).min(1.0).asin());
-    // Directions around the axis, near the row's own.
-    // Directions around the axis, cut behind the row.
-    let az: Vec<f64> = contiguous(
-        &poses
-            .iter()
-            .map(|p| f64::from(p.centre.x).atan2(f64::from(-p.centre.z)))
-            .collect::<Vec<_>>(),
-    );
-    let mut order: Vec<usize> = (0..row.len()).collect();
-    order.sort_by(|&a, &b| az[a].total_cmp(&az[b]).then(row[a].0.cmp(&row[b].0)));
-    // Side by side from `start`, the mean direction kept.
+    // Directions around the axis, each near the one before it in the row, so the row
+    // keeps its own order and ends (as its rows say, left to right).
+    let mut az: Vec<f64> = Vec::with_capacity(row.len());
+    for p in &poses {
+        let a = f64::from(p.centre.x).atan2(f64::from(-p.centre.z));
+        az.push(az.last().map_or(a, |&before| unwrap(a, before)));
+    }
+    // Side by side from `start` in that order, the mean direction kept.
     let mut offsets = vec![0.0f64; row.len()];
     let mut x = 0.0f64;
-    for &i in &order {
-        offsets[i] = x + half(poses[i].width);
-        x += 2.0 * half(poses[i].width);
+    for (i, p) in poses.iter().enumerate() {
+        offsets[i] = x + half(p.width);
+        x += 2.0 * half(p.width);
     }
     let n = row.len() as f64;
     let start = az.iter().sum::<f64>() / n - offsets.iter().sum::<f64>() / n;
@@ -512,13 +697,12 @@ fn straighten_flat<K: Copy + Ord>(row: &[(K, Placement, PixelSize)]) -> Vec<(K, 
     let right = Vec3::Y.cross(face);
     let along: Vec<f32> = poses.iter().map(|p| p.centre.dot(right)).collect();
     let depth = poses.iter().map(|p| -p.centre.dot(face)).sum::<f32>() / poses.len() as f32;
-    let mut order: Vec<usize> = (0..row.len()).collect();
-    order.sort_by(|&a, &b| along[a].total_cmp(&along[b]).then(row[a].0.cmp(&row[b].0)));
+    // Side by side in the row's own order.
     let mut offsets = vec![0.0f32; row.len()];
     let mut x = 0.0f32;
-    for &i in &order {
-        offsets[i] = x + poses[i].width / 2.0;
-        x += poses[i].width;
+    for (i, p) in poses.iter().enumerate() {
+        offsets[i] = x + p.width / 2.0;
+        x += p.width;
     }
     let n = row.len() as f32;
     let start = along.iter().sum::<f32>() / n - offsets.iter().sum::<f32>() / n;
@@ -543,21 +727,31 @@ fn straighten_flat<K: Copy + Ord>(row: &[(K, Placement, PixelSize)]) -> Vec<(K, 
 }
 
 /// Whether `row` moved by `shift` keeps apart from the monitors `inner`: none covers
-/// one of them as seen, and, seen in the frame `turn` (the whole's), they make the same
-/// rows as in `rows`, so no two rows are taken for one. Corners and rows are taken in
-/// that frame: where two monitors are too far apart around the eye to be projected
-/// together, covering falls back to angles, which must be the whole's own.
+/// one of them as seen, and, seen in the frame `turn` (the whole's) with the laptop
+/// `screen` where it stands and `rows` (as first seen) as what was, `row` is a row of its
+/// own, so it is taken for one row with none of them. Corners and rows are taken in that frame: where two
+/// monitors are too far apart around the eye to be projected together, covering falls
+/// back to angles, which must be the whole's own.
+#[allow(clippy::too_many_arguments)]
 fn apart<K: Copy + Ord>(
     row: &[K],
     inner: &[K],
     out: &BTreeMap<K, Placement>,
     local: &BTreeMap<K, (Placement, PixelSize)>,
+    screen: Option<(K, (Placement, PixelSize))>,
     turn: Quat,
     shift: Vec3,
     rows: &[Vec<K>],
 ) -> bool {
+    let size = |k: K| match screen {
+        Some((id, (_, px))) if id == k => px,
+        _ => local[&k].1,
+    };
     let placed = |k: K| {
-        let mut p = out[&k];
+        let mut p = match screen {
+            Some((id, (p, _))) if id == k => p,
+            _ => out[&k],
+        };
         if row.contains(&k) {
             p.position += shift;
         }
@@ -567,7 +761,7 @@ fn apart<K: Copy + Ord>(
             width: p.width,
         }
     };
-    let corners = |k: K| placed(k).corners(placed(k).width * local[&k].1.aspect());
+    let corners = |k: K| placed(k).corners(placed(k).width * size(k).aspect());
     let covering = row.iter().any(|&u| {
         inner
             .iter()
@@ -576,29 +770,28 @@ fn apart<K: Copy + Ord>(
     if covering {
         return false;
     }
-    let ids: Vec<K> = inner.iter().chain(row).copied().collect();
+    let ids: Vec<K> = inner
+        .iter()
+        .chain(row)
+        .copied()
+        .chain(screen.map(|s| s.0))
+        .collect();
     let monitors: Vec<Monitor<K>> = ids
         .iter()
         .map(|&k| Monitor {
             id: k,
-            px: local[&k].1,
+            px: size(k),
             placement: placed(k),
         })
         .collect();
     let room = Room::new(&Frame::upright(Vec3::ZERO, 0.0), &monitors);
     let now = rows_of(&ids, &room, Some(rows));
-    let partition = |rows: &[Vec<K>]| -> Vec<Vec<K>> {
-        let mut p: Vec<Vec<K>> = rows
-            .iter()
-            .map(|r| {
-                let mut r: Vec<K> = r.iter().copied().filter(|k| ids.contains(k)).collect();
-                r.sort();
-                r
-            })
-            .filter(|r| !r.is_empty())
-            .collect();
-        p.sort();
-        p
-    };
-    partition(&now) == partition(rows)
+    // Its monitors make one row there, with nobody else in it.
+    let mut mine: Vec<K> = row.to_vec();
+    mine.sort();
+    now.iter().any(|r| {
+        let mut r = r.clone();
+        r.sort();
+        r == mine
+    })
 }
