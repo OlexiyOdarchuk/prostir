@@ -42,7 +42,7 @@ impl Worker {
             }
             Job::Screenshot { job, id, .. } => {
                 self.begin(format!("a picture of {id}"));
-                let result = self.screenshot(id).map(JobOk::Saved);
+                let result = self.screenshot(id);
                 self.end();
                 self.done(Done::Job { job, result });
             }
@@ -166,7 +166,7 @@ impl Worker {
     }
 
     /// Saves a picture of monitor `id` (all of them where only that is possible).
-    fn screenshot(&mut self, id: ScreenId) -> Result<std::path::PathBuf> {
+    fn screenshot(&mut self, id: ScreenId) -> Result<JobOk> {
         let Some(slot) = self.slots.get(&id).filter(|s| !s.is_physical()) else {
             bail!(UserError::UnknownDisplay);
         };
@@ -187,17 +187,21 @@ impl Worker {
                 .map_err(anyhow::Error::from)
                 .and_then(|data| crate::encoder::keyframe_to_png(&data, encoder.codec()))
             {
-                Ok(path) => return Ok(path),
+                Ok(path) => return Ok(JobOk::Saved { path, whole: false }),
                 Err(e) => warn!("screenshot from the stream: {e:#}; taking the whole desktop"),
             }
         }
         let key = slot.key().cloned();
-        let name = self.desktop.caps().name;
+        let caps = self.desktop.caps();
+        let (name, whole) = (caps.name, !caps.screenshot_one_output || key.is_none());
         let Some(windows) = self.desktop.windows() else {
             return Err(anyhow!("the {name} desktop takes no screenshots"))
                 .context(UserError::Capture);
         };
-        windows.screenshot(key.as_ref()).context(UserError::Capture)
+        let path = windows
+            .screenshot(key.as_ref())
+            .context(UserError::Capture)?;
+        Ok(JobOk::Saved { path, whole })
     }
 
     /// Puts the PC's active window on a panel of its own, screen `id`, output

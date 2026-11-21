@@ -137,6 +137,12 @@ pub enum Request {
         x: i32,
         y: i32,
     },
+    /// A picture of a virtual monitor or a window panel, saved as a PNG in the
+    /// Pictures folder as the headset's screenshots are: answers its `path` (and
+    /// `whole` where the desktop could only take all of it), once the desktop took it.
+    Screenshot {
+        id: u32,
+    },
     /// Mbit/s for each monitor, 5 to 100.
     SetQuality {
         mbit: u32,
@@ -223,6 +229,7 @@ pub const REQUESTS: &[&str] = &[
     "set_scale",
     "set_primary",
     "place",
+    "screenshot",
     "set_quality",
     "set_sharp",
     "set_codec",
@@ -405,7 +412,9 @@ impl std::error::Error for Failure {}
 
 /// What a request gave, as one JSON object: `{"revision": 7}`,
 /// `{"id": 103, "revision": 8}` (a display made), `{"seconds_left": 180, "revision":
-/// 9}` (pairing open). `revision` is that of the state that already has the change.
+/// 9}` (pairing open), `{"path": "/home/me/Pictures/Prostir/1.png", "whole": false,
+/// "revision": 9}` (a screenshot). `revision` is that of the state that already has
+/// the change.
 ///
 /// On D-Bus a failure is a D-Bus error instead (its name and text); a transport
 /// without errors of its own (the named pipe) puts `error` and `text` here.
@@ -416,6 +425,12 @@ pub struct Answer {
     pub id: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seconds_left: Option<u32>,
+    /// The file a screenshot was saved to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// The screenshot shows the whole desktop, not only the display asked for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub whole: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<ApiError>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -960,6 +975,7 @@ mod tests {
                 x: -1920,
                 y: 0,
             },
+            Request::Screenshot { id: 103 },
             Request::SetQuality { mbit: 30 },
             Request::SetSharp { on: true },
             Request::SetCodec {
@@ -1059,6 +1075,16 @@ mod tests {
             ..Answer::default()
         };
         assert_eq!(added.to_json(), r#"{"id":105,"revision":4}"#);
+        let saved = Answer {
+            path: Some("/home/me/Pictures/Prostir/1.png".into()),
+            whole: Some(false),
+            revision: 5,
+            ..Answer::default()
+        };
+        assert_eq!(
+            saved.to_json(),
+            r#"{"path":"/home/me/Pictures/Prostir/1.png","whole":false,"revision":5}"#
+        );
         let failed = Answer {
             error: Some(ApiError::NotConnected),
             text: Some("No headset".into()),

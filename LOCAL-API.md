@@ -1,7 +1,7 @@
 # Prostir local API
 
 Programs of the same user on the PC (`prostir ctl`, the settings window
-`prostir window`, scripts, hot keys) talk to the running Prostir through this API.
+`prostir window`, scripts, hot keys, an AI agent through [`prostir mcp`](#mcp-prostir-mcp)) talk to the running Prostir through this API.
 The headset protocol is a separate thing (`PROTOCOL.md`).
 
 The requests, answers, events and the state are Rust types in the crate
@@ -197,6 +197,7 @@ exist, monitor requests change the set kept for the next headset (its monitors s
 | `set_scale` | `id`, `scale` (percent) | another scale for a monitor: its output is made anew under the same name and id (it stands `starting` meanwhile); `BadSize` for a scale the desktop does not give its size |
 | `place` | `id`, `x`, `y` | moves a display on the desktop to about `x`, `y` (its top-left corner, logical pixels): into the row it is then in, between its neighbours left and right, or a row of its own above or under the others; the desktop's arrangement then lines it up. Only while the monitors are on the desktop (`Unsupported` otherwise). The main headset's next arrangement (when the person moves a monitor in the headset) replaces it; the headset's own 3D arrangement is not changed |
 | `set_primary` | `id` | the desktop's primary display |
+| `screenshot` | `id` | a picture of a virtual monitor or a window panel, saved as a PNG as the headset's screenshots are (`Prostir/<date and time>.png` in the Pictures folder); answers `path` (the whole path) and `whole`. Answered once the desktop took it (20 s at most, else `Desktop`): with `grim -o` on Hyprland; on KDE Plasma from the monitor's own stream while it streams to a headset, else Spectacle's picture of the whole desktop (`whole`: true). `UnknownDisplay` for no such monitor or a display of the PC, `Capture` when it could not be taken, `Unsupported` while no monitors are on the desktop |
 | `set_quality` | `mbit` (5 to 100) | per monitor |
 | `set_sharp` | `on` | the slower encoder preset for clearer small text |
 | `set_codec` | `codec` (`h264`, `h265`, `auto`), `cpu` (bool, default false) | `auto` is the same as `h265` (H.265 where the PC and every headset can, else H.264), and the state shows it as `h265` |
@@ -230,10 +231,12 @@ brings them:
 {"revision": 7}
 {"id": 103, "revision": 8}
 {"seconds_left": 180, "revision": 9}
+{"path": "/home/me/Pictures/Prostir/2026-11-21 14-05-09.png", "whole": false, "revision": 9}
 ```
 
 `revision` is that of the state that already has the change; `id` comes with
-`add_monitor`, `seconds_left` with `pair_new_headset`. On D-Bus a failure is a D-Bus
+`add_monitor`, `seconds_left` with `pair_new_headset`, `path` and `whole` with
+`screenshot`. On D-Bus a failure is a D-Bus
 error, not an answer. A transport without errors of its own (the named pipe) answers
 `{"error": "NotConnected", "text": "No headset is connected", "revision": 7}` instead.
 
@@ -361,6 +364,7 @@ prostir ctl closer [N] | farther [N]       # Distance -N / +N, 1 by default
 prostir ctl preset N
 prostir ctl monitor list | add WxH[@1.25|@125%] | remove ID | retry ID | primary ID
 prostir ctl screen show|hide ID            # the PC's own displays
+prostir ctl screenshot ID                  # a picture of a monitor: where it was saved
 prostir ctl quality MBIT | sharp on|off | codec h264|h265|auto [--cpu]
 prostir ctl sound headset|pc
 prostir ctl pair | pair stop
@@ -391,6 +395,58 @@ time Prostir comes back on the bus.
 headset (asleep)` (`"asleep": true` too) when the sockets' watcher or systemd's socket
 waits for a headset, or that port 47830 is taken by another program (`"port_taken":
 true`), and exits with 2.
+
+## MCP (`prostir mcp`)
+
+`prostir mcp` is this API for an AI agent, as a server of the Model Context Protocol:
+the agent's program starts it and talks to it over its stdin and stdout (JSON-RPC 2.0,
+one message a line; MCP versions `2025-11-25`, `2025-06-18`, `2025-03-26` and
+`2024-11-05`). Only those messages go to stdout; its log goes to stderr. For Claude
+Code:
+
+```
+claude mcp add prostir -- prostir mcp
+```
+
+It is a client of the session bus like `prostir ctl`, with the same rights (those of
+the PC's owner) and no other way in: no network port, only the stdio of the process the
+user's own agent started. Each tool is one request (or `GetState`); the agent's program
+can ask the person before the tools marked `destructiveHint` (`remove_monitor`,
+`forget_headset`, `forget_all`, `quit`, `call`). What the agent sees its model sees too:
+the state has the pairing code while one is shown, and a screenshot shows what is on
+that monitor.
+
+| Tool | Arguments | |
+|---|---|---|
+| `get_state` | | `{"revision": …, "state": {…}}`, the [state](#state) |
+| `list_monitors` | | `{"revision", "primary", "displays"}` from the state |
+| `add_monitor` | `w`, `h`, `scale` (100) | `add_monitor`; the answer as `Call` gives it (`{"id": …, "revision": …}`) |
+| `remove_monitor`, `retry_monitor`, `set_primary` | `id` | the requests of the same name |
+| `place_monitor` | `id`, `x`, `y` | `place` |
+| `set_scale` | `id`, `scale` | |
+| `show_pc_display` | `id`, `shown` | `show_physical` |
+| `recenter`, `line_up`, `show_mouse`, `reset_arrangement`, `profile`, `cinema`, `focus`, `follow`, `no_limits`, `distance`, `preset` | as the requests | commands for the headset |
+| `set_quality`, `set_sharp`, `set_codec`, `sound_to_headset`, `set_counting`, `autostart` | as the requests | |
+| `pair_new_headset`, `stop_pairing`, `forget_headset`, `forget_all`, `show_settings`, `quit` | as the requests | |
+| `call` | `request`: a request object | any request as it is, also those no tool covers |
+| `screenshot_monitor` | `id`, `keep` (false) | `screenshot`; the picture as MCP `image` content (`image/png`), after a text `{"id", "whole", "bytes", "revision", "path"}`; the file is removed afterwards unless `keep` (then `path` names it) |
+| `wait_for_state` | `pointer`, one of `equals`, `contains`, `exists`; `timeout` (seconds, 10 by default, 120 at most) | waits until the value at the JSON Pointer `pointer` (RFC 6901, `""` the whole state) is `equals`, has `contains` in it (an object those fields, an array such an element, a string that text) or `exists` (true or false); without a condition, until the state changes. Answers `{"revision", "value", "waited_ms"}` |
+| `start` | | starts Prostir as `prostir` does (the settings window opens too, and keeps it running while open); nothing else starts it |
+
+For example, after `add_monitor` answered `{"id": 105, …}`, `wait_for_state` with
+`{"pointer": "/displays", "contains": {"id": 105, "state": "running"}, "timeout": 30}`
+returns once monitor 105 runs. It looks at `GetState` first, then again on each
+`StateChanged` and at least once a second.
+
+A tool that did not do what it was asked answers its result with `isError: true` and
+a text `{"error": NAME, "text": …}`, NAME as `ctl --json` gives it: the
+[errors](#errors) above, `NotRunning` and `NoBus`, `BadArgument` for arguments that do
+not read, `TimedOut` for a wait whose condition did not hold in time (with `revision`
+and `value` as they were last). While Prostir is not running every tool says
+`NotRunning` at once. JSON-RPC errors are left for what is not MCP: `-32700` (not JSON),
+`-32600` (not a request), `-32601` (no such method), `-32602` (no such tool). Requests
+are handled one after the other: a command for the headset or a wait holds the next
+ones until it is answered.
 
 ## `prostir` and the settings window
 

@@ -58,6 +58,7 @@ fn commands_read_as_requests() {
             shown: false
         }
     );
+    assert_eq!(asks("screenshot 103"), Request::Screenshot { id: 103 });
     assert_eq!(asks("quality 50"), Request::SetQuality { mbit: 50 });
     assert_eq!(asks("sharp on"), Request::SetSharp { on: true });
     assert_eq!(

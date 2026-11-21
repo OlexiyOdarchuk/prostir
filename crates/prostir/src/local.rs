@@ -152,6 +152,9 @@ impl Brain {
         if let Request::PairingCode { code } = request {
             return self.code_typed(&code, reply);
         }
+        if let Request::Screenshot { id } = request {
+            return self.screenshot(id, reply);
+        }
         let result = self.carry_out(request);
         if let Some(d) = self.displays.as_mut() {
             d.apply(&self.store.wanted());
@@ -197,6 +200,74 @@ impl Brain {
         if let Some(reply) = self.code_reply.take() {
             self.answer(reply, done());
         }
+    }
+
+    /// A picture of monitor `n`, as the headset's screenshot: the desktop's worker
+    /// takes it, and the answer comes once it did (see [`Brain::shot_taken`]).
+    fn screenshot(&mut self, n: u32, reply: Reply) {
+        let Some(displays) = self.displays.as_mut() else {
+            let text = t(
+                "Знімок можна зробити, поки монітори є на стільниці",
+                "A screenshot is taken while the monitors are on the desktop",
+            );
+            return self.answer(reply, unsupported(text));
+        };
+        if displays.desk_stuck() {
+            let text = crate::session::desktop_not_responding();
+            return self.answer(reply, CtlReply::failed(ApiError::Desktop, text));
+        }
+        match displays.screenshot(ScreenId::from_wire(DisplayId(n))) {
+            Ok(job) => {
+                let until = std::time::Instant::now() + crate::worker::answer_within();
+                self.shots.push((job, reply, until));
+            }
+            Err(e) => self.answer(reply, failed(&e)),
+        }
+    }
+
+    /// The answer to job `job` of the desktop's worker, if a screenshot of the local
+    /// API waits for it: whether one did.
+    pub(crate) fn shot_taken(
+        &mut self,
+        job: crate::worker::JobId,
+        result: &anyhow::Result<DisplayId>,
+        answer: &crate::displays::JobAnswer,
+    ) -> bool {
+        let Some(i) = self.shots.iter().position(|(j, ..)| *j == job) else {
+            return false;
+        };
+        let (_, reply, _) = self.shots.remove(i);
+        let result = match (result, answer) {
+            (Err(e), _) => failed(e),
+            (Ok(_), crate::displays::JobAnswer::Saved { path, whole }) => CtlReply::Saved {
+                path: path.to_string_lossy().into_owned(),
+                whole: *whole,
+            },
+            (Ok(_), _) => done(),
+        };
+        self.answer(reply, result);
+        true
+    }
+
+    /// Screenshots that waited for the desktop until `now` (all of them with `all`:
+    /// the desktop does not respond, or its monitors are gone) fail with `Desktop`:
+    /// their jobs, which nobody waits for now.
+    pub(crate) fn give_up_shots(
+        &mut self,
+        now: std::time::Instant,
+        all: bool,
+    ) -> Vec<crate::worker::JobId> {
+        let (over, still): (Vec<_>, Vec<_>) = std::mem::take(&mut self.shots)
+            .into_iter()
+            .partition(|(_, _, until)| all || *until <= now);
+        self.shots = still;
+        let mut jobs = Vec::new();
+        for (job, reply, _) in over {
+            let text = crate::session::desktop_not_responding();
+            self.answer(reply, CtlReply::failed(ApiError::Desktop, text));
+            jobs.push(job);
+        }
+        jobs
     }
 
     /// Shows the notice of a new headset nearby; its button opens the pairing window
@@ -379,8 +450,9 @@ impl Brain {
                 self.door.stop_pairing();
                 done()
             }
-            // Handled in `ctl`: answered once the attempt ends.
-            Request::PairingCode { .. } => unsupported(""),
+            // Handled in `ctl`: answered once the attempt ends, or once the desktop
+            // took the picture.
+            Request::PairingCode { .. } | Request::Screenshot { .. } => unsupported(""),
             Request::SetScale { id: n, scale } => self.rescale(ScreenId::saved(n), scale),
             Request::Place { id: n, x, y } => match self.displays.as_mut() {
                 Some(d) => match d.move_to(ScreenId::saved(n), x, y) {

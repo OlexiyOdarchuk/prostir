@@ -143,6 +143,10 @@
   taken off, put on, leaving), each with `--json` and exit codes for scripts.
 - The same on D-Bus for other programs and hot keys (`io.github.OlexiyOdarchuk.Prostir`
   on the session bus, see `LOCAL-API.md`).
+- `prostir mcp` offers the same to an AI agent over the Model Context Protocol
+  (`claude mcp add prostir -- prostir mcp` for Claude Code): the state, monitors and
+  their arrangement, headset commands, a picture of a monitor, and waiting for the state
+  to show a change. `prostir ctl screenshot ID` saves a picture of a monitor.
 - One program, `prostir`, with one menu entry: `prostir` opens the settings window and
   starts Prostir in the background if it is not running; the tray has "Settings…" too.
   `prostir serve` runs it in the background, as autostart and systemd start it: on

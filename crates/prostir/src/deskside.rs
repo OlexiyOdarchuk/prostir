@@ -55,6 +55,9 @@ impl Brain {
                 }
             }
             DeskNews::Job(job, result, answer) => {
+                if self.shot_taken(job, &result, &answer) {
+                    return self.look_at_desk(Instant::now());
+                }
                 let outcome = requests::outcome_of_job(result, answer);
                 for s in self.sessions.values_mut() {
                     if s.job_done(job, &outcome) {
@@ -144,6 +147,11 @@ impl Brain {
                         displays.forget_job(job);
                     }
                 }
+                for job in self.give_up_shots(now, true) {
+                    if let Some(d) = self.displays.as_ref() {
+                        d.desk().cancel(job);
+                    }
+                }
                 for accepted in std::mem::take(&mut self.waiting_desk) {
                     turn_away(accepted.conn, desktop_not_responding());
                 }
@@ -172,6 +180,7 @@ impl Brain {
             .sessions
             .values()
             .filter_map(Session::waiting_until)
+            .chain(self.shots.iter().map(|(_, _, until)| *until))
             .min();
         let retiring = self
             .retiring
@@ -183,6 +192,13 @@ impl Brain {
 
     /// Requests that waited for the desktop long enough fail.
     pub(crate) fn desk_answers_due(&mut self, now: Instant) {
+        // Without monitors no screenshot comes any more.
+        let gone = self.displays.is_none();
+        for job in self.give_up_shots(now, gone) {
+            if let Some(d) = self.displays.as_ref() {
+                d.desk().cancel(job);
+            }
+        }
         let Some(displays) = self.displays.as_mut() else {
             return;
         };

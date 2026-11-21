@@ -199,6 +199,11 @@ pub fn parse(args: &[String]) -> Result<(Ctl, bool), String> {
             let id = number(rest.get(1), "a display's id")?;
             ask(Request::ShowPhysical { id, shown })
         }
+        "screenshot" => {
+            takes = 1;
+            let id = number(rest.first(), "a display's id")?;
+            ask(Request::Screenshot { id })
+        }
         "quality" => {
             takes = 1;
             let mbit = number(rest.first(), "Mbit/s")?;
@@ -311,6 +316,7 @@ prostir ctl COMMAND [--json]
   preset N
   monitor list | add WxH[@1.25|@125%] | remove ID | retry ID | primary ID
   screen show ID | screen hide ID
+  screenshot ID                  a picture of a monitor: where it was saved
   quality MBIT | sharp on|off | codec h264|h265|auto [--cpu]
   sound headset|pc
   pair | pair stop
@@ -420,7 +426,7 @@ fn failed(e: &ClientError, json: bool, io: &mut Output<'_>, for_headset: bool) -
 }
 
 /// The exit code, the error's name and its text for `e`.
-fn what_failed(e: &ClientError, for_headset: bool) -> (i32, &'static str, String) {
+pub fn what_failed(e: &ClientError, for_headset: bool) -> (i32, &'static str, String) {
     match e {
         ClientError::NoBus(why) => (
             NOT_RUNNING,
@@ -460,6 +466,9 @@ fn error_json(name: &str, text: &str, running: Option<bool>) -> serde_json::Valu
 
 /// The line for people when a request was done.
 fn done_line(answer: &Answer) -> String {
+    if let Some(path) = &answer.path {
+        return format!("{} {path}", t("Збережено:", "Saved:"));
+    }
     match (answer.id, answer.seconds_left) {
         (Some(id), _) => format!("{} {id}", t("Додано, номер", "Added, id")),
         (_, Some(left)) => format!(

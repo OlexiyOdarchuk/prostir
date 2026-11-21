@@ -23,6 +23,11 @@ pub enum CtlReply {
     Added(u32),
     /// The pairing window opened, for so many seconds.
     Pairing(u32),
+    /// A screenshot saved at `path`; `whole`: of the whole desktop.
+    Saved {
+        path: String,
+        whole: bool,
+    },
     Failed(Failure),
 }
 
@@ -51,6 +56,10 @@ impl CtlReply {
             Self::Done => {}
             Self::Added(id) => answer.id = Some(*id),
             Self::Pairing(seconds) => answer.seconds_left = Some(*seconds),
+            Self::Saved { path, whole } => {
+                answer.path = Some(path.clone());
+                answer.whole = Some(*whole);
+            }
             Self::Failed(f) => {
                 answer.error = Some(f.error);
                 answer.text = Some(f.text.clone());
