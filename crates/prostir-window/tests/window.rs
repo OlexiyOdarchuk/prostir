@@ -271,6 +271,32 @@ fn going_on_in_the_first_run_opens_pairing() {
     assert_eq!(handle.calls(), [Request::PairNewHeadset]);
 }
 
+/// A monitor just added stands nowhere until the headset placed it: a line under the
+/// map says so and can remove it; placed, it is on the map instead.
+#[test]
+fn a_monitor_being_placed_is_named_under_the_map() {
+    let (mut h, handle) = window(Mock::connected(), Setup::default());
+    open(&mut h, Page::Monitors);
+    press(&mut h, "1920 × 1080");
+    h.run_steps(2);
+    h.get_by_label("Prostir-4: розставляється…");
+    assert!(h.query_by_label("Prostir-4").is_none(), "not on the map");
+    press(&mut h, "Прибрати Prostir-4");
+    assert_eq!(
+        handle.calls().last(),
+        Some(&Request::RemoveMonitor { id: 5 })
+    );
+    assert!(h.query_by_label("Prostir-4: розставляється…").is_none());
+
+    press(&mut h, "2560 × 1440");
+    h.run_steps(2);
+    h.get_by_label("Prostir-4: розставляється…");
+    handle.place_new();
+    h.run_steps(3);
+    assert!(h.query_by_label("Prostir-4: розставляється…").is_none());
+    h.get_by_label("Prostir-4");
+}
+
 #[test]
 fn a_refused_request_says_why_until_closed() {
     let (mut h, handle) = window(Mock::connected(), Setup::default());

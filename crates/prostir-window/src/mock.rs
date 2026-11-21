@@ -33,6 +33,9 @@ struct Inner {
     silent: bool,
     /// It owns the name but has not this interface: a Prostir older than the window.
     old: bool,
+    /// Monitors added and not placed by the headset yet, as the service has them
+    /// (nowhere on the desktop): where the headset puts each, and since when.
+    placing: Vec<(u32, DeskRect, Instant)>,
 }
 
 /// The mock service.
@@ -189,6 +192,7 @@ impl Mock {
                 refuse: None,
                 silent: false,
                 old: false,
+                placing: Vec::new(),
             })),
         }
     }
@@ -423,7 +427,16 @@ impl MockHandle {
         i.publish();
     }
 
-    /// Moves time on: the pairing window, a headset turning up (live mocks only).
+    /// The headset placed the monitors added: they stand where it put them, running.
+    pub fn place_new(&self) {
+        let mut i = self.inner.lock().unwrap();
+        if i.place_new(None) {
+            i.publish();
+        }
+    }
+
+    /// Moves time on: the pairing window, a headset turning up, a monitor added placed
+    /// (live mocks only).
     pub fn tick(&self) {
         let mut i = self.inner.lock().unwrap();
         if i.tick() {
@@ -444,8 +457,31 @@ impl Inner {
         }
     }
 
-    /// The pairing window in real time; whether anything changed.
+    /// Places the monitors added (those added `after` ago at least, if given): whether
+    /// any was.
+    fn place_new(&mut self, after: Option<Duration>) -> bool {
+        let due = |since: &Instant| after.is_none_or(|a| since.elapsed() >= a);
+        let (now, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.placing)
+            .into_iter()
+            .partition(|(_, _, t)| due(t));
+        self.placing = later;
+        for (id, rect, _) in &now {
+            if let Some(d) = self.state.displays.iter_mut().find(|d| d.id == *id) {
+                d.desk = Some(*rect);
+                d.state = DisplayState::Running;
+            }
+        }
+        !now.is_empty()
+    }
+
+    /// The pairing window in real time, a monitor added placed about a second later;
+    /// whether anything changed.
     fn tick(&mut self) -> bool {
+        let placed = self.live && self.place_new(Some(Duration::from_secs(1)));
+        placed | self.pairing_tick()
+    }
+
+    fn pairing_tick(&mut self) -> bool {
         let (Some(since), true) = (self.pairing_since, self.live) else {
             return false;
         };
@@ -523,7 +559,12 @@ impl Inner {
                         .map(|r| r.x + r.w as i32)
                         .max()
                         .unwrap_or(0);
-                    display(id, &name, *w, *h, right, 0)
+                    // Nowhere until the headset placed it (see `MockHandle::place_new`).
+                    let mut d = display(id, &name, *w, *h, right, 0);
+                    self.placing
+                        .push((id, d.desk.take().unwrap(), Instant::now()));
+                    d.state = DisplayState::Starting;
+                    d
                 } else {
                     // Kept for the next headset.
                     kept(id, &name, *w, *h)
@@ -783,9 +824,17 @@ mod tests {
         let s = m.state();
         let d = s.display(id).unwrap();
         assert_eq!((d.name.as_str(), d.mode.scale), ("Prostir-4", 125));
+        assert_eq!(
+            (d.desk, d.state),
+            (None, DisplayState::Starting),
+            "being placed"
+        );
+        m.handle().place_new();
+        let d = m.state().display(id).unwrap().clone();
+        assert!(d.desk.is_some() && d.state == DisplayState::Running);
         m.call(&Request::SetPrimary { id }).unwrap();
         let a = m.call(&Request::Place { id, x: -1920, y: 0 }).unwrap();
-        assert_eq!(a.revision, 4);
+        assert_eq!(a.revision, 5);
         assert_eq!(m.state().primary, Some(id));
         assert_eq!(m.state().display(id).unwrap().desk.unwrap().x, -1920);
         m.call(&Request::RemoveMonitor { id }).unwrap();

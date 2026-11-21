@@ -53,6 +53,7 @@ pub(super) fn monitors(ui: &mut Ui, v: &mut View<'_, '_>, s: &State, _revision: 
         ui.add_space(tk.th.shape.spacing);
         text(ui, tk.t(hint), tk.small(), p.text_muted);
     }
+    being_placed(ui, v, s);
     kept_monitors(ui, v, s);
     ui.add_space(tk.th.shape.section_gap);
 
@@ -108,6 +109,35 @@ pub(super) fn monitors(ui: &mut Ui, v: &mut View<'_, '_>, s: &State, _revision: 
             },
         );
     });
+}
+
+/// Monitors just added that the headset has not placed yet: not on the map until it
+/// has, a line each under it meanwhile.
+fn being_placed(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
+    let tk = v.tk;
+    let p = tk.p;
+    let placing = s.displays.iter().filter(|d| {
+        d.kind == DisplayKind::Virtual
+            && d.desk.is_none()
+            && matches!(d.state, DisplayState::Starting | DisplayState::Running)
+    });
+    for d in placing {
+        ui.add_space(tk.th.shape.spacing);
+        let line = vec2(ui.available_width(), tk.th.shape.control_height);
+        ui.allocate_ui_with_layout(line, Layout::left_to_right(Align::Center), |ui| {
+            text(
+                ui,
+                tk.f("mon-placing", &[("name", (&d.name).into())]),
+                tk.small(),
+                p.text_muted,
+            );
+            let named = tk.f("mon-remove-named", &[("name", (&d.name).into())]);
+            if w::button_named(ui, tk, &tk.t("mon-remove"), &named, Kind::Quiet, true).clicked() {
+                v.out
+                    .push(Action::Send(Request::RemoveMonitor { id: d.id }));
+            }
+        });
+    }
 }
 
 fn selected_monitor(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
