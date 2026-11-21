@@ -7,6 +7,7 @@
 //!   size, as sharing a monitor in Discord does on KDE; starting Prostir's own stream
 //!   over puts its size back;
 //! - `resize-sticky Fake-2 320x240`: the same, but only making the output anew does;
+//! - `refuse-scale`: setting the next monitor's scale fails, as `kscreen-doctor` can;
 //! - `scale Fake-2 150`: the person gives the output another scale in the desktop's
 //!   display settings;
 //! - `unplug eDP-1`, `plug eDP-1`: a display of the PC goes away (the lid closed, the
@@ -42,7 +43,7 @@ use crate::encoder::{Encoder, Input};
 use crate::platform::{
     AddModel, Cursor, DeskPlan, Desktop, DesktopCaps, FrameSource, Geometry, GpuDevices, Memory,
     Origin, Output, OutputHealth, OutputKey, Outputs, PhysicalDisplay, Pointer, Scales,
-    VirtualSpec, Windows, needs_scale,
+    VirtualSpec, Windows, needs_scale, scale_of,
 };
 
 /// A display of the fake PC itself, and whether it is plugged in.
@@ -61,6 +62,10 @@ static SCALES: Mutex<BTreeMap<String, f64>> = Mutex::new(BTreeMap::new());
 
 /// The desktop's layout, for the commands of other programs.
 static LAYOUT: Mutex<Option<Layout>> = Mutex::new(None);
+
+/// The next scale the platform layer sets is not set (`refuse-scale`), as when
+/// `kscreen-doctor` fails.
+static REFUSE_SCALE: AtomicBool = AtomicBool::new(false);
 
 /// Gives output `name` (`pixels` large) the scale `factor` on the desktop, and keeps
 /// it for the name.
@@ -220,7 +225,11 @@ impl Desktop for FakeDesktop {
         info!("fake desktop: created {name} ({spec})");
         let listed = self.layout.lock().unwrap().get(&name).map(|g| (g.w, g.h));
         if needs_scale(spec, listed) {
-            set_scale(&self.layout, &name, (spec.w, spec.h), spec.factor());
+            if REFUSE_SCALE.swap(false, Ordering::Relaxed) {
+                warn!("fake desktop: setting the scale of {name} failed");
+            } else {
+                set_scale(&self.layout, &name, (spec.w, spec.h), spec.factor());
+            }
         }
         Ok(Box::new(output))
     }
@@ -428,6 +437,12 @@ impl Output for FakeOutput {
         &self.key
     }
 
+    /// From the layout in memory, as KWin's events tell it.
+    fn desk_scale(&self) -> Option<u16> {
+        let g = *self.layout.lock().unwrap().get(&self.name)?;
+        scale_of(self.screen.size(), (g.w, g.h))
+    }
+
     /// A display of the PC is closed once it is unplugged.
     fn health(&self) -> OutputHealth {
         if !self.owned && !plugged(&self.name) {
@@ -559,6 +574,11 @@ fn command(line: &str) -> Result<()> {
             .with_context(|| format!("no display {name}"))?;
         p.plugged = verb == "plug";
         info!("fake desktop: {name} {verb}ged");
+        return Ok(());
+    }
+    if let ["refuse-scale"] = words[..] {
+        REFUSE_SCALE.store(true, Ordering::Relaxed);
+        info!("fake desktop: the next scale set fails");
         return Ok(());
     }
     if let ["scale", name, percent] = words[..] {

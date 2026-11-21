@@ -179,6 +179,18 @@ pub trait Output: Send {
     /// Its stable key (not a name the desktop may give to another output later).
     fn key(&self) -> &OutputKey;
 
+    /// The scale the desktop has it at now, in percent, where the platform knows it
+    /// without asking the desktop each time (from the desktop's own events, or a look
+    /// that costs next to nothing); none where it does not.
+    fn desk_scale(&self) -> Option<u16> {
+        None
+    }
+
+    /// A scale given to it in the desktop's own settings is the one wanted from now
+    /// on: kept where the platform puts its own settings back (Hyprland's monitor
+    /// rules, after its config is read again).
+    fn scale_taken(&self, _percent: u16) {}
+
     /// How it is doing now.
     fn health(&self) -> OutputHealth;
 

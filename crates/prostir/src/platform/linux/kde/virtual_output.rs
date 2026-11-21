@@ -24,11 +24,15 @@ use anyhow::{Context, Result, bail};
 use super::kscreen;
 use crate::encoder::Input;
 use crate::platform::linux::is_panel;
-use crate::platform::{OutputKey, PhysicalDisplay, VirtualSpec, needs_scale};
+use crate::platform::{OutputKey, PhysicalDisplay, VirtualSpec, needs_scale, scale_of};
 use log::{info, warn};
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
 use wayland_client::protocol::{wl_output, wl_registry};
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, WEnum};
+use wayland_protocols::xdg::xdg_output::zv1::client::{
+    zxdg_output_manager_v1::ZxdgOutputManagerV1,
+    zxdg_output_v1::{self, ZxdgOutputV1},
+};
 use wayland_protocols_plasma::screencast::v1::client::{
     zkde_screencast_stream_unstable_v1::{self, ZkdeScreencastStreamUnstableV1},
     zkde_screencast_unstable_v1::ZkdeScreencastUnstableV1,
@@ -56,6 +60,10 @@ struct OutputInfo {
     /// What the display says it is (its EDID, as KWin passes it on).
     make: String,
     model: String,
+    /// Its size on the desktop in logical pixels (xdg-output), as of the last `done`,
+    /// and as announced since.
+    logical: Option<(i32, i32)>,
+    next_logical: Option<(i32, i32)>,
 }
 
 impl OutputInfo {
@@ -77,9 +85,34 @@ impl OutputInfo {
                 if let Some(mode) = self.next_mode.take() {
                     self.mode = Some(mode);
                 }
+                // xdg-output 3 and later: its sizes count with the output's `done`.
+                if let Some(size) = self.next_logical.take() {
+                    self.logical = Some(size);
+                }
             }
             _ => {}
         }
+    }
+
+    fn on_xdg_event(&mut self, event: &zxdg_output_v1::Event) {
+        match *event {
+            zxdg_output_v1::Event::LogicalSize { width, height } => {
+                self.next_logical = Some((width, height));
+            }
+            // Before xdg-output 3, its own `done` ends a change.
+            zxdg_output_v1::Event::Done => {
+                if let Some(size) = self.next_logical.take() {
+                    self.logical = Some(size);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The scale it stands at on the desktop, in percent: its pixels over its logical
+    /// size.
+    fn scale(&self) -> Option<u16> {
+        scale_of(self.mode?, self.logical?)
     }
 }
 
@@ -100,6 +133,10 @@ struct Shared {
     changed: Condvar,
     /// Compositor outputs by registry name.
     outputs: Mutex<HashMap<u32, (wl_output::WlOutput, OutputInfo)>>,
+    /// KWin's xdg-output, which tells each output's logical size (and so its scale) as
+    /// it changes, and the xdg-output of each output by registry name.
+    xdg: Mutex<Option<ZxdgOutputManagerV1>>,
+    xdg_outputs: Mutex<HashMap<u32, ZxdgOutputV1>>,
 }
 
 impl Shared {
@@ -115,6 +152,10 @@ impl Shared {
             return;
         }
         let output = registry.bind::<wl_output::WlOutput, _, _>(name, 4, qh, name);
+        if let Some(xdg) = self.xdg.lock().unwrap().as_ref() {
+            let logical = xdg.get_xdg_output(&output, qh, name);
+            self.xdg_outputs.lock().unwrap().insert(name, logical);
+        }
         self.outputs
             .lock()
             .unwrap()
@@ -144,6 +185,10 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
                 state.shared.bind_output(registry, name, version, qh);
             }
             wl_registry::Event::GlobalRemove { name } => {
+                let logical = state.shared.xdg_outputs.lock().unwrap().remove(&name);
+                if let Some(logical) = logical {
+                    logical.destroy();
+                }
                 let mut outputs = state.shared.outputs.lock().unwrap();
                 if let Some((output, _)) = outputs.remove(&name) {
                     output.release();
@@ -165,6 +210,33 @@ impl Dispatch<wl_output::WlOutput, u32> for State {
     ) {
         if let Some((_, info)) = state.shared.outputs.lock().unwrap().get_mut(global) {
             info.on_event(event);
+        }
+    }
+}
+
+impl Dispatch<ZxdgOutputManagerV1, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &ZxdgOutputManagerV1,
+        _: <ZxdgOutputManagerV1 as Proxy>::Event,
+        (): &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<ZxdgOutputV1, u32> for State {
+    fn event(
+        state: &mut Self,
+        _: &ZxdgOutputV1,
+        event: zxdg_output_v1::Event,
+        global: &u32,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let Some((_, info)) = state.shared.outputs.lock().unwrap().get_mut(global) {
+            info.on_xdg_event(&event);
         }
     }
 }
@@ -226,6 +298,9 @@ impl Screencast {
             .bind(&qh, 2..=4, ())
             .context("KWin does not expose zkde_screencast_unstable_v1 to this program")?;
         let shared = Arc::new(Shared::default());
+        // Each output's logical size, where KWin offers it (without it nothing knows
+        // a scale given in the display settings).
+        *shared.xdg.lock().unwrap() = globals.bind(&qh, 1..=3, ()).ok();
         for g in globals.contents().clone_list() {
             if g.interface == "wl_output" {
                 shared.bind_output(globals.registry(), g.name, g.version, &qh);
@@ -510,6 +585,18 @@ impl VirtualOutput {
         resized(made, now)
     }
 
+    /// The scale KWin has the output at now, in percent, from its events (nothing is
+    /// asked).
+    pub fn desk_scale(&self) -> Option<u16> {
+        let outputs = self.shared.outputs.lock().unwrap();
+        // Made anew, the output can briefly be listed twice: the newest one is ours.
+        outputs
+            .iter()
+            .filter(|(_, (_, info))| info.name.as_deref() == Some(self.name.as_str()))
+            .max_by_key(|(global, _)| **global)
+            .and_then(|(_, (_, info))| info.scale())
+    }
+
     /// The encoder reads the stream from KWin's PipeWire node.
     pub fn input(&self) -> Input {
         let node = self.node;
@@ -588,6 +675,30 @@ mod tests {
         out.on_event(wl_output::Event::Scale { factor: 2 });
         out.on_event(wl_output::Event::Done);
         assert_eq!(out.mode, Some((320, 240)));
+    }
+
+    /// The scale from the mode and the logical size, each counted once done: with
+    /// xdg-output 3 at the output's `done`, before it at its own.
+    #[test]
+    fn the_scale_from_the_logical_size_once_done() {
+        let mut out = info(vec![
+            mode(2560, 1440, wl_output::Mode::Current),
+            wl_output::Event::Done,
+        ]);
+        assert_eq!(out.scale(), None, "no logical size yet");
+        out.on_xdg_event(&zxdg_output_v1::Event::LogicalSize {
+            width: 2048,
+            height: 1152,
+        });
+        assert_eq!(out.scale(), None, "not done");
+        out.on_event(wl_output::Event::Done);
+        assert_eq!(out.scale(), Some(125));
+        out.on_xdg_event(&zxdg_output_v1::Event::LogicalSize {
+            width: 2560,
+            height: 1440,
+        });
+        out.on_xdg_event(&zxdg_output_v1::Event::Done);
+        assert_eq!(out.scale(), Some(100));
     }
 
     #[test]

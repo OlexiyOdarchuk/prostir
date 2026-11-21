@@ -3,84 +3,85 @@
 
 use super::*;
 
-/// How often the monitors' scales on the desktop are looked at, for one given in the
-/// desktop's own settings; such a scale is taken once seen twice in a row.
-const SCALE_LOOK: Duration = Duration::from_secs(2);
-
 impl Worker {
     /// Takes a scale given to a monitor in the desktop's own settings (KDE's display
     /// settings, say): the monitor is that scale from now on, its output as it is, and
-    /// the control loop hears of it. Only one seen twice in a row, of an output made a
-    /// while ago and not resized by another program, so a change of Prostir's own
-    /// (made anew at the scale) is never taken for one.
+    /// the control loop hears of it. The scale is what the platform knows already
+    /// ([`Output::desk_scale`]: KWin's events, nothing asked), looked at on every tick.
+    /// Taken only when seen on two ticks in a row, and only away from the scale the
+    /// output was made with after it was seen at that one: a scale Prostir could not
+    /// set is never taken for the person's choice.
     pub(super) fn check_scales(&mut self) {
-        if self.scales_looked.elapsed() < SCALE_LOOK {
-            return;
-        }
-        self.scales_looked = Instant::now();
-        let ids: Vec<ScreenId> = self
-            .slots
-            .iter()
-            .filter(|(_, s)| {
-                matches!(s.made, Made::Monitor { .. })
-                    && s.made_at.elapsed() >= SCALE_LOOK
-                    && s.output
-                        .as_ref()
-                        .is_some_and(|o| matches!(o.health(), OutputHealth::Live))
-            })
-            .map(|(id, _)| *id)
-            .collect();
-        if ids.is_empty() {
-            return;
-        }
-        let outputs = self.desktop.outputs();
-        for id in ids {
-            let Some(slot) = self.slots.get_mut(&id) else {
+        let mut taken = std::mem::take(&mut self.scales_taken);
+        taken.clear();
+        for (id, slot) in &mut self.slots {
+            let Made::Monitor { spec, .. } = &slot.made else {
                 continue;
             };
-            let (Made::Monitor { spec, .. }, Some(key)) = (&slot.made, slot.key()) else {
+            let seen = slot
+                .output
+                .as_ref()
+                .filter(|o| matches!(o.health(), OutputHealth::Live))
+                .and_then(|o| o.desk_scale());
+            let Some(seen) = seen else {
+                slot.scale_seen = None;
                 continue;
             };
-            let seen = outputs
-                .get(key)
-                .and_then(|g| scale_of((spec.width, spec.height), (g.w, g.h)))
-                .filter(|p| *p != spec.percent());
-            let taken = match seen {
-                Some(p) if slot.scale_seen == Some(p) => Some(p),
-                _ => None,
-            };
-            slot.scale_seen = seen;
-            let Some(percent) = taken else {
-                continue;
-            };
-            let scale = f64::from(percent) / 100.0;
-            let new = MonitorSpec {
-                scale,
-                ..spec.clone()
-            };
-            if new.validate().is_err() {
+            if seen == spec.percent() {
+                slot.seen_own = true;
+                slot.scale_seen = None;
                 continue;
             }
-            info!(
-                "{}: scale {percent} % given on the desktop, taken",
+            if slot.seen_own && slot.scale_seen == Some(seen) {
+                taken.push((*id, seen));
+            }
+            slot.scale_seen = Some(seen);
+        }
+        for &(id, percent) in &taken {
+            self.take_scale(id, percent);
+        }
+        self.scales_taken = taken;
+    }
+
+    /// Monitor `id` stands at `percent` on the desktop from now on, unless the desktop
+    /// does not give its size that scale (then it is left alone, said once).
+    fn take_scale(&mut self, id: ScreenId, percent: u16) {
+        let allowed = self.desktop.caps().scales.allows(percent);
+        let Some(slot) = self.slots.get_mut(&id) else {
+            return;
+        };
+        let Made::Monitor { spec, .. } = &mut slot.made else {
+            return;
+        };
+        let old = spec.percent();
+        let scale = f64::from(percent) / 100.0;
+        if !allowed || !(0.5..=4.0).contains(&scale) {
+            warn!(
+                "{}: scale {percent} % given on the desktop is not one Prostir gives it: left as it is",
                 slot.name
             );
+            // Not again until it was back at its own.
+            slot.seen_own = false;
             slot.scale_seen = None;
-            if let Made::Monitor { spec, .. } = &mut slot.made {
-                spec.scale = scale;
-            }
-            // The state worked on follows at once: its output is not made anew at the
-            // old scale before the control loop hands the new one over.
-            if let Some(w) = &mut self.wanted {
-                for (i, s) in &mut w.screens {
-                    if let (true, What::Monitor { spec, .. }) = (*i == id, &mut s.what) {
-                        spec.scale = scale;
-                    }
-                }
-            }
-            self.layout_due = true;
-            self.done(Done::Rescaled { id, percent });
+            return;
         }
+        info!(
+            "{}: scale {percent} % given on the desktop, taken",
+            slot.name
+        );
+        spec.scale = scale;
+        slot.scale_seen = None;
+        if let Some(output) = &slot.output {
+            output.scale_taken(percent);
+        }
+        // What the control loop wants follows at once, and so does what it sends until
+        // it heard of the scale: its output is not made anew at the old one.
+        self.rescaled.insert(id, (old, percent));
+        if let Some(w) = &mut self.wanted {
+            follow_rescaled(&mut self.rescaled, w);
+        }
+        self.layout_due = true;
+        self.done(Done::Rescaled { id, percent });
     }
 
     /// The output that is to be primary, where it is ours to pick.
@@ -358,6 +359,32 @@ pub(super) fn origin_at(
 ) -> (i32, i32) {
     main.and_then(|m| positions.iter().find(|(key, _, _)| key == m))
         .map_or((0, 0), |(_, x, y)| (*x, *y))
+}
+
+/// Monitors whose scale was given on the desktop and taken (`old`, `new` in percent):
+/// a wanted state that still has the old one, sent before the control loop heard of
+/// it, gets the new one. Done once one has the new scale, or another (chosen in
+/// Prostir since), or the monitor is gone.
+pub(super) fn follow_rescaled(rescaled: &mut BTreeMap<ScreenId, (u16, u16)>, wanted: &mut Wanted) {
+    if rescaled.is_empty() {
+        return;
+    }
+    rescaled.retain(|id, &mut (old, new)| {
+        let spec = wanted
+            .screens
+            .iter_mut()
+            .find_map(|(i, s)| match &mut s.what {
+                What::Monitor { spec, .. } if i == id => Some(spec),
+                _ => None,
+            });
+        match spec {
+            Some(spec) if spec.percent() == old => {
+                spec.scale = f64::from(new) / 100.0;
+                true
+            }
+            _ => false,
+        }
+    });
 }
 
 /// Whether `plan` is the headset's plan as `boxes` hold it: every output with a box

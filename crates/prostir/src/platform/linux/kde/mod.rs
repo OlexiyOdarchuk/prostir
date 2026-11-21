@@ -253,4 +253,8 @@ impl Output for KdeOutput {
     fn make_primary(&self) {
         self.stream.make_primary();
     }
+
+    fn desk_scale(&self) -> Option<u16> {
+        self.stream.desk_scale()
+    }
 }

@@ -988,6 +988,40 @@ fn the_volume_from_the_pc_reaches_the_headset() {
     assert_eq!(error_name(&bad), "BadArgument");
 }
 
+/// A scale the desktop did not set (the call failed) is not taken for one given in its
+/// settings: the monitor keeps the scale chosen in Prostir, never seen on the desktop.
+#[test]
+fn a_scale_that_could_not_be_set_is_not_taken() {
+    let (_dir, mut pc, _keys, _headset) = session("api-refused-scale", &Options::default());
+    let Some(bus) = &pc.bus else {
+        return;
+    };
+    let bus = bus.connect();
+    let started = Instant::now();
+    let a = loop {
+        let (_, state) = get_state(&bus);
+        if let Some(d) = state.displays.first()
+            && d.state == prostir_api::DisplayState::Running
+        {
+            break d.clone();
+        }
+        assert!(started.elapsed() < SOON, "no monitor running");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let failed = pc.count_log("fake desktop: setting the scale of");
+    pc.desktop("refuse-scale");
+    pc.wait_log(SOON, "fake desktop: the next scale set fails");
+    let request = format!(r#"{{"request":"set_scale","id":{},"scale":150}}"#, a.id);
+    call(&bus, "Call", &(request.as_str(),)).unwrap();
+    pc.wait_log_after(SOON, "fake desktop: setting the scale of", failed);
+    // Ticks enough to take a scale seen twice.
+    std::thread::sleep(Duration::from_secs(3));
+    let (_, state) = get_state(&bus);
+    let d = state.display(a.id).unwrap();
+    assert_eq!(d.mode.scale, 150, "{d:?}");
+    assert_eq!(pc.count_log("given on the desktop, taken"), 0);
+}
+
 /// A scale given to a monitor in the desktop's own settings is taken: the local API and
 /// the set kept for next time have it, and the monitor's output stays as it is.
 #[test]

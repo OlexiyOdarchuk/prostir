@@ -83,6 +83,9 @@ impl Worker {
                 slot.rest_until = None;
                 slot.closed_told = false;
                 slot.size_guard = SizeGuard::default();
+                // Made anew: seen at its scale again before another is taken.
+                slot.scale_seen = None;
+                slot.seen_own = false;
                 if !slot.is_physical() {
                     self.wallpapers_due = true;
                 }

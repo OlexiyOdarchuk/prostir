@@ -26,7 +26,7 @@ use crate::i18n::t;
 use crate::layout::panel_size;
 use crate::platform::{
     ActiveWindow, DeskPlan, Desktop, Geometry, MonitorSpec, Output, OutputHealth, OutputKey,
-    VirtualSpec, dialogs, scale_of,
+    VirtualSpec, dialogs,
 };
 use crate::router::Router;
 use crate::screen::{ScreenId, SizeAction, SizeGuard};
@@ -185,10 +185,10 @@ struct Slot {
     size_guard: SizeGuard,
     /// The desktop closing it was said.
     closed_told: bool,
-    /// When it was made, the last scale the desktop was seen to have it at that is not
-    /// the one it was made with, and when.
-    made_at: Instant,
+    /// A scale the desktop was seen to have it at on the last tick, not the one it was
+    /// made with; and whether it was seen at that one since it was made.
     scale_seen: Option<u16>,
+    seen_own: bool,
 }
 
 impl Slot {
@@ -204,8 +204,8 @@ impl Slot {
             kept: None,
             size_guard: SizeGuard::default(),
             closed_told: false,
-            made_at: Instant::now(),
             scale_seen: None,
+            seen_own: false,
         }
     }
 
@@ -275,8 +275,11 @@ pub struct Worker {
     /// After the desktop refused a layout: when to try again, and how many times it did.
     layout_retry: (Instant, u32),
     primary_checked: Instant,
-    /// When the monitors' scales on the desktop were looked at last.
-    scales_looked: Instant,
+    /// Monitors whose scale given on the desktop was taken: old and new, in percent
+    /// (see [`place::follow_rescaled`]).
+    rescaled: BTreeMap<ScreenId, (u16, u16)>,
+    /// The scales taken on a tick, kept for the next.
+    scales_taken: Vec<(ScreenId, u16)>,
     panels_checked: Instant,
     physical_due: Instant,
 }
@@ -348,7 +351,8 @@ impl Worker {
             layout_waits: false,
             layout_retry: (now, 0),
             primary_checked: now,
-            scales_looked: now,
+            rescaled: BTreeMap::new(),
+            scales_taken: Vec::new(),
             panels_checked: now,
             physical_due: now,
         }
@@ -395,7 +399,8 @@ impl Worker {
     }
 
     /// Takes the newest wanted state.
-    fn take(&mut self, wanted: Wanted) {
+    fn take(&mut self, mut wanted: Wanted) {
+        place::follow_rescaled(&mut self.rescaled, &mut wanted);
         let was = self.wanted.as_ref();
         if was.is_none_or(|w| w.layout != wanted.layout) {
             self.layout_due = true;
