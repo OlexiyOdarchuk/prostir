@@ -354,6 +354,14 @@ fn save_find_secret(path: &std::path::Path, secret: FindSecret) -> Result<FindSe
 impl Security {
     pub fn load() -> Result<Self> {
         let dir = config_dir();
+        // A write cut short leaves its temporary file; the real one is whole.
+        for file in [
+            dir.join("identity"),
+            dir.join("paired_headsets"),
+            find_secret_file(&dir),
+        ] {
+            secure::remove_leftovers(&file);
+        }
         let identity =
             Identity::load_or_create(&dir.join("identity")).context("cannot load the PC's key")?;
         info!("PC key {}", secure::fingerprint(&identity.public));

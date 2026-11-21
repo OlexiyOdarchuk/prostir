@@ -84,7 +84,7 @@ static TEMPORARY: AtomicU64 = AtomicU64::new(0);
 pub fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
     let mut tmp = path.as_os_str().to_owned();
     let n = TEMPORARY.fetch_add(1, Ordering::Relaxed);
-    tmp.push(format!(".tmp.{}.{n}", std::process::id()));
+    let _ = write!(tmp, ".tmp.{}.{n}", std::process::id());
     let tmp = PathBuf::from(tmp);
     let written = write_synced(&tmp, data).and_then(|()| std::fs::rename(&tmp, path));
     if written.is_err() {
@@ -108,9 +108,11 @@ fn write_synced(path: &Path, data: &[u8]) -> io::Result<()> {
 }
 
 /// Removes the temporary files that writes of `path` cut short (a crash or power cut
-/// between writing and renaming) left next to it: `<file>.tmp.*` of
-/// [`write_atomic`], and `<file>.tmp` of older versions. Only while nothing writes
-/// `path`, before the first write of a start.
+/// between writing and renaming) left next to it: `<file>.tmp.<process>.<number>` of
+/// [`write_atomic`], and `<file>.tmp` of older versions. Those of this process stay:
+/// a write of it may be under way (a thread an earlier start in the same process left
+/// running), and none of them can be left over from a crash. Call it at a start,
+/// before the first write of `path`.
 pub fn remove_leftovers(path: &Path) {
     let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else {
         return;
@@ -123,17 +125,27 @@ pub fn remove_leftovers(path: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    let old = format!("{name}.tmp");
+    let own = std::process::id().to_string();
     for entry in entries.flatten() {
         let file = entry.file_name();
-        let leftover = file.to_str().is_some_and(|f| {
-            f.strip_prefix(old.as_str())
-                .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
-        });
+        let leftover = file
+            .to_str()
+            .and_then(|f| f.strip_prefix(name))
+            .and_then(|rest| rest.strip_prefix(".tmp"))
+            .is_some_and(|rest| match rest.strip_prefix('.') {
+                None => rest.is_empty(),
+                Some(numbers) => numbers.split_once('.').is_some_and(|(process, number)| {
+                    digits(process) && digits(number) && process != own
+                }),
+            });
         if leftover {
             let _ = std::fs::remove_file(entry.path());
         }
     }
+}
+
+fn digits(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
 }
 
 pub fn to_hex(bytes: &[u8]) -> String {
@@ -472,19 +484,32 @@ mod tests {
         ] {
             std::fs::write(dir.join(leftover), "half a fi").unwrap();
         }
-        for kept in ["settings.txt.tmpx", "other.txt.tmp", "settings.txt.old"] {
+        // This process's own may be a write under way.
+        let own = format!("settings.txt.tmp.{}.5", std::process::id());
+        for kept in [
+            "settings.txt.tmpx",
+            "settings.txt.tmp.12",
+            "settings.txt.tmp.x.1",
+            "settings.txt.tmp.12.0.bak",
+            "other.txt.tmp",
+            "settings.txt.old",
+            &own,
+        ] {
             std::fs::write(dir.join(kept), "").unwrap();
         }
         remove_leftovers(&path);
-        assert_eq!(
-            names(),
-            [
-                "other.txt.tmp",
-                "settings.txt",
-                "settings.txt.old",
-                "settings.txt.tmpx"
-            ]
-        );
+        let mut kept = vec![
+            "other.txt.tmp".to_owned(),
+            "settings.txt".into(),
+            "settings.txt.old".into(),
+            "settings.txt.tmp.12".into(),
+            "settings.txt.tmp.12.0.bak".into(),
+            "settings.txt.tmp.x.1".into(),
+            "settings.txt.tmpx".into(),
+            own,
+        ];
+        kept.sort();
+        assert_eq!(names(), kept);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

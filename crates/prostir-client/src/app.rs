@@ -2157,6 +2157,17 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     if test.as_deref().is_some_and(Selftest::over) {
         return Ok(());
     }
+    // A write cut short leaves its temporary file; the real one is whole.
+    for name in [
+        "settings.txt",
+        "layout.txt",
+        "profiles.txt",
+        "keyboard.txt",
+        "identity",
+        "paired_hosts",
+    ] {
+        prostir_proto::secure::remove_leftovers(&data_dir.join(name));
+    }
     let settings_path = data_dir.join("settings.txt");
     let profiles_path = data_dir.join("profiles.txt");
     let settings = Settings::load(&settings_path);

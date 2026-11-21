@@ -12,7 +12,8 @@
 //! - A change only marks the file; [`Store::flush`], once a pass of the main loop,
 //!   hands the text to a thread of its own that writes it (the latest of each file)
 //!   atomically and durably. A crash loses at most that one pass; a half-written file
-//!   is a `*.tmp` beside the old one, removed on the next start.
+//!   is a temporary file beside the old one (`<file>.tmp.<process>.<number>`),
+//!   removed on the next start.
 //! - The first start of this version moves the settings of 0.1 over from
 //!   `monitors.txt` (and the counter switch from `count`), which stay as they are for
 //!   a downgrade to read; 0.1's `count-notice`, and `count` unless it is off, go once
@@ -295,7 +296,13 @@ impl Store {
     fn load(&mut self) {
         let Some(dir) = self.dir.clone() else { return };
         // A write cut short leaves its temporary file; the real one is whole.
-        for name in ["settings.txt", "screens.txt", "headsets.txt"] {
+        // 0.1 wrote `monitors.txt` the same way.
+        for name in [
+            "settings.txt",
+            "screens.txt",
+            "headsets.txt",
+            "monitors.txt",
+        ] {
             prostir_proto::secure::remove_leftovers(&dir.join(name));
         }
         let read = |name: &str| std::fs::read_to_string(dir.join(name)).ok();
