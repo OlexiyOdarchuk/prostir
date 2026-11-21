@@ -8,6 +8,8 @@ use eframe::egui::{
     vec2,
 };
 
+use unicode_segmentation::UnicodeSegmentation;
+
 use crate::snap;
 use crate::theme::mix;
 use crate::widgets::{Tk, faded};
@@ -75,7 +77,7 @@ fn bounds(tiles: &[Tile]) -> Rect {
 }
 
 /// The smallest font a tile's text goes down to before less of it is shown.
-const MIN_FONT: f32 = 9.0;
+const MIN_FONT: f32 = 10.0;
 /// Between the name and the size line.
 const LINE_GAP: f32 = 2.0;
 
@@ -144,26 +146,37 @@ pub fn fit_label(
 /// `name` shortened with an ellipsis until `fits`: its ending kept where that tells
 /// similar names apart (`Pro…-3`, a number or a short last word), else its start
 /// (`Екран ноу…`). None where not even a letter and the ellipsis fit.
+/// Letters are whole graphemes: a letter with its accent stays one.
 pub fn shortened(name: &str, fits: impl Fn(&str) -> bool) -> Option<String> {
-    let chars: Vec<char> = name.chars().collect();
+    let letters: Vec<&str> = name.graphemes(true).collect();
+    let n = letters.len();
     let tail = name
         .rfind(['-', ' '])
-        .map(|i| name[i..].chars().count())
-        .filter(|n| (2..=5).contains(n) && *n < chars.len());
-    let head = |n: usize| chars[..n].iter().collect::<String>();
-    if let Some(tail) = tail {
-        let end: String = chars[chars.len() - tail..].iter().collect();
-        for n in (1..chars.len() - tail).rev() {
-            let s = format!("{}…{end}", head(n));
-            if fits(&s) {
-                return Some(s);
+        .map(|i| name[i..].graphemes(true).count())
+        .filter(|t| (2..=5).contains(t) && *t < n);
+    // The longest start of at most `max` letters (at least one) that `fits` as `make`
+    // makes it, halving: a longer start never fits where a shorter one does not.
+    let longest = |make: &dyn Fn(&str) -> String, max: usize| {
+        let at = |k: usize| make(&letters[..k].concat());
+        if max == 0 || !fits(&at(1)) {
+            return None;
+        }
+        let (mut lo, mut hi) = (1, max);
+        while lo < hi {
+            let mid = (lo + hi).div_ceil(2);
+            if fits(&at(mid)) {
+                lo = mid;
+            } else {
+                hi = mid - 1;
             }
         }
-    }
-    (1..chars.len())
-        .rev()
-        .map(|n| format!("{}…", head(n)))
-        .find(|s| fits(s))
+        Some(at(lo))
+    };
+    tail.and_then(|t| {
+        let end = letters[n - t..].concat();
+        longest(&|start| format!("{start}…{end}"), n - t - 1)
+    })
+    .or_else(|| longest(&|start| format!("{start}…"), n - 1))
 }
 
 /// A tile's name and size, in full.
@@ -607,13 +620,14 @@ pub fn arc(
         ui.painter()
             .add(Shape::convex_polygon(pts.clone(), faded(fill, kk), stroke));
         let c = pts.iter().fold(Vec2::ZERO, |a, p| a + p.to_vec2()) / 4.0;
-        // The name only where it fits on the screen's face.
+        // The name only where it fits on the screen's face, across and down.
         let face = pts[0].distance(pts[1]).min(pts[3].distance(pts[2])) - 8.0;
+        let face_height = pts[0].distance(pts[3]).min(pts[1].distance(pts[2])) - 4.0;
         for font in [tk.body_m(), tk.small()] {
             let g = ui
                 .painter()
                 .layout_no_wrap(t.name.clone(), font, faded(fg, kk));
-            if g.size().x <= face {
+            if g.size().x <= face && g.size().y <= face_height {
                 ui.painter().galley(c.to_pos2() - g.size() / 2.0, g, fg);
                 break;
             }
@@ -623,6 +637,12 @@ pub fn arc(
         && let Some(i) = hit
     {
         events.push(MapEvent::Select(tiles[i].id));
+    }
+    // The whole name and size of the display under the pointer.
+    if let Some(i) = hit
+        && !resp.dragged()
+    {
+        resp.clone().on_hover_text(hover_text(&tiles[i]));
     }
     if resp.dragged() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
@@ -730,6 +750,16 @@ mod tests {
             Some("Екран ноу…")
         );
         assert_eq!(shortened("Prostir-3", fits(1)), None);
+        // A letter with a combining accent stays whole.
+        let letters = |max: usize| move |s: &str| s.graphemes(true).count() <= max;
+        assert_eq!(
+            shortened("Pre\u{301}sent-2", letters(6)).as_deref(),
+            Some("Pre\u{301}…-2")
+        );
+        assert_eq!(
+            shortened("Cafe\u{301} du coin", letters(5)).as_deref(),
+            Some("Cafe\u{301}…")
+        );
     }
 
     #[test]
