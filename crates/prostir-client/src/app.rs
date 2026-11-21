@@ -509,6 +509,8 @@ struct Scene {
     /// The menu's language: what it shows, and the one it waits for.
     lang: LangState,
     clock: ClockFace,
+    /// Which languages the Language page shows, when there are many.
+    language_page: u8,
     profiles: [Profile; profiles::SLOTS],
     profiles_path: PathBuf,
     /// The profile last switched to, until something is changed by hand.
@@ -1981,6 +1983,7 @@ impl Scene {
             tab: self.tab,
             texts: self.texts().clone(),
             languages: self.lang.known().clone(),
+            language_page: self.language_page,
             intro: !self.settings.intro_seen,
             update: self.update_needed.clone(),
             update_from,
@@ -2166,7 +2169,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     }
     let settings_path = data_dir.join("settings.txt");
     let profiles_path = data_dir.join("profiles.txt");
-    let settings = Settings::load(&settings_path);
+    let mut settings = Settings::load(&settings_path);
     // This start's own: a new start in the same process begins afresh.
     let mic = Arc::new(Mic::new(settings.mic, app.clone()));
     let gains = Arc::new(Gains::default());
@@ -2235,19 +2238,20 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
 
     // The menu's language, before the first frame: the headset's own language once,
     // the files there are, and the language to show. From here on the system thread
-    // reads the files, away from the frame.
+    // reads the files.
     let system_lang = crate::system::language();
-    let mut lang_loader = crate::lang::Loader::new(external_dir.as_ref().map(|d| d.join("lang")));
     #[expect(
         clippy::disallowed_methods,
-        reason = "at the start, before the first frame; the system thread loads from here on"
+        reason = "the start, before the first frame, reads the language files once"
     )]
-    let lang = {
-        let known = lang_loader.languages();
-        let first =
-            crate::lang::resolve(settings.language, settings.pc_language, system_lang, &known);
-        LangState::new(lang_loader.load(first), known)
-    };
+    let (lang, lang_loader) = crate::lang::start(
+        external_dir.as_ref().map(|d| d.join("lang")),
+        settings.language,
+        settings.pc_language,
+        system_lang,
+    );
+    // A language chosen once whose file is gone is "like the PC" again.
+    settings.language = crate::lang::kept(settings.language, lang.known());
     // What the network thread was last told (it names a PC over USB).
     let mut told_texts = lang.texts().clone();
 
@@ -2381,6 +2385,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         system_lang,
         lang,
         clock: ClockFace::default(),
+        language_page: 0,
         profiles: profiles::load(&profiles_path),
         profiles_path,
         active_profile: None,
@@ -2390,6 +2395,11 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         placed_for: HashMap::new(),
         settings_path,
     };
+    // The language's file had lines that could not be read: said once, in front.
+    if let Some(warning) = scene.texts().warning() {
+        let text = warning.to_owned();
+        scene.show_toast(text);
+    }
     if !scene.settings.cinema {
         let saved = scene.desk.load();
         scene.adopt_desk(saved);
@@ -2409,8 +2419,8 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     let mut store = crate::store::of_this_build(app);
     // Since when the store says the app is not the user's: it closes after saying so.
     let mut not_owned_since: Option<Instant> = None;
-    // What the person is told then, in the menu's language.
-    let mut not_owned_text: Option<String> = None;
+    // What the person is told then, and the language it is in.
+    let mut not_owned_text: Option<(Texts, String)> = None;
     let mut session_running = false;
     // The input is the app's: false while the system menu is open over it (the app
     // keeps drawing, but shows no hands or rays of its own and takes no input).
@@ -2442,14 +2452,21 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         }
         if let StoreCheck::NotOwned { store: name } = store.poll() {
             let since = *not_owned_since.get_or_insert_with(Instant::now);
-            // Written once, then compared with what the menu shows.
-            let what = not_owned_text.get_or_insert_with(|| {
-                scene
+            // Written once in each language, then compared with what the menu shows.
+            if not_owned_text
+                .as_ref()
+                .is_none_or(|(texts, _)| texts != scene.texts())
+            {
+                let text = scene
                     .texts()
-                    .f("store-not-confirmed", &[("store", name.into())])
-            });
+                    .f("store-not-confirmed", &[("store", name.into())]);
+                not_owned_text = Some((scene.texts().clone(), text));
+            }
+            let what = not_owned_text
+                .as_ref()
+                .map_or("", |(_, text)| text.as_str());
             if scene.error.as_ref().is_none_or(|(t, _)| t != what) {
-                scene.show_error(what.clone());
+                scene.show_error(what.to_owned());
                 // In front of the user, wherever the menu was last.
                 let (head, forward) = scene.head;
                 let hands = scene.hands_in_view;
@@ -2551,7 +2568,14 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         while let Some(event) = system_thread.try_recv() {
             match event {
                 SystemEvent::Battery(reading) => newest = Some(reading),
-                SystemEvent::Texts(texts) => scene.lang.loaded(texts),
+                SystemEvent::Texts(texts) => {
+                    if scene.lang.loaded(texts)
+                        && let Some(warning) = scene.texts().warning()
+                    {
+                        let text = warning.to_owned();
+                        scene.show_toast(text);
+                    }
+                }
                 SystemEvent::Languages(known) => {
                     scene.lang.listed(known);
                 }
@@ -4225,6 +4249,7 @@ fn handle_action(
             scene.settings.intro_seen = true;
             scene.settings.save(settings_path);
         }
+        Action::LanguagePage(page) => scene.language_page = page,
         Action::Language(language) => {
             scene.settings.language = language;
             scene.settings.save(settings_path);

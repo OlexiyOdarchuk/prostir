@@ -11,9 +11,11 @@
 //! never formats them again; messages with placeholders are formatted when the menu
 //! is built, which happens only when what it shows changed.
 //!
-//! Files are read only by the [`Loader`], at the start (before the first frame) and on
-//! the `system` thread after that; the frame only swaps in a [`Texts`] that came
-//! ready (see [`LangState`]).
+//! Files are read only by the [`Loader`]: [`start`] before the first frame, then the
+//! `system` thread. The frame only decides which language it wants and swaps in a
+//! [`Texts`] that came ready (see [`LangState`]). The loader's calls are disallowed in
+//! `clippy.toml`, so each caller carries an `expect` that says why it may read
+//! files; that the caller is not the frame is for review to see.
 //!
 //! The menu's font is Noto Sans (Latin, Cyrillic, Greek), drawn without shaping: a
 //! language in another script (Arabic, Devanagari, CJK) or written right to left does
@@ -129,17 +131,26 @@ pub struct Known {
 
 /// The language the menu shows for `choice` among the `known` ones: the PC's for
 /// "like the PC" (English when there is no file for it; the system's before the PC
-/// said), the system's for "like the system", else the chosen one; English when
-/// there is no file for it.
+/// said), the system's for "like the system", else the chosen one (as "like the PC"
+/// when there is no file for it, see [`kept`]); English when nothing else is found.
 pub fn resolve(choice: Language, pc: Option<Lang>, system: Option<Lang>, known: &[Known]) -> Lang {
     let pick = |l: Option<Lang>| l.and_then(|l| matching(l, known));
-    match choice {
+    match kept(choice, known) {
         Language::Fixed(l) => pick(Some(l)),
         Language::LikeSystem => pick(system),
         Language::LikePc if pc.is_some() => pick(pc),
         Language::LikePc => pick(system),
     }
     .unwrap_or(Lang::FALLBACK)
+}
+
+/// `choice` as it stands with the `known` languages: a fixed language there is no
+/// file for is "like the PC", as an unknown word in `settings.txt` always was.
+pub fn kept(choice: Language, known: &[Known]) -> Language {
+    match choice {
+        Language::Fixed(l) if matching(l, known).is_none() => Language::LikePc,
+        other => other,
+    }
 }
 
 /// The known language for `want`: the same code (`pt-BR`), else the same language
@@ -282,6 +293,9 @@ struct Loaded {
     plain: HashMap<String, String>,
     calendar: Calendar,
     fixed: Arc<Fixed>,
+    /// What the person is told about the files, in this language: lines that could
+    /// not be read, or no file at all for the language.
+    warning: Option<String>,
 }
 
 impl PartialEq for Texts {
@@ -307,13 +321,28 @@ impl Texts {
             })
             .collect();
         let calendar = Calendar::of(&strings);
+        let language = || [("language", Arg::from(lang.as_str()))];
+        let warning = if strings.code() != lang.as_str() && lang != Lang::FALLBACK {
+            Some(strings.f("language-missing", &language()))
+        } else if !strings.problems().is_empty() {
+            Some(strings.f("language-problems", &language()))
+        } else {
+            None
+        };
         Self(Arc::new(Loaded {
             lang,
             strings,
             plain,
             calendar,
             fixed,
+            warning,
         }))
+    }
+
+    /// What to tell the person about this language's files, if anything (formatted
+    /// when it was loaded).
+    pub fn warning(&self) -> Option<&str> {
+        self.0.warning.as_deref()
     }
 
     /// The language these are (as asked for; what it lacks is English).
@@ -361,12 +390,36 @@ fn english() -> &'static str {
 }
 
 /// Reads the language files: the built-in ones and those in the app's folder. It reads
-/// the disk, so it runs only at the start and on the `system` thread, never in the
-/// frame.
+/// the disk: [`start`] uses it before the first frame, the `system` thread after.
 pub struct Loader {
     builtin: Vec<(&'static str, &'static str)>,
     dirs: Vec<PathBuf>,
     fixed: Option<Arc<Fixed>>,
+    /// The files the list was made from (name, size, time changed) and the list:
+    /// the files are read again only when these change.
+    listed: Option<(Vec<FileStamp>, Vec<Known>)>,
+}
+
+type FileStamp = (PathBuf, u64, Option<std::time::SystemTime>);
+
+/// The menu's language at the start, before the first frame: the files there are
+/// (built in, and in `dir`), and the language `choice` wants among them, loaded.
+/// From here on the `system` thread keeps the loader.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the start, before the first frame, reads the language files once"
+)]
+pub fn start(
+    dir: Option<PathBuf>,
+    choice: Language,
+    pc: Option<Lang>,
+    system: Option<Lang>,
+) -> (LangState, Loader) {
+    let mut loader = Loader::new(dir);
+    let known = loader.languages();
+    let first = resolve(choice, pc, system, &known);
+    let state = LangState::new(loader.load(first), known);
+    (state, loader)
 }
 
 impl Loader {
@@ -381,6 +434,7 @@ impl Loader {
             builtin: builtin.to_vec(),
             dirs,
             fixed: None,
+            listed: None,
         }
     }
 
@@ -389,13 +443,49 @@ impl Loader {
     }
 
     /// Every language there is a file for, by code; codes longer than [`Lang::MAX`]
-    /// are left out.
+    /// are left out. The files are read again only when one was added, removed or
+    /// changed since the last time.
     #[expect(
         clippy::disallowed_methods,
         reason = "the loader is the one that reads the language files"
     )]
-    pub fn languages(&self) -> Vec<Known> {
-        self.catalog()
+    pub fn languages(&mut self) -> Vec<Known> {
+        self.languages_if_changed()
+            .or_else(|| self.listed.as_ref().map(|(_, known)| known.clone()))
+            .unwrap_or_default()
+    }
+
+    /// The languages, if the files changed since they were last listed (or never were).
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the loader is the one that reads the language files"
+    )]
+    pub fn languages_if_changed(&mut self) -> Option<Vec<Known>> {
+        let mut stamps: Vec<FileStamp> = Vec::new();
+        for dir in &self.dirs {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|e| e == "ftl") {
+                    let meta = entry.metadata().ok();
+                    let size = meta.as_ref().map_or(0, std::fs::Metadata::len);
+                    let changed = meta.and_then(|m| m.modified().ok());
+                    stamps.push((path, size, changed));
+                }
+            }
+        }
+        stamps.sort();
+        if self
+            .listed
+            .as_ref()
+            .is_some_and(|(seen, _)| *seen == stamps)
+        {
+            return None;
+        }
+        let known: Vec<Known> = self
+            .catalog()
             .languages()
             .into_iter()
             .filter_map(|l| match Lang::new(&l.code) {
@@ -405,7 +495,9 @@ impl Loader {
                     None
                 }
             })
-            .collect()
+            .collect();
+        self.listed = Some((stamps, known.clone()));
+        Some(known)
     }
 
     /// The texts of `lang`, English behind them.
@@ -433,8 +525,8 @@ impl Loader {
     }
 }
 
-/// The built-in texts of `code` (English when it has none): tests and previews. Reads
-/// no file.
+/// The built-in texts of `code` (English when it has none), for tests. Reads no file.
+#[cfg(test)]
 #[expect(
     clippy::disallowed_methods,
     reason = "a loader of the built-in files only, with no folder to read"
@@ -493,12 +585,14 @@ impl LangState {
     }
 
     /// A language came loaded: shown if it is the one asked for last (not one the
-    /// menu was switched away from meanwhile).
-    pub fn loaded(&mut self, texts: Texts) {
-        if self.asked == Some(texts.lang()) {
-            self.asked = None;
-            self.texts = texts;
+    /// menu was switched away from meanwhile); whether it is.
+    pub fn loaded(&mut self, texts: Texts) -> bool {
+        if self.asked != Some(texts.lang()) {
+            return false;
         }
+        self.asked = None;
+        self.texts = texts;
+        true
     }
 
     /// The languages there are files for, listed again (a file may have been added);
@@ -673,11 +767,17 @@ mod tests {
             r(Language::Fixed(Lang::new("de").unwrap()), "uk", "uk"),
             "de"
         );
-        // The file of a chosen language is gone.
+        // The file of a chosen language is gone: like the PC.
         assert_eq!(
-            r(Language::Fixed(Lang::new("pl").unwrap()), "uk", "uk"),
-            "en"
+            r(Language::Fixed(Lang::new("pl").unwrap()), "uk", "en"),
+            "uk"
         );
+        assert_eq!(
+            kept(Language::Fixed(Lang::new("pl").unwrap()), &k),
+            Language::LikePc
+        );
+        let de = Language::Fixed(Lang::new("de").unwrap());
+        assert_eq!(kept(de, &k), de);
     }
 
     /// Both built-in files have every message, and nothing else.
@@ -750,11 +850,11 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Choosing a language in the menu reads no file in the frame: the frame asks
-    /// once and goes on showing what it has, and what the `system` thread loaded is
-    /// only swapped in.
+    /// Choosing a language in the menu only asks for it, once, and the menu goes on
+    /// showing what it has (the files may even be gone meanwhile); what the `system`
+    /// thread loaded is then swapped in.
     #[test]
-    fn a_language_switch_reads_nothing_in_the_frame() {
+    fn a_language_switch_only_asks_and_swaps() {
         let dir =
             std::env::temp_dir().join(format!("prostir-headset-switch-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -774,12 +874,53 @@ mod tests {
         std::fs::write(dir.join("de.ftl"), "language-name = Deutsch\nmenu = Menü\n").unwrap();
         let loaded = loader.load(de);
         std::fs::remove_dir_all(&dir).unwrap();
-        state.loaded(loaded);
+        assert!(state.loaded(loaded));
         assert_eq!(state.texts().t("menu"), "Menü");
         assert_eq!(state.wanted(choice, None, None), None, "shown");
-        // Back to English: asked again.
+        // Back to English: asked again; German, loaded late, is not shown.
         let en = Language::Fixed(Lang::FALLBACK);
         assert_eq!(state.wanted(en, None, None), Some(Lang::FALLBACK));
+        assert!(!state.loaded(builtin("de")));
+        assert_eq!(state.texts().t("menu"), "Menü");
+    }
+
+    /// The list is made again only when a file was added, removed or changed; a file
+    /// that cannot be read is no language.
+    #[test]
+    fn the_list_is_read_again_only_when_files_change() {
+        let dir = std::env::temp_dir().join(format!("prostir-headset-list-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut loader = Loader::new(Some(dir.clone()));
+        let codes =
+            |known: &[Known]| -> Vec<String> { known.iter().map(|k| k.lang.to_string()).collect() };
+        assert_eq!(codes(&loader.languages()), ["en", "uk"]);
+        assert_eq!(loader.languages_if_changed(), None, "nothing changed");
+        std::fs::write(dir.join("de.ftl"), "language-name = Deutsch\n").unwrap();
+        std::fs::write(dir.join("fr.ftl"), b"language-name = \xff\n").unwrap();
+        let known = loader.languages_if_changed().expect("a file was added");
+        assert_eq!(codes(&known), ["de", "en", "uk"], "French is not readable");
+        assert_eq!(loader.languages_if_changed(), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A language whose file has lines that cannot be read says so.
+    #[test]
+    fn a_broken_file_is_told() {
+        let dir =
+            std::env::temp_dir().join(format!("prostir-headset-broken-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("de.ftl"), "language-name = Deutsch\nmenu = {\n").unwrap();
+        let mut loader = Loader::new(Some(dir.clone()));
+        let de = loader.load(Lang::new("de").unwrap());
+        assert!(
+            de.warning().is_some_and(|w| w.contains("de")),
+            "{:?}",
+            de.warning()
+        );
+        assert_eq!(loader.load(Lang::FALLBACK).warning(), None);
+        let gone = loader.load(Lang::new("pl").unwrap());
+        assert!(gone.warning().is_some(), "no file for it");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// The pseudo-language has every message, half as long again, with the same

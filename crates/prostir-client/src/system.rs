@@ -50,6 +50,8 @@ enum SystemCmd {
 /// The running thread, for one start of the app: it stops when this is dropped.
 pub struct System {
     cmds: Option<Sender<SystemCmd>>,
+    /// The thread is gone (it could not start, or it ended): said once in the log.
+    gone: std::cell::Cell<bool>,
     events: Receiver<SystemEvent>,
     thread: Option<JoinHandle<()>>,
 }
@@ -67,6 +69,7 @@ impl System {
             .ok();
         Self {
             cmds: Some(cmds),
+            gone: std::cell::Cell::new(false),
             events,
             thread,
         }
@@ -81,16 +84,19 @@ impl System {
 
     /// Load the files of `lang`; [`SystemEvent::Texts`] brings them.
     pub fn load_language(&self, lang: Lang) {
-        if let Some(cmds) = &self.cmds {
-            let _ = cmds.send(SystemCmd::Language(lang));
-        }
+        self.send(SystemCmd::Language(lang));
     }
 
-    /// List the language files again (one may have been added);
+    /// List the language files again if they changed (one may have been added);
     /// [`SystemEvent::Languages`] brings the list.
     pub fn list_languages(&self) {
-        if let Some(cmds) = &self.cmds {
-            let _ = cmds.send(SystemCmd::Languages);
+        self.send(SystemCmd::Languages);
+    }
+
+    fn send(&self, cmd: SystemCmd) {
+        let sent = self.cmds.as_ref().is_some_and(|c| c.send(cmd).is_ok());
+        if !sent && !self.gone.replace(true) {
+            warn!("no system thread: the menu keeps its language, the battery is not read");
         }
     }
 
@@ -133,9 +139,8 @@ fn run(cmds: &Receiver<SystemCmd>, events: &Sender<SystemEvent>, mut loader: Loa
                 false
             }
             Ok(SystemCmd::Languages) => {
-                if events
-                    .send(SystemEvent::Languages(loader.languages()))
-                    .is_err()
+                if let Some(known) = loader.languages_if_changed()
+                    && events.send(SystemEvent::Languages(known)).is_err()
                 {
                     return;
                 }

@@ -184,6 +184,7 @@ fn main() {
         asks: Vec::new(),
         texts,
         languages: languages.into(),
+        language_page: 0,
         update_from: NoStore.update_hint(),
     };
     // TOAST="text": a toast instead.

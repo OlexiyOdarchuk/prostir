@@ -177,6 +177,8 @@ pub struct UiState {
     pub texts: Texts,
     /// The languages there are files for.
     pub languages: std::sync::Arc<[crate::lang::Known]>,
+    /// Which eight of them the Language page shows, when there are more than nine.
+    pub language_page: u8,
     /// First run: show the tips page instead of the tabs.
     pub intro: bool,
     /// The PC speaks another protocol: (the PC is newer, the PC app's version).
@@ -370,6 +372,8 @@ pub enum Action {
     /// The first-run tips were read.
     IntroDone,
     Language(Language),
+    /// Show these languages on the Language page (see `UiState::language_page`).
+    LanguagePage(u8),
     /// Connect to the n-th PC in `UiState::found`.
     ConnectTo(usize),
     ShowKeypad,
@@ -879,6 +883,8 @@ impl Panel {
         let inner = r0 - 12.0;
         let free = r0 - 4.0;
         let across = |above: f32| 2.0 * (free * free - above * above).max(0.0).sqrt();
+        // The battery line: measured at the middle of its letters (its digits reach a
+        // little higher, still clear of the sectors).
         if let Some((percent, charging)) = s.battery {
             let id = if charging {
                 "battery-charging"
@@ -886,14 +892,14 @@ impl Panel {
                 "battery-level"
             };
             let battery = l.f(id, &[("percent", percent.into())]);
-            let (x, size) = centred(self, &battery, 15.0, false, across(64.0));
+            let (x, size) = centred(self, &battery, 15.0, false, across(56.0));
             let color = if percent <= 15 && !charging {
                 DANGER
             } else {
                 MUTED
             };
             items.push(text_in(
-                across(64.0),
+                across(56.0),
                 text(x, cy - 52.0, size, false, color, &battery),
             ));
         }
@@ -988,34 +994,37 @@ impl Panel {
 
         let (lx, lw) = (44.0, 580.0);
         let (rx, rw) = (680.0, 556.0);
+        // Each page's texts stay in their column (see `in_column`).
+        let at = items.len();
+        // Pairing has the page to itself.
+        let whole = w - 2.0 * lx;
         if let Some((host, why)) = &s.pair_offer {
             build_pair_offer(l, &mut items, lx, lw, host, *why);
+            in_column(&mut items[at..], lx, whole);
             return items;
         }
         if let Some(p) = &s.pairing {
             self.build_pairing(l, p, &mut items, lx, lw, 150.0);
+            in_column(&mut items[at..], lx, whole);
             return items;
         }
         if let Some((pc_newer, pc_app)) = &s.update {
-            build_update(
-                l,
-                &mut items,
-                lx,
-                w - 2.0 * lx,
-                *pc_newer,
-                pc_app,
-                s.update_from,
-            );
+            build_update(l, &mut items, lx, whole, *pc_newer, pc_app, s.update_from);
+            in_column(&mut items[at..], lx, whole);
             return items;
         }
         if s.intro && s.host.is_some() {
-            build_intro(l, &mut items, lx, w - 2.0 * lx);
+            build_intro(l, &mut items, lx, whole);
+            in_column(&mut items[at..], lx, whole);
             return items;
         }
         // No PC yet: how to get one, and the PCs found so far.
         if s.host.is_none() {
             build_welcome(l, &mut items, lx, lw, 150.0);
+            in_column(&mut items[at..], lx, lw);
+            let right = items.len();
             self.build_connection(s, &mut items, rx, rw, 150.0);
+            in_column(&mut items[right..], rx, rw);
             return items;
         }
 
@@ -1045,12 +1054,21 @@ impl Panel {
         }
 
         let top = 230.0;
+        let at = items.len();
         match s.tab {
-            Tab::Quick => build_quick(s, &mut items, lx, w - 2.0 * lx, top - 12.0),
+            Tab::Quick => {
+                build_quick(s, &mut items, lx, whole, top - 12.0);
+                in_column(&mut items[at..], lx, whole);
+            }
             Tab::Monitors => {
                 let left = monitor_list(s, &mut items, lx, lw, top - 12.0);
+                in_column(&mut items[at..], lx, lw);
+                let right = items.len();
                 build_monitor_options(s, &mut items, rx, rw, top);
+                in_column(&mut items[right..], rx, rw);
+                let below = items.len();
                 save_as_profile(s, &mut items, lx, lw, left + 30.0);
+                in_column(&mut items[below..], lx, lw);
             }
             Tab::Settings(section) => build_settings(s, section, &mut items, top - 12.0),
         }
@@ -1843,7 +1861,7 @@ fn segmented(
     options: Vec<(&str, Action, bool, bool)>,
 ) {
     if !title.is_empty() {
-        items.push(text(x, *y, 21.0, true, SECTION, title));
+        items.push(text_in(w, text(x, *y, 21.0, true, SECTION, title)));
         *y += 18.0;
     } else {
         *y -= 30.0;
@@ -2631,6 +2649,21 @@ fn build_settings(s: &UiState, section: Section, items: &mut Vec<Item>, top: f32
     ));
     let (cx, cw) = (nx + nw + 50.0, WIDTH as f32 - (nx + nw + 50.0) - 44.0);
     let ctop = top + 12.0;
+    let at = items.len();
+    settings_page(s, section, items, cx, cw, ctop);
+    in_column(&mut items[at..], cx, cw);
+}
+
+/// The chosen part of Settings, in the column from `cx`, `cw` wide.
+fn settings_page(
+    s: &UiState,
+    section: Section,
+    items: &mut Vec<Item>,
+    cx: f32,
+    cw: f32,
+    ctop: f32,
+) {
+    let l = &s.texts;
     match section {
         Section::Look => {
             let col = cw.min(640.0);
@@ -2656,12 +2689,32 @@ fn build_settings(s: &UiState, section: Section, items: &mut Vec<Item>, top: f32
                 ],
             );
             // Every language there is a file for, by the name it calls itself, three
-            // to a row.
-            for row in s.languages.chunks(3) {
-                let options: Vec<_> = row
-                    .iter()
-                    .map(|k| choice(k.name.as_str(), Language::Fixed(k.lang)))
-                    .collect();
+            // to a row, three rows at most: with more, eight at a time and "More…" to
+            // the next ones.
+            let all = &s.languages;
+            let (shown, more) = if all.len() <= 9 {
+                (&all[..], None)
+            } else {
+                let pages = all.len().div_ceil(8);
+                let page = usize::from(s.language_page) % pages;
+                let next = u8::try_from((page + 1) % pages).unwrap_or(0);
+                let end = (page * 8 + 8).min(all.len());
+                (&all[page * 8..end], Some(next))
+            };
+            let mut options: Vec<_> = shown
+                .iter()
+                .map(|k| choice(k.name.as_str(), Language::Fixed(k.lang)))
+                .collect();
+            if let Some(next) = more {
+                options.push((
+                    l.t("language-more"),
+                    Action::LanguagePage(next),
+                    false,
+                    true,
+                ));
+            }
+            for row in options.chunks(3) {
+                let options = row.to_vec();
                 // The buttons of a shorter last row as wide as those of a full one.
                 let k = options.len() as f32;
                 let width = k * (w - 20.0) / 3.0 + 10.0 * (k - 1.0);
@@ -3245,6 +3298,18 @@ fn text(x: f32, baseline: f32, size: f32, medium: bool, color: [u8; 4], s: &str)
     }
 }
 
+/// The texts among `items` with no room of their own stay in the column from `x`, `w`
+/// wide: a longer one is drawn smaller rather than run into the next column.
+fn in_column(items: &mut [Item], x: f32, w: f32) {
+    for item in items {
+        if let Item::Text { x: at, room, .. } = item
+            && room.is_infinite()
+        {
+            *room = (x + w - *at).max(0.0);
+        }
+    }
+}
+
 /// A text that may be at most `room` wide (in a column, on a tile).
 fn text_in(room: f32, item: Item) -> Item {
     match item {
@@ -3463,6 +3528,7 @@ mod tests {
             tab: Tab::Monitors,
             texts: crate::lang::builtin("uk"),
             languages: languages(),
+            language_page: 0,
             intro: false,
             update: None,
             update_from: NoStore.update_hint(),
@@ -3704,6 +3770,20 @@ mod tests {
                         .collect();
                     states.push(asking);
                 }
+                // Twenty languages, every page of them.
+                if tab == Tab::Settings(Section::Language) {
+                    for page in 0..3 {
+                        let mut many = st.clone();
+                        many.languages = (0..20)
+                            .map(|i| crate::lang::Known {
+                                lang: crate::lang::Lang::new(&format!("x{i}")).expect("a code"),
+                                name: format!("Мова номер {i}"),
+                            })
+                            .collect();
+                        many.language_page = page;
+                        states.push(many);
+                    }
+                }
                 // Many paired PCs.
                 let mut many = st.clone();
                 many.paired = (0..5).map(|i| format!("pc-{i}")).collect();
@@ -3819,7 +3899,22 @@ mod tests {
                 st.texts = lang.clone();
                 let mut p = Panel::wrist();
                 p.set_state(&st);
-                let problems = p.overflows();
+                let mut problems = p.overflows();
+                // The built-in languages fit as they are: the battery, the date and
+                // "Menu" at their own sizes (the 12-hour clock is made smaller to fit
+                // in any language, and so are the sectors' labels).
+                if lang.lang().as_str() != "qps" {
+                    for item in &p.items {
+                        if let Item::Text { text, size, .. } = item
+                            && *text != *st.clock
+                        {
+                            let own = if text.contains('%') { 15.0 } else { 18.0 };
+                            if (size - own).abs() > f32::EPSILON {
+                                problems.push(format!("{text:?} drawn smaller ({size})"));
+                            }
+                        }
+                    }
+                }
                 assert!(problems.is_empty(), "{lang:?}: {}", problems.join("\n"));
             }
         }

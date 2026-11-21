@@ -2,6 +2,10 @@
 # Another language is a file <code>.ftl like this one in the app's folder
 # Android/data/dev.prostir.client/files/lang/ (its own words where it has them,
 # these where it does not).
+#
+# A comment `# $name` above a message says what its placeholders are. Plural forms
+# follow the language's own rules ({ $count -> [one] ... *[other] ... }); NUMBER()
+# is there for a number formatted another way.
 
 language-name = English
 
@@ -19,12 +23,14 @@ menu = Menu
 focus = Focus
 cinema = Cinema
 line-up = Line up
+# $value (Number): a percentage, 40 to 100
 percent = { $value } %
 
 ## The header and the tabs
 
 status-update-needed = Update needed
 status-pairing = Pairing…
+# $pc (String): the PC's name
 status-connected = Connected to { $pc }
 status-searching = Looking for a PC…
 change-pc = Change PC
@@ -37,12 +43,15 @@ tab-settings = Settings
 wrist-in-front = In front
 wrist-mouse = Mouse?
 wrist-screenshot = Screenshot
+# $percent (Number): the headset's battery, 0 to 100
 battery-level = { $percent } %
+# $percent (Number): the headset's battery, 0 to 100
 battery-charging = { $percent } % · charging
 
 ## Before a PC: the welcome and the PCs found
 
 welcome-title = Prostir shows your PC's monitors
+# $site (String): Prostir's site, prostir.ishawyha.dev
 welcome-pc-app = Prostir for the PC: { $site }
 welcome-install = Install Prostir on the PC
 welcome-start = Start it
@@ -60,6 +69,7 @@ key-done = Done
 
 ## Pairing
 
+# $pc (String): the PC's name
 pairing-with = Pairing with { $pc }
 pairing-failed = The code did not match. Try again
 pairing-type-on-pc = Type this code into the Prostir window on the PC:
@@ -82,12 +92,14 @@ offer-not-now = Not now
 
 update-headset = Update the app in the headset
 update-pc = Update Prostir on the PC
+# $pc (String): the PC app's version; $headset (String): this app's version
 update-versions = The PC has { $pc }, the headset has { $headset }.
 update-versions-differ = Different versions cannot connect.
 update-pc-from = Download the new PC version from
 update-connects-by-itself = The headset connects by itself once the versions match.
 store-update-library = Update Prostir in the headset's library:
 store-update-apk = Install the new APK from
+# $store (String): the name of the store this build comes from
 store-not-confirmed = Could not confirm Prostir came from { $store }
 
 ## The first-run tips
@@ -130,7 +142,9 @@ quick-screenshot-state = Of the monitor in front
 
 ## Monitors
 
+# $n (String): the monitor's number, as the PC's display settings show it
 monitor-n = Monitor { $n }
+# $n (Number): the window panel's number, from 1
 window-n = Window { $n }
 place-left = left
 place-middle = middle
@@ -141,6 +155,7 @@ monitor-remove-confirm = Remove? Press again
 monitor-primary = Primary
 monitor-make-primary = Make primary
 pc-display = PC display
+# $name (String): the PC's name for its display (HDMI-A-1)
 pc-display-named = Display { $name }
 laptop-screen = Laptop screen
 pc-display-not-connected = not connected
@@ -148,6 +163,7 @@ pc-display-shown = Shown
 pc-display-hidden = Hidden
 monitors-line-up = Line up: close the seams (A button)
 add-monitor = Add a monitor
+# $count (Number): how many monitors the PC makes at most
 monitors-at-most =
     { $count ->
         [one] At most { $count } monitor
@@ -238,6 +254,11 @@ sound-about-4 = Take the headset off and both return to the PC.
 language-title = Menu language · Мова
 language-like-pc = Same as PC
 language-like-system = Same as the system
+language-more = More…
+# $language (String): the language's code (de, pt-BR)
+language-problems = Some lines of the { $language } language file could not be read: they show in English
+# $language (String): the language's code (de, pt-BR)
+language-missing = No file for the language { $language }: the menu stays in English
 time = Time
 date = Date
 date-like-menu = As the menu
@@ -260,6 +281,7 @@ paired-pcs = Paired PCs
 paired-none = None
 paired-forget-confirm = Forget? Again
 paired-forget = Forget
+# $count (Number): how many more paired PCs there are
 paired-more = And { $count }
 
 ## Settings: help
@@ -280,11 +302,17 @@ adding-monitor = Adding a monitor…
 ask-waiting = Working…
 rest-eyes = Rest your eyes: look into the distance for 20 seconds
 rest-hour = An hour in the headset: time for a short break
+# $path (String): where the PC saved the picture
 toast-screenshot-saved = Screenshot saved: { $path }
+# $error (String): what went wrong, as the system says it
 error-send = Could not send to the PC: { $error }
 error-not-connected = Not connected to a PC
+# $name (String): the display's name; $size (String): its size, 5120×1440;
+# $codec (String): H264 or H265
 error-too-big = { $name }: { $size } ({ $codec }) is too large for this headset to show
+# $error (String): what went wrong, as the system says it
 error-cameras = Cameras unavailable: { $error }
+# $typed (String): what was typed
 error-not-ip = «{ $typed }»: is not an IP address
 pc-usb = PC (USB)
 bye-pc-quit = The PC app was closed
@@ -314,6 +342,8 @@ failure-bad-argument = A value out of range
 
 ## The palm menu's date and the 12-hour clock
 
+# $weekday (String): weekday-0 to weekday-6; $day (Number): the day of the month;
+# $month (String): month-0 to month-11
 date-format = { $weekday }, { $month } { $day }
 weekday-0 = Sun
 weekday-1 = Mon
@@ -334,6 +364,7 @@ month-8 = Sep
 month-9 = Oct
 month-10 = Nov
 month-11 = Dec
+# $time (String): 2:05; $half: am or pm
 time-12h =
     { $half ->
         [am] { $time } AM
