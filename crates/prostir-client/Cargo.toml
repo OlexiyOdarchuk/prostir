@@ -27,6 +27,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 prostir-proto.workspace = true
 prostir-layout.workspace = true
+prostir-lang.workspace = true
 glam.workspace = true
 log.workspace = true
 tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
@@ -53,8 +54,6 @@ prostir-testkit = { workspace = true, optional = true }
 # The shipped selftest clips are checked against the fake PC that plays them.
 prostir-testkit.workspace = true
 tiny-skia = { version = "0.12", features = ["png-format"] }
-# The plural forms of counts are checked against Fluent's.
-prostir-lang.workspace = true
 
 [lints]
 workspace = true

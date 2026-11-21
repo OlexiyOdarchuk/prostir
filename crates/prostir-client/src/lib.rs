@@ -1,4 +1,4 @@
-//! Quest 3 client: shows each virtual KDE monitor as an OpenXR quad layer.
+//! Quest 3 client: shows each virtual monitor of the PC as an OpenXR quad layer.
 //!
 //! Video frames are decoded by MediaCodec directly into Android surfaces owned
 //! by the Quest compositor (XR_KHR_android_surface_swapchain), so pixels never
@@ -11,7 +11,7 @@
 pub mod background;
 pub mod commands;
 pub mod device;
-pub mod i18n;
+pub mod lang;
 pub mod layout;
 pub mod outbox;
 pub mod pending;

@@ -10,7 +10,6 @@ use std::ffi::{CString, c_char, c_void};
 use log::{info, warn};
 
 use super::{Store, StoreCheck, UpdateHint};
-use crate::i18n::Lang;
 
 /// The Meta Horizon Store: the app is checked to be the user's at launch, and updated
 /// from the headset's library.
@@ -29,27 +28,24 @@ impl MetaStore {
 }
 
 impl Store for MetaStore {
-    fn poll(&mut self, l: Lang) -> StoreCheck {
+    fn poll(&mut self) -> StoreCheck {
         match self.check.as_mut().map_or(Some(false), Entitlement::poll) {
             None => StoreCheck::Waiting,
             Some(true) => StoreCheck::Owned,
-            Some(false) => StoreCheck::NotOwned(l.t(
-                "Не вдалося підтвердити, що Prostir отримано з Meta Horizon Store",
-                "Could not confirm Prostir came from the Meta Horizon Store",
-            )),
+            Some(false) => StoreCheck::NotOwned { store: NAME },
         }
     }
 
-    fn update_hint(&self, l: Lang) -> UpdateHint {
+    fn update_hint(&self) -> UpdateHint {
         UpdateHint {
-            how: l.t(
-                "Оновіть Prostir у бібліотеці шолома:",
-                "Update Prostir in the headset's library:",
-            ),
-            place: "Meta Horizon Store",
+            how: "store-update-library",
+            place: NAME,
         }
     }
 }
+
+/// The store's name, as the person knows it.
+const NAME: &str = "Meta Horizon Store";
 
 /// Prostir's application id on the Meta Horizon Developer Dashboard.
 const APP_ID: &str = match option_env!("PROSTIR_HORIZON_APP_ID") {

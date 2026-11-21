@@ -4,8 +4,6 @@
 //! `store`); one from GitHub or for development has [`NoStore`]. Another store is
 //! another implementation.
 
-use crate::i18n::Lang;
-
 #[cfg(all(target_os = "android", feature = "store"))]
 mod meta;
 
@@ -15,12 +13,16 @@ pub enum StoreCheck {
     /// No answer yet.
     Waiting,
     Owned,
-    /// Not owned, or the check could not run: what to tell the person before the app
-    /// closes.
-    NotOwned(&'static str),
+    /// Not owned, or the check could not run: the person is told so (naming the
+    /// store) before the app closes.
+    NotOwned {
+        /// The store's own name.
+        store: &'static str,
+    },
 }
 
-/// Where a newer version of the app comes from: what to do, and where (shown large).
+/// Where a newer version of the app comes from: what to do (the message that says
+/// it), and where (shown large: the store's name, or an address).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UpdateHint {
     pub how: &'static str,
@@ -29,9 +31,9 @@ pub struct UpdateHint {
 
 pub trait Store {
     /// The ownership check, asked once per pass of the loop until the app closes.
-    fn poll(&mut self, l: Lang) -> StoreCheck;
+    fn poll(&mut self) -> StoreCheck;
     /// Where to get a newer version of the app, for the screen that says to update it.
-    fn update_hint(&self, l: Lang) -> UpdateHint;
+    fn update_hint(&self) -> UpdateHint;
 }
 
 /// A build from GitHub, or for development: nothing to check, and new versions are on
@@ -40,13 +42,13 @@ pub trait Store {
 pub struct NoStore;
 
 impl Store for NoStore {
-    fn poll(&mut self, _: Lang) -> StoreCheck {
+    fn poll(&mut self) -> StoreCheck {
         StoreCheck::Owned
     }
 
-    fn update_hint(&self, l: Lang) -> UpdateHint {
+    fn update_hint(&self) -> UpdateHint {
         UpdateHint {
-            how: l.t("Встановіть новий APK з", "Install the new APK from"),
+            how: "store-update-apk",
             place: "github.com/OlexiyOdarchuk/prostir/releases",
         }
     }
@@ -74,14 +76,16 @@ mod tests {
     #[test]
     fn no_store_has_nothing_to_check() {
         let mut store = NoStore;
-        assert_eq!(store.poll(Lang::En), StoreCheck::Owned);
+        assert_eq!(store.poll(), StoreCheck::Owned);
+        let hint = store.update_hint();
+        assert_eq!(hint.place, "github.com/OlexiyOdarchuk/prostir/releases");
         assert_eq!(
-            store.update_hint(Lang::En),
-            UpdateHint {
-                how: "Install the new APK from",
-                place: "github.com/OlexiyOdarchuk/prostir/releases",
-            }
+            crate::lang::builtin("en").t(hint.how),
+            "Install the new APK from"
         );
-        assert_eq!(store.update_hint(Lang::Uk).how, "Встановіть новий APK з");
+        assert_eq!(
+            crate::lang::builtin("uk").t(hint.how),
+            "Встановіть новий APK з"
+        );
     }
 }

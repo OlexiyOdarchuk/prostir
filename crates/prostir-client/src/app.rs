@@ -1,6 +1,6 @@
 //! OpenXR main loop.
 //!
-//! Each KDE monitor is decoded by MediaCodec straight into an Android surface
+//! Each monitor of the PC is decoded by MediaCodec straight into an Android surface
 //! owned by the Quest compositor (XR_KHR_android_surface_swapchain) and shown as
 //! a quad or cylinder layer. The menu, its button, pointer dots and the
 //! panorama are small CPU-drawn images; nothing is rendered per frame.
@@ -28,8 +28,8 @@ use prostir_proto::state::{
 use prostir_proto::{ClientMsg, Codec};
 
 use crate::audio::Gains;
-use crate::i18n::{Lang, Language};
 use crate::input::Controls;
+use crate::lang::{Lang, LangState, Moment, Texts};
 use crate::layout::{self, Cylinder, Grab, Held, Hit, Placement, Ray, ScreenId};
 use crate::mic::Mic;
 use crate::net::{Feedback, NetEvent};
@@ -192,62 +192,53 @@ fn local_time() -> Option<libc::tm> {
     }
 }
 
-/// The time as `14:05` or `2:05 PM`.
-fn clock_text(tm: &libc::tm, twelve: bool) -> String {
-    if !twelve {
-        return format!("{:02}:{:02}", tm.tm_hour, tm.tm_min);
+/// A moment of the local time, as the menu writes it.
+fn moment(tm: &libc::tm) -> Moment {
+    let small = |v: libc::c_int, max: u8| v.clamp(0, libc::c_int::from(max)) as u8;
+    Moment {
+        year: tm.tm_year + 1900,
+        month: small(tm.tm_mon, 11),
+        day: small(tm.tm_mday, 31),
+        weekday: small(tm.tm_wday, 6),
+        hour: small(tm.tm_hour, 23),
+        minute: small(tm.tm_min, 59),
     }
-    let hour = match tm.tm_hour % 12 {
-        0 => 12,
-        h => h,
-    };
-    let half = if tm.tm_hour < 12 { "AM" } else { "PM" };
-    format!("{hour}:{:02} {half}", tm.tm_min)
 }
 
-/// The date as `Ср, 18 лист.`, `Wed, Nov 18` or `18.11.2026`.
-fn date_text(tm: &libc::tm, style: crate::settings::DateStyle, lang: Lang) -> String {
-    use crate::settings::DateStyle;
-    let (day, month) = (
-        tm.tm_wday.clamp(0, 6) as usize,
-        tm.tm_mon.clamp(0, 11) as usize,
-    );
-    let style = match (style, lang) {
-        (DateStyle::LikeMenu, Lang::Uk) => DateStyle::Ukrainian,
-        (DateStyle::LikeMenu, Lang::En) => DateStyle::English,
-        (s, _) => s,
-    };
-    match style {
-        DateStyle::English => {
-            const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-            const MONTHS: [&str; 12] = [
-                "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-            ];
-            format!("{}, {} {}", DAYS[day], MONTHS[month], tm.tm_mday)
-        }
-        DateStyle::Numbers => format!(
-            "{:02}.{:02}.{}",
-            tm.tm_mday,
-            tm.tm_mon + 1,
-            tm.tm_year + 1900
-        ),
-        _ => {
-            const DAYS: [&str; 7] = ["Нд", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"];
-            const MONTHS: [&str; 12] = [
-                "січ.",
-                "лют.",
-                "бер.",
-                "квіт.",
-                "трав.",
-                "черв.",
-                "лип.",
-                "серп.",
-                "вер.",
-                "жовт.",
-                "лист.",
-                "груд.",
-            ];
-            format!("{}, {} {}", DAYS[day], tm.tm_mday, MONTHS[month])
+/// The time and the date on the palm menu, written again only when the minute, the
+/// language or how they are written changes (not every frame).
+#[derive(Default)]
+struct ClockFace {
+    /// What the texts were written for.
+    shown: Option<(Moment, bool, crate::settings::DateStyle, Texts)>,
+    /// Shared with the menu's state, which is made anew every frame.
+    clock: Arc<str>,
+    date: Arc<str>,
+}
+
+impl ClockFace {
+    fn update(
+        &mut self,
+        now: Option<Moment>,
+        twelve: bool,
+        style: crate::settings::DateStyle,
+        texts: &Texts,
+    ) {
+        let Some(now) = now else {
+            if self.shown.take().is_some() {
+                self.clock = Arc::default();
+                self.date = Arc::default();
+            }
+            return;
+        };
+        let same = self
+            .shown
+            .as_ref()
+            .is_some_and(|(m, t, s, l)| *m == now && *t == twelve && *s == style && l == texts);
+        if !same {
+            self.clock = texts.clock(twelve, &now).into();
+            self.date = texts.date(style, &now).into();
+            self.shown = Some((now, twelve, style, texts.clone()));
         }
     }
 }
@@ -389,7 +380,7 @@ fn lying_flat(position: Vec3, head: Vec3) -> glam::Quat {
 /// Everything shown in the headset and how it is arranged.
 struct Scene {
     monitors: HashMap<ScreenId, Monitor>,
-    /// Left-to-right order of the Quest monitors, shared with the host and KDE.
+    /// Left-to-right order of the Quest monitors, shared with the host and its desktop.
     order: Vec<ScreenId>,
     placements: HashMap<ScreenId, Placement>,
     primary: Option<ScreenId>,
@@ -515,6 +506,11 @@ struct Scene {
     keyboard_path: PathBuf,
     /// The headset's own system language.
     system_lang: Option<Lang>,
+    /// The menu's language: what it shows, and the one it waits for.
+    lang: LangState,
+    clock: ClockFace,
+    /// Which languages the Language page shows, when there are many.
+    language_page: u8,
     profiles: [Profile; profiles::SLOTS],
     profiles_path: PathBuf,
     /// The profile last switched to, until something is changed by hand.
@@ -573,7 +569,7 @@ impl Scene {
 
     /// What the switch's display is called, if a display of the PC is connected.
     fn physical_name(&self) -> Option<String> {
-        physical::switch(self.pc.displays.as_ref()?).map(|d| physical::label(d, self.lang()))
+        physical::switch(self.pc.displays.as_ref()?).map(|d| physical::label(d, self.texts()))
     }
 
     /// Quest monitors left to right: in the host's order, unknown ones at the end.
@@ -600,9 +596,9 @@ impl Scene {
             .collect()
     }
 
-    /// Sends a new left-to-right order to the host (which re-arranges KDE to match).
+    /// Sends a new left-to-right order to the host (which re-arranges its desktop to match).
     /// Tells the PC how the monitors stand around the user (rows, left to right), so
-    /// KDE's arrangement matches: the mouse leaves a monitor where the next one is,
+    /// the desktop's arrangement matches: the mouse leaves a monitor where the next one is,
     /// sideways, up or down. Only sent when it changed.
     #[expect(
         clippy::disallowed_methods,
@@ -613,7 +609,7 @@ impl Scene {
             return;
         }
         // Wait until every monitor the PC has is placed: a partial picture would make
-        // KDE rearrange (and blink) once per arriving monitor. One whose stream could
+        // the desktop rearrange (and blink) once per arriving monitor. One whose stream could
         // not start keeps its place and does not hold the others up.
         let complete = self.order.iter().any(|id| self.monitors.contains_key(id))
             && self.order.iter().all(|id| self.placements.contains_key(id));
@@ -629,7 +625,7 @@ impl Scene {
             return;
         }
         // Only an arrangement that has held for a moment: monitors arriving one by one
-        // or being laid out again pass through states KDE should not be shown.
+        // or being laid out again pass through states the desktop should not be shown.
         match &self.pending_layout {
             Some((pending, since)) if *pending == desktop => {
                 if since.elapsed() < Duration::from_millis(800) {
@@ -644,7 +640,7 @@ impl Scene {
         self.pending_layout = None;
         let rows = desktop.wire();
         info!(
-            "KDE arrangement: {}",
+            "desktop arrangement: {}",
             rows.iter()
                 .map(|r| {
                     let ids: Vec<u32> = r.ids().map(|id| id.0).collect();
@@ -1246,19 +1242,12 @@ impl Scene {
             return;
         }
         self.worn_for = Duration::ZERO;
-        let l = self.lang();
-        let text = if every <= 20 * 60 {
-            l.t(
-                "Перепочиньте очі: 20 секунд подивіться вдалину",
-                "Rest your eyes: look into the distance for 20 seconds",
-            )
+        let id = if every <= 20 * 60 {
+            "rest-eyes"
         } else {
-            l.t(
-                "Година в шоломі: час на коротку перерву",
-                "An hour in the headset: time for a short break",
-            )
+            "rest-hour"
         };
-        self.show_toast(text.to_owned());
+        self.show_toast(self.texts().t(id).to_owned());
     }
 
     /// "Sound from the screen": the sound placed towards the monitor whose window plays
@@ -1817,8 +1806,8 @@ impl Scene {
     fn tell_failure(&mut self, what: ui::Asked, why: ui::Failure, detail: &str) {
         if matches!(what, ui::Asked::Profile(_) | ui::Asked::FindMouse) {
             let text = why
-                .text(self.lang())
-                .map_or_else(|| detail.to_owned(), str::to_owned);
+                .text()
+                .map_or_else(|| detail.to_owned(), |id| self.texts().t(id).to_owned());
             self.show_toast(text);
         }
     }
@@ -1856,30 +1845,38 @@ impl Scene {
         match sent {
             Some(Ok(())) => {}
             Some(Err(e)) => {
-                let what = self
-                    .lang()
-                    .t("Не вдалося надіслати на ПК", "Could not send to the PC");
-                self.show_error(format!("{what}: {e}"));
+                let text = self
+                    .texts()
+                    .f("error-send", &[("error", e.to_string().into())]);
+                self.show_error(text);
             }
             None => {
-                let what = self
-                    .lang()
-                    .t("Немає з'єднання з ПК", "Not connected to a PC");
-                self.show_error(what.into());
+                let text = self.texts().t("error-not-connected").to_owned();
+                self.show_error(text);
             }
         }
     }
 
-    /// The interface language: chosen in the menu, else the PC's, else the headset's.
-    fn lang(&self) -> Lang {
-        match self.settings.language {
-            Language::Fixed(l) => l,
-            Language::LikePc => self
-                .settings
-                .pc_language
-                .or(self.system_lang)
-                .unwrap_or(Lang::En),
-        }
+    /// The menu's texts, in the language it shows now.
+    fn texts(&self) -> &Texts {
+        self.lang.texts()
+    }
+
+    /// The language the menu is to show, if it is neither shown nor already asked for:
+    /// the `system` thread is to load it (chosen in the menu, else the PC's, else the
+    /// headset's).
+    fn wanted_lang(&mut self) -> Option<Lang> {
+        let s = &self.settings;
+        self.lang
+            .wanted(s.language, s.pc_language, self.system_lang)
+    }
+
+    /// The time and the date on the palm menu, for this minute.
+    fn tick_clock(&mut self) {
+        let s = &self.settings;
+        let now = local_time().map(|t| moment(&t));
+        self.clock
+            .update(now, s.clock_12h, s.date_style, self.lang.texts());
     }
 
     #[expect(
@@ -1977,18 +1974,16 @@ impl Scene {
                 .map(|(i, _)| i),
             paired: self.paired.iter().map(|(_, n)| n.clone()).collect(),
             battery: self.headset_battery,
-            clock: local_time()
-                .map(|t| clock_text(&t, self.settings.clock_12h))
-                .unwrap_or_default(),
-            date: local_time()
-                .map(|t| date_text(&t, self.settings.date_style, self.lang()))
-                .unwrap_or_default(),
+            clock: self.clock.clock.clone(),
+            date: self.clock.date.clone(),
             confirm_forget: self
                 .confirm_forget
                 .filter(|(_, at)| at.elapsed() < CONFIRM_FOR)
                 .map(|(i, _)| i),
             tab: self.tab,
-            lang: self.lang(),
+            texts: self.texts().clone(),
+            languages: self.lang.known().clone(),
+            language_page: self.language_page,
             intro: !self.settings.intro_seen,
             update: self.update_needed.clone(),
             update_from,
@@ -2174,7 +2169,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     }
     let settings_path = data_dir.join("settings.txt");
     let profiles_path = data_dir.join("profiles.txt");
-    let settings = Settings::load(&settings_path);
+    let mut settings = Settings::load(&settings_path);
     // This start's own: a new start in the same process begins afresh.
     let mic = Arc::new(Mic::new(settings.mic, app.clone()));
     let gains = Arc::new(Gains::default());
@@ -2201,10 +2196,10 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     let mut toast_layer = ImageLayer::new(&session, format, TOAST_PX.0, TOAST_PX.1, false)?;
     let mut attach_layer = ImageLayer::new(&session, format, ATTACH_PX.0, ATTACH_PX.1, false)?;
     // What the "Attach" texture shows now: language and lit (pointed at).
-    let mut attach_drawn: Option<(Lang, bool)> = None;
+    let mut attach_drawn: Option<(Texts, bool)> = None;
     // The placeholder of a monitor being added: its layer, made for a size and
     // language.
-    let mut placeholder: Option<(ImageLayer, (u32, u32), Lang)> = None;
+    let mut placeholder: Option<(ImageLayer, (u32, u32), Texts)> = None;
     cursor_layer.upload(&gl, &ui::cursor_image(CURSOR_PX))?;
     let mut button_hovered = false;
     // The left hand's menu gesture as last seen, to act once per gesture.
@@ -2240,16 +2235,34 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     let external_dir = app.external_data_path().filter(|_| test.is_none());
     let mut custom_pano = custom_panorama_path(external_dir.as_deref()).is_some();
     let mut panel_was_open = false;
-    // The language the network thread was last told (it starts with the default).
-    let mut told_lang = Lang::default();
+
+    // The menu's language, before the first frame: the headset's own language once,
+    // the files there are, and the language to show. From here on the system thread
+    // reads the files.
+    let system_lang = crate::system::language();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the start, before the first frame, reads the language files once"
+    )]
+    let (lang, lang_loader) = crate::lang::start(
+        external_dir.as_ref().map(|d| d.join("lang")),
+        settings.language,
+        settings.pc_language,
+        system_lang,
+    );
+    // A language chosen once whose file is gone is "like the PC" again.
+    settings.language = crate::lang::kept(settings.language, lang.known());
+    // What the network thread was last told (it names a PC over USB).
+    let mut told_texts = lang.texts().clone();
 
     // The battery once now, for the first `Open`; from here on the system thread reads
     // it, away from the frame.
     let battery = crate::system::battery();
-    let system_thread = crate::system::System::start();
+    let system_thread = crate::system::System::start(lang_loader);
 
     let (net_tx, net_rx) = mpsc::channel();
     let steering = net::Steering::default();
+    steering.set_texts(told_texts.clone());
     // What the first `Open` says, before the network thread can connect.
     steering.set_headset(headset_state(&settings, true, battery, &mic, &model));
     // However this function ends, the network thread and its session end with it, and
@@ -2369,7 +2382,10 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         hands_in_view: false,
         keyboard_place: layout::load(&data_dir.join("keyboard.txt")).remove(&0),
         keyboard_path: data_dir.join("keyboard.txt"),
-        system_lang: crate::i18n::system(),
+        system_lang,
+        lang,
+        clock: ClockFace::default(),
+        language_page: 0,
         profiles: profiles::load(&profiles_path),
         profiles_path,
         active_profile: None,
@@ -2379,6 +2395,11 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         placed_for: HashMap::new(),
         settings_path,
     };
+    // The language's file had lines that could not be read: said once, in front.
+    if let Some(warning) = scene.texts().warning() {
+        let text = warning.to_owned();
+        scene.show_toast(text);
+    }
     if !scene.settings.cinema {
         let saved = scene.desk.load();
         scene.adopt_desk(saved);
@@ -2398,6 +2419,8 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     let mut store = crate::store::of_this_build(app);
     // Since when the store says the app is not the user's: it closes after saying so.
     let mut not_owned_since: Option<Instant> = None;
+    // What the person is told then, and the language it is in.
+    let mut not_owned_text: Option<(Texts, String)> = None;
     let mut session_running = false;
     // The input is the app's: false while the system menu is open over it (the app
     // keeps drawing, but shows no hands or rays of its own and takes no input).
@@ -2427,10 +2450,23 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         if destroy {
             break;
         }
-        if let StoreCheck::NotOwned(what) = store.poll(scene.lang()) {
+        if let StoreCheck::NotOwned { store: name } = store.poll() {
             let since = *not_owned_since.get_or_insert_with(Instant::now);
+            // Written once in each language, then compared with what the menu shows.
+            if not_owned_text
+                .as_ref()
+                .is_none_or(|(texts, _)| texts != scene.texts())
+            {
+                let text = scene
+                    .texts()
+                    .f("store-not-confirmed", &[("store", name.into())]);
+                not_owned_text = Some((scene.texts().clone(), text));
+            }
+            let what = not_owned_text
+                .as_ref()
+                .map_or("", |(_, text)| text.as_str());
             if scene.error.as_ref().is_none_or(|(t, _)| t != what) {
-                scene.show_error(what.into());
+                scene.show_error(what.to_owned());
                 // In front of the user, wherever the menu was last.
                 let (head, forward) = scene.head;
                 let hands = scene.hands_in_view;
@@ -2532,11 +2568,28 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         while let Some(event) = system_thread.try_recv() {
             match event {
                 SystemEvent::Battery(reading) => newest = Some(reading),
+                SystemEvent::Texts(texts) => {
+                    if scene.lang.loaded(texts)
+                        && let Some(warning) = scene.texts().warning()
+                    {
+                        let text = warning.to_owned();
+                        scene.show_toast(text);
+                    }
+                }
+                SystemEvent::Languages(known) => {
+                    scene.lang.listed(known);
+                }
             }
         }
         if let Some(reading) = newest {
             scene.battery_read(reading);
         }
+        // Another language chosen (or the PC's changed): loaded on the system thread,
+        // the menu keeps the one it has until then.
+        if let Some(lang) = scene.wanted_lang() {
+            system_thread.load_language(lang);
+        }
+        scene.tick_clock();
 
         // Panorama: generated or decoded off the main thread, uploaded once per choice.
         let wanted = scene.settings.background;
@@ -2784,7 +2837,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                     .is_some_and(passthrough::Passthrough::window_supported),
                 exts.khr_composition_layer_equirect2,
                 custom_pano,
-                store.update_hint(scene.lang()),
+                store.update_hint(),
             );
             wrist_panel.set_state(&ui_state);
             wrist_panel.hover(wrist_hover);
@@ -3017,7 +3070,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                             controls.pulse(&session, hand);
                         }
                         scene.save_layout();
-                        // Dropped somewhere else: KDE's arrangement follows what the
+                        // Dropped somewhere else: the desktop's arrangement follows what the
                         // eyes see.
                         scene.send_layout();
                     }
@@ -3105,6 +3158,8 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         if scene.panel_open && !panel_was_open {
             // The user may have copied a picture onto the headset meanwhile.
             custom_pano = custom_panorama_path(external_dir.as_deref()).is_some();
+            // Or a language file: listed again on the system thread.
+            system_thread.list_languages();
             // And paired with another PC.
             #[expect(
                 clippy::disallowed_methods,
@@ -3114,10 +3169,9 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             scene.paired = paired.entries().to_vec();
         }
         // The network thread names a PC over USB in the menu's language.
-        let lang = scene.lang();
-        if lang != told_lang {
-            scene.steering.set_lang(lang);
-            told_lang = lang;
+        if *scene.texts() != told_texts {
+            told_texts = scene.texts().clone();
+            scene.steering.set_texts(told_texts.clone());
         }
         panel_was_open = scene.panel_open;
         // A new toast: drawn once, placed where the user looks now.
@@ -3143,24 +3197,27 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                 .iter()
                 .flatten()
                 .any(|(t, _)| matches!(t, Target::Attach(_)));
-            let want = (scene.lang(), lit);
-            if attach_drawn != Some(want) {
-                let label = scene.lang().t("Прикріпити", "Attach");
+            if attach_drawn
+                .as_ref()
+                .is_none_or(|(t, l)| t != scene.texts() || *l != lit)
+            {
+                let label = scene.texts().t("attach");
                 attach_layer
                     .upload(&gl, &panel.pill_image(label, ATTACH_PX.0, ATTACH_PX.1, lit))?;
-                attach_drawn = Some(want);
+                attach_drawn = Some((scene.texts().clone(), lit));
             }
         }
-        if let Some(a) = &scene.adding {
-            let want = (a.size, scene.lang());
-            if placeholder.as_ref().is_none_or(|p| (p.1, p.2) != want) {
-                let (w, h) = a.size;
-                let px_h = (PLACEHOLDER_PX * h / w.max(1)).clamp(64, 4 * PLACEHOLDER_PX);
-                let mut layer = ImageLayer::new(&session, format, PLACEHOLDER_PX, px_h, true)?;
-                let label = scene.lang().t("Монітор додається…", "Adding a monitor…");
-                layer.upload(&gl, &panel.placeholder_image(label, PLACEHOLDER_PX, px_h))?;
-                placeholder = Some((layer, a.size, scene.lang()));
-            }
+        if let Some(a) = &scene.adding
+            && placeholder
+                .as_ref()
+                .is_none_or(|p| p.1 != a.size || p.2 != *scene.texts())
+        {
+            let (w, h) = a.size;
+            let px_h = (PLACEHOLDER_PX * h / w.max(1)).clamp(64, 4 * PLACEHOLDER_PX);
+            let mut layer = ImageLayer::new(&session, format, PLACEHOLDER_PX, px_h, true)?;
+            let label = scene.texts().t("adding-monitor");
+            layer.upload(&gl, &panel.placeholder_image(label, PLACEHOLDER_PX, px_h))?;
+            placeholder = Some((layer, a.size, scene.texts().clone()));
         }
         if scene.wrist.is_some()
             && let Some(pixels) = wrist_panel.render_if_dirty()
@@ -3175,7 +3232,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                     .is_some_and(passthrough::Passthrough::window_supported),
                 exts.khr_composition_layer_equirect2,
                 custom_pano,
-                store.update_hint(scene.lang()),
+                store.update_hint(),
             );
             panel.set_state(&ui_state);
             let drawing = test.is_some().then(Instant::now);
@@ -3410,7 +3467,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             .collect();
         let moving = scene.moving_now(&grabbed);
         scene.animate(dt, &moving);
-        // Keep KDE's arrangement in step once nothing is being moved.
+        // Keep the desktop's arrangement in step once nothing is being moved.
         if grabbed.is_empty() && scene.scaling.is_none() && !scene.relayout_pending() {
             scene.send_layout();
         }
@@ -3652,20 +3709,13 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
 
 /// What to tell the user about a connection that ended; nothing where there is
 /// nothing to say (the headset was off the head, or the PC already said why).
-fn disconnect_text(l: Lang, why: net::Disconnect) -> Option<&'static str> {
+fn disconnect_text(why: net::Disconnect) -> Option<&'static str> {
     use prostir_proto::PcGoodbye;
     Some(match why {
-        net::Disconnect::Goodbye(PcGoodbye::Quit) => {
-            l.t("Програму на ПК закрито", "The PC app was closed")
-        }
-        net::Disconnect::Goodbye(PcGoodbye::Forgotten) => l.t(
-            "ПК більше не знає цей шолом. Сполучіть знову",
-            "The PC no longer knows this headset. Pair them again",
-        ),
-        net::Disconnect::Goodbye(PcGoodbye::Other) => {
-            l.t("ПК завершив з'єднання", "The PC ended the connection")
-        }
-        net::Disconnect::Silence => l.t("Немає зв'язку з ПК", "No connection to the PC"),
+        net::Disconnect::Goodbye(PcGoodbye::Quit) => "bye-pc-quit",
+        net::Disconnect::Goodbye(PcGoodbye::Forgotten) => "bye-forgotten",
+        net::Disconnect::Goodbye(PcGoodbye::Other) => "bye-pc-ended",
+        net::Disconnect::Silence => "bye-silence",
         net::Disconnect::Goodbye(PcGoodbye::TakenOff | PcGoodbye::Replaced | PcGoodbye::Failed)
         | net::Disconnect::Closed => return None,
     })
@@ -3694,14 +3744,14 @@ fn handle_net_event(
                 scene.settings.pc_language = language;
                 scene.settings.save(&scene.settings_path);
             }
-            let usb = scene.lang().t("ПК (USB)", "PC (USB)");
-            scene.host = Some(name.unwrap_or_else(|| {
+            let host = name.unwrap_or_else(|| {
                 if addr.ip().is_loopback() {
-                    usb.into()
+                    scene.texts().t("pc-usb").to_owned()
                 } else {
                     addr.ip().to_string()
                 }
-            }));
+            });
+            scene.host = Some(host);
             scene.feedback = Some(feedback);
             scene.asks.new_session();
             scene.sent_layout = None;
@@ -3733,8 +3783,10 @@ fn handle_net_event(
             (Some(ui::Asked::Profile(_)), Outcome::Failed { .. }) => scene.profile_switch = None,
             (None, _) | (_, Outcome::Failed { .. }) => {}
             (_, Outcome::Saved { path }) => {
-                let saved = scene.lang().t("Знімок збережено:", "Screenshot saved:");
-                scene.show_toast(format!("{saved} {path}"));
+                let text = scene
+                    .texts()
+                    .f("toast-screenshot-saved", &[("path", path.into())]);
+                scene.show_toast(text);
             }
             (_, Outcome::Pointer { id, u, v }) => {
                 let f = |v: u16| f32::from(v) / 65535.0;
@@ -3763,11 +3815,15 @@ fn handle_net_event(
             size: (w, h),
             codec,
         } => {
-            let what = scene.lang().t(
-                "завеликий, щоб цей шолом його показав",
-                "is too large for this headset to show",
+            let text = scene.texts().f(
+                "error-too-big",
+                &[
+                    ("name", name.into()),
+                    ("size", format!("{w}×{h}").into()),
+                    ("codec", format!("{codec:?}").into()),
+                ],
             );
-            scene.show_error(format!("{name}: {w}×{h} ({codec:?}) {what}"));
+            scene.show_error(text);
         }
         NetEvent::Pairing { host, code } => {
             let failed = scene.pairing.as_ref().is_some_and(|p| p.failed);
@@ -3806,8 +3862,9 @@ fn handle_net_event(
             scene.order.clear();
             scene.pc = PcState::default();
             scene.profile_switch = None;
-            if let Some(text) = disconnect_text(scene.lang(), why) {
-                scene.show_toast(text.into());
+            if let Some(id) = disconnect_text(why) {
+                let text = scene.texts().t(id).to_owned();
+                scene.show_toast(text);
             }
         }
         NetEvent::HostError(text) => scene.show_error(text),
@@ -4107,8 +4164,10 @@ fn set_passthrough(scene: &mut Scene, passthrough: &mut Option<passthrough::Pass
             .set_room(background.is_room())
             .and_then(|()| pt.set_room_opacity(opacity))
     {
-        let what = scene.lang().t("Камери недоступні", "Cameras unavailable");
-        scene.show_error(format!("{what}: {e:#}"));
+        let text = scene
+            .texts()
+            .f("error-cameras", &[("error", format!("{e:#}").into())]);
+        scene.show_error(text);
     }
 }
 
@@ -4190,6 +4249,7 @@ fn handle_action(
             scene.settings.intro_seen = true;
             scene.settings.save(settings_path);
         }
+        Action::LanguagePage(page) => scene.language_page = page,
         Action::Language(language) => {
             scene.settings.language = language;
             scene.settings.save(settings_path);
@@ -4566,8 +4626,8 @@ fn handle_action(
                     scene.ip_input = None;
                 }
                 None => {
-                    let what = scene.lang().t("не IP-адреса", "is not an IP address");
-                    scene.show_error(format!("«{typed}»: {what}"));
+                    let text = scene.texts().f("error-not-ip", &[("typed", typed.into())]);
+                    scene.show_error(text);
                 }
             }
         }

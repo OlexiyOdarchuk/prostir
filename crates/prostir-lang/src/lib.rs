@@ -154,7 +154,9 @@ impl Catalog {
         out
     }
 
-    /// Every language there is a file for, by code.
+    /// Every language there is a readable file for, by code. A file that cannot be
+    /// read (too big, not UTF-8) adds no language: it would only be English again
+    /// under another code.
     pub fn languages(&self) -> Vec<Language> {
         let mut codes: Vec<String> = self.builtin.iter().map(|(c, _)| (*c).to_owned()).collect();
         for dir in &self.dirs {
@@ -175,12 +177,14 @@ impl Catalog {
         codes.dedup();
         codes
             .into_iter()
-            .map(|code| {
-                let name = self
-                    .load(&code)
-                    .own(NAME_ID)
-                    .unwrap_or_else(|| code.clone());
-                Language { code, name }
+            .filter_map(|code| {
+                let strings = self.load(&code);
+                if strings.code() != code {
+                    log::warn!("{code}.ftl: nothing readable in it, not listed");
+                    return None;
+                }
+                let name = strings.own(NAME_ID).unwrap_or_else(|| code.clone());
+                Some(Language { code, name })
             })
             .collect()
     }
@@ -206,6 +210,10 @@ impl Catalog {
         // No Unicode isolation marks around placeholders: a text renderer without
         // bidirectional text draws them as boxes, and no language here needs them.
         bundle.set_use_isolating(false);
+        // NUMBER(), for a file that formats a number its own way.
+        if let Err(e) = bundle.add_builtins() {
+            log::warn!("Fluent's built-in functions: {e}");
+        }
         let mut has_any = false;
         for (file, text) in self.sources(code) {
             let resource = match FluentResource::try_new(text.into_owned()) {
@@ -404,6 +412,7 @@ fn ids(text: &str) -> (BTreeMap<String, String>, Vec<String>) {
         .collect();
     let mut bundle = FluentBundle::new_concurrent(vec![LanguageIdentifier::default()]);
     bundle.set_use_isolating(false);
+    let _ = bundle.add_builtins();
     bundle.add_resource_overriding(resource);
     let mut out = BTreeMap::new();
     for id in ids {
@@ -505,6 +514,39 @@ mod tests {
         assert_eq!(uk.f("hello", &[("name", "Jo".into())]), "Привіт, Jo");
         assert_eq!(uk.problems().len(), 1, "{:?}", uk.problems());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A file that cannot be read adds no language (it was listed as a second
+    /// English).
+    #[test]
+    fn an_unreadable_file_adds_no_language() {
+        let dir = std::env::temp_dir().join(format!("prostir-lang-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("de.ftl"),
+            b"language-name = Deutsch\nhello = \xff\xfe\n",
+        )
+        .unwrap();
+        let big = format!("language-name = Big\n{}", "x = y\n".repeat(200_000));
+        std::fs::write(dir.join("fr.ftl"), big).unwrap();
+        std::fs::write(dir.join("pl.ftl"), "language-name = Polski\n").unwrap();
+        let langs = catalog(vec![dir.clone()]).languages();
+        let codes: Vec<_> = langs.iter().map(|l| l.code.as_str()).collect();
+        assert_eq!(codes, ["en", "pl", "uk"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn plurals_can_use_number() {
+        let c = Catalog::with_dirs(
+            &[(
+                "en",
+                "n = { NUMBER($n) ->\n    [one] one\n   *[other] more\n}\n",
+            )],
+            Vec::new(),
+        );
+        assert_eq!(c.load("en").f("n", &[("n", 1.into())]), "one");
+        assert_eq!(c.load("en").f("n", &[("n", 3.into())]), "more");
     }
 
     #[test]

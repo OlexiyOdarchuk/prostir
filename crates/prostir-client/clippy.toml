@@ -33,4 +33,11 @@ disallowed-methods = [
     { path = "prostir_proto::secure::remove_leftovers", reason = "removes files: the files' writer and the network thread only" },
     { path = "prostir_proto::secure::write_atomic", reason = "writes a file, with fsync: the files' writer and the network thread only" },
     { path = "prostir_proto::secure::TrustStore::load", reason = "reads the trusted PCs' file: the network thread only" },
+    { path = "prostir_lang::Catalog::load", reason = "reads the language files: the language loader only" },
+    { path = "prostir_lang::Catalog::languages", reason = "reads the language folder: the language loader only" },
+    { path = "prostir_lang::read_capped", reason = "reads a file: the language loader only (through prostir-lang)" },
+    { path = "prostir::lang::start", reason = "reads the language files: called once at the start, with an expect that says so" },
+    { path = "prostir::lang::Loader::load", reason = "reads the language files: called by the system thread, with an expect that says so" },
+    { path = "prostir::lang::Loader::languages", reason = "reads the language folder: called at the start and by the system thread, with an expect that says so" },
+    { path = "prostir::lang::Loader::languages_if_changed", reason = "reads the language folder: called at the start and by the system thread, with an expect that says so" },
 ]

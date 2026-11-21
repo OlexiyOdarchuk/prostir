@@ -1,8 +1,8 @@
 //! Renders the headset menu to a PNG for checking the design on the desktop.
 //! cargo run -p prostir-client --example panel_preview -- panel.png [hover_x hover_y]
-//! Environment: WRIST=1 (the wrist menu), TAB=monitors|look|sound|language|pc|help (default: quick), LANG_UI=en, PAIR=show|type|failed, OFFLINE=1, KEYPAD=…
+//! Environment: WRIST=1 (the wrist menu), TAB=monitors|look|sound|language|pc|help (default: quick), LANG_UI=en|uk|qps (qps: the longer pseudo-language), PAIR=show|type|failed, OFFLINE=1, KEYPAD=…
 
-use prostir::i18n::Lang;
+use prostir::lang::{BUILTIN, Known, Lang, Loader, Texts};
 use prostir::settings::Settings;
 use prostir::store::{NoStore, Store as _};
 use prostir::ui::{MonitorEntry, OfferWhy, PairingView, Panel, Place, Section, Tab, UiState};
@@ -20,6 +20,21 @@ fn questmon_pairing(mode: &str) -> PairingView {
     }
 }
 
+/// The menu's language: a built-in one, or `qps`, every text half as long again.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a preview on the desktop, built-in files only"
+)]
+fn texts(code: &str) -> (Texts, Vec<Known>) {
+    let qps: &'static str = Box::leak(prostir::lang::pseudo(BUILTIN[0].1).into_boxed_str());
+    let mut loader = Loader::with(&[BUILTIN[0], BUILTIN[1], ("qps", qps)], Vec::new());
+    let texts = loader.load(Lang::new(code).unwrap_or(Lang::FALLBACK));
+    // The pseudo-language is listed only while it is shown.
+    let mut languages = loader.languages();
+    languages.retain(|k| k.lang.as_str() != "qps" || code == "qps");
+    (texts, languages)
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let out = args.next().unwrap_or_else(|| "panel.png".into());
@@ -27,11 +42,9 @@ fn main() {
         (Some(x), Some(y)) => Some((x.parse().unwrap(), y.parse().unwrap())),
         _ => None,
     };
-    let lang = if std::env::var("LANG_UI").as_deref() == Ok("en") {
-        Lang::En
-    } else {
-        Lang::Uk
-    };
+    let code = std::env::var("LANG_UI").unwrap_or_else(|_| "uk".into());
+    let (texts, languages) = texts(&code);
+    let day = prostir::lang::Moment::EXAMPLE;
     let state = UiState {
         mic_denied: std::env::var("MIC_DENIED").is_ok(),
         confirm_save: None,
@@ -39,12 +52,10 @@ fn main() {
         can_move_mouse: std::env::var("NO_MOUSE").is_err(),
         paired: vec!["workstation".into(), "laptop".into()],
         battery: Some((72, false)),
-        clock: "14:05".into(),
-        date: if std::env::var("LANG_UI").as_deref() == Ok("en") {
-            "Wed 18 Nov".into()
-        } else {
-            "Ср, 18 лист.".into()
-        },
+        clock: texts.clock(false, &day).into(),
+        date: texts
+            .date(prostir::settings::DateStyle::LikeMenu, &day)
+            .into(),
         confirm_forget: None,
         windows: if std::env::var("WINDOWS").is_ok() {
             vec![MonitorEntry {
@@ -143,7 +154,7 @@ fn main() {
         mirror_wanted: true,
         audio_wanted: true,
         mic_wanted: true,
-        mirror_name: Some("Екран HDMI-A-1".into()),
+        mirror_name: Some(texts.f("pc-display-named", &[("name", "HDMI-A-1".into())])),
         settings: Settings::default(),
         room_available: true,
         panorama_available: true,
@@ -171,8 +182,10 @@ fn main() {
             .collect(),
         active_profile: Some(0),
         asks: Vec::new(),
-        lang,
-        update_from: NoStore.update_hint(lang),
+        texts,
+        languages: languages.into(),
+        language_page: 0,
+        update_from: NoStore.update_hint(),
     };
     // TOAST="text": a toast instead.
     if let Ok(message) = std::env::var("TOAST") {
