@@ -586,18 +586,19 @@ fn asks_version(cli: &Cli) -> bool {
 fn main() -> Result<()> {
     // This program's file, found now: a package update may replace it while it runs.
     let _ = prostir_window::launch::this_program();
-    let cli = Cli::parse();
+    let cli = Cli::read();
     if asks_version(&cli) {
         println!("{}", version_line());
         return Ok(());
     }
     let quiet = || init_log("warn");
     let code = match cli.command {
+        None if cli.old_options => serve(cli.serve, Why::OldOptions)?,
         None => {
             quiet();
             open_window()
         }
-        Some(Sub::Serve(args)) => serve(args)?,
+        Some(Sub::Serve(args)) => serve(args, Why::Asked)?,
         Some(Sub::Window { mock }) => match prostir_window::run(mock) {
             Ok(()) => 0,
             Err(e) => {
@@ -645,11 +646,26 @@ enum Origin {
     Systemd,
 }
 
+/// What started `serve`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Why {
+    /// `prostir serve`.
+    Asked,
+    /// `serve`'s options without a command, as 0.1 took them (`prostir -m 2560x1440`).
+    OldOptions,
+}
+
 /// `prostir serve`: waits for the headset and serves it. Its exit code.
-fn serve(args: Args) -> Result<i32> {
+fn serve(args: Args, why: Why) -> Result<i32> {
     // Before any thread starts: it clears the variables that passed them.
     let passed = platform::sockets::take()?;
     init_log("info");
+    if why == Why::OldOptions {
+        warn!(
+            "options without a command are 0.1's way: this runs as `prostir serve` with them; \
+             write `prostir serve ...`, a later version takes them only so"
+        );
+    }
     let discovery = (!args.no_discovery).then_some(args.discovery_port);
     match passed {
         Some(mut sockets) => {
@@ -943,16 +959,19 @@ fn full_with(
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
     use log::{Level, Log, Metadata};
+
+    use super::{Cli, Sub};
+
+    fn read(args: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::read_from(std::iter::once("prostir").chain(args.iter().copied()))
+    }
 
     /// `-v` and `--version` from every way in; `-m` stays the monitor.
     #[test]
     fn the_version_from_every_way_in() {
         let asks = |args: &[&str]| {
-            let cli =
-                super::Cli::try_parse_from(std::iter::once("prostir").chain(args.iter().copied()))
-                    .unwrap_or_else(|e| panic!("{args:?}: {e}"));
+            let cli = read(args).unwrap_or_else(|e| panic!("{args:?}: {e}"));
             super::asks_version(&cli)
         };
         for args in [
@@ -975,6 +994,39 @@ mod tests {
             assert!(!asks(args), "{args:?}");
         }
         assert!(super::version_line().starts_with("Prostir 0."));
+    }
+
+    /// 0.1's `prostir -m 2560x1440` is `prostir serve -m 2560x1440`; a bare `prostir`
+    /// and the commands are as they are; the help shows the options under `serve` only.
+    #[test]
+    fn serve_options_without_a_command_mean_serve() {
+        let cli = read(&["-m", "2560x1440", "--software", "--linger", "5"]).unwrap();
+        assert!(cli.old_options && cli.command.is_none());
+        assert_eq!(cli.serve.monitors.len(), 1);
+        assert!(cli.serve.software);
+        assert_eq!(cli.serve.linger, 5);
+        for args in [
+            &[][..],
+            &["-v"],
+            &["serve", "-m", "2560x1440"],
+            &["ctl", "status"],
+        ] {
+            assert!(!read(args).unwrap().old_options, "{args:?}");
+        }
+        let serve = read(&["serve", "--port", "1"]).unwrap();
+        assert!(matches!(serve.command, Some(Sub::Serve(a)) if a.port == 1));
+        assert!(
+            read(&["-m", "2560x1440", "serve"]).is_err(),
+            "one or the other"
+        );
+        let help = super::cli::command_line().render_long_help().to_string();
+        assert!(!help.contains("--monitor"), "{help}");
+        let mut line = super::cli::command_line();
+        let serve_help = line
+            .find_subcommand_mut("serve")
+            .unwrap()
+            .render_long_help();
+        assert!(serve_help.to_string().contains("--monitor"));
     }
 
     /// Prostir's own lines at info, a dependency's only from warnings: zbus logs

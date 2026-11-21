@@ -1,6 +1,15 @@
 //! The command line: `prostir` (the window), `prostir serve` (the service) and
 //! `prostir ctl`; `prostir window` is the window's own process, which `prostir` and
 //! the service start.
+//!
+//! Up to 0.1 a bare `prostir` was the service, with its options (`prostir -m
+//! 2560x1440`): those options without a command still mean `prostir serve` with them,
+//! hidden from the help.
+
+use std::ffi::OsString;
+
+use clap::parser::ValueSource;
+use clap::{ArgMatches, CommandFactory, FromArgMatches};
 
 use super::*;
 
@@ -9,14 +18,56 @@ use super::*;
     about = "Virtual monitors for KDE Plasma and Hyprland, streamed to a Meta Quest 3",
     long_about = "Virtual monitors for KDE Plasma and Hyprland, streamed to a Meta Quest 3.\n\n\
                   Without a command: opens the settings window, starting Prostir in the \
-                  background if it is not running."
+                  background if it is not running.",
+    args_conflicts_with_subcommands = true
 )]
 pub(super) struct Cli {
     /// Print the version (as the log says it: `Prostir 0.2.0`) and exit.
     #[arg(short = 'v', long = "version", global = true)]
     pub(crate) version: bool,
+    /// `serve`'s options without a command, as 0.1 took them (hidden, see [`Cli::read`]).
+    #[command(flatten)]
+    pub(crate) serve: Args,
+    /// Some of them were given: this is `prostir serve` with them.
+    #[arg(skip)]
+    pub(crate) old_options: bool,
     #[command(subcommand)]
     pub(crate) command: Option<Sub>,
+}
+
+impl Cli {
+    /// This program's command line; a wrong one exits with clap's message.
+    pub(super) fn read() -> Self {
+        Self::read_from(std::env::args_os()).unwrap_or_else(|e| e.exit())
+    }
+
+    /// The command line `args` (the program's name first), with `serve`'s options
+    /// without a command hidden from the help and noted in [`Cli::old_options`].
+    pub(super) fn read_from<I, T>(args: I) -> Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString> + Clone,
+    {
+        let matches = command_line().try_get_matches_from(args)?;
+        let mut cli = Self::from_arg_matches(&matches)?;
+        cli.old_options = serve_options_given(&matches);
+        Ok(cli)
+    }
+}
+
+/// The command line's parser, `serve`'s options at the top hidden.
+pub(super) fn command_line() -> clap::Command {
+    Cli::command().mut_args(|a| match a.get_id().as_str() {
+        "version" | "help" => a,
+        _ => a.hide(true),
+    })
+}
+
+/// Whether one of `serve`'s options was given without a command.
+fn serve_options_given(matches: &ArgMatches) -> bool {
+    <Args as clap::Args>::augment_args(clap::Command::new("serve"))
+        .get_arguments()
+        .any(|a| matches.value_source(a.get_id().as_str()) == Some(ValueSource::CommandLine))
 }
 
 #[derive(Subcommand, Debug)]

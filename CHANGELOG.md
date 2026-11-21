@@ -147,7 +147,8 @@
   `prostir serve` runs it in the background, as autostart and systemd start it: on
   Hyprland, change `exec-once = prostir` to `exec-once = prostir serve`. The window is
   a process of its own, so the background part never loads its graphics libraries (EGL, X11)
-  and a window that crashes takes nothing else down.
+  and a window that crashes takes nothing else down. 0.1's options without a command
+  (`prostir -m 2560x1440`) still run it in the background, with a warning in the log.
 
 ### Sound
 

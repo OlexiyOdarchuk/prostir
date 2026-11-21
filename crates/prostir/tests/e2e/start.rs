@@ -95,3 +95,21 @@ fn the_first_start_opens_the_settings_window() {
     std::thread::sleep(std::time::Duration::from_millis(500));
     assert_eq!(pc.count_log(WINDOW), 0);
 }
+
+/// 0.1's options without a command (`prostir --linger 5`) are `prostir serve` with
+/// them, which says so in its log: while Prostir runs, the running one opens its window.
+#[test]
+fn serve_options_without_a_command_are_serve() {
+    let dir = TestDir::new("old-options");
+    dir.save_monitors(TWO_MONITORS);
+    let mut pc = Pc::start(&dir, &Options::default());
+    if pc.bus.is_none() {
+        return;
+    }
+    let before = pc.count_log(WINDOW);
+    let again = pc.again(&["--linger", "5"]);
+    assert_eq!(again.code, 0, "{again:?}");
+    assert!(again.err.contains("0.1's way"), "{again:?}");
+    assert!(again.err.contains("Prostir runs already"), "{again:?}");
+    pc.wait_log_after(SOON, WINDOW, before);
+}
