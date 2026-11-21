@@ -2102,7 +2102,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     let profiles_path = data_dir.join("profiles.txt");
     let settings = Settings::load(&settings_path);
     // This start's own: a new start in the same process begins afresh.
-    let mic = Arc::new(Mic::new(settings.mic));
+    let mic = Arc::new(Mic::new(settings.mic, app.clone()));
     let gains = Arc::new(Gains::default());
 
     // Passthrough keeps the cameras busy and costs battery: only when "Room" is chosen.

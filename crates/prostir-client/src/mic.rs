@@ -10,7 +10,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
+use android_activity::AndroidApp;
 use jni::objects::{JObject, JValue};
+use jni::sys::jobject;
 use jni::{jni_sig, jni_str};
 use log::{info, warn};
 use ndk_sys as ffi;
@@ -41,16 +43,19 @@ pub struct Mic {
     /// Access to the microphone was refused: no more system prompts each time a PC
     /// app starts recording, and the menu says where to allow it.
     denied: AtomicBool,
+    /// The running activity, which shows the system's prompt.
+    app: AndroidApp,
 }
 
 impl Mic {
     /// With the user's switch as the settings have it.
-    pub fn new(allowed: bool) -> Self {
+    pub fn new(allowed: bool, app: AndroidApp) -> Self {
         Self {
             next_up: AtomicU8::new(0),
             allowed_by_system: AtomicU8::new(permission::UNKNOWN),
             allowed: AtomicBool::new(allowed),
             denied: AtomicBool::new(false),
+            app,
         }
     }
 
@@ -86,7 +91,7 @@ impl Mic {
     pub fn ask_again(&self) {
         self.denied.store(false, Ordering::Relaxed);
         if !has_permission() {
-            request_permission();
+            request_permission(&self.app);
         }
     }
 
@@ -110,7 +115,7 @@ impl Mic {
         }
         self.allowed_by_system
             .store(permission::ASKING, Ordering::Relaxed);
-        request_permission();
+        request_permission(&self.app);
         let until = Instant::now() + Duration::from_secs(60);
         while Instant::now() < until && !stop.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(500));
@@ -213,7 +218,8 @@ fn record(input: &Input, up: u8, feedback: &Feedback, stop: &AtomicBool) -> bool
 
 /// Runs `f` with the app's context: the Application that `ndk_context` holds
 /// (android-activity puts it there), not the activity. Enough for system services and
-/// permissions; what needs the Activity itself takes it from the `AndroidApp`.
+/// checking permissions; what needs the Activity itself (asking for one) takes it from
+/// the `AndroidApp`.
 pub(crate) fn with_activity<T>(
     f: impl FnOnce(&mut jni::Env<'_>, &JObject<'_>) -> jni::errors::Result<T>,
 ) -> Option<T> {
@@ -248,18 +254,34 @@ fn has_permission() -> bool {
     .unwrap_or(false)
 }
 
-fn request_permission() {
-    with_activity(|env, activity| {
-        let name = env.new_string(PERMISSION)?;
-        let list = env.new_object_array(1, jni_str!("java/lang/String"), &name)?;
-        env.call_method(
-            activity,
-            jni_str!("requestPermissions"),
-            jni_sig!("([Ljava/lang/String;I)V"),
-            &[JValue::Object(&list), JValue::Int(1)],
-        )?;
-        Ok(())
-    });
+/// Shows the system's prompt for the microphone. Only an Activity has
+/// `requestPermissions` (the Application has not: asked there, the prompt never came),
+/// and it is asked on the Java main thread, as Android expects; the answer is seen
+/// later through [`has_permission`].
+fn request_permission(app: &AndroidApp) {
+    let on_main = app.clone();
+    app.run_on_java_main_thread(Box::new(move || {
+        // SAFETY: the VM of the running NativeActivity.
+        let vm = unsafe { jni::JavaVM::from_raw(on_main.vm_as_ptr().cast()) };
+        let asked = vm.attach_current_thread(|env| -> jni::errors::Result<()> {
+            let raw: jobject = on_main.activity_as_ptr().cast();
+            // SAFETY: the activity's object, valid while the activity runs; the cast
+            // only borrows it, it never deletes it.
+            let activity = unsafe { env.as_cast_raw::<JObject<'static>>(&raw) }?;
+            let name = env.new_string(PERMISSION)?;
+            let list = env.new_object_array(1, jni_str!("java/lang/String"), &name)?;
+            env.call_method(
+                &*activity,
+                jni_str!("requestPermissions"),
+                jni_sig!("([Ljava/lang/String;I)V"),
+                &[JValue::Object(&list), JValue::Int(1)],
+            )?;
+            Ok(())
+        });
+        if let Err(e) = asked {
+            warn!("cannot ask for the microphone: {e}");
+        }
+    }));
 }
 
 /// An AAudio input stream (through `ndk-sys`, like the player).
