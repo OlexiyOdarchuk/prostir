@@ -1198,7 +1198,7 @@ fn cinema_in_one_pass_needs_no_file() {
     });
     let mut at_desk = arrange(Preset::Arc, &two, Some(0), None, None);
     at_desk.get_mut(&0).unwrap().position += Vec3::new(-0.2, 0.1, 0.0);
-    // Cinema on: the desk is kept first (`Scene::set_cinema`).
+    // Cinema on: the desk is kept first (`World::set_cinema`).
     assert!(desk.keep(keyed(at_desk.clone()), &sizes, (center, RADIUS, 0.0), false));
     // The cinema view, moved by hand, kept as cinema is not.
     let mut view = keyed(cinema(&two, None));
@@ -1224,7 +1224,7 @@ fn cinema_in_one_pass_needs_no_file() {
         &[],
     );
     assert_eq!(profile.places.len(), 2);
-    // Cinema off: what `Scene::adopt_desk` takes.
+    // Cinema off: what `World::adopt_desk` takes.
     let back = desk.arrangement();
     for (i, id) in [0, 1].iter().enumerate() {
         assert!(

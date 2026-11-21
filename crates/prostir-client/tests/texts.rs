@@ -59,6 +59,8 @@ const OTHER_CODE: &[(&str, &str)] = &[
     ),
     ("settings.rs", include_str!("../src/settings.rs")),
     ("system.rs", include_str!("../src/system.rs")),
+    ("world/mod.rs", include_str!("../src/world/mod.rs")),
+    ("world/tests.rs", include_str!("../src/world/tests.rs")),
     ("xrutil.rs", include_str!("../src/xrutil.rs")),
     (
         "panel_preview.rs",
