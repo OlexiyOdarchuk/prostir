@@ -806,7 +806,8 @@ fn a_monitor_added_from_the_pc_shows_where_the_headset_puts_it() {
     pc.wait_log_after(SOON, "fake desktop: placed", before);
     headset.take_for(Duration::from_millis(300)).unwrap();
     let (_, state) = get_state(&bus);
-    assert_eq!(state.display(new).unwrap().desk, None);
+    let d = state.display(new).unwrap();
+    assert_eq!((d.desk, d.placing), (None, true));
     // The headset puts it over the first one.
     entries.insert(0, at(DisplayId(new), 320, -180));
     headset
@@ -834,7 +835,8 @@ fn a_monitor_added_from_the_pc_shows_where_the_headset_puts_it() {
     assert!(r.y + r.h as i32 <= under.y, "{r:?} over {under:?}");
     headset.take_for(Duration::from_millis(500)).unwrap();
     let (_, state) = get_state(&bus);
-    assert_eq!(state.display(new).unwrap().desk, Some(r), "it did not move");
+    let d = state.display(new).unwrap();
+    assert_eq!((d.desk, d.placing), (Some(r), false), "it did not move");
     let seen = places(&changes, new);
     assert!(seen.iter().any(Option::is_none), "{seen:?}");
     assert!(

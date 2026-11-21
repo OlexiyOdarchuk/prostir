@@ -973,9 +973,10 @@ static TOOLS: &[Tool] = &[
         description: "The displays (id, kind virtual/physical/window, name, output, mode with \
                       w, h and scale, desk rectangle in logical pixels, state \
                       starting/running/failed/absent/kept, failure) and the primary display's id. \
-                      A new monitor can stand starting or running with desk null for up to 4 \
-                      seconds while the headset places it: that is not off the desktop; wait for \
-                      its desk (pointer /displays, contains {\"id\": ID, \"desk\": {}}).",
+                      A new monitor can stand starting or running with desk null and placing \
+                      true for up to 4 seconds while the headset places it: that is not off the \
+                      desktop; wait for its desk (pointer /displays, contains {\"id\": ID, \
+                      \"desk\": {}}).",
         args: &[],
         does: Does::Monitors,
         touch: Touch::Reads,
@@ -985,8 +986,8 @@ static TOOLS: &[Tool] = &[
         "Adds a virtual monitor of w x h pixels at a scale in percent; answers its id. It \
          stands starting until it runs (running), failed if it could not start. With no \
          headset connected and no monitors on the desktop it joins the set kept for the next \
-         headset (kept). Wait for it with wait_for_state. It can have desk null for up to 4 \
-         seconds while the headset places it: wait for its desk too (pointer /displays, \
+         headset (kept). Wait for it with wait_for_state. It can have desk null (placing \
+         true) for up to 4 seconds while the headset places it: wait for its desk too (pointer /displays, \
          contains {\"id\": ID, \"desk\": {}}) rather than take it as off the desktop.",
         &[
             Arg::of("w", "integer", "width in pixels").within(1, 16384),

@@ -65,6 +65,7 @@ fn display(id: u32, name: &str, w: u32, h: u32, x: i32, y: i32) -> Display {
         shown: true,
         mode: Mode { w, h, scale: 100 },
         desk: Some(DeskRect { x, y, w, h }),
+        placing: false,
         state: DisplayState::Running,
         failure: None,
     }
@@ -468,6 +469,7 @@ impl Inner {
         for (id, rect, _) in &now {
             if let Some(d) = self.state.displays.iter_mut().find(|d| d.id == *id) {
                 d.desk = Some(*rect);
+                d.placing = false;
                 d.state = DisplayState::Running;
             }
         }
@@ -564,6 +566,7 @@ impl Inner {
                     self.placing
                         .push((id, d.desk.take().unwrap(), Instant::now()));
                     d.state = DisplayState::Starting;
+                    d.placing = true;
                     d
                 } else {
                     // Kept for the next headset.

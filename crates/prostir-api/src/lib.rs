@@ -774,6 +774,10 @@ pub struct Display {
     pub shown: bool,
     pub mode: Mode,
     pub desk: Option<DeskRect>,
+    /// A monitor just added that the headset is placing: no `desk` until it stands
+    /// where the headset put it. Left out when false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub placing: bool,
     pub state: DisplayState,
     pub failure: Option<Problem>,
 }
@@ -1172,6 +1176,7 @@ mod tests {
                     w: 2048,
                     h: 1152,
                 }),
+                placing: false,
                 state: DisplayState::Failed,
                 failure: Some(Problem {
                     code: ApiError::Desktop,

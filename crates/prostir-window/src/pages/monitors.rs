@@ -116,11 +116,7 @@ pub(super) fn monitors(ui: &mut Ui, v: &mut View<'_, '_>, s: &State, _revision: 
 fn being_placed(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
     let tk = v.tk;
     let p = tk.p;
-    let placing = s.displays.iter().filter(|d| {
-        d.kind == DisplayKind::Virtual
-            && d.desk.is_none()
-            && matches!(d.state, DisplayState::Starting | DisplayState::Running)
-    });
+    let placing = s.displays.iter().filter(|d| d.placing);
     for d in placing {
         ui.add_space(tk.th.shape.spacing);
         let line = vec2(ui.available_width(), tk.th.shape.control_height);

@@ -893,10 +893,14 @@ impl Brain {
                         }
                         // A monitor just added stands nowhere until the headset placed
                         // it: a map then shows it once, where it stays.
-                        if !d.desk_known(id, now) {
+                        let placing = !d.desk_known(id, now);
+                        if placing {
                             w.desk = None;
                         }
-                        api_display(&w, output.unwrap_or_default())
+                        api::Display {
+                            placing,
+                            ..api_display(&w, output.unwrap_or_default())
+                        }
                     })
                     .collect();
                 (list, part.primary.map(|p| p.0))
@@ -1131,6 +1135,7 @@ fn api_display(d: &wire::Display, output: String) -> api::Display {
             w: r.w,
             h: r.h,
         }),
+        placing: false,
         state,
         failure,
     }
