@@ -179,10 +179,11 @@ pub fn refit(p: Placement, was: PixelSize, now: PixelSize) -> Placement {
 }
 
 /// Which way an arrangement faces from `eye`: the mean direction of its monitors, in
-/// the yaw convention of `center` (0 is -Z, positive turns towards -X).
+/// the yaw convention of `center` (0 is -Z, positive turns towards -X). Summed in the
+/// order of their numbers, so the same arrangement gives the same yaw to the bit.
 pub fn facing_yaw<K: Key>(placements: &HashMap<K, Placement>, eye: Vec3) -> Option<f32> {
-    let (sin, cos) = placements
-        .values()
+    let (sin, cos) = super::saved::ascending(placements)
+        .filter_map(|k| placements.get(&k))
         .map(|p| {
             let d = p.position - eye;
             (-d.x).atan2(-d.z)

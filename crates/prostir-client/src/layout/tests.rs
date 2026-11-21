@@ -2181,6 +2181,26 @@ fn farthest_corner(a: &Placements, b: &Placements, m: &[(u32, u32, u32)]) -> f32
 /// their distances cross back and forth within DRAW_HOLD never swaps them, so where
 /// they overlap never flickers; one clearly nearer goes last; one held goes last of
 /// all, and new ones go by distance.
+/// New monitors at one distance are drawn in the order of their numbers, however
+/// they come; an arrangement faces the same way to the bit, whatever the order of its
+/// map.
+#[test]
+fn the_same_arrangement_gives_the_same_order() {
+    for listed in [[3, 1, 2], [2, 3, 1], [1, 2, 3]] {
+        let mut order: Vec<(f32, u32)> = listed.iter().map(|&k| (1.5, k)).collect();
+        draw_order(&mut order, &[]);
+        assert_eq!(order.iter().map(|o| o.1).collect::<Vec<_>>(), [1, 2, 3]);
+    }
+    let three = [(0, 2560, 1440), (1, 1440, 2560), (2, 3440, 1440)];
+    let laid = arrange(Preset::Arc, &three, Some(1), None, None);
+    let yaw = facing_yaw(&laid, Vec3::new(0.1, 0.0, 0.2)).unwrap();
+    for _ in 0..20 {
+        let again: HashMap<u32, Placement> = laid.iter().map(|(k, p)| (*k, *p)).collect();
+        let other = facing_yaw(&again, Vec3::new(0.1, 0.0, 0.2)).unwrap();
+        assert_eq!(other.to_bits(), yaw.to_bits());
+    }
+}
+
 #[test]
 fn the_draw_order_holds_for_monitors_at_one_distance() {
     let mut before: Vec<u32> = Vec::new();

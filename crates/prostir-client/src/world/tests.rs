@@ -731,6 +731,26 @@ fn of_monitors_the_one_on_top_is_hit() {
     );
 }
 
+/// Of two monitors as straight ahead, the one in front is the one of the smaller
+/// number, every time.
+#[test]
+fn the_monitor_in_front_of_two_as_ahead() {
+    let mut sim = Sim::at_desk();
+    let ahead = Placement {
+        position: Vec3::new(0.0, 0.0, -1.0),
+        rotation: Quat::IDENTITY,
+        width: 1.25,
+    };
+    for n in [3, 1, 2] {
+        sim.world.placements.insert(k(n), ahead);
+    }
+    assert_eq!(sim.world.monitor_in_front(sim.head, |_| false), Some(k(1)));
+    assert_eq!(
+        sim.world.monitor_in_front(sim.head, |id| id == k(1)),
+        Some(k(2))
+    );
+}
+
 /// Scenario 13. Two PCs with a display of the same number: two displays, each with a
 /// place of its own, and moving one leaves the other.
 #[test]

@@ -489,6 +489,8 @@ impl World {
                 .keys()
                 .filter(|id| !self.placements.contains_key(id)),
         );
+        // By number: the same list placed the same way every time.
+        waiting.sort_unstable();
         for &id in &waiting {
             self.stream_shown(id, s, head, now);
         }
@@ -1896,7 +1898,7 @@ impl World {
     }
 
     /// The monitor most straight ahead of the head (not a window panel, nor one
-    /// `hidden`).
+    /// `hidden`); of two as straight ahead, the one of the smaller number.
     pub fn monitor_in_front(
         &self,
         (head, forward): (Vec3, Vec3),
@@ -1909,7 +1911,7 @@ impl World {
             })
             .max_by(|a, b| {
                 let score = |p: &Placement| (p.position - head).normalize_or_zero().dot(forward);
-                score(a.1).total_cmp(&score(b.1))
+                score(a.1).total_cmp(&score(b.1)).then(b.0.cmp(a.0))
             })
             .map(|(id, _)| *id)
     }
