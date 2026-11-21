@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use log::{info, warn};
@@ -425,6 +426,18 @@ impl Steering {
         self.lock().quit
     }
 
+    /// Waits `d`, or less once the app is closing.
+    fn rest(&self, d: Duration) {
+        let until = Instant::now() + d;
+        let mut s = self.lock();
+        while !s.quit {
+            let Some(left) = until.checked_duration_since(Instant::now()) else {
+                return;
+            };
+            s = self.0.1.wait_timeout(s, left).unwrap().0;
+        }
+    }
+
     /// The user's answer to "Pair with this PC?".
     pub fn answer_offer(&self, pair: bool) {
         let mut s = self.lock();
@@ -510,7 +523,13 @@ impl Steering {
     }
 }
 
-pub fn spawn(events: Sender<NetEvent>, discovery: Discovery, steering: Steering, sound: Sound) {
+/// Starts the network thread; it ends soon after [`Steering::shut_down`].
+pub fn spawn(
+    events: Sender<NetEvent>,
+    discovery: Discovery,
+    steering: Steering,
+    sound: Sound,
+) -> JoinHandle<()> {
     std::thread::Builder::new()
         .name("net".into())
         .spawn(move || {
@@ -602,13 +621,13 @@ pub fn spawn(events: Sender<NetEvent>, discovery: Discovery, steering: Steering,
                         .refused
                         .is_some_and(|t| t.elapsed() < Duration::from_secs(3))
                     {
-                        std::thread::sleep(Duration::from_secs(10));
+                        steering.rest(Duration::from_secs(10));
                     }
                 }
-                std::thread::sleep(Duration::from_millis(300));
+                steering.rest(Duration::from_millis(300));
             }
         })
-        .expect("spawn net thread");
+        .expect("spawn net thread")
 }
 
 /// What steering needs of a connection that is being opened.
@@ -1033,7 +1052,7 @@ fn run_session(
                 pc_app: app,
             });
             // Nothing changes until one side is updated: try again only now and then.
-            std::thread::sleep(Duration::from_secs(10));
+            steering.rest(Duration::from_secs(10));
             return Ok(());
         }
     };

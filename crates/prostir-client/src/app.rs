@@ -59,6 +59,8 @@ const TOAST_WIDTH: f32 = 0.46;
 const TOAST_FOR: Duration = Duration::from_secs(4);
 const ERROR_SHOWN_FOR: Duration = Duration::from_secs(8);
 const CONFIRM_FOR: Duration = Duration::from_secs(4);
+/// How long the app, closing, waits for the network thread to end.
+const NET_STOPS_WITHIN: Duration = Duration::from_secs(1);
 /// How long a pinch must be held on a monitor before it starts dragging it.
 const HOLD_TO_DRAG: Duration = Duration::from_millis(300);
 
@@ -2149,17 +2151,21 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     let steering = net::Steering::default();
     // What the first `Open` says, before the network thread can connect.
     steering.set_headset(headset_state(&settings, true, battery, &mic));
-    // However this function ends, the network thread and its session end with it.
-    struct StopNetwork(net::Steering);
+    // However this function ends, the network thread and its session end with it, and
+    // the thread is waited for (up to a second): a new start in the same process must
+    // not find this one's still connected to the PC.
+    struct StopNetwork(net::Steering, Option<JoinHandle<()>>);
     impl Drop for StopNetwork {
         fn drop(&mut self) {
             self.0.shut_down();
+            if let Some(thread) = self.1.take() {
+                crate::system::join_within("net", thread, NET_STOPS_WITHIN);
+            }
         }
     }
-    let _stop_network = StopNetwork(steering.clone());
     // A selftest connects to its fake PC and nothing else, never to a real PC.
     debug_assert!(test.is_none() || fake_pc.is_some());
-    net::spawn(
+    let network = net::spawn(
         net_tx,
         net::Discovery {
             identity_file: data_dir.join("identity"),
@@ -2174,6 +2180,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             mic: mic.clone(),
         },
     );
+    let _stop_network = StopNetwork(steering.clone(), Some(network));
 
     // SAFETY: the VM pointer is valid for the life of the process.
     let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) };
