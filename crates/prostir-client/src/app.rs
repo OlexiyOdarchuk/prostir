@@ -5,11 +5,6 @@
 //! a quad or cylinder layer. The menu, its button, pointer dots and the
 //! panorama are small CPU-drawn images; nothing is rendered per frame.
 
-#![expect(
-    clippy::disallowed_methods,
-    reason = "the frame loop, part of the shell, still holds the model: until step 7.7 passes the time in, it reads the clock, starts threads and reads the trusted PCs itself"
-)]
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::ptr;
@@ -133,6 +128,10 @@ const AFTER_TOUCH: Duration = Duration::from_millis(600);
 #[allow(
     clippy::needless_pass_by_value,
     reason = "the signature android-activity calls"
+)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "until step 7.7 passes the time in and moves the threads to the shell"
 )]
 pub fn android_main(app: AndroidApp) {
     android_logger::init_once(
@@ -327,6 +326,10 @@ fn wrist_menu_height() -> f32 {
 /// fingers), while an open palm is turned to the face. It takes a quarter of a second
 /// of that to appear, so hands passing by (typing, reaching) do not bring it up.
 /// `since`: when the palm started facing the face.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "until step 7.7 passes the time in and moves the threads to the shell"
+)]
 fn palm_menu_place(
     joints: Option<&[(Vec3, f32); 26]>,
     right_hand: bool,
@@ -601,6 +604,10 @@ impl Scene {
     /// Tells the PC how the monitors stand around the user (rows, left to right), so
     /// KDE's arrangement matches: the mouse leaves a monitor where the next one is,
     /// sideways, up or down. Only sent when it changed.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "until step 7.7 passes the time in and moves the threads to the shell"
+    )]
     fn send_layout(&mut self) {
         if self.settings.cinema || self.feedback.is_none() {
             return;
@@ -792,6 +799,10 @@ impl Scene {
 
     /// The placeholder of a monitor being added goes once its picture is there, it
     /// failed, the connection ended, or it waited too long.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "until step 7.7 passes the time in and moves the threads to the shell"
+    )]
     fn adding_due(&mut self) {
         let Some(a) = &self.adding else {
             return;
@@ -855,6 +866,10 @@ impl Scene {
     /// The PC made a profile's monitors (`ids`, in the order of its sizes): they take
     /// the profile's places, or, for a profile without places (from before 0.2.0, a
     /// starting point, cinema), the layout of its preset once all of them stream.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "until step 7.7 passes the time in and moves the threads to the shell"
+    )]
     fn profile_made(&mut self, ids: Vec<ScreenId>) {
         let Some(switch) = &mut self.profile_switch else {
             return;
@@ -888,6 +903,10 @@ impl Scene {
     /// A profile laid out by its preset, once every monitor it made streams (or could
     /// not start: it keeps its place in the list), or once it waited long enough
     /// (`pending::PROFILE_STANDS_WITHIN`), with what streams then.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "until step 7.7 passes the time in and moves the threads to the shell"
+    )]
     fn profile_streams(&mut self) {
         let settled = |id: ScreenId| {
             self.monitors.contains_key(&id)
@@ -1133,6 +1152,10 @@ impl Scene {
 
     /// Mouse follows the gaze: after resting on another monitor for a moment, the
     /// mouse goes to where the user looks on it.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "until step 7.7 passes the time in and moves the threads to the shell"
+    )]
     fn follow_gaze(&mut self) {
         let busy =
             self.wrist.is_some() || self.grabs.iter().any(Option::is_some) || self.settings.cinema;
@@ -1198,6 +1221,10 @@ impl Scene {
     /// Rest reminders: after so many minutes of wearing, a short message. Every 20
     /// minutes it is the 20-20-20 rule (look 6 m away for 20 seconds); hourly, a break.
     /// Taking the headset off for 5 minutes counts as a rest.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "until step 7.7 passes the time in and moves the threads to the shell"
+    )]
     fn remind_rest(&mut self, dt: f32) {
         let every = u64::from(self.settings.rest_every) * 60;
         if every == 0 {
@@ -1253,6 +1280,10 @@ impl Scene {
     }
 
     /// Shows `text` for a few seconds, below the line of sight.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "until step 7.7 passes the time in and moves the threads to the shell"
+    )]
     fn show_toast(&mut self, text: String) {
         // Not the text: it can be a PC notification (a message, a code).
         info!("toast shown");
@@ -1705,6 +1736,10 @@ impl Scene {
     /// number, and the control shows how it stands meanwhile. Without a connection
     /// nothing is sent (and nothing kept to send later: repeating "add a monitor"
     /// after reconnecting could add two).
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "until step 7.7 passes the time in and moves the threads to the shell"
+    )]
     fn request(&mut self, asked: Request, what: ui::Asked) -> Option<ReqId> {
         if self.feedback.is_none() {
             self.ask_failed(what, ui::Failure::NotConnected, String::new());
@@ -1735,6 +1770,10 @@ impl Scene {
 
     /// Request `req` was answered: which control asked it, `None` for one this side
     /// does not wait for (answered after it gave up on it).
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "until step 7.7 passes the time in and moves the threads to the shell"
+    )]
     fn answered(&mut self, req: ReqId, outcome: &Outcome) -> Option<ui::Asked> {
         let answered = self.asks.answered(req, outcome, Instant::now());
         // A command of the PC that waited for this answer gets it, with the same code.
@@ -1764,6 +1803,10 @@ impl Scene {
     /// Request of control `what` failed: the control says why. A control the menu
     /// does not show while it works (a profile closes the menu, the palm menu finds the
     /// mouse) says it with a short message.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "until step 7.7 passes the time in and moves the threads to the shell"
+    )]
     fn ask_failed(&mut self, what: ui::Asked, why: ui::Failure, detail: String) {
         self.tell_failure(what, why, &detail);
         self.asks.failed(what, why, detail, Instant::now());
@@ -1783,6 +1826,10 @@ impl Scene {
     /// Requests without an answer for 30 s count as failed (a late answer is let go),
     /// and failures are shown for a while; a profile switch waited for long enough is
     /// laid out with what streams.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "until step 7.7 passes the time in and moves the threads to the shell"
+    )]
     fn expire_asks(&mut self) {
         for (req, what) in self.asks.expire(Instant::now()) {
             if self.profile_switch.as_ref().is_some_and(|s| s.req == req) {
@@ -1835,12 +1882,20 @@ impl Scene {
         }
     }
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "until step 7.7 passes the time in and moves the threads to the shell"
+    )]
     fn show_error(&mut self, text: String) {
         warn!("{text}");
         self.error = Some((text, Instant::now()));
     }
 
     /// What the menu shows; `update_from`: where this build is updated (its store's).
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "until step 7.7 passes the time in and moves the threads to the shell"
+    )]
     fn ui_state(
         &self,
         room: bool,
@@ -2017,6 +2072,10 @@ fn load_panorama(choice: Background, dir: Option<&Path>) -> Panorama {
 }
 
 /// The app; with `test`, the selftest's run of it (see `selftest::device`).
+#[expect(
+    clippy::disallowed_methods,
+    reason = "until step 7.7 passes the time in and moves the threads to the shell"
+)]
 fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     // SAFETY: pointers come straight from the running NativeActivity.
     let platform = unsafe { xr::AndroidPlatformInfo::new(app.vm_as_ptr(), app.activity_as_ptr()) };
@@ -3027,9 +3086,12 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             // The user may have copied a picture onto the headset meanwhile.
             custom_pano = custom_panorama_path(external_dir.as_deref()).is_some();
             // And paired with another PC.
-            scene.paired = prostir_proto::secure::TrustStore::load(&scene.trust_file)
-                .entries()
-                .to_vec();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "the trusted PCs are read here until step 7.6 gives them to the network thread"
+            )]
+            let paired = prostir_proto::secure::TrustStore::load(&scene.trust_file);
+            scene.paired = paired.entries().to_vec();
         }
         // The network thread names a PC over USB in the menu's language.
         let lang = scene.lang();
@@ -3589,6 +3651,10 @@ fn disconnect_text(l: Lang, why: net::Disconnect) -> Option<&'static str> {
     })
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "until step 7.7 passes the time in and moves the threads to the shell"
+)]
 fn handle_net_event(
     scene: &mut Scene,
     session: &xr::Session<Gfx>,
@@ -4026,6 +4092,10 @@ fn set_passthrough(scene: &mut Scene, passthrough: &mut Option<passthrough::Pass
     }
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "until step 7.7 passes the time in and moves the threads to the shell"
+)]
 fn handle_action(
     scene: &mut Scene,
     action: Action,
@@ -4381,6 +4451,10 @@ fn handle_action(
                 scene.confirm_forget = Some((i, Instant::now()));
             } else if let Some((key, name)) = scene.paired.get(i).cloned() {
                 scene.confirm_forget = None;
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "the trusted PCs are read here until step 7.6 gives them to the network thread"
+                )]
                 let mut store = prostir_proto::secure::TrustStore::load(&scene.trust_file);
                 match store.remove(&key) {
                     Ok(()) => {
