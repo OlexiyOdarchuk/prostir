@@ -707,6 +707,53 @@ fn monitors_scaled_and_placed_from_the_pc() {
     assert_eq!(error_name(&bad), "BadSize");
 }
 
+/// Back and forth between scales from the PC, 100 % among them: each one is applied,
+/// the monitor's place on the desktop as large as its pixels at that scale.
+#[test]
+fn every_scale_from_the_pc_is_applied_100_too() {
+    let (_dir, pc, _keys, _headset) = session("api-scales", &Options::default());
+    let Some(bus) = &pc.bus else {
+        return;
+    };
+    let bus = bus.connect();
+    let started = Instant::now();
+    let a = loop {
+        let (_, state) = get_state(&bus);
+        if let Some(d) = state.displays.first()
+            && d.desk.is_some()
+            && d.state == prostir_api::DisplayState::Running
+        {
+            break d.clone();
+        }
+        assert!(started.elapsed() < SOON, "no monitor on the desktop");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(a.mode.scale, 100);
+    for scale in [150u16, 100, 125, 100] {
+        let request = format!(r#"{{"request":"set_scale","id":{},"scale":{scale}}}"#, a.id);
+        call(&bus, "Call", &(request.as_str(),)).unwrap();
+        let logical = |px: u32| (f64::from(px) * 100.0 / f64::from(scale)).round() as u32;
+        let want = (logical(a.mode.w), logical(a.mode.h));
+        let started = Instant::now();
+        loop {
+            let (_, state) = get_state(&bus);
+            let d = state.display(a.id).expect("the same id");
+            let desk = d.desk.map(|r| (r.w, r.h));
+            if d.mode.scale == scale
+                && d.state == prostir_api::DisplayState::Running
+                && desk == Some(want)
+            {
+                break;
+            }
+            assert!(
+                started.elapsed() < START,
+                "{scale} %: {d:?}, on the desktop {desk:?}, not {want:?}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
 /// The laptop's lid closed (its panel kept as shown from before, not connected) and
 /// one monitor on HDMI: the monitor shows and hides as often as asked, from the
 /// headset and from the PC, the absent panel counting for no limit; the local API

@@ -485,8 +485,8 @@ pub struct VirtualSpec {
     /// Its picture in pixels.
     pub w: u32,
     pub h: u32,
-    /// Its scale in percent (as `Mode.scale` in the protocol); 100 keeps what the
-    /// desktop remembers.
+    /// Its scale in percent (as `Mode.scale` in the protocol), 100 as well as any
+    /// other: the desktop is told it even where it remembers another for the name.
     pub scale: u16,
     /// Hz, one of [`DesktopCaps::refresh`].
     pub refresh: u16,

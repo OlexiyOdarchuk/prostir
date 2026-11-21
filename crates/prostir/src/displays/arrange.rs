@@ -38,8 +38,8 @@ impl Displays {
     }
 
     /// Adds monitor `id` (a number never given before), at most `max` of them; its
-    /// output takes the lowest free `Prostir-N`, so KScreen keeps the position and
-    /// scale it remembers for that name. It is made by the desktop's worker: one that
+    /// output takes the lowest free `Prostir-N`, so KScreen finds what it remembers
+    /// for that name. It is made by the desktop's worker: one that
     /// cannot start stays, `Failed`, and keeps its place (it is tried again at the
     /// next session).
     pub fn add(&mut self, id: ScreenId, spec: MonitorSpec, max: usize) -> Result<()> {

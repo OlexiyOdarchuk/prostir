@@ -83,6 +83,13 @@ impl OutputInfo {
     }
 }
 
+/// The KScreen setting for the output's scale, 100 % too: KWin keeps each output's
+/// settings by name, so an output made anew under the same name has the scale it had
+/// last (125 % set a moment ago, say) until it is told another.
+fn scale_setting(spec: &VirtualSpec) -> String {
+    format!("scale.{}", spec.factor())
+}
+
 /// The current size `now` when it is not the size `made` the output was created with.
 fn resized(made: (u32, u32), now: Option<(u32, u32)>) -> Option<(u32, u32)> {
     now.filter(|&size| size != made)
@@ -439,9 +446,7 @@ impl Screencast {
             Duration::from_secs(10),
         )?;
         info!("Prostir-{number}: {spec}, PipeWire node {}", output.node);
-        if spec.scale != 100 {
-            kscreen::set(output.output_name(), &format!("scale.{}", spec.factor()));
-        }
+        kscreen::set(output.output_name(), &scale_setting(spec));
         Ok(output)
     }
 }
@@ -578,6 +583,22 @@ mod tests {
         out.on_event(wl_output::Event::Scale { factor: 2 });
         out.on_event(wl_output::Event::Done);
         assert_eq!(out.mode, Some((320, 240)));
+    }
+
+    #[test]
+    fn every_scale_is_set_100_too() {
+        let spec = |scale| VirtualSpec {
+            id: crate::screen::ScreenId::saved(3),
+            number: 4,
+            w: 2560,
+            h: 1440,
+            scale,
+            refresh: 60,
+        };
+        // 100 too: made anew, the output first has the scale KWin kept for its name.
+        assert_eq!(scale_setting(&spec(100)), "scale.1");
+        assert_eq!(scale_setting(&spec(125)), "scale.1.25");
+        assert_eq!(scale_setting(&spec(150)), "scale.1.5");
     }
 
     #[test]
