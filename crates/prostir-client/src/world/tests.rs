@@ -1036,6 +1036,23 @@ fn the_magnet_on_letting_go() {
     }
 }
 
+/// The chosen layout chosen again lays the monitors out by it anew, as choosing it
+/// does: a monitor moved by hand goes back to its place in the layout.
+#[test]
+fn the_chosen_layout_again_lays_out_anew() {
+    let mut sim = Sim::at_desk();
+    sim.world.preset_chosen(&sim.s, sim.now);
+    let laid = sim.places();
+    let mut p = sim.place(k(1));
+    p.position += Vec3::new(0.2, 0.4, 0.1);
+    sim.world.hold(Thing::Display(k(1)), &sim.s);
+    sim.world.drag(&sim.s, Thing::Display(k(1)), p, sim.head.0);
+    sim.world.let_go(Thing::Display(k(1)), &sim.s, sim.now);
+    assert!(!same_places(&sim.places(), &laid));
+    sim.world.preset_chosen(&sim.s, sim.now);
+    assert!(same_places(&sim.places(), &laid), "laid out anew");
+}
+
 /// Laid out anew, what the hands held is let go (the app's grabs follow it).
 #[test]
 fn laying_out_lets_go() {

@@ -2038,6 +2038,7 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
     }
 
     let st = s.settings;
+    let layouts = items.len();
     segmented(
         items,
         rx,
@@ -2065,6 +2066,18 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
             ),
         ],
     );
+    // The chosen layout pressed again lays the monitors out by it anew, as choosing it
+    // does (without going through another one first).
+    for item in items.get_mut(layouts..).into_iter().flatten() {
+        if let Item::Button {
+            style: Style::Selected,
+            action,
+            ..
+        } = item
+        {
+            *action = Some(Action::Preset(st.preset));
+        }
+    }
     segmented(
         items,
         rx,
@@ -3892,6 +3905,31 @@ mod tests {
             p.hover(Some((cx as f32, r.top() + r.height() / 2.0)));
             let pointed = at(p.render_if_dirty().unwrap());
             assert_ne!(plain, pointed, "its whole name over the map");
+        }
+    }
+
+    /// Every layout can be pressed, the chosen one too: pressed again, it lays the
+    /// monitors out anew.
+    #[test]
+    fn the_chosen_layout_can_be_pressed_again() {
+        for preset in [Preset::Arc, Preset::Wall, Preset::Overhead] {
+            let mut st = sample_state();
+            st.tab = Tab::Monitors;
+            st.settings.preset = preset;
+            let presets: Vec<(Action, Style)> = Panel::new()
+                .build(&st)
+                .into_iter()
+                .filter_map(|i| match i {
+                    Item::Button {
+                        action: Some(a @ Action::Preset(_)),
+                        style,
+                        ..
+                    } => Some((a, style)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(presets.len(), 3, "{preset:?}");
+            assert!(presets.contains(&(Action::Preset(preset), Style::Selected)));
         }
     }
 
