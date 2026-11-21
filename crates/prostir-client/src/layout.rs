@@ -407,18 +407,15 @@ pub fn arrange<K: Key>(
     .collect()
 }
 
-/// Where the arrangement is seen from and how it is turned: from `center` (eye, yaw);
-/// lying down, along the band tilted up overhead (seen from below, left and right would
-/// make no sense).
-pub fn frame(center: (Vec3, f32), preset: Preset) -> Frame {
-    if preset == Preset::Overhead {
-        Frame::tilted(center.0, center.1, OVERHEAD_PITCH)
-    } else {
-        Frame::upright(center.0, center.1)
-    }
+/// Where the arrangement is seen from and how it is turned: from `center` (eye, yaw),
+/// tilted up by `tilt`; lying down, along the band tilted up overhead (seen from below,
+/// left and right would make no sense). The tilt is the arrangement's (see [`tilt`]).
+pub fn frame(center: (Vec3, f32), tilt: f32) -> Frame {
+    Frame::tilted(center.0, center.1, tilt)
 }
 
-/// How far up [`frame`] is tilted for `preset`, in radians.
+/// How far up an arrangement `preset` lays out is tilted, in radians: lying down, the
+/// band overhead.
 pub fn tilt(preset: Preset) -> f32 {
     if preset == Preset::Overhead {
         OVERHEAD_PITCH
@@ -473,12 +470,12 @@ impl<K: Key> Desktop<K> {
         placements: &HashMap<K, Placement>,
         monitors: &[(K, u32, u32)],
         center: (Vec3, f32),
-        preset: Preset,
+        tilt: f32,
         primary: Option<K>,
         sent: Option<&Desktop<K>>,
     ) -> Self {
         let all = placed(placements, monitors);
-        let room = Room::new(&frame(center, preset), &all);
+        let room = Room::new(&frame(center, tilt), &all);
         let rows = rows_seen(&room, &all, sent.map_or(&[], |d| &d.rows));
         let size = |id: K| {
             let m = all.iter().find(|m| m.id == id)?;
@@ -553,7 +550,7 @@ impl<K: Key> Desktop<K> {
 struct DesktopInputs<K> {
     placed: Vec<(K, Placement, u32, u32)>,
     center: (Vec3, f32),
-    preset: Preset,
+    tilt: f32,
     primary: Option<K>,
     sent: Option<Desktop<K>>,
 }
@@ -576,7 +573,7 @@ impl<K: Key> DesktopMemo<K> {
         placements: &HashMap<K, Placement>,
         monitors: &[(K, u32, u32)],
         center: (Vec3, f32),
-        preset: Preset,
+        tilt: f32,
         primary: Option<K>,
         sent: Option<&Desktop<K>>,
     ) -> Desktop<K> {
@@ -586,7 +583,7 @@ impl<K: Key> DesktopMemo<K> {
                 .filter_map(|&(id, w, h)| Some((id, *placements.get(&id)?, w, h)))
                 .collect(),
             center,
-            preset,
+            tilt,
             primary,
             sent: sent.cloned(),
         };
@@ -595,7 +592,7 @@ impl<K: Key> DesktopMemo<K> {
         {
             return desktop.clone();
         }
-        let desktop = Desktop::of(placements, monitors, center, preset, primary, sent);
+        let desktop = Desktop::of(placements, monitors, center, tilt, primary, sent);
         *self.0.borrow_mut() = Some((inputs, desktop.clone()));
         desktop
     }
@@ -611,13 +608,13 @@ pub fn line_up<K: Key>(
     placements: &HashMap<K, Placement>,
     monitors: &[(K, u32, u32)],
     center: (Vec3, f32),
-    preset: Preset,
+    tilt: f32,
     primary: Option<K>,
     previous: &[Vec<K>],
     lid: Option<K>,
 ) -> HashMap<K, Placement> {
     let all = placed(placements, monitors);
-    let frame = frame(center, preset);
+    let frame = frame(center, tilt);
     let rows = rows_seen(&Room::new(&frame, &all), &all, previous);
     tidy::line_up(&all, &frame, primary, Some(&rows), lid)
         .into_iter()
@@ -636,13 +633,13 @@ pub fn place_new<K: Key>(
     monitors: &[(K, u32, u32)],
     size: (u32, u32),
     center: (Vec3, f32),
-    preset: Preset,
+    tilt: f32,
     gaze: Vec3,
     previous: &[Vec<K>],
     radius: f32,
 ) -> Placement {
     let all = placed(placements, monitors);
-    let frame = frame(center, preset);
+    let frame = frame(center, tilt);
     let rows = rows_seen(&Room::new(&frame, &all), &all, previous);
     place::place_new(
         &all,
@@ -910,6 +907,9 @@ pub struct Arrangement<K = DisplayKey> {
     pub center: Option<(Vec3, f32)>,
     /// The circle it stands on.
     pub radius: Option<f32>,
+    /// How far its frame is tilted up (see [`frame`]): the arrangement's, not the
+    /// preset's, so a profile laid out lying down is seen so whatever the preset.
+    pub tilt: f32,
 }
 
 impl<K> Default for Arrangement<K> {
@@ -919,6 +919,7 @@ impl<K> Default for Arrangement<K> {
             sizes: HashMap::new(),
             center: None,
             radius: None,
+            tilt: 0.0,
         }
     }
 }
@@ -931,6 +932,7 @@ impl Desk {
     /// format 2
     /// center 0 1.6 0 0.25
     /// radius 1.3
+    /// tilt 0
     /// cinema 0123456789abcdef:3
     /// 0123456789abcdef:3 -0.6 1.6 -1.2 0 0.2 0 0.98 0.77 2560x1440
     /// ```
@@ -942,6 +944,7 @@ impl Desk {
     pub fn parse(text: &str) -> Result<(Self, Skipped), LoadError> {
         let mut saved = Arrangement::default();
         let mut cinema = None;
+        let mut tilt_read = false;
         let mut skipped = Skipped::default();
         for (n, line) in persist::body(text)? {
             if line.is_empty() {
@@ -959,6 +962,12 @@ impl Desk {
                     saved.radius.is_none() && {
                         saved.radius = parse_radius(rest);
                         saved.radius.is_some()
+                    }
+                }
+                "tilt" => {
+                    !tilt_read && {
+                        tilt_read = true;
+                        parse_tilt(rest).map(|t| saved.tilt = t).is_some()
                     }
                 }
                 "cinema" => {
@@ -990,8 +999,9 @@ impl Desk {
         &self.saved
     }
 
-    /// Keeps `placements` (made for the stream `sizes`, around `center`, on the circle
-    /// of `radius`) as the desk arrangement, unless they are the cinema view; true when
+    /// Keeps `placements` (made for the stream `sizes`, around `center` with its frame
+    /// tilted up by `tilt`, on the circle of `radius`) as the desk arrangement, unless
+    /// they are the cinema view; true when
     /// kept, and `layout.txt` is to be written. What is kept is what the file says:
     /// a size only for a placement. Its maps keep their memory from one time to the
     /// next.
@@ -999,7 +1009,7 @@ impl Desk {
         &mut self,
         placements: impl IntoIterator<Item = (DisplayKey, Placement)>,
         sizes: &HashMap<DisplayKey, PixelSize>,
-        (center, radius): ((Vec3, f32), f32),
+        (center, radius, tilt): ((Vec3, f32), f32, f32),
         cinema: bool,
     ) -> bool {
         if cinema {
@@ -1021,6 +1031,7 @@ impl Desk {
         );
         saved.center = Some(center).filter(|(eye, yaw)| eye.is_finite() && yaw.is_finite());
         saved.radius = Some(radius).filter(|r| r.is_finite() && *r > 0.1);
+        saved.tilt = upright(tilt);
         true
     }
 
@@ -1060,6 +1071,9 @@ impl Desk {
         }
         if let Some(radius) = saved.radius {
             let _ = writeln!(out, "radius {radius}");
+        }
+        if saved.center.is_some() {
+            let _ = writeln!(out, "tilt {}", saved.tilt);
         }
         if let Some(screen) = self.cinema {
             let _ = writeln!(out, "cinema {screen}");
@@ -1192,6 +1206,25 @@ pub(crate) fn parse_center(text: &str) -> Option<(Vec3, f32)> {
     let [x, y, z, yaw] = numbers::<4>(&mut words)?;
     let eye = Vec3::new(x, y, z);
     (words.next().is_none() && eye.is_finite() && yaw.is_finite()).then_some((eye, yaw))
+}
+
+/// A tilt up of a frame, in radians: from straight down to straight up.
+pub(crate) fn parse_tilt(text: &str) -> Option<f32> {
+    let tilt: f32 = text.parse().ok()?;
+    (-std::f32::consts::FRAC_PI_2..=std::f32::consts::FRAC_PI_2)
+        .contains(&tilt)
+        .then_some(tilt)
+}
+
+/// `tilt` as a frame can be tilted: a number from straight down to straight up (none
+/// at all is no tilt).
+pub(crate) fn upright(tilt: f32) -> f32 {
+    let up = std::f32::consts::FRAC_PI_2;
+    if tilt.is_finite() {
+        tilt.clamp(-up, up)
+    } else {
+        0.0
+    }
 }
 
 /// A circle's radius: a number over 10 cm.
@@ -1641,7 +1674,14 @@ mod tests {
         preset: Preset,
         primary: Option<u32>,
     ) -> Desktop<u32> {
-        Desktop::of(placements, m, (Vec3::ZERO, 0.0), preset, primary, None)
+        Desktop::of(
+            placements,
+            m,
+            (Vec3::ZERO, 0.0),
+            tilt(preset),
+            primary,
+            None,
+        )
     }
 
     #[test]
@@ -1774,7 +1814,7 @@ mod tests {
         let two = [(0, 2560, 1440), (1, 2560, 1440)];
         let mut rough = arrange(Preset::Wall, &two, None, None, None);
         rough.get_mut(&1).unwrap().position += Vec3::new(0.06, 0.01, 0.0);
-        let t = line_up(&rough, &two, center, Preset::Wall, Some(0), &[], None);
+        let t = line_up(&rough, &two, center, tilt(Preset::Wall), Some(0), &[], None);
         assert!((t[&0].position.z - t[&1].position.z).abs() < 1e-4);
         assert!(t[&0].rotation.angle_between(t[&1].rotation) < 1e-4);
         assert!((t[&0].position.y - t[&1].position.y).abs() < 1e-4);
@@ -1828,7 +1868,7 @@ mod tests {
     /// Whether two monitors cover each other as seen from `center`.
     fn covered(placements: &HashMap<u32, Placement>, m: &[(u32, u32, u32)]) -> bool {
         let all = placed(placements, m);
-        let seen = prostir_layout::space::see(&frame((Vec3::ZERO, 0.0), Preset::Arc), &all);
+        let seen = prostir_layout::space::see(&frame((Vec3::ZERO, 0.0), tilt(Preset::Arc)), &all);
         seen.iter().enumerate().any(|(i, a)| {
             seen[i + 1..]
                 .iter()
@@ -1928,7 +1968,7 @@ mod tests {
                 others,
                 (id.1, id.2),
                 center,
-                Preset::Arc,
+                tilt(Preset::Arc),
                 gaze,
                 &[],
                 RADIUS,
@@ -1941,12 +1981,12 @@ mod tests {
             &p,
             &m,
         ));
-        let p = line_up(&p, four, center, Preset::Arc, Some(0), &[], None);
+        let p = line_up(&p, four, center, tilt(Preset::Arc), Some(0), &[], None);
         let desktop = desktop_of(&p, four, Preset::Arc, Some(0));
         assert_eq!(desktop.rows.len(), 2, "{:?}", desktop.rows);
         same_on_the_pc(&desktop, four, Some(0));
         let same = |q: &HashMap<u32, Placement>, what: &str| {
-            let again = Desktop::of(q, four, center, Preset::Arc, Some(0), Some(&desktop));
+            let again = Desktop::of(q, four, center, tilt(Preset::Arc), Some(0), Some(&desktop));
             assert_eq!(again, desktop, "{what}");
         };
         // A monitor added: the others stay, and so do their rows.
@@ -1956,7 +1996,14 @@ mod tests {
             assert_eq!(with[id], *place, "{id} moved");
         }
         assert!(!covered(&with, &m), "the new one covers nothing");
-        let five = Desktop::of(&with, &m, center, Preset::Arc, Some(0), Some(&desktop));
+        let five = Desktop::of(
+            &with,
+            &m,
+            center,
+            tilt(Preset::Arc),
+            Some(0),
+            Some(&desktop),
+        );
         let kept: Vec<Vec<u32>> = five
             .rows
             .iter()
@@ -1973,11 +2020,24 @@ mod tests {
         same(&with, "removed");
         // The headset app restarted.
         let mut desk = Desk::default();
-        desk.keep(keyed(p.clone()), &HashMap::new(), (center, RADIUS), false);
+        desk.keep(
+            keyed(p.clone()),
+            &HashMap::new(),
+            (center, RADIUS, 0.0),
+            false,
+        );
         same(&numbered(&reread(&desk).saved.placements), "restarted");
         // Lined up again.
         same(
-            &line_up(&p, four, center, Preset::Arc, Some(0), &desktop.rows, None),
+            &line_up(
+                &p,
+                four,
+                center,
+                tilt(Preset::Arc),
+                Some(0),
+                &desktop.rows,
+                None,
+            ),
             "lined up",
         );
         // Saved in a profile, another profile, and back: the places by their order.
@@ -2049,7 +2109,7 @@ mod tests {
                     &m[..5],
                     (m[5].1, m[5].2),
                     center,
-                    Preset::Arc,
+                    tilt(Preset::Arc),
                     gaze,
                     &rows,
                     RADIUS,
@@ -2087,7 +2147,7 @@ mod tests {
                 &m[..n],
                 (m[n].1, m[n].2),
                 center,
-                Preset::Arc,
+                tilt(Preset::Arc),
                 ahead,
                 &rows,
                 RADIUS,
@@ -2163,7 +2223,14 @@ mod tests {
                 for (&k, &(r, u)) in &at {
                     p = moved(&p, k, r, u);
                 }
-                let desktop = Desktop::of(&p, &three, center, Preset::Arc, Some(1), sent.as_ref());
+                let desktop = Desktop::of(
+                    &p,
+                    &three,
+                    center,
+                    tilt(Preset::Arc),
+                    Some(1),
+                    sent.as_ref(),
+                );
                 assert_eq!(desktop.rows, vec![vec![0, 1, 2]], "drag {drag} frame {f}");
                 if sent.as_ref().is_some_and(|s| s.rows != desktop.rows) {
                     flips += 1;
@@ -2234,7 +2301,7 @@ mod tests {
                 let yaw = Quat::from_rotation_y(center.1);
                 let turn = yaw * Quat::from_rotation_x(-back.to_radians()) * yaw.inverse();
                 let tilted = turned_about(&upright, eye, turn);
-                let out = line_up(&tilted, &m, center, Preset::Arc, Some(1), &[], None);
+                let out = line_up(&tilted, &m, center, tilt(Preset::Arc), Some(1), &[], None);
                 for (id, p) in &tilted {
                     assert!(
                         out[id].position.distance(p.position) < 1e-3,
@@ -2253,7 +2320,7 @@ mod tests {
                 p.rotation = (Quat::from_axis_angle(p.rotation * Vec3::Z, 5f32.to_radians())
                     * p.rotation)
                     .normalize();
-                let out = line_up(&hand, &m, center, Preset::Arc, Some(1), &[], None);
+                let out = line_up(&hand, &m, center, tilt(Preset::Arc), Some(1), &[], None);
                 for id in [0u32, 1, 2] {
                     let up = out[&id].rotation * Vec3::Y;
                     assert!(
@@ -2275,7 +2342,7 @@ mod tests {
                         "{back}°: seam {a}-{b}"
                     );
                 }
-                let desktop = Desktop::of(&out, &m, center, Preset::Arc, Some(1), None);
+                let desktop = Desktop::of(&out, &m, center, tilt(Preset::Arc), Some(1), None);
                 assert_eq!(desktop.rows, vec![vec![0, 1, 2]], "{back}°");
                 rows_on_a_line(&desktop);
                 same_on_the_pc(&desktop, &m, Some(1));
@@ -2314,7 +2381,15 @@ mod tests {
             a.rotation = (Quat::from_rotation_z(0.04) * plane * a.rotation).normalize();
             a.position += plane * Vec3::new(-0.02, 0.0, 0.01);
             let placements = HashMap::from([(0, a), (1, mirrored(&a, at))]);
-            let out = line_up(&placements, &two, center, Preset::Arc, None, &[], None);
+            let out = line_up(
+                &placements,
+                &two,
+                center,
+                tilt(Preset::Arc),
+                None,
+                &[],
+                None,
+            );
             let back = mirrored(&out[&0], at);
             assert!(
                 back.position.distance(out[&1].position) < 1e-3,
@@ -2336,7 +2411,15 @@ mod tests {
         let p = crooked.get_mut(&2).unwrap();
         p.rotation = (Quat::from_axis_angle(p.rotation * Vec3::Z, 6f32.to_radians()) * p.rotation)
             .normalize();
-        let out = line_up(&crooked, &three, center, Preset::Arc, Some(1), &[], None);
+        let out = line_up(
+            &crooked,
+            &three,
+            center,
+            tilt(Preset::Arc),
+            Some(1),
+            &[],
+            None,
+        );
         for (id, p) in &start {
             assert!(out[id].position.distance(p.position) < 1e-3, "{id} moved");
             assert!(
@@ -2354,10 +2437,11 @@ mod tests {
         let memo = DesktopMemo::default();
         let mut p = arrange(Preset::Arc, &three, Some(1), None, None);
         let of = |p: &HashMap<u32, Placement>| {
-            Desktop::of(p, &three, center, Preset::Arc, Some(1), None)
+            Desktop::of(p, &three, center, tilt(Preset::Arc), Some(1), None)
         };
-        let get =
-            |p: &HashMap<u32, Placement>| memo.get(p, &three, center, Preset::Arc, Some(1), None);
+        let get = |p: &HashMap<u32, Placement>| {
+            memo.get(p, &three, center, tilt(Preset::Arc), Some(1), None)
+        };
         assert_eq!(get(&p), of(&p));
         assert_eq!(get(&p), of(&p));
         p.get_mut(&2).unwrap().position += Vec3::new(0.0, 0.3, 0.0);
@@ -2405,8 +2489,18 @@ mod tests {
         let sizes = keyed(sizes);
         let mut arranged = arrange(Preset::Arc, &two, Some(0), None, None);
         arranged.get_mut(&1).unwrap().position += Vec3::new(0.1, 0.3, 0.0);
-        assert!(desk.keep(keyed(arranged.clone()), &sizes, (center, RADIUS), false));
-        assert!(!desk.keep(keyed(cinema(&two, None)), &sizes, (center, RADIUS), true));
+        assert!(desk.keep(
+            keyed(arranged.clone()),
+            &sizes,
+            (center, RADIUS, 0.0),
+            false
+        ));
+        assert!(!desk.keep(
+            keyed(cinema(&two, None)),
+            &sizes,
+            (center, RADIUS, 0.0),
+            true
+        ));
         for kept in [desk.arrangement(), reread(&desk).arrangement()] {
             assert_eq!(kept.placements.len(), 2);
             for (id, p) in &arranged {
@@ -2430,7 +2524,7 @@ mod tests {
             was.keep(
                 keyed(arrange(Preset::Wall, &two, Some(0), None, None)),
                 &sizes,
-                (center, RADIUS),
+                (center, RADIUS, 0.0),
                 false,
             );
             was
@@ -2438,13 +2532,13 @@ mod tests {
         let mut at_desk = arrange(Preset::Arc, &two, Some(0), None, None);
         at_desk.get_mut(&0).unwrap().position += Vec3::new(-0.2, 0.1, 0.0);
         // Cinema on: the desk is kept first (`Scene::set_cinema`).
-        assert!(desk.keep(keyed(at_desk.clone()), &sizes, (center, RADIUS), false));
+        assert!(desk.keep(keyed(at_desk.clone()), &sizes, (center, RADIUS, 0.0), false));
         // The cinema view, moved by hand, kept as cinema is not.
         let mut view = keyed(cinema(&two, None));
         for p in view.values_mut() {
             p.position += Vec3::new(0.3, 0.0, -0.4);
         }
-        assert!(!desk.keep(view.clone(), &sizes, (center, RADIUS), true));
+        assert!(!desk.keep(view.clone(), &sizes, (center, RADIUS, 0.0), true));
         // Saved as a profile while in cinema.
         let monitors = modes(&[(k(0), 2560, 1440), (k(1), 1920, 1080)]);
         let live = Arrangement {
@@ -2452,6 +2546,7 @@ mod tests {
             sizes: sizes.clone(),
             center: Some(center),
             radius: Some(RADIUS),
+            tilt: 0.0,
         };
         let profile = crate::profiles::Profile::of(
             &monitors,
@@ -2459,7 +2554,6 @@ mod tests {
             Vec::new(),
             &live,
             Some(desk.arrangement()),
-            0.0,
             &[],
         );
         assert_eq!(profile.places.len(), 2);
@@ -2489,7 +2583,7 @@ mod tests {
             (7, (800, 600)),
         ]));
         let center = (Vec3::new(0.1, 0.0, -0.2), 0.7);
-        desk.keep(keyed(arranged), &sizes, (center, RADIUS), false);
+        desk.keep(keyed(arranged), &sizes, (center, RADIUS, 0.0), false);
         let reread = reread(&desk);
         for saved in [desk.arrangement(), reread.arrangement()] {
             assert_eq!(saved.sizes.len(), 2);
@@ -2507,7 +2601,7 @@ mod tests {
         assert_eq!(text, again);
         let ids: Vec<&str> = text
             .lines()
-            .skip(3)
+            .skip(4)
             .filter_map(|l| l.split(' ').next())
             .collect();
         assert_eq!(ids, [k(0).to_string(), k(1).to_string()]);
@@ -2560,7 +2654,7 @@ mod tests {
     /// nothing, a width of nothing, a turn of nothing, words after the size.
     #[test]
     fn desk_format_2() {
-        let text = "format 2\ncenter 0 1.6 0 0.25\nradius 1.3\ncinema 0123456789abcdef:12\n\
+        let text = "format 2\ncenter 0 1.6 0 0.25\nradius 1.3\ntilt 0.5\ncinema 0123456789abcdef:12\n\
                     0123456789abcdef:3 -0.5 1.5 -0.9 0 0.2 0 0.98 1.38 2560x1440\n\
                     0123456789abcdef:12 0.5 1.5 -0.9 0 -0.2 0 0.98 1.03\n";
         let desk = reading(text);
@@ -2575,6 +2669,7 @@ mod tests {
         assert_eq!(saved.radius, Some(1.3));
         assert_eq!(saved.center, Some((Vec3::new(0.0, 1.6, 0.0), 0.25)));
         assert_eq!(desk.cinema(), Some(twelve));
+        assert_eq!(saved.tilt, 0.5);
         let mut again = String::new();
         desk.write_text(&mut again);
         let back = reading(&again);
@@ -2584,7 +2679,7 @@ mod tests {
             assert!(q.rotation.angle_between(p.rotation) < 1e-4);
         }
         assert!(again.starts_with(
-            "format 2\ncenter 0 1.6 0 0.25\nradius 1.3\ncinema 0123456789abcdef:12\n"
+            "format 2\ncenter 0 1.6 0 0.25\nradius 1.3\ntilt 0.5\ncinema 0123456789abcdef:12\n"
         ));
         assert_eq!(back.cinema(), Some(twelve));
         // Another system's line ends, no end to the last line: the same.
@@ -2609,6 +2704,7 @@ mod tests {
             "center 0 1.6 0 0\n".to_owned(),
             "center 0 1.6 0\n".to_owned(),
             "radius 0\n".to_owned(),
+            "tilt 9\n".to_owned(),
             "cinema 12\n".to_owned(),
             format!("0123456789abcdef:4 {place} 2560\n"),
             format!("0123456789abcdef:4 {place} 0x0\n"),
@@ -2656,7 +2752,7 @@ mod tests {
         desk.keep(
             [(a3, p(-0.5)), (b3, p(0.5))],
             &HashMap::new(),
-            ((Vec3::ZERO, 0.0), RADIUS),
+            ((Vec3::ZERO, 0.0), RADIUS, 0.0),
             false,
         );
         let back = reread(&desk);
@@ -2669,7 +2765,7 @@ mod tests {
             &placements,
             &monitors,
             (Vec3::ZERO, 0.0),
-            Preset::Arc,
+            tilt(Preset::Arc),
             Some(a3),
             None,
         );
@@ -2719,7 +2815,7 @@ mod tests {
             }
             let mut desk = Desk::default();
             let center = (Vec3::new(float(&mut rng), 1.0, 0.0), float(&mut rng));
-            desk.keep(places, &sizes, (center, float(&mut rng)), false);
+            desk.keep(places, &sizes, (center, float(&mut rng), 0.0), false);
             let mut text = String::new();
             desk.write_text(&mut text);
             let (back, skipped) = Desk::parse(&text).unwrap();
@@ -2879,8 +2975,8 @@ mod tests {
         what: &str,
     ) -> Desktop<u32> {
         let (da, db) = (
-            Desktop::of(a, m, ca, Preset::Arc, primary, None),
-            Desktop::of(b, m, cb, Preset::Arc, primary, None),
+            Desktop::of(a, m, ca, tilt(Preset::Arc), primary, None),
+            Desktop::of(b, m, cb, tilt(Preset::Arc), primary, None),
         );
         assert_eq!(da.rows, db.rows, "{what}: rows");
         for s in &da.plan {
@@ -2932,9 +3028,10 @@ mod tests {
             sizes: HashMap::new(),
             center: Some(center),
             radius: Some(RADIUS),
+            tilt: 0.0,
         };
         let profile =
-            crate::profiles::Profile::of(&modes(m), primary, Vec::new(), &live, None, 0.0, rows);
+            crate::profiles::Profile::of(&modes(m), primary, Vec::new(), &live, None, rows);
         let mut all = crate::profiles::empty();
         all[0] = Some(profile);
         let [back, ..] = reread_profiles(&all);
@@ -3017,7 +3114,7 @@ mod tests {
             let origin = (Vec3::ZERO, 0.0);
             // Lined up once, as the user keeps it, where they sat.
             let kept = carried_all(
-                &line_up(&by_hand, m, origin, Preset::Arc, primary, &[], None),
+                &line_up(&by_hand, m, origin, tilt(Preset::Arc), primary, &[], None),
                 origin,
                 saved_at,
             );
@@ -3057,19 +3154,21 @@ mod tests {
                 );
                 check(&back, now, "switched to");
                 // Then "Line up".
-                let rows = Desktop::of(&back, m, now, Preset::Arc, primary, sent.as_ref()).rows;
-                let lined = line_up(&back, m, now, Preset::Arc, primary, &rows, None);
+                let rows =
+                    Desktop::of(&back, m, now, tilt(Preset::Arc), primary, sent.as_ref()).rows;
+                let lined = line_up(&back, m, now, tilt(Preset::Arc), primary, &rows, None);
                 check(&lined, now, "switched to, lined up");
                 // Then "In front", and "Line up" after it.
                 let (front, at) = in_front(&back, m, primary, now, head(now));
                 check(&front, at, "switched to, in front");
-                let rows = Desktop::of(&front, m, at, Preset::Arc, primary, sent.as_ref()).rows;
-                let lined = line_up(&front, m, at, Preset::Arc, primary, &rows, None);
+                let rows =
+                    Desktop::of(&front, m, at, tilt(Preset::Arc), primary, sent.as_ref()).rows;
+                let lined = line_up(&front, m, at, tilt(Preset::Arc), primary, &rows, None);
                 check(&lined, at, "switched to, in front, lined up");
                 // The other order: "In front" and "Line up" first, saved, and back.
                 let (front, at) = in_front(&kept, m, primary, saved_at, head(now));
-                let rows = Desktop::of(&front, m, at, Preset::Arc, primary, None).rows;
-                let lined = line_up(&front, m, at, Preset::Arc, primary, &rows, None);
+                let rows = Desktop::of(&front, m, at, tilt(Preset::Arc), primary, None).rows;
+                let lined = line_up(&front, m, at, tilt(Preset::Arc), primary, &rows, None);
                 let again = saved_profile(m, primary, &lined, at, &rows);
                 let (back, _) = switched_to(&again, m, later);
                 check(&back, later, "in front, lined up, saved, switched to");
@@ -3089,6 +3188,7 @@ mod tests {
             sizes: HashMap::new(),
             center: Some(desk_center),
             radius: Some(1.3),
+            tilt: 0.0,
         };
         let view = cinema(&three, None);
         let live = |placements: &HashMap<u32, Placement>| Arrangement {
@@ -3096,11 +3196,12 @@ mod tests {
             sizes: HashMap::new(),
             center: Some((Vec3::ZERO, 0.0)),
             radius: Some(RADIUS),
+            tilt: 0.0,
         };
         let rows = vec![vec![0, 1, 2]];
         let m = modes(&three);
         let of = |live: &Arrangement<u32>, desk: Option<&Arrangement<u32>>| {
-            crate::profiles::Profile::of(&m, Some(1), Vec::new(), live, desk, 0.0, &rows)
+            crate::profiles::Profile::of(&m, Some(1), Vec::new(), live, desk, &rows)
         };
         let profile = of(&live(&view), Some(&desk));
         assert_eq!(profile.places.len(), 3);
@@ -3123,6 +3224,66 @@ mod tests {
         // Not every monitor placed: no places, no rows.
         let profile = of(&live(&view), None);
         assert!(profile.places.is_empty() && profile.rows.is_empty());
+    }
+
+    /// A profile laid out lying down keeps its frame's tilt: switched to elsewhere,
+    /// with the preset "around me" chosen meanwhile, the PC gets the desktop it had
+    /// when the profile was saved, and "Line up" does to it what it did then, both
+    /// seen from its tilted frame (the arrangement's tilt, not the preset's).
+    #[test]
+    fn a_profile_laid_out_lying_down_is_seen_lying_down() {
+        let m = [
+            (0, 2560, 1440),
+            (1, 2560, 1440),
+            (2, 1920, 1080),
+            (3, 1440, 2560),
+        ];
+        let saved_at = (Vec3::new(0.1, 1.1, 0.2), 0.3);
+        let later = (Vec3::new(-0.4, 0.9, 0.5), -1.2);
+        let lying = tilt(Preset::Overhead);
+        let mut kept = carried_all(
+            &arrange(Preset::Overhead, &m, Some(1), None, None),
+            (Vec3::ZERO, 0.0),
+            saved_at,
+        );
+        kept.get_mut(&2).unwrap().position += Vec3::new(0.05, 0.08, 0.0);
+        let then = Desktop::of(&kept, &m, saved_at, lying, Some(1), None);
+        let lined_then = line_up(&kept, &m, saved_at, lying, Some(1), &then.rows, None);
+        let live = Arrangement {
+            placements: kept.clone(),
+            sizes: HashMap::new(),
+            center: Some(saved_at),
+            radius: Some(RADIUS),
+            tilt: lying,
+        };
+        let profile =
+            crate::profiles::Profile::of(&modes(&m), Some(1), Vec::new(), &live, None, &then.rows);
+        let [profile, ..] = reread_profiles(&[Some(profile), None, None]);
+        let profile = profile.unwrap();
+        let saved = profile.frame.unwrap();
+        assert_eq!(saved.tilt, lying);
+        // Switched to elsewhere: the tilt the scene takes is the profile's.
+        let (back, sent) = switched_to(&profile, &m, later);
+        let now = Desktop::of(&back, &m, later, saved.tilt, Some(1), sent.as_ref());
+        assert_eq!(now.rows, then.rows);
+        for s in &then.plan {
+            let t = now.plan.iter().find(|t| t.id == s.id).unwrap();
+            assert!(
+                (s.x - t.x).abs() <= 2 && (s.y - t.y).abs() <= 2,
+                "{} moved",
+                s.id
+            );
+        }
+        let lined_now = line_up(&back, &m, later, saved.tilt, Some(1), &now.rows, None);
+        let seen = |p: &Placement, at: (Vec3, f32)| frame(at, lying).unplace(*p).position;
+        for (id, p) in &lined_then {
+            let off = seen(&lined_now[id], later).distance(seen(p, saved_at));
+            assert!(off < 2e-3, "{id}: {off}");
+        }
+        // Seen upright (the preset's frame), the same arrangement makes another desktop:
+        // the tilt is what keeps it.
+        let upright = Desktop::of(&back, &m, later, 0.0, Some(1), None);
+        assert_ne!(upright.plan, now.plan);
     }
 
     /// The rows of a profile switched to are its own. The PC gives a monitor of the same
@@ -3163,16 +3324,30 @@ mod tests {
                 width: w,
             },
         );
-        let fresh = Desktop::of(&p, &owner, center, Preset::Arc, Some(1), None);
+        let fresh = Desktop::of(&p, &owner, center, tilt(Preset::Arc), Some(1), None);
         assert_eq!(fresh.rows, vec![vec![6], vec![2, 1, 3, 4]]);
         // The rows sent for the profile before, where 6 was the portrait's neighbour.
         let before = Desktop::history(vec![vec![2, 1, 3, 6, 4]]);
-        let stale = Desktop::of(&p, &owner, center, Preset::Arc, Some(1), before.as_ref());
+        let stale = Desktop::of(
+            &p,
+            &owner,
+            center,
+            tilt(Preset::Arc),
+            Some(1),
+            before.as_ref(),
+        );
         assert_ne!(stale.rows, fresh.rows, "the history of another arrangement");
         // Saved with its rows, switched to: its rows.
         let profile = saved_profile(&owner, Some(1), &p, center, &fresh.rows);
         let (back, sent) = switched_to(&profile, &owner, center);
-        let own = Desktop::of(&back, &owner, center, Preset::Arc, Some(1), sent.as_ref());
+        let own = Desktop::of(
+            &back,
+            &owner,
+            center,
+            tilt(Preset::Arc),
+            Some(1),
+            sent.as_ref(),
+        );
         assert_eq!(own.rows, fresh.rows);
         assert_eq!(own.plan, fresh.plan, "the plan made afresh");
         // Saved without rows: they start afresh.
@@ -3181,7 +3356,7 @@ mod tests {
         let (back, sent) = switched_to(&without, &owner, center);
         assert!(sent.is_none());
         assert_eq!(
-            Desktop::of(&back, &owner, center, Preset::Arc, Some(1), None).rows,
+            Desktop::of(&back, &owner, center, tilt(Preset::Arc), Some(1), None).rows,
             fresh.rows
         );
     }
@@ -3192,7 +3367,7 @@ mod tests {
     fn seams_of_6(p: &Placements, owner: &[(u32, u32, u32)]) -> Vec<f64> {
         use prostir_layout::desk::View;
         let all = placed(p, owner);
-        let room = Room::new(&frame((Vec3::ZERO, 0.0), Preset::Arc), &all);
+        let room = Room::new(&frame((Vec3::ZERO, 0.0), tilt(Preset::Arc)), &all);
         [1, 3]
             .iter()
             .map(|&below| {
@@ -3239,9 +3414,9 @@ mod tests {
         assert!(!s.across);
         glued_upright.insert(6, s.placement);
         let lined = |p: &Placements| {
-            let rows = Desktop::of(p, &owner, center, Preset::Arc, Some(1), None).rows;
+            let rows = Desktop::of(p, &owner, center, tilt(Preset::Arc), Some(1), None).rows;
             assert_eq!(rows, vec![vec![6], vec![2, 1, 3, 4]]);
-            line_up(p, &owner, center, Preset::Arc, Some(1), &rows, None)
+            line_up(p, &owner, center, tilt(Preset::Arc), Some(1), &rows, None)
         };
         for (name, p) in [("let go by hand", by_hand), ("upright", glued_upright)] {
             let once = lined(&p);
@@ -3393,8 +3568,16 @@ mod tests {
     fn a_long_follow_leaves_a_glued_seam_glued() {
         let origin = (Vec3::ZERO, 0.0);
         let (owner, by_hand) = owners_stack();
-        let rows = Desktop::of(&by_hand, &owner, origin, Preset::Arc, Some(1), None).rows;
-        let kept = line_up(&by_hand, &owner, origin, Preset::Arc, Some(1), &rows, None);
+        let rows = Desktop::of(&by_hand, &owner, origin, tilt(Preset::Arc), Some(1), None).rows;
+        let kept = line_up(
+            &by_hand,
+            &owner,
+            origin,
+            tilt(Preset::Arc),
+            Some(1),
+            &rows,
+            None,
+        );
         let (mut p, mut center) = (kept.clone(), origin);
         let mut rng = Rng(0xf011);
         for _ in 0..60_000 {
@@ -3411,7 +3594,7 @@ mod tests {
             seen_apart(&p, center, &kept, origin, &owner) < 1e-3,
             "followed as one piece"
         );
-        let lined = line_up(&p, &owner, center, Preset::Arc, Some(1), &rows, None);
+        let lined = line_up(&p, &owner, center, tilt(Preset::Arc), Some(1), &rows, None);
         let moved = farthest_corner(&p, &lined, &owner);
         assert!(moved < 1e-4, "Line up after following moves {moved} m");
     }

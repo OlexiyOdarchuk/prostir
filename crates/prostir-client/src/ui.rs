@@ -3937,7 +3937,6 @@ mod tests {
         primary: u32,
     ) {
         use crate::layout::{Desktop, Placement};
-        use crate::settings::Preset;
         use glam::{Quat, Vec3};
         /// The laptop screen's number in these tests.
         const MIRROR_ID: u32 = 100;
@@ -3957,15 +3956,7 @@ mod tests {
             .collect();
         let sizes: Vec<(u32, u32, u32)> = all.iter().map(|&(id, w, h, ..)| (id, w, h)).collect();
         let center = (Vec3::ZERO, 0.0);
-        let spots = Desktop::of(
-            &placements,
-            &sizes,
-            center,
-            Preset::Arc,
-            Some(primary),
-            None,
-        )
-        .spots();
+        let spots = Desktop::of(&placements, &sizes, center, 0.0, Some(primary), None).spots();
         let mut st = sample_state();
         st.tab = Tab::Monitors;
         st.primary = Some(k(primary));

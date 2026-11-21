@@ -472,6 +472,10 @@ struct Scene {
     /// The circle around the head the arrangement stands on (it grows for many
     /// monitors, see `layout::preset_radius`).
     radius: f32,
+    /// How far up the arrangement's frame is tilted (see `layout::frame`): lying down,
+    /// a band overhead seen from below. The arrangement's own, as a profile keeps it:
+    /// a preset sets it when it lays the monitors out.
+    tilt: f32,
     /// The desktop last sent to the PC.
     sent_layout: Option<layout::Desktop<DisplayKey>>,
     /// The monitors far to near as drawn this frame and the frame before (see
@@ -750,6 +754,7 @@ impl Scene {
             sizes: HashMap::new(),
             center: Some(self.center),
             radius: Some(self.radius),
+            tilt: self.tilt,
         };
         let monitors: Vec<(DisplayKey, Mode)> = self
             .quest_sizes()
@@ -773,7 +778,6 @@ impl Scene {
             shown,
             &live,
             self.settings.cinema.then(|| self.desk.arrangement()),
-            layout::tilt(self.settings.preset),
             &self.sent_rows(),
         )
     }
@@ -827,7 +831,7 @@ impl Scene {
             &self.layout_sizes(),
             size,
             self.center,
-            self.settings.preset,
+            self.tilt,
             self.head.1,
             &self.sent_rows(),
             self.radius,
@@ -926,8 +930,9 @@ impl Scene {
                     desk.placements.insert(id, p);
                     desk.sizes.remove(&id);
                 }
+                let tilt = frame.map_or(desk.tilt, |f| f.tilt);
                 self.desk
-                    .keep(desk.placements, &desk.sizes, (at, radius), false);
+                    .keep(desk.placements, &desk.sizes, (at, radius, tilt), false);
                 self.saves.mark(persist::File::Desk);
                 self.rows_from(rows);
             }
@@ -941,6 +946,10 @@ impl Scene {
                     self.placed_for.remove(&id);
                 }
                 self.radius = radius;
+                // The profile's arrangement is seen as it was, whatever the preset.
+                if let Some(f) = frame {
+                    self.tilt = f.tilt;
+                }
                 self.profile_switch = None;
                 self.rows_from(rows);
                 self.save_layout();
@@ -999,7 +1008,7 @@ impl Scene {
                 .filter(|(id, _)| !self.is_window(**id))
                 .map(|(id, p)| (*id, *p)),
             &self.placed_for,
-            (self.center, self.radius),
+            (self.center, self.radius, self.tilt),
             self.settings.cinema,
         );
         self.desk = desk;
@@ -1122,6 +1131,10 @@ impl Scene {
         self.placements.extend(saved.placements);
         self.placed_for = saved.sizes;
         self.radius = saved.radius.unwrap_or(layout::RADIUS);
+        // A desk never kept (none saved yet) keeps the tilt of the preset.
+        if saved.center.is_some() {
+            self.tilt = saved.tilt;
+        }
         let live: Vec<(DisplayKey, layout::PixelSize)> = self
             .monitors
             .iter()
@@ -1191,6 +1204,7 @@ impl Scene {
         let mirror = self.mirror_id();
         let mirror_place = mirror.and_then(|id| self.placements.get(&id).copied());
         self.radius = layout::preset_radius(self.settings.preset, &self.quest_sizes());
+        self.tilt = layout::tilt(self.settings.preset);
         self.placements = self.around_user(layout::arrange(
             self.settings.preset,
             &self.quest_sizes(),
@@ -1244,7 +1258,7 @@ impl Scene {
     /// overhead (seen from below, right over the head, left and right would make no
     /// sense), as the desktop does it.
     fn map_view(&self) -> (Vec3, glam::Quat) {
-        let tilt = layout::tilt(self.settings.preset);
+        let tilt = self.tilt;
         (
             self.view_eye.unwrap_or(self.center.0),
             glam::Quat::from_rotation_x(-tilt) * glam::Quat::from_rotation_y(-self.center.1),
@@ -1273,7 +1287,7 @@ impl Scene {
             &self.placements,
             &self.layout_sizes(),
             self.center,
-            self.settings.preset,
+            self.tilt,
             self.primary,
             self.sent_layout.as_ref(),
         )
@@ -1566,7 +1580,7 @@ impl Scene {
             &self.placements,
             &self.layout_sizes(),
             self.center,
-            self.settings.preset,
+            self.tilt,
             self.primary,
             &self.sent_rows(),
             lid,
@@ -1657,7 +1671,7 @@ impl Scene {
         if self.settings.cinema
             || !self.settings.magnet
             || self.settings.move_all
-            || self.settings.preset == crate::settings::Preset::Overhead
+            || self.tilt != 0.0
             || self.is_window(id)
             || !self.monitors.contains_key(&id)
         {
@@ -2551,6 +2565,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         toast: None,
         center: (Vec3::ZERO, 0.0),
         radius: layout::RADIUS,
+        tilt: layout::tilt(settings.preset),
         sent_layout: None,
         draw_order: Vec::new(),
         drawn: Vec::new(),
@@ -4660,6 +4675,7 @@ fn handle_action(
         }
         Action::Preset(preset) => {
             scene.settings.preset = preset;
+            scene.tilt = layout::tilt(preset);
             scene.saves.mark(persist::File::Settings);
             scene.arrange_all();
         }

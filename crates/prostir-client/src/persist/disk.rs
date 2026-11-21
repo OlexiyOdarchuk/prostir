@@ -800,7 +800,7 @@ mod tests {
         desk.keep(
             [(three, place)],
             &std::collections::HashMap::new(),
-            ((glam::Vec3::ZERO, 0.0), layout::RADIUS),
+            ((glam::Vec3::ZERO, 0.0), layout::RADIUS, 0.0),
             false,
         );
         saver.save(File::Desk, |out| desk.write_text(out));

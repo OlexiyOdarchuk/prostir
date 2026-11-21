@@ -60,7 +60,7 @@ pub struct ProfileFrame {
 impl Profile {
     /// The setup as it stands: `monitors` (number, size and scale) left to right, the
     /// `primary` one, the PC's own displays `shown`, the arrangement `live` with the
-    /// `rows` the PC has (by number), seen from its center tilted up by `tilt`. In
+    /// `rows` the PC has (by number), seen from its center tilted up as it is. In
     /// cinema `desk` is the desk arrangement kept in memory before the cinema view
     /// replaced it, and that is what is saved. Only what the file can say is kept: as
     /// many monitors as any PC makes, places that are places (else none), a center that
@@ -71,7 +71,6 @@ impl Profile {
         shown: Vec<DisplayKey>,
         live: &Arrangement<K>,
         desk: Option<&Arrangement<K>>,
-        tilt: f32,
         rows: &[Vec<K>],
     ) -> Self {
         let monitors = monitors.get(..MAX_MONITORS).unwrap_or(monitors);
@@ -79,10 +78,7 @@ impl Profile {
         let center = arrangement
             .center
             .filter(|(eye, yaw)| eye.is_finite() && yaw.is_finite());
-        let upright = std::f32::consts::FRAC_PI_2;
-        let tilt = Some(tilt)
-            .filter(|t| t.is_finite())
-            .map_or(0.0, |t| t.clamp(-upright, upright));
+        let tilt = layout::upright(arrangement.tilt);
         let frame = center.map(|(eye, yaw)| Frame::tilted(eye, yaw, tilt));
         let places: Option<Vec<Placement>> = monitors
             .iter()
@@ -306,11 +302,8 @@ fn parse_monitors(text: &str) -> Option<(Vec<Mode>, u8)> {
 /// `tilt radius`: a tilt between straight down and straight up, a circle.
 fn parse_frame(text: &str) -> Option<ProfileFrame> {
     let (tilt, radius) = text.split_once(' ')?;
-    let tilt: f32 = tilt.parse().ok()?;
-    let upright = -std::f32::consts::FRAC_PI_2..=std::f32::consts::FRAC_PI_2;
-    upright.contains(&tilt).then_some(())?;
     Some(ProfileFrame {
-        tilt,
+        tilt: layout::parse_tilt(tilt)?,
         radius: layout::parse_radius(radius)?,
     })
 }
@@ -629,15 +622,18 @@ mod tests {
             sizes: std::collections::HashMap::new(),
             center: Some(saved_at),
             radius: Some(1.4),
+            tilt: 0.0,
         };
         for tilt in [0.0, layout::OVERHEAD_PITCH] {
             let p = Profile::of(
                 &monitors,
                 Some(9),
                 Vec::new(),
-                &live,
+                &Arrangement {
+                    tilt,
+                    ..live.clone()
+                },
                 None,
-                tilt,
                 &[vec![7, 9]],
             );
             assert_eq!(p.primary, 1);
@@ -667,10 +663,10 @@ mod tests {
             placements: std::iter::once((7, place(0.0))).collect(),
             ..live.clone()
         };
-        let p = Profile::of(&monitors, None, Vec::new(), &view, Some(&live), 0.0, &[]);
+        let p = Profile::of(&monitors, None, Vec::new(), &view, Some(&live), &[]);
         assert_eq!((p.places.len(), p.primary), (2, 0));
         // Not every monitor placed: no places, no rows, no frame.
-        let p = Profile::of(&monitors, None, Vec::new(), &view, None, 0.0, &[vec![7]]);
+        let p = Profile::of(&monitors, None, Vec::new(), &view, None, &[vec![7]]);
         assert!(p.places.is_empty() && p.rows.is_empty() && p.frame.is_none());
     }
 
@@ -723,10 +719,10 @@ mod tests {
                 sizes: std::collections::HashMap::new(),
                 center: Some((Vec3::new(rng.float(), 1.0, 0.0), rng.float())),
                 radius: Some(rng.float()),
+                tilt: rng.float(),
             };
             let rows = vec![(0..n as u32).collect()];
-            let tilt = rng.float();
-            let p = Profile::of(&monitors, Some(0), Vec::new(), &live, None, tilt, &rows);
+            let p = Profile::of(&monitors, Some(0), Vec::new(), &live, None, &rows);
             assert!(p.monitors.len() <= MAX_MONITORS);
             let text = text_of(&[Some(p.clone()), None, None]);
             let (back, skipped) = parse(&text).unwrap();
