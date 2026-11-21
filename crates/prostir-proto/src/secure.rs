@@ -173,6 +173,17 @@ pub fn fingerprint(key: &[u8; 32]) -> String {
     to_hex(&key[..6])
 }
 
+/// A short number for the device whose key is `key`: the first 8 bytes of the key's
+/// SHA-256. The same key always gives the same number, so files can name a device by
+/// it across runs; it is never sent, and proves nothing (the key does).
+pub fn key_id(key: &[u8; 32]) -> [u8; 8] {
+    use sha2::Digest as _;
+    let digest = Sha256::digest(key);
+    let mut out = [0; 8];
+    out.copy_from_slice(&digest[..8]);
+    out
+}
+
 /// Peer keys this device has paired with, one `hexkey label` per line.
 pub struct TrustStore {
     path: PathBuf,
@@ -358,6 +369,14 @@ mod tests {
             via: Via::Network,
         };
         (info(b.public), info(a.public))
+    }
+
+    /// A key's number is the start of its SHA-256, the same every time.
+    #[test]
+    fn a_keys_number() {
+        assert_eq!(to_hex(&key_id(&[0; 32])), "66687aadf862bd77");
+        assert_eq!(key_id(&[7; 32]), key_id(&[7; 32]));
+        assert_ne!(key_id(&[7; 32]), key_id(&[8; 32]));
     }
 
     #[test]
