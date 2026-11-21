@@ -59,12 +59,12 @@ key-done = Готово
 
 pairing-with = Сполучення з { $pc }
 pairing-failed = Код не підійшов. Спробуйте ще раз
-pairing-type-on-pc = Введіть цей код у віконці Prostir на ноутбуці:
+pairing-type-on-pc = Введіть цей код у віконці Prostir на ПК:
 pairing-once = Це потрібно лише один раз для кожного ПК.
-pairing-other-way-type-here = Навпаки: код на ноутбуці, ввести тут
+pairing-other-way-type-here = Навпаки: код на ПК, ввести тут
 pairing-type-pc-code = Введіть код, який показує ПК
 pairing-where-pc-code = (сповіщення або іконка Prostir у треї):
-pairing-other-way-type-on-pc = Навпаки: код у шоломі, ввести на ноутбуці
+pairing-other-way-type-on-pc = Навпаки: код у шоломі, ввести на ПК
 offer-new = Новий ПК
 offer-wrong-codes = Код не підійшов кілька разів
 offer-forgotten = ПК більше не знає цей шолом
