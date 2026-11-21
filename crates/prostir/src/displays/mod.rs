@@ -34,6 +34,7 @@ mod arrange;
 mod encoding;
 mod parts;
 mod physical;
+mod placing;
 mod sound;
 mod windows;
 
@@ -131,7 +132,10 @@ pub struct Displays {
     /// Monitors just added while the headset places the monitors itself: their place
     /// on the desktop is a stand-in until the headset's arrangement has them and the
     /// desktop was laid out with it (see [`Displays::desk_known`]).
-    placing: BTreeMap<ScreenId, arrange::Placing>,
+    placing: placing::Placings,
+    /// The main headset of these sessions sent where the monitors stand: it places a
+    /// monitor added later itself.
+    headset_places: bool,
     /// When each display of the PC was last connected, in seconds since 1970 (0: not
     /// known), to forget the least recently seen of those not connected.
     physical_seen: BTreeMap<ScreenId, u64>,
@@ -212,7 +216,8 @@ impl Displays {
             detaching: BTreeMap::new(),
             rows: set.rows.clone(),
             on_desk: BTreeMap::new(),
-            placing: BTreeMap::new(),
+            placing: placing::Placings::default(),
+            headset_places: false,
             physical_seen: set.physical.iter().map(|(id, p)| (*id, p.seen)).collect(),
             too_big: BTreeMap::new(),
             settings: settings.clone(),
@@ -332,6 +337,7 @@ impl Displays {
         if self.facts.is_some() {
             let wanted = self.wanted();
             self.desk.want(wanted);
+            self.placing.handed(self.desk.posted());
         }
     }
 
@@ -523,9 +529,9 @@ impl Displays {
                     self.screens.remove(&id);
                 }
             }
-            Done::Placed(on_desk) => {
+            Done::Placed { on_desk, upto } => {
                 self.on_desk = on_desk;
-                self.placed_now(Instant::now());
+                self.placing.laid_out(upto, Instant::now());
             }
             Done::Physical(seen) => self.sync_physical(&seen, new_id),
             Done::Focus(key) => self.focus = key.and_then(|k| self.id_of_output(&k)),

@@ -707,28 +707,28 @@ fn monitors_scaled_and_placed_from_the_pc() {
     assert_eq!(error_name(&bad), "BadSize");
 }
 
-/// A monitor added from the PC while the headset places the monitors: the local API
-/// shows it nowhere on the desktop until the headset placed it and the desktop was laid
-/// out so, then where it stays, never at the stand-in place before. One the headset
-/// does not place shows at the PC's place after a few seconds.
-#[test]
-fn a_monitor_added_from_the_pc_shows_where_the_headset_puts_it() {
+/// How long a monitor just added waits for the headset to place it (`PLACE_WAIT` in
+/// `displays/placing.rs`).
+const PLACE_WAIT: Duration = Duration::from_secs(4);
+
+/// A session whose headset placed its two monitors (640x360 and 480x272 side by side,
+/// tops level), the local API showing both on the desktop; with the
+/// arrangement sent.
+fn placed_session(
+    name: &str,
+) -> Option<(
+    TestDir,
+    Pc,
+    prostir_testkit::FakeHeadset,
+    Connection,
+    Vec<prostir_proto::state::Placed>,
+)> {
     use prostir_proto::ClientMsg;
-    use prostir_proto::state::{Placed, Row};
-    let (_dir, pc, _keys, mut headset) = session("api-adding", &Options::default());
-    let Some(bus) = &pc.bus else {
-        return;
-    };
-    let bus = bus.connect();
+    use prostir_proto::state::Row;
+    let (dir, pc, _keys, mut headset) = session(name, &Options::default());
+    let bus = pc.bus.as_ref()?.connect();
     let order = headset.view().order();
-    let (m1, m2) = (order[0], order[1]);
-    let at = |id, center, middle| Placed {
-        id,
-        center: Some(center),
-        middle: Some(middle),
-    };
-    // 640x360 and 480x272 side by side, tops level.
-    let mut entries = vec![at(m1, 320, 180), at(m2, 880, 136)];
+    let entries = vec![at(order[0], 320, 180), at(order[1], 880, 136)];
     headset
         .send(&ClientMsg::Arrange {
             rows: vec![Row {
@@ -745,33 +745,70 @@ fn a_monitor_added_from_the_pc_shows_where_the_headset_puts_it() {
         assert!(started.elapsed() < SOON, "not placed: {:?}", state.displays);
         headset.take_for(Duration::from_millis(50)).unwrap();
     }
-    let add = |bus: &Connection| -> u32 {
-        let reply: String = call(
-            bus,
-            "Call",
-            &(r#"{"request":"add_monitor","w":640,"h":360}"#,),
-        )
-        .unwrap()
-        .body()
-        .deserialize()
-        .unwrap();
-        let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
-        u32::try_from(reply["id"].as_u64().expect("the new monitor's id")).unwrap()
+    Some((dir, pc, headset, bus, entries))
+}
+
+/// Where the headset has a display: its centre and middle in its stream's pixels.
+fn at(
+    id: prostir_proto::state::DisplayId,
+    center: i32,
+    middle: i32,
+) -> prostir_proto::state::Placed {
+    prostir_proto::state::Placed {
+        id,
+        center: Some(center),
+        middle: Some(middle),
+    }
+}
+
+/// Adds a 640x360 monitor through the local API: its id.
+fn add_monitor(bus: &Connection) -> u32 {
+    let reply: String = call(
+        bus,
+        "Call",
+        &(r#"{"request":"add_monitor","w":640,"h":360}"#,),
+    )
+    .unwrap()
+    .body()
+    .deserialize()
+    .unwrap();
+    let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    u32::try_from(reply["id"].as_u64().expect("the new monitor's id")).unwrap()
+}
+
+/// Where monitor `id` is on the desktop in every state that came, in order.
+fn places(changes: &mpsc::Receiver<(u32, State)>, id: u32) -> Vec<Option<prostir_api::DeskRect>> {
+    changes
+        .try_iter()
+        .filter_map(|(_, s)| s.display(id).map(|d| d.desk))
+        .collect()
+}
+
+/// A monitor added from the PC while the headset places the monitors: in every state
+/// the local API sends, it stands nowhere on the desktop until the headset placed it
+/// and the desktop was laid out so, then where it stays, never at the stand-in place
+/// the PC gave it before. One the headset does not place shows at the PC's place when
+/// the wait for it ends.
+#[test]
+fn a_monitor_added_from_the_pc_shows_where_the_headset_puts_it() {
+    use prostir_proto::ClientMsg;
+    use prostir_proto::state::{DisplayId, Row};
+    let Some((_dir, mut pc, mut headset, bus, mut entries)) = placed_session("api-adding") else {
+        return;
     };
-    let new = add(&bus);
+    let changes = state_changes(&bus);
+    let before = pc.count_log("fake desktop: placed");
+    let new = add_monitor(&bus);
     // Made and streaming, laid out by the PC meanwhile: still nowhere in the API.
     headset
         .wait(START, "the new monitor showing", View::all_monitors_show)
         .unwrap();
-    let shown = Instant::now();
-    while shown.elapsed() < Duration::from_millis(800) {
-        let (_, state) = get_state(&bus);
-        let d = state.display(new).expect("the new monitor");
-        assert_eq!(d.desk, None, "at a stand-in place: {d:?}");
-        headset.take_for(Duration::from_millis(50)).unwrap();
-    }
+    pc.wait_log_after(SOON, "fake desktop: placed", before);
+    headset.take_for(Duration::from_millis(300)).unwrap();
+    let (_, state) = get_state(&bus);
+    assert_eq!(state.display(new).unwrap().desk, None);
     // The headset puts it over the first one.
-    entries.insert(0, at(prostir_proto::state::DisplayId(new), 320, -180));
+    entries.insert(0, at(DisplayId(new), 320, -180));
     headset
         .send(&ClientMsg::Arrange {
             rows: vec![
@@ -785,7 +822,7 @@ fn a_monitor_added_from_the_pc_shows_where_the_headset_puts_it() {
         })
         .unwrap();
     let started = Instant::now();
-    let first = loop {
+    let (r, state) = loop {
         let (_, state) = get_state(&bus);
         if let Some(r) = state.display(new).and_then(|d| d.desk) {
             break (r, state);
@@ -793,25 +830,66 @@ fn a_monitor_added_from_the_pc_shows_where_the_headset_puts_it() {
         assert!(started.elapsed() < SOON, "never on the desktop");
         headset.take_for(Duration::from_millis(20)).unwrap();
     };
-    let (r, state) = first;
-    let under = state.display(m1.0).unwrap().desk.unwrap();
+    let under = state.display(entries[1].id.0).unwrap().desk.unwrap();
     assert!(r.y + r.h as i32 <= under.y, "{r:?} over {under:?}");
     headset.take_for(Duration::from_millis(500)).unwrap();
     let (_, state) = get_state(&bus);
     assert_eq!(state.display(new).unwrap().desk, Some(r), "it did not move");
+    let seen = places(&changes, new);
+    assert!(seen.iter().any(Option::is_none), "{seen:?}");
+    assert!(
+        seen.iter().all(|p| p.is_none_or(|p| p == r)),
+        "only where it stays: {seen:?}"
+    );
 
-    // Not placed by the headset: where the PC put it, a few seconds later.
-    let other = add(&bus);
-    let started = Instant::now();
+    // Not placed by the headset: where the PC put it, once the wait for it ends.
+    let added = Instant::now();
+    let other = add_monitor(&bus);
     let after = loop {
         let (_, state) = get_state(&bus);
         if state.display(other).and_then(|d| d.desk).is_some() {
-            break started.elapsed();
+            break added.elapsed();
         }
-        assert!(started.elapsed() < START, "never on the desktop");
-        headset.take_for(Duration::from_millis(50)).unwrap();
+        assert!(added.elapsed() < START, "never on the desktop");
+        headset.take_for(Duration::from_millis(20)).unwrap();
     };
-    assert!(after >= Duration::from_secs(2), "shown after {after:?}");
+    assert!(
+        after >= PLACE_WAIT - Duration::from_millis(200)
+            && after < PLACE_WAIT + Duration::from_secs(1),
+        "shown after {after:?}"
+    );
+}
+
+/// The headset leaves before it placed a monitor added from the PC: the monitors stay
+/// (`--linger`) and the PC's place counts at once, without the wait for a headset.
+#[test]
+fn a_monitor_being_placed_shows_once_the_headset_left() {
+    let Some((_dir, mut pc, mut headset, bus, _)) = placed_session("api-adding-left") else {
+        return;
+    };
+    let before = pc.count_log("fake desktop: placed");
+    let added = Instant::now();
+    let new = add_monitor(&bus);
+    headset
+        .wait(START, "the new monitor showing", View::all_monitors_show)
+        .unwrap();
+    pc.wait_log_after(SOON, "fake desktop: placed", before);
+    let (_, state) = get_state(&bus);
+    assert_eq!(state.display(new).unwrap().desk, None);
+    headset.disconnect();
+    let left = Instant::now();
+    loop {
+        let (_, state) = get_state(&bus);
+        if state.display(new).and_then(|d| d.desk).is_some() {
+            break;
+        }
+        assert!(
+            left.elapsed() < Duration::from_secs(1) && added.elapsed() < PLACE_WAIT,
+            "not shown {:?} after the headset left",
+            left.elapsed()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// The volume set in the settings window: the headset's sound device goes there, the

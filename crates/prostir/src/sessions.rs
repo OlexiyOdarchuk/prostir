@@ -315,6 +315,9 @@ impl Brain {
     /// or they broke.
     fn after_the_last_session(&mut self, taken_off: bool) {
         self.control.no_headset(&self.answers);
+        if let Some(d) = self.displays.as_mut() {
+            d.no_headset();
+        }
         self.roles = brain::Roles::NONE;
         let how = match &self.displays {
             Some(_) if taken_off => {

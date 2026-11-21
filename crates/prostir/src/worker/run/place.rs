@@ -88,7 +88,10 @@ impl Worker {
             Ok(on_desk) => {
                 self.layout_due = self.layout_waits;
                 self.layout_retry = (Instant::now(), 0);
-                self.done(Done::Placed(on_desk));
+                self.done(Done::Placed {
+                    on_desk,
+                    upto: self.taken,
+                });
             }
             Err(e) => {
                 let failures = self.layout_retry.1 + 1;

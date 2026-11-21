@@ -178,7 +178,9 @@ impl Brain {
             .iter()
             .filter_map(|r| r.dog.due(r.step().map(|(t, _)| t), now))
             .min();
-        crate::brain::earliest([dog, answers, retiring])
+        // A monitor's stand-in place counts: the local API shows it.
+        let placing = self.displays.as_ref().and_then(Displays::placing_due);
+        crate::brain::earliest([dog, answers, retiring, placing])
     }
 
     /// Requests that waited for the desktop long enough fail.
