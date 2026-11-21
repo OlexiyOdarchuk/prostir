@@ -319,6 +319,10 @@ pub fn save(path: &Path, profiles: &[Profile; SLOTS]) {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "tests make the folders the code under test reads and writes in"
+)]
 mod tests {
     use super::*;
     use crate::settings::Curve;

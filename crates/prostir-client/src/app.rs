@@ -2030,6 +2030,10 @@ fn tab_from_code(code: u8) -> Tab {
     }
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "looked for when the menu opens, in the frame, until step 7.7 moves it out"
+)]
 fn custom_panorama_path(dir: Option<&Path>) -> Option<PathBuf> {
     let d = dir?;
     ["background.jpg", "background.jpeg", "background.png"]

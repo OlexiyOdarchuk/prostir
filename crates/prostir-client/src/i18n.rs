@@ -1,7 +1,11 @@
 //! Interface language. Strings live next to the code that shows them, as
 //! `lang.t("український", "English")` pairs.
 
-/// The headset's system language (Quest settings), e.g. `en-US`.
+/// The headset's system language (its own settings), e.g. `en-US`.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "asked once at the start; the shell asks it from step 7.2a, with the language files"
+)]
 pub fn system() -> Option<Lang> {
     let out = std::process::Command::new("getprop")
         .arg("persist.sys.locale")
