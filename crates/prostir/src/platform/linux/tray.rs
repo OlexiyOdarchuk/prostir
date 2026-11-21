@@ -361,7 +361,7 @@ impl ksni::Tray for Tray {
                     self.counting,
                 ),
                 checked: self.counting,
-                visible: crate::usage::available(),
+                visible: crate::usage::possible(),
                 activate: Box::new(|tray: &mut Self| {
                     tray.commands.tray(Command::SetCounting(!tray.counting));
                 }),

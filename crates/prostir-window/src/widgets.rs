@@ -227,11 +227,43 @@ pub fn button_named(
     kind: Kind,
     enabled: bool,
 ) -> Response {
+    button_at_least(ui, tk, label, name, 0.0, kind, enabled)
+}
+
+/// Buttons side by side that are equal choices (Yes and No): the same kind and the
+/// same width, none filled with the accent. Returns which one was clicked.
+pub fn equal_buttons(ui: &mut Ui, tk: &Tk<'_>, labels: &[&str]) -> Option<usize> {
+    let width = labels
+        .iter()
+        .map(|l| button_width(ui, tk, l))
+        .fold(0.0, f32::max);
+    let mut clicked = None;
+    for (i, label) in labels.iter().enumerate() {
+        if button_at_least(ui, tk, label, label, width, Kind::Secondary, true).clicked() {
+            clicked = Some(i);
+        }
+    }
+    clicked
+}
+
+/// [`button_named`] at least `width` wide.
+fn button_at_least(
+    ui: &mut Ui,
+    tk: &Tk<'_>,
+    label: &str,
+    name: &str,
+    width: f32,
+    kind: Kind,
+    enabled: bool,
+) -> Response {
     let galley = ui
         .painter()
         .layout_no_wrap(label.to_owned(), tk.body_m(), Color32::PLACEHOLDER);
     let pad = tk.th.shape.padding;
-    let size = vec2(galley.size().x + pad * 2.0, tk.th.shape.control_height);
+    let size = vec2(
+        (galley.size().x + pad * 2.0).max(width),
+        tk.th.shape.control_height,
+    );
     let sense = if enabled {
         Sense::click()
     } else {

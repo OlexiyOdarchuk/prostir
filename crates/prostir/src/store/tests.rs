@@ -53,7 +53,7 @@ fn every_old_monitors_txt_moves_over() {
             software: true,
             audio: false,
             mirror: true,
-            count: true,
+            count: Counting::Unasked,
             autostart: None,
             window: prostir_api::WindowLook::default(),
             access: BTreeMap::new(),
@@ -104,6 +104,65 @@ fn the_autostart_choice_is_kept() {
     }
 }
 
+/// The answer about counting is one of three and written as it is; nothing read is
+/// taken for a yes. `on` and `off` (earlier builds of 0.2, which counted until turned
+/// off): off stays no, on is no answer.
+#[test]
+fn the_counting_answer_is_kept() {
+    let (s, kept) = parse_settings("bitrate 30\n");
+    assert_eq!(s.count, Counting::Unasked);
+    assert!(settings_text(&s, &kept).contains("count unasked\n"));
+    for (line, count) in [
+        ("count yes", Counting::Yes),
+        ("count no", Counting::No),
+        ("count unasked", Counting::Unasked),
+    ] {
+        let (s, kept) = parse_settings(line);
+        assert_eq!(s.count, count, "{line}");
+        let text = settings_text(&s, &kept);
+        assert!(text.contains(&format!("{line}\n")), "{text}");
+        assert_eq!(parse_settings(&text).0.count, count);
+    }
+    for (line, count, written) in [
+        ("count off", Counting::No, "count no\n"),
+        ("count on", Counting::Unasked, "count unasked\n"),
+    ] {
+        let (s, kept) = parse_settings(line);
+        assert_eq!(s.count, count, "{line}");
+        assert!(settings_text(&s, &kept).contains(written));
+    }
+    // A value that does not read is kept as it was and counts as no answer.
+    let (s, kept) = parse_settings("count maybe\n");
+    assert_eq!(s.count, Counting::Unasked);
+    assert_eq!(kept.unknown, ["count maybe"]);
+}
+
+/// 0.1 kept the counter's switch in `count`, written only when the person used it:
+/// an off stays no; an on, like no file at all, is no answer, so the question is
+/// asked once after the update.
+#[test]
+fn the_counting_answer_of_0_1() {
+    for (file, count) in [
+        (None, Counting::Unasked),
+        (Some("on\n"), Counting::Unasked),
+        (Some("off\n"), Counting::No),
+    ] {
+        let dir = temp_dir("count-0.1");
+        std::fs::write(dir.join("monitors.txt"), "row\n2560x1440\n").unwrap();
+        if let Some(text) = file {
+            std::fs::write(dir.join("count"), text).unwrap();
+        }
+        let store = Store::open(Some(dir.clone()), Run::default());
+        assert_eq!(store.wanted().count, count, "{file:?}");
+        store.close();
+        let text = std::fs::read_to_string(dir.join("settings.txt")).unwrap();
+        let store = Store::open(Some(dir.clone()), Run::default());
+        assert_eq!(store.wanted().count, count, "{text}");
+        store.close();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 /// The six monitors of 2026-11-19, as 0.1.2 saved them.
 #[test]
 fn the_six_monitors_move_over() {
@@ -127,7 +186,7 @@ fn files_round_trip_and_keep_unknown_lines() {
     let settings = Settings {
         bitrate: 50,
         codec: Codec::H264,
-        count: false,
+        count: Counting::No,
         ..Settings::default()
     };
     let kept = Kept {
@@ -389,7 +448,8 @@ fn moving_over_and_broken_files() {
     std::fs::write(dir.join("count"), "off\n").unwrap();
     std::fs::write(dir.join("screens.txt.tmp"), "half a fi").unwrap();
     let store = Store::open(Some(dir.clone()), Run::default());
-    assert!(!store.settings.mirror && !store.settings.count);
+    assert!(!store.settings.mirror);
+    assert_eq!(store.settings.count, Counting::No);
     assert_eq!(store.screens().specs.len(), 2);
     assert!(!dir.join("screens.txt.tmp").exists());
     store.close();

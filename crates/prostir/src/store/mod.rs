@@ -28,6 +28,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
 use log::{info, warn};
+use prostir_api::Counting;
 use prostir_layout::desk::Entry;
 use prostir_proto::Codec;
 use prostir_proto::state::{Access, perms, role};
@@ -307,9 +308,11 @@ impl Store {
                 return;
             };
             (self.settings, self.screens) = migrate(&old);
-            // The counter switch had a file of its own.
+            // The counter switch had a file of its own, written only when the person
+            // used it. 0.1 counted until turned off, so on was no answer to the
+            // question: only an off stays (no, and not asked again).
             if read("count").is_some_and(|t| t.trim() == "off") {
-                self.settings.count = false;
+                self.settings.count = Counting::No;
             }
             info!("settings moved over from monitors.txt");
             self.settings_changed = true;

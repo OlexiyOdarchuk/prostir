@@ -120,6 +120,25 @@ fn each_state_of_the_overview() {
     );
     open(&mut h, Page::Overview);
     picture(&mut h, &mut all, "overview-en");
+    // "Count this PC among users?" until it is answered: on the first run, where the
+    // first start opens, and on the overview.
+    let unasked = |s: &mut prostir_window::api::State| {
+        s.counting = Some(prostir_window::api::Counting::Unasked);
+    };
+    let (mut h, _) = window(dark(Mock::no_headsets().edit(unasked)), shot());
+    h.run_steps(2);
+    picture(&mut h, &mut all, "first-run-question");
+    let (mut h, _) = window(
+        Mock::connected()
+            .edit(unasked)
+            .look(ThemeMode::Light, "ink"),
+        Setup {
+            language: "en",
+            ..shot()
+        },
+    );
+    open(&mut h, Page::Overview);
+    picture(&mut h, &mut all, "overview-question-en");
     all.unwrap();
 }
 

@@ -899,9 +899,6 @@ fn full_with(
         }
         store.change(|s| s.autostart = Some(on));
     }
-    // The first start says that this build counts its users and how to turn it off,
-    // a day before the first count.
-    usage::announce_once(store.wanted().count);
     // Monitors from a run that crashed: without the headset nobody sees their windows.
     platform::clean_up_after_crash();
 

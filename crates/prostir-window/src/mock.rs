@@ -169,7 +169,7 @@ fn base() -> State {
         },
         pairing: None,
         nearby: Vec::new(),
-        counting: true,
+        counting: Some(Counting::Yes),
         problems: Vec::new(),
     }
 }
@@ -568,7 +568,7 @@ impl Inner {
                 };
                 s.encoding.cpu = *cpu;
             }
-            Request::SetCounting { on } => s.counting = *on,
+            Request::SetCounting { counting } => s.counting = Some(*counting),
             Request::PairNewHeadset | Request::StopPairing | Request::PairingCode { .. }
                 if !self.pairing_steps =>
             {

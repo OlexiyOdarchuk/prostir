@@ -1115,8 +1115,11 @@ static TOOLS: &[Tool] = &[
     ),
     asks(
         "set_counting",
-        "Counts this PC among Prostir's users, or not.",
-        &[ON],
+        "The person's answer to \"Count this PC among Prostir's users?\" (once a day one \
+         request with only the date). Set it only as the person says: nothing is counted \
+         until yes; unasked puts the question back in the settings window. The state's \
+         counting is null where this build or run never counts.",
+        &[Arg::of("counting", "string", "yes, no or unasked").one_of(&["yes", "no", "unasked"])],
     ),
     asks(
         "autostart",

@@ -6,6 +6,7 @@ pub(super) fn overview(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
     let tk = v.tk;
     let p = tk.p;
     header(ui, v, Page::Overview);
+    counting_question(ui, v, s);
     let gap = tk.th.shape.section_gap;
     let virtual_count = s
         .displays
@@ -232,14 +233,19 @@ pub(super) fn overview(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
                 }
             });
         }
-        w::divider(ui, tk);
-        let label = tk.t("ov-counting");
-        let can = !v.ui.unsupported.contains("set_counting");
-        w::row(ui, tk, &label, Some(&tk.t("ov-counting-desc")), |ui| {
-            if let Some(on) = w::switch(ui, tk, &label, s.counting, can) {
-                v.out.push(Action::Send(Request::SetCounting { on }));
-            }
-        });
+        // Once answered (until then the question at the top asks), and only where
+        // this build and run count at all.
+        if let Some(c) = s.counting.filter(|c| *c != Counting::Unasked) {
+            w::divider(ui, tk);
+            let label = tk.t("ov-counting");
+            let can = !v.ui.unsupported.contains("set_counting");
+            w::row(ui, tk, &label, Some(&tk.t("ov-counting-desc")), |ui| {
+                if let Some(on) = w::switch(ui, tk, &label, c == Counting::Yes, can) {
+                    let counting = if on { Counting::Yes } else { Counting::No };
+                    v.out.push(Action::Send(Request::SetCounting { counting }));
+                }
+            });
+        }
     });
 }
 

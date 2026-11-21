@@ -8,6 +8,7 @@ pub(super) fn first_run(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
     let tk = v.tk;
     let p = tk.p;
     header(ui, v, Page::FirstRun);
+    counting_question(ui, v, s);
     let step = v.ui.fr_step.min(STEPS - 1);
     text(
         ui,

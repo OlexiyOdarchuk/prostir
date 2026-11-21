@@ -17,8 +17,9 @@ pub struct Settings {
     pub audio: bool,
     /// The laptop screen in the headset.
     pub mirror: bool,
-    /// Count this PC among users (see `usage`).
-    pub count: bool,
+    /// The answer to "Count this PC among users?" (see `usage`): `count unasked`,
+    /// `count yes` or `count no`. Nothing is counted until it is yes.
+    pub count: Counting,
     /// Starting with the session, as the person chose it (`autostart on|off`); none
     /// yet before the first start, which turns it on (see `platform::autostart`).
     /// Once kept, an update never changes it.
@@ -115,7 +116,7 @@ impl Default for Settings {
             software: false,
             audio: true,
             mirror: true,
-            count: true,
+            count: Counting::Unasked,
             autostart: None,
             window: prostir_api::WindowLook::default(),
             access: BTreeMap::new(),
@@ -125,6 +126,26 @@ impl Default for Settings {
 
 fn on_off(v: bool) -> &'static str {
     if v { "on" } else { "off" }
+}
+
+fn counting_name(count: Counting) -> &'static str {
+    match count {
+        Counting::Yes => "yes",
+        Counting::No => "no",
+        Counting::Unasked | Counting::Other => "unasked",
+    }
+}
+
+/// The answer a `count` line holds. `on` and `off` are what earlier builds of 0.2
+/// wrote, where counting was on until turned off: `off` was the person's choice and
+/// stays no, but `on` was mostly the default nobody chose, so it is no answer.
+fn parse_counting(value: &str) -> Option<Counting> {
+    match value {
+        "yes" => Some(Counting::Yes),
+        "no" | "off" => Some(Counting::No),
+        "unasked" | "on" => Some(Counting::Unasked),
+        _ => None,
+    }
 }
 
 fn codec_name(codec: Codec) -> &'static str {
@@ -181,10 +202,7 @@ pub(super) fn parse_settings(text: &str) -> (Settings, Kept) {
                 s.mirror = v;
                 true
             }
-            ("count", Some(v)) => {
-                s.count = v;
-                true
-            }
+            ("count", _) => parse_counting(value).map(|c| s.count = c).is_some(),
             ("autostart", Some(v)) => {
                 s.autostart = Some(v);
                 true
@@ -249,7 +267,7 @@ pub(super) fn settings_text(s: &Settings, kept: &Kept) -> String {
         on_off(s.software),
         on_off(s.audio),
         on_off(s.mirror),
-        on_off(s.count),
+        counting_name(s.count),
     );
     if let Some(on) = s.autostart {
         let _ = writeln!(text, "autostart {}", on_off(on));

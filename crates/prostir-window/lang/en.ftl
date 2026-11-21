@@ -70,6 +70,16 @@ ov-autostart-here-not = Set up with the desktop on this PC.
 ov-counting = Count this PC among users
 ov-counting-desc = Once a day one request that says only that Prostir was used: no name, no address, no settings.
 
+## The question about counting, until it is answered
+
+count-ask-title = Count this PC among Prostir's users?
+count-ask-body = If yes, once a day, when a headset connects, this PC sends GoatCounter one request with only the date in it: no ID, no PC name, no settings. That shows how many people use Prostir. Nothing is sent until you answer.
+count-ask-later = The answer can be changed at any time on the Overview page or in the tray.
+count-ask-yes = Yes
+count-ask-no = No
+count-ask-privacy = Privacy policy
+count-ask-privacy-url = https://prostir.ishawyha.dev/privacy.html#counting
+
 ## How a monitor is doing
 
 state-streaming = Streaming

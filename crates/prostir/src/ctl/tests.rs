@@ -87,7 +87,11 @@ fn commands_read_as_requests() {
     );
     assert_eq!(asks("forget --all"), Request::ForgetAll);
     assert_eq!(asks("autostart on"), Request::Autostart { on: true });
-    assert_eq!(asks("count off"), Request::SetCounting { on: false });
+    let counting = |counting| Request::SetCounting { counting };
+    assert_eq!(asks("count yes"), counting(api::Counting::Yes));
+    assert_eq!(asks("count no"), counting(api::Counting::No));
+    assert_eq!(asks("count off"), counting(api::Counting::No));
+    assert_eq!(asks("count unasked"), counting(api::Counting::Unasked));
     assert_eq!(asks("settings"), Request::ShowSettings);
     assert_eq!(asks("quit"), Request::Quit);
 }
@@ -126,6 +130,8 @@ fn wrong_arguments() {
         "quality fast",
         "codec vp9",
         "sound loud",
+        "count",
+        "count maybe",
         "pair now",
         "forget",
         "profile",

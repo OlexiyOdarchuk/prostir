@@ -263,9 +263,14 @@ pub fn parse(args: &[String]) -> Result<(Ctl, bool), String> {
         }
         "count" => {
             takes = 1;
-            ask(Request::SetCounting {
-                on: on(rest.first())?,
-            })
+            let counting = match rest.first().copied() {
+                Some("yes" | "on") => api::Counting::Yes,
+                Some("no" | "off") => api::Counting::No,
+                Some("unasked") => api::Counting::Unasked,
+                Some(other) => return Err(format!("expected yes, no or unasked, not {other:?}")),
+                None => return Err("expected yes, no or unasked".to_owned()),
+            };
+            ask(Request::SetCounting { counting })
         }
         "settings" => ask(Request::ShowSettings),
         "quit" => ask(Request::Quit),
@@ -322,7 +327,7 @@ prostir ctl COMMAND [--json]
   pair | pair stop
   headsets | forget HEADSET | forget --all
   autostart on|off|status
-  count on|off
+  count yes|no|unasked           count this PC among users (unasked: ask again)
   settings
   quit
 

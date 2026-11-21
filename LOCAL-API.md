@@ -203,7 +203,7 @@ exist, monitor requests change the set kept for the next headset (its monitors s
 | `set_sharp` | `on` | the slower encoder preset for clearer small text |
 | `set_codec` | `codec` (`h264`, `h265`, `auto`), `cpu` (bool, default false) | `auto` is the same as `h265` (H.265 where the PC and every headset can, else H.264), and the state shows it as `h265` |
 | `sound_to_headset` | `on` | the PC's sound in the headset, or on the PC |
-| `set_counting` | `on` | count this PC among users |
+| `set_counting` | `counting` (`yes`, `no`, `unasked`) | the person's answer to "Count this PC among users?" (once a day one request with only the date, see the privacy policy), kept in `settings.txt` (`count yes`, `no` or `unasked`). Nothing is counted until it is `yes`; `unasked` puts the question back in the settings window. Set it only as the person says. `BadArgument` for anything else |
 | `autostart` | `on` | start with the session: with systemd, enables `prostir.socket` (and removes an autostart entry of 0.1), else an XDG autostart entry (`prostir serve`); `Unsupported` where it is not set from here (Hyprland, whose config starts it). On by default: the first start of Prostir for a user turns it on; the choice is kept in `settings.txt` (`autostart on` or `off`), so once turned off (here, the tray, `prostir ctl autostart off`) no later start or update turns it on again |
 | `pair_new_headset` | | opens the pairing window for 3 minutes (again from now if it is open), answers `seconds_left`: while it is open the PC answers every headset that asks for it, and the program stays running. It closes at its time, with `stop_pairing`, or once a headset pairs. A headset can pair over a connection (a typed address, USB) whether it is open or not; its code protects that |
 | `stop_pairing` | | closes it |
@@ -296,7 +296,7 @@ change older clients would misread.
   },
   "pairing": null,
   "nearby": [],
-  "counting": true,
+  "counting": "yes",
   "problems": [{"code": "Sound", "text": "The sound could not be switched"}]
 }
 ```
@@ -333,7 +333,7 @@ change older clients would misread.
 | `sound` | `to_headset`; `volume`: the main headset's volume (`level` 0 to 100, `muted`), while the PC's volume device follows it (one volume for the PC's slider and the headset's buttons), else `null`; `mic_on` (the switch of the headset whose microphone the PC takes, read only: it is changed in the headset); `mic` (`off`, `ready`, `failed`: the PC's end, the virtual microphone programs record from) and `mic_failure` |
 | `pairing` | while the pairing window is open, the PC shows a code, or a headset waits for its code: `seconds_left`, `seconds_total` (how long the pairing window was opened for; `0`: no pairing window, only a code), `pc_code` (the code to type in the headset, while the PC shows one), `code_for` (a headset waiting for its code to be typed here, by name; only while the settings window is on the bus), `last` (how the last attempt since the window opened ended: `{"paired": {"name": …}}`, `"wrong"`; anything else reads as other) |
 | `nearby` | headsets that are not this PC's and asked for it in the last minute, by the name they gave (a headset gives one while it looks for a PC to pair with), else by address, the latest last |
-| `counting` | this PC counts among users |
+| `counting` | the answer to "Count this PC among users?": `unasked` (the settings window asks, at the top of its overview and first run; nothing is counted meanwhile, so a PC where nobody answered, such as one that only runs `prostir serve`, never counts), `yes`, `no`; `null` where this build or run never counts (a build from source, `PROSTIR_NO_COUNT=1`), so there is nothing to ask. An update from 0.1 asks again unless 0.1 was turned off |
 | `problems` | what is wrong now: `code` (an error's name) and `text` in the PC's language; `Desktop` while the desktop does not respond (a call into it has hung for 15 s) |
 
 The pairing code is on the bus because the tray shows it to the same user anyway; it
@@ -371,7 +371,7 @@ prostir ctl sound headset|pc
 prostir ctl pair | pair stop
 prostir ctl headsets | forget HEADSET | forget --all
 prostir ctl autostart on|off|status
-prostir ctl count on|off
+prostir ctl count yes|no|unasked          # count this PC among users (unasked: ask again)
 prostir ctl settings
 prostir ctl quit
 ```

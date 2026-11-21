@@ -117,6 +117,47 @@ fn header(ui: &mut Ui, v: &View<'_, '_>, page: Page) {
     w::page_header(ui, v.tk, &v.tk.t(title), sub.as_deref());
 }
 
+/// "Count this PC among users?", at the top of the overview and the first run until
+/// it is answered: what would be sent, and two equal answers, neither chosen before.
+/// The rest of the page works meanwhile; nothing is counted until the answer is yes.
+fn counting_question(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
+    if s.counting != Some(Counting::Unasked) {
+        return;
+    }
+    let tk = v.tk;
+    let p = tk.p;
+    w::card(ui, tk, |ui| {
+        text(ui, tk.t("count-ask-title"), tk.heading(), p.text);
+        ui.add_space(tk.th.shape.spacing);
+        text(ui, tk.t("count-ask-body"), tk.body(), p.text_muted);
+        ui.add_space(tk.th.shape.spacing * 0.5);
+        text(ui, tk.t("count-ask-later"), tk.body(), p.text_muted);
+        ui.add_space(tk.th.shape.padding);
+        let full = ui.available_width();
+        ui.allocate_ui_with_layout(
+            vec2(full, tk.th.shape.control_height),
+            Layout::left_to_right(Align::Center),
+            |ui| {
+                let (yes, no) = (tk.t("count-ask-yes"), tk.t("count-ask-no"));
+                let counting = match w::equal_buttons(ui, tk, &[&yes, &no]) {
+                    Some(0) => Some(Counting::Yes),
+                    Some(_) => Some(Counting::No),
+                    None => None,
+                };
+                if let Some(counting) = counting {
+                    v.out.push(Action::Send(Request::SetCounting { counting }));
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if w::button(ui, tk, &tk.t("count-ask-privacy"), Kind::Quiet, true).clicked() {
+                        v.out.push(Action::OpenUrl(tk.t("count-ask-privacy-url")));
+                    }
+                });
+            },
+        );
+    });
+    ui.add_space(tk.th.shape.section_gap);
+}
+
 /// A large title with a coloured dot for the state in front of it.
 fn hero(ui: &mut Ui, tk: &Tk<'_>, color: Option<Color32>, title: &str) {
     ui.horizontal(|ui| {

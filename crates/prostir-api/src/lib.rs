@@ -43,6 +43,7 @@ lenient!(DisplayKind: Virtual, Physical, Window);
 lenient!(DisplayState: Starting, Running, Failed, Absent, Kept);
 lenient!(Codec: H264, H265, Av1);
 lenient!(MicState: Off, Ready, Failed);
+lenient!(Counting: Unasked, Yes, No);
 
 /// The service's name on the session bus.
 pub const BUS_NAME: &str = "io.github.OlexiyOdarchuk.Prostir";
@@ -170,9 +171,10 @@ pub enum Request {
     SetMic {
         on: bool,
     },
-    /// Count this PC among users.
+    /// The answer to "Count this PC among users?": `yes`, `no`, or `unasked` to put
+    /// the question back.
     SetCounting {
-        on: bool,
+        counting: Counting,
     },
     /// Start Prostir with the session.
     Autostart {
@@ -257,10 +259,21 @@ impl Request {
             .get("request")
             .and_then(serde_json::Value::as_str)
             .map(|d| REQUESTS.contains(&d));
-        serde_json::from_value(value).map_err(|e| match known {
+        let request = serde_json::from_value(value).map_err(|e| match known {
             Some(false) => Failure::new(ApiError::Unsupported, e.to_string()),
             _ => Failure::new(ApiError::BadArgument, e.to_string()),
-        })
+        })?;
+        // The state reads an answer it does not know leniently; a request may not.
+        if let Self::SetCounting {
+            counting: Counting::Other,
+        } = request
+        {
+            return Err(Failure::new(
+                ApiError::BadArgument,
+                "counting: expected yes, no or unasked",
+            ));
+        }
+        Ok(request)
     }
 
     pub fn to_json(&self) -> String {
@@ -552,8 +565,10 @@ pub struct State {
     pub pairing: Option<Pairing>,
     /// Headsets that asked for this PC recently, by name (from step 6.8).
     pub nearby: Vec<String>,
-    /// This PC counts among users.
-    pub counting: bool,
+    /// The answer to "Count this PC among users?"; `null`: this build or this run
+    /// never counts (a build from source, `PROSTIR_NO_COUNT=1`), so there is nothing
+    /// to ask.
+    pub counting: Option<Counting>,
     /// What is wrong now, in the PC's language.
     pub problems: Vec<Problem>,
 }
@@ -608,6 +623,19 @@ pub enum Phase {
     Live,
     /// The monitors wait a while for the headset to come back.
     Lingering,
+    Other,
+}
+
+/// The person's answer to "Count this PC among users?". Nothing is counted until it
+/// is `Yes`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Counting {
+    /// Not asked yet, or not answered: the settings window asks.
+    #[default]
+    Unasked,
+    Yes,
+    No,
     Other,
 }
 
@@ -985,7 +1013,9 @@ mod tests {
             Request::SoundToHeadset { on: false },
             Request::Volume { level: 40 },
             Request::SetMic { on: true },
-            Request::SetCounting { on: false },
+            Request::SetCounting {
+                counting: Counting::No,
+            },
             Request::Autostart { on: true },
             Request::WindowLook {
                 theme: ThemeMode::Dark,
@@ -1057,6 +1087,25 @@ mod tests {
         );
         assert_eq!(error("recenter"), ApiError::BadArgument);
         assert_eq!(error("{}"), ApiError::BadArgument);
+        // The answer about counting is one of three, and never left out.
+        assert_eq!(
+            read(r#"{"request":"set_counting","counting":"yes"}"#).unwrap(),
+            Request::SetCounting {
+                counting: Counting::Yes
+            }
+        );
+        assert_eq!(
+            error(r#"{"request":"set_counting","counting":"maybe"}"#),
+            ApiError::BadArgument
+        );
+        assert_eq!(
+            error(r#"{"request":"set_counting"}"#),
+            ApiError::BadArgument
+        );
+        assert_eq!(
+            error(r#"{"request":"set_counting","on":true}"#),
+            ApiError::BadArgument
+        );
         assert!(Request::Recenter.for_headset());
         assert!(!Request::Quit.for_headset());
     }
@@ -1217,7 +1266,7 @@ mod tests {
             },
             pairing: None,
             nearby: Vec::new(),
-            counting: true,
+            counting: Some(Counting::Unasked),
             problems: vec![Problem {
                 code: ApiError::Sound,
                 text: "x".into(),
@@ -1248,7 +1297,7 @@ mod tests {
             r#""using":{"codec":"h264","hardware":true},"outputs":[{"display":103,"#,
             r#""encoder":"x264","codec":"h264","hardware":false,"copies":true,"note":"y"}]},"#,
             r#""sound":{"to_headset":true,"volume":{"level":40,"muted":false},"mic_on":false,"#,
-            r#""mic":"off","mic_failure":null},"pairing":null,"nearby":[],"counting":true,"#,
+            r#""mic":"off","mic_failure":null},"pairing":null,"nearby":[],"counting":"unasked","#,
             r#""problems":[{"code":"Sound","text":"x"}]}"#,
         );
         assert_eq!(json, expected);
@@ -1276,6 +1325,8 @@ mod tests {
             ApiError::Other
         );
         assert_eq!(s.window, WindowLook::default());
+        // Without the answer about counting: nothing to ask.
+        assert_eq!(s.counting, None);
         assert_eq!(
             s.pairing.unwrap().last,
             Some(PairResult::Paired {
@@ -1312,6 +1363,10 @@ mod tests {
             Reason::TakenOff
         );
         assert_eq!(serde_json::from_str::<Via>("null").unwrap(), Via::Other);
+        assert_eq!(
+            serde_json::from_str::<Counting>(r#""later""#).unwrap(),
+            Counting::Other
+        );
         let event: Event =
             serde_json::from_str(r#"{"event":"headset_charging","headset":"a1"}"#).unwrap();
         assert_eq!(event, Event::Other);

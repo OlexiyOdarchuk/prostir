@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Prostir privacy policy</title>
-  <meta name="description" content="What Prostir does with your data: no accounts, no servers of its own, everything between your headset and your PC encrypted, and one anonymous count a day that you can turn off.">
+  <meta name="description" content="What Prostir does with your data: no accounts, no servers of its own, everything between your headset and your PC encrypted, and, only if you agree, one anonymous count a day.">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="canonical" href="https://prostir.ishawyha.dev/privacy.html">
   <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -34,23 +34,24 @@
 <main class="wrap doc-layout">
   <article class="doc">
     <h1>Privacy policy</h1>
-    <p class="muted">Last updated: 18 November 2026.</p>
+    <p class="muted">Last updated: 21 November 2026.</p>
 
     <div class="summary">
       <p>In short</p>
       <ul>
         <li>Prostir has no accounts and no servers of its own, and sends nothing about you to its author or anyone else.</li>
         <li>Your headset and your PC talk to each other directly, encrypted, over your own network or a USB cable.</li>
-        <li>Once a day the PC sends one anonymous count, which you can turn off before it is ever sent.</li>
+        <li>Only if you agree, the PC sends one anonymous count a day. It asks first, and sends nothing until you answer.</li>
         <li>The microphone, PC notifications in the headset and sound from the screen work only when you turn them on.</li>
       </ul>
     </div>
 
     <h2 id="counting">Counting users</h2>
     <p>To know how many people use Prostir, the PC program sends one request a day to <a href="https://www.goatcounter.com/">GoatCounter</a>, when a headset connects. The request contains only the path <code>/day/</code> followed by the date, and the very first time also <code>/install</code>. It carries no identifier, host name, settings or anything else about you or your PC. GoatCounter does not store IP addresses. The totals are public on this site.</p>
-    <p>It is on by default. The first time Prostir starts, it shows a notification that says it counts once a day, anonymously, and how to turn that off. The first count is sent no earlier than the next day (UTC), so you can turn it off before anything is sent. Turn it off with the tray item "Count this PC among users", or start Prostir with the environment variable <code>PROSTIR_NO_COUNT=1</code>. Builds made from the source code never count.</p>
+    <p>It is off until you agree. The first time the settings window opens, it asks "Count this PC among Prostir's users?", says what would be sent, links to this page, and offers two equal answers, Yes and No, neither chosen in advance. Until you answer, nothing is sent, so a PC where nobody answered (one that only runs Prostir in the background, a server) never counts. Change the answer at any time in the settings window (Overview, "Count this PC among users"), with the tray item of the same name, or with <code>prostir ctl count yes</code> or <code>no</code>. The environment variable <code>PROSTIR_NO_COUNT=1</code> turns it off whatever the answer. Builds made from the source code never count.</p>
+    <p>Version 0.1 counted until it was turned off. After an update from it, the settings window asks once as well and nothing is sent until you answer; if you had turned counting off in 0.1, it stays off and you are not asked.</p>
     <p>Official builds contain the key they send the counts with. Anyone can extract it from the program, but it can only add counts, so the worst misuse is inflated numbers. Read the totals on this site as approximate.</p>
-    <p>The count relies on a legitimate interest in knowing whether the project is used. Turning it off is how you object to it, and no count is sent after that.</p>
+    <p>The count relies on your consent, given with Yes. You can withdraw it at any time by answering No, and no count is sent after that.</p>
 
     <h2 id="between">What travels between the headset and your PC</h2>
     <p>The picture of your virtual monitors and detached windows, PC sound, the headset microphone (see below), which monitor has the mouse, where the mouse pointer is when you press "Mouse?", whether the headset is being worn, the headset's battery level (shown in the PC's tray), the version numbers of both apps, the settings you change in the headset menu, and short messages the PC shows in the headset, such as "Screenshot saved". All of it goes directly between your two devices, over your local network or a USB cable, encrypted with the Noise protocol. To be found by the headset, the PC broadcasts its host name on the local network.</p>

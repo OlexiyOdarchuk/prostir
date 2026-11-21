@@ -64,7 +64,8 @@ impl Control {
             self.shown_battery = Some(headset.battery);
         }
         let wanted = store.wanted();
-        let settings = (wanted.bitrate, wanted.sharp, wanted.count);
+        let counting = wanted.count == prostir_api::Counting::Yes;
+        let settings = (wanted.bitrate, wanted.sharp, counting);
         if self.shown_settings != Some(settings) {
             tray::set_settings(self.tray.as_ref(), settings.0, settings.1, settings.2);
             self.shown_settings = Some(settings);
@@ -84,9 +85,14 @@ impl Brain {
                 info!("clearer text: {sharp}");
                 self.store.change(|s| s.sharp = sharp);
             }
+            // The tray's item answers the question too: checked is a yes.
             TrayCommand::SetCounting(on) => {
-                info!("counting this PC among users: {on}");
-                self.store.change(|s| s.count = on);
+                let count = if on {
+                    prostir_api::Counting::Yes
+                } else {
+                    prostir_api::Counting::No
+                };
+                self.set_counting(count);
             }
             TrayCommand::SetAutostart(on) => self.set_autostart(on),
             TrayCommand::Headset(asked) => {

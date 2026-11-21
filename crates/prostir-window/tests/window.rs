@@ -6,7 +6,7 @@ mod common;
 use common::{Setup, open, press, press_as, window};
 use eframe::egui::{self, Key, Role};
 use egui_kittest::kittest::Queryable;
-use prostir_window::api::{ClientError, Request, ThemeMode};
+use prostir_window::api::{ClientError, Counting, Request, ThemeMode};
 use prostir_window::app::{Conn, Page, Start};
 use prostir_window::mock::Mock;
 
@@ -650,4 +650,99 @@ fn the_first_close_says_prostir_goes_on() {
     h.state_mut().window_closes();
     assert_eq!(said.lock().unwrap().len(), 1, "once only");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// "Count this PC among users?" on the first start: at the top of the first run and
+/// the overview, with two equal answers and neither chosen, while the rest of the
+/// window works. An answer is sent once and the question goes; the overview's
+/// switch then shows the answer and changes it.
+#[test]
+fn the_counting_question_and_both_answers() {
+    const QUESTION: &str = "Рахувати цей ПК серед користувачів Prostir?";
+    const SWITCH: &str = "Рахувати цей ПК серед користувачів";
+    let unasked = |s: &mut prostir_window::api::State| s.counting = Some(Counting::Unasked);
+    for (answer, counting, other) in [
+        ("Так", Counting::Yes, Counting::No),
+        ("Ні", Counting::No, Counting::Yes),
+    ] {
+        let (mut h, handle) = window(Mock::no_headsets().edit(unasked), Setup::default());
+        assert_eq!(h.state().ui.page, Page::FirstRun);
+        h.get_by_label(QUESTION);
+        // Neither answer looks chosen: both are plain buttons of the same size.
+        let yes = h.get_by_role_and_label(Role::Button, "Так").rect();
+        let no = h.get_by_role_and_label(Role::Button, "Ні").rect();
+        assert_eq!(yes.size(), no.size());
+        // The first run goes on meanwhile.
+        press(&mut h, "Далі");
+        assert_eq!(handle.calls(), [Request::PairNewHeadset]);
+        h.get_by_label(QUESTION);
+        // The overview asks too, and has no switch until the answer.
+        open(&mut h, Page::Overview);
+        h.get_by_label(QUESTION);
+        assert!(h.query_by_role_and_label(Role::Switch, SWITCH).is_none());
+        press(&mut h, answer);
+        assert_eq!(
+            handle.calls(),
+            [Request::PairNewHeadset, Request::SetCounting { counting }]
+        );
+        assert_eq!(handle.state().counting, Some(counting));
+        assert!(h.query_by_label(QUESTION).is_none());
+        open(&mut h, Page::FirstRun);
+        assert!(h.query_by_label(QUESTION).is_none());
+        open(&mut h, Page::Overview);
+        press_as(&mut h, Some(Role::Switch), SWITCH);
+        assert_eq!(
+            handle.calls().last(),
+            Some(&Request::SetCounting { counting: other })
+        );
+    }
+    // Where this build or run never counts, nothing is asked or shown.
+    let (mut h, _) = window(
+        Mock::connected().edit(|s| s.counting = None),
+        Setup::default(),
+    );
+    open(&mut h, Page::Overview);
+    assert!(h.query_by_label(QUESTION).is_none());
+    assert!(h.query_by_role_and_label(Role::Switch, SWITCH).is_none());
+}
+
+/// The question's link opens the privacy policy in the window's language.
+#[test]
+fn the_counting_question_links_the_privacy_policy() {
+    let unasked = |s: &mut prostir_window::api::State| s.counting = Some(Counting::Unasked);
+    let (mut h, handle) = window(
+        Mock::connected().edit(unasked),
+        Setup {
+            language: "en",
+            ..Setup::default()
+        },
+    );
+    h.get_by_label("Count this PC among Prostir's users?");
+    let link = h.get_by_label("Privacy policy").rect().center();
+    h.hover_at(link);
+    h.run_steps(2);
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos: link,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+    }
+    h.run_steps(1);
+    let opened: Vec<String> = h
+        .output()
+        .platform_output
+        .commands
+        .iter()
+        .filter_map(|c| match c {
+            egui::OutputCommand::OpenUrl(u) => Some(u.url.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        opened,
+        ["https://prostir.ishawyha.dev/privacy.html#counting"]
+    );
+    assert!(handle.calls().is_empty());
 }
