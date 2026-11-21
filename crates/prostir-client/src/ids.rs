@@ -10,7 +10,7 @@
 
 use std::fmt;
 
-use prostir_proto::state::{DisplayId, ReqId};
+use prostir_proto::state::DisplayId;
 
 /// A PC, by its key: the first 8 bytes of the SHA-256 of its public key (see
 /// `prostir_proto::secure::key_id`). The same between runs; never on the wire, the
@@ -88,8 +88,6 @@ impl fmt::Display for DisplayKey {
 pub enum Thing {
     /// A display of a PC.
     Display(DisplayKey),
-    /// The placeholder of a monitor a PC is asked to add, by the request.
-    Adding { pc: PcId, req: ReqId },
     /// The menu.
     Menu,
     /// The round button that opens the menu.

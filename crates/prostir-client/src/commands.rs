@@ -3,6 +3,8 @@
 //! headset's microphone switch is not among them: only the user changes it, in the
 //! headset (kind 9, which once set it, is retired and answered `UNSUPPORTED`).
 
+#![forbid(unsafe_code)]
+
 use prostir_proto::request::{Asked, Command};
 use prostir_proto::state::ErrorCode;
 

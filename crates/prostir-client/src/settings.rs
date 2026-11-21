@@ -1,5 +1,7 @@
 //! Headset-side preferences chosen in the menu, kept between launches.
 
+#![forbid(unsafe_code)]
+
 pub use crate::background::Sky;
 use crate::lang::{Lang, Language};
 

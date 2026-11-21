@@ -4,6 +4,8 @@
 //! the preset are settings over whatever profile is on, and stay as they are when one
 //! is switched to. Three slots, empty until the setup as it stands is saved into one.
 
+#![forbid(unsafe_code)]
+
 use glam::Vec3;
 use prostir_layout::space::Frame;
 use prostir_proto::state::Mode;

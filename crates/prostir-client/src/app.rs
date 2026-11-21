@@ -3273,7 +3273,6 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                     // In cinema nothing is kept; the rest are never held.
                     Thing::Menu
                     | Thing::Display(_)
-                    | Thing::Adding { .. }
                     | Thing::MenuButton
                     | Thing::Wrist
                     | Thing::Attach(_) => {}
@@ -3285,9 +3284,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                     Thing::Menu => Some(&mut scene.panel_place),
                     Thing::Keyboard => scene.keyboard_place.as_mut(),
                     Thing::Display(id) => scene.placements.get_mut(&id),
-                    Thing::Adding { .. } | Thing::MenuButton | Thing::Wrist | Thing::Attach(_) => {
-                        None
-                    }
+                    Thing::MenuButton | Thing::Wrist | Thing::Attach(_) => None,
                 };
                 let wall = scene.settings.preset == crate::settings::Preset::Wall
                     && !scene.settings.cinema;
@@ -3481,7 +3478,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         for pick in picks.iter().flatten() {
             let (radius, alpha) = match pick.0 {
                 Thing::Menu | Thing::MenuButton | Thing::Keyboard => (0.012, 0.55),
-                Thing::Display(_) | Thing::Adding { .. } => (0.03, 0.3),
+                Thing::Display(_) => (0.03, 0.3),
                 Thing::Attach(_) => (0.01, 0.5),
                 Thing::Wrist => (0.008, 0.55),
             };

@@ -3,6 +3,8 @@
 //! laptop's panel, a monitor whose cable is out) is never the one: showing it would
 //! show nothing.
 
+#![forbid(unsafe_code)]
+
 use prostir_proto::state::{Display, DisplayId, DisplayKind, DisplayState, Displays};
 
 use crate::lang::Texts;

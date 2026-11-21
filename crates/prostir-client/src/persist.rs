@@ -14,6 +14,8 @@
 //! over: a file this version does not read (an older version's, an empty one, one cut
 //! short) is set aside as `*.old` at the start, and the app starts without it.
 
+#![forbid(unsafe_code)]
+
 mod disk;
 
 use std::fmt;

@@ -5,6 +5,8 @@
 //! make and the PC desktop made of those is `prostir_layout`, the code the PC runs too;
 //! here the headset's state goes in and out of it.
 
+#![forbid(unsafe_code)]
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -881,37 +883,6 @@ impl Grab {
             placement.position = point - placement.rotation * offset;
             placement.rotation = facing(placement.position, head);
         }
-    }
-}
-
-#[cfg(test)]
-mod grab_tests {
-    use super::*;
-
-    #[test]
-    fn a_thing_held_near_follows_the_hand_one_to_one() {
-        let head = Vec3::new(0.0, 1.6, 0.0);
-        let mut p = Placement {
-            position: Vec3::new(0.0, 1.4, -0.6),
-            rotation: facing(Vec3::new(0.0, 1.4, -0.6), head),
-            width: 0.6,
-        };
-        let hand = Vec3::new(0.05, 1.35, -0.4);
-        let mut g = Grab::start(Thing::Menu, 0.2, Vec2::ZERO, &p).with_reach(hand, head);
-        let ray = |o: Vec3| Ray {
-            origin: o,
-            dir: -Vec3::Z,
-        };
-        g.update(&mut p, ray(hand), head, Vec2::ZERO, 0.01);
-        // Pulled 25 cm towards the user: the menu comes 25 cm closer.
-        g.update(
-            &mut p,
-            ray(hand + Vec3::new(0.0, 0.0, 0.25)),
-            head,
-            Vec2::ZERO,
-            0.01,
-        );
-        assert!((p.position.z - (-0.35)).abs() < 1e-4, "{:?}", p.position);
     }
 }
 
@@ -3293,5 +3264,36 @@ mod tests {
         let lined = line_up(&p, &owner, center, Preset::Arc, Some(1), &rows, None);
         let moved = farthest_corner(&p, &lined, &owner);
         assert!(moved < 1e-4, "Line up after following moves {moved} m");
+    }
+}
+
+#[cfg(test)]
+mod grab_tests {
+    use super::*;
+
+    #[test]
+    fn a_thing_held_near_follows_the_hand_one_to_one() {
+        let head = Vec3::new(0.0, 1.6, 0.0);
+        let mut p = Placement {
+            position: Vec3::new(0.0, 1.4, -0.6),
+            rotation: facing(Vec3::new(0.0, 1.4, -0.6), head),
+            width: 0.6,
+        };
+        let hand = Vec3::new(0.05, 1.35, -0.4);
+        let mut g = Grab::start(Thing::Menu, 0.2, Vec2::ZERO, &p).with_reach(hand, head);
+        let ray = |o: Vec3| Ray {
+            origin: o,
+            dir: -Vec3::Z,
+        };
+        g.update(&mut p, ray(hand), head, Vec2::ZERO, 0.01);
+        // Pulled 25 cm towards the user: the menu comes 25 cm closer.
+        g.update(
+            &mut p,
+            ray(hand + Vec3::new(0.0, 0.0, 0.25)),
+            head,
+            Vec2::ZERO,
+            0.01,
+        );
+        assert!((p.position.z - (-0.35)).abs() < 1e-4, "{:?}", p.position);
     }
 }

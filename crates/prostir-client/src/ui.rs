@@ -1,6 +1,8 @@
 //! The floating menu panel. It is drawn on the CPU into an RGBA image and only
 //! re-uploaded when something changes (hover, a click, news from the host).
 
+#![forbid(unsafe_code)]
+
 use std::collections::HashMap;
 
 use fontdue::{Font, FontSettings, Metrics};

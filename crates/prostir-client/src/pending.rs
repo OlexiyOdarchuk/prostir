@@ -6,6 +6,8 @@
 //! waits for a request's answer, the 30 s limit, a disconnect, and a profile that
 //! places its monitors by their numbers or, failing that, within a time limit.
 
+#![forbid(unsafe_code)]
+
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
