@@ -4,8 +4,8 @@
 //! look at only; dragging an empty spot turns the view.
 
 use eframe::egui::{
-    self, Align2, Color32, CornerRadius, Key, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui,
-    Vec2, pos2, vec2,
+    self, Color32, CornerRadius, Key, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, Vec2, pos2,
+    vec2,
 };
 
 use crate::snap;
@@ -74,43 +74,156 @@ fn bounds(tiles: &[Tile]) -> Rect {
     })
 }
 
+/// The smallest font a tile's text goes down to before less of it is shown.
+const MIN_FONT: f32 = 9.0;
+/// Between the name and the size line.
+const LINE_GAP: f32 = 2.0;
+
+/// How a tile's text fits it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LabelFit {
+    /// The name's font size.
+    pub name: f32,
+    /// The size line's font size; none: the size line is left out.
+    pub size: Option<f32>,
+    /// The name is shortened with an ellipsis.
+    pub elided: bool,
+}
+
+/// The largest text that fits `room` (width, height): the name (at `body` down to
+/// [`MIN_FONT`]) over the size line (`body - small` smaller, not under
+/// [`MIN_FONT`]); where both do not fit even at the smallest, the name alone as large
+/// as it fits; then the name shortened at the smallest; nothing where not even one
+/// line of it fits. `measure(name, font)`: the size of the name (true) or of the size
+/// line (false) at that font size.
+pub fn fit_label(
+    room: Vec2,
+    body: f32,
+    small: f32,
+    has_size: bool,
+    measure: impl Fn(bool, f32) -> Vec2,
+) -> Option<LabelFit> {
+    let body = body.max(MIN_FONT);
+    let smaller = (body - small).max(0.0);
+    let steps = || {
+        let n = (body - MIN_FONT).ceil() as i32;
+        (0..=n).map(move |i| (body - i as f32).max(MIN_FONT))
+    };
+    if has_size {
+        for font in steps() {
+            let size_font = (font - smaller).max(MIN_FONT);
+            let (n, s) = (measure(true, font), measure(false, size_font));
+            if n.x <= room.x && s.x <= room.x && n.y + LINE_GAP + s.y <= room.y {
+                return Some(LabelFit {
+                    name: font,
+                    size: Some(size_font),
+                    elided: false,
+                });
+            }
+        }
+    }
+    for font in steps() {
+        let n = measure(true, font);
+        if n.x <= room.x && n.y <= room.y {
+            return Some(LabelFit {
+                name: font,
+                size: None,
+                elided: false,
+            });
+        }
+    }
+    // Shortened: at least a letter and the ellipsis across.
+    let n = measure(true, MIN_FONT);
+    (n.y <= room.y && room.x >= MIN_FONT * 1.2).then_some(LabelFit {
+        name: MIN_FONT,
+        size: None,
+        elided: true,
+    })
+}
+
+/// `name` shortened with an ellipsis until `fits`: its ending kept where that tells
+/// similar names apart (`Pro…-3`, a number or a short last word), else its start
+/// (`Екран ноу…`). None where not even a letter and the ellipsis fit.
+pub fn shortened(name: &str, fits: impl Fn(&str) -> bool) -> Option<String> {
+    let chars: Vec<char> = name.chars().collect();
+    let tail = name
+        .rfind(['-', ' '])
+        .map(|i| name[i..].chars().count())
+        .filter(|n| (2..=5).contains(n) && *n < chars.len());
+    let head = |n: usize| chars[..n].iter().collect::<String>();
+    if let Some(tail) = tail {
+        let end: String = chars[chars.len() - tail..].iter().collect();
+        for n in (1..chars.len() - tail).rev() {
+            let s = format!("{}…{end}", head(n));
+            if fits(&s) {
+                return Some(s);
+            }
+        }
+    }
+    (1..chars.len())
+        .rev()
+        .map(|n| format!("{}…", head(n)))
+        .find(|s| fits(s))
+}
+
+/// A tile's name and size, in full.
+fn hover_text(t: &Tile) -> String {
+    if t.size.is_empty() {
+        t.name.clone()
+    } else {
+        format!("{}\n{}", t.name, t.size)
+    }
+}
+
 fn label(ui: &Ui, tk: &Tk<'_>, r: Rect, t: &Tile, color: Color32) {
-    let c = r.center();
-    // The name: smaller on a narrow monitor, and shortened with an ellipsis where
-    // even that does not fit.
-    let room = r.width() - 8.0;
-    if room < tk.th.type_.size_small || r.height() < tk.th.type_.size_small + 4.0 {
+    // Inside the tile, above the main monitor's bar.
+    let mut room = r.shrink2(vec2(6.0, 4.0));
+    if t.main {
+        room.max.y = (r.bottom() - 11.0).max(room.min.y);
+    }
+    if room.width() <= 0.0 || room.height() <= 0.0 {
         return;
     }
-    let fits = |font| {
-        let g = ui.painter().layout_no_wrap(t.name.clone(), font, color);
-        (g.size().x <= room).then_some(g)
+    let painter = ui.painter().with_clip_rect(r.intersect(ui.clip_rect()));
+    let font = |size: f32, name: bool| tk.font(size, name);
+    let galley = |text: &str, size: f32, name: bool| {
+        painter.layout_no_wrap(text.to_owned(), font(size, name), color)
     };
-    let name = fits(tk.body_m())
-        .or_else(|| fits(tk.small()))
-        .unwrap_or_else(|| {
-            let mut job =
-                egui::text::LayoutJob::simple_singleline(t.name.clone(), tk.small(), color);
-            job.wrap = egui::text::TextWrapping {
-                max_width: room,
-                max_rows: 1,
-                break_anywhere: true,
-                overflow_character: Some('…'),
-            };
-            ui.painter().layout_job(job)
+    let fit = fit_label(
+        room.size(),
+        tk.th.type_.size_body,
+        tk.th.type_.size_small,
+        !t.size.is_empty(),
+        |name, size| {
+            let text = if name { &t.name } else { &t.size };
+            galley(text, size, name).size()
+        },
+    );
+    let Some(fit) = fit else {
+        return;
+    };
+    let name = if fit.elided {
+        let short = shortened(&t.name, |s| {
+            galley(s, fit.name, true).size().x <= room.width()
         });
-    if r.height() < 52.0 || name.size().y < tk.th.type_.size_body {
-        ui.painter().galley(c - name.size() / 2.0, name, color);
+        let Some(short) = short else {
+            return;
+        };
+        galley(&short, fit.name, true)
     } else {
-        ui.painter()
-            .galley(c - name.size() / 2.0 - vec2(0.0, 10.0), name, color);
-        ui.painter().text(
-            c + vec2(0.0, 11.0),
-            Align2::CENTER_CENTER,
-            &t.size,
-            tk.small(),
-            faded(color, 0.85),
-        );
+        galley(&t.name, fit.name, true)
+    };
+    let size = fit
+        .size
+        .map(|s| painter.layout_no_wrap(t.size.clone(), font(s, false), faded(color, 0.85)));
+    let height = name.size().y + size.as_ref().map_or(0.0, |g| LINE_GAP + g.size().y);
+    let mut y = room.center().y - height / 2.0;
+    let x = |w: f32| room.center().x - w / 2.0;
+    let name_height = name.size().y;
+    painter.galley(pos2(x(name.size().x), y), name, color);
+    y += name_height + LINE_GAP;
+    if let Some(g) = size {
+        painter.galley(pos2(x(g.size().x), y), g, color);
     }
 }
 
@@ -203,7 +316,11 @@ pub fn flat(
             None => to_screen(t.rect),
         }
         .shrink(gap);
-        let resp = ui.interact(r, id, Sense::click_and_drag());
+        let mut resp = ui.interact(r, id, Sense::click_and_drag());
+        if st.drag.is_none() {
+            // The whole name and size, also where the tile has room for less.
+            resp = resp.on_hover_text(hover_text(t));
+        }
         let h = ui.ctx().animate_bool_with_time(
             id.with("h"),
             resp.hovered(),
@@ -515,4 +632,116 @@ pub fn arc(
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
     }
     events
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// About as the window's font measures: 0.55 of the size across a letter, 1.25 of
+    /// it a line.
+    fn measure(name: &str, size: &str) -> impl Fn(bool, f32) -> Vec2 {
+        let (name, size) = (name.chars().count(), size.chars().count());
+        move |is_name, font| {
+            let n = if is_name { name } else { size };
+            vec2(n as f32 * 0.55 * font, font * 1.25)
+        }
+    }
+
+    fn fit(room: (f32, f32), name: &str, size: &str) -> Option<LabelFit> {
+        fit_label(
+            vec2(room.0, room.1),
+            15.0,
+            13.0,
+            !size.is_empty(),
+            measure(name, size),
+        )
+    }
+
+    /// Whatever is shown stays inside the room.
+    fn inside(room: (f32, f32), name: &str, size: &str, f: LabelFit) {
+        let m = measure(name, size);
+        let n = m(true, f.name);
+        let mut height = n.y;
+        if !f.elided {
+            assert!(n.x <= room.0, "{name} at {f:?} in {room:?}");
+        }
+        if let Some(s) = f.size {
+            let s = m(false, s);
+            assert!(s.x <= room.0, "{size} at {f:?} in {room:?}");
+            height += LINE_GAP + s.y;
+        }
+        assert!(height <= room.1, "{f:?} in {room:?}");
+        assert!(f.name >= MIN_FONT && f.size.is_none_or(|s| s >= MIN_FONT));
+    }
+
+    #[test]
+    fn a_wide_tile_has_both_lines_at_full_size() {
+        let f = fit((200.0, 100.0), "Prostir-1", "2560 × 1440").unwrap();
+        assert_eq!(
+            f,
+            LabelFit {
+                name: 15.0,
+                size: Some(13.0),
+                elided: false
+            }
+        );
+    }
+
+    /// A portrait or a scaled monitor: smaller text first, then the name alone, then
+    /// shortened; never outside the tile.
+    #[test]
+    fn a_narrow_tile_shrinks_the_text_then_drops_the_size_then_shortens() {
+        let (name, size) = ("Prostir-3", "1440 × 2560 · 125 %");
+        let shrunk = fit((110.0, 100.0), name, size).unwrap();
+        assert!(shrunk.name < 15.0 && shrunk.size.is_some() && !shrunk.elided);
+        inside((110.0, 100.0), name, size, shrunk);
+
+        let alone = fit((60.0, 100.0), name, size).unwrap();
+        assert_eq!(alone.size, None);
+        assert!(!alone.elided);
+        inside((60.0, 100.0), name, size, alone);
+
+        let short = fit((30.0, 100.0), name, size).unwrap();
+        assert!(short.elided);
+        assert_eq!(short.name, MIN_FONT);
+        inside((30.0, 100.0), name, size, short);
+    }
+
+    #[test]
+    fn a_low_tile_keeps_one_line_and_a_tiny_one_none() {
+        let (name, size) = ("Prostir-2", "2560 × 1440");
+        let one = fit((200.0, 20.0), name, size).unwrap();
+        assert_eq!(one.size, None);
+        inside((200.0, 20.0), name, size, one);
+        assert_eq!(fit((200.0, 8.0), name, size), None);
+        assert_eq!(fit((6.0, 100.0), name, size), None);
+    }
+
+    #[test]
+    fn a_shortened_name_keeps_what_tells_it_apart() {
+        let fits = |max: usize| move |s: &str| s.chars().count() <= max;
+        assert_eq!(shortened("Prostir-3", fits(6)).as_deref(), Some("Pro…-3"));
+        assert_eq!(shortened("Prostir-12", fits(5)).as_deref(), Some("P…-12"));
+        // No room for the ending: the start.
+        assert_eq!(shortened("Prostir-12", fits(3)).as_deref(), Some("Pr…"));
+        assert_eq!(
+            shortened("Екран ноутбука", fits(10)).as_deref(),
+            Some("Екран ноу…")
+        );
+        assert_eq!(shortened("Prostir-3", fits(1)), None);
+    }
+
+    #[test]
+    fn every_room_gets_text_that_fits_it() {
+        let (name, size) = ("Prostir-12", "3840 × 2160 · 150 %");
+        for w in (4..300).step_by(7) {
+            for h in (4..120).step_by(5) {
+                let room = (w as f32, h as f32);
+                if let Some(f) = fit(room, name, size) {
+                    inside(room, name, size, f);
+                }
+            }
+        }
+    }
 }

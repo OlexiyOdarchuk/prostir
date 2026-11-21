@@ -119,6 +119,7 @@ mon-selected = Selected monitor
 mon-none = Select a monitor on the map.
 mon-size = { $w } × { $h }
 mon-size-scaled = { $w } × { $h }, scale { $scale }%
+mon-size-at-scale = { $w } × { $h } · { $scale }%
 mon-scale = Scale
 mon-main = Main monitor
 mon-main-desc = The panel and new windows go here.

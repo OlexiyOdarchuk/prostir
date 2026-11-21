@@ -239,6 +239,22 @@ fn size(tk: &Tk<'_>, m: &Mode) -> String {
     tk.f("mon-size", &[("w", m.w.into()), ("h", m.h.into())])
 }
 
+/// On a tile of the map: `2560 × 1440`, and `2560 × 1440 · 125 %` with a scale (the
+/// tile is as large as the desktop has it, smaller at a larger scale).
+fn tile_size(tk: &Tk<'_>, m: &Mode) -> String {
+    if m.w == 0 || m.h == 0 || m.scale == 100 {
+        return size(tk, m);
+    }
+    tk.f(
+        "mon-size-at-scale",
+        &[
+            ("w", m.w.into()),
+            ("h", m.h.into()),
+            ("scale", m.scale.into()),
+        ],
+    )
+}
+
 /// `1920 × 1080, 125 %`; nothing for a size not known.
 fn size_scaled(tk: &Tk<'_>, m: &Mode) -> String {
     if m.w == 0 || m.h == 0 {

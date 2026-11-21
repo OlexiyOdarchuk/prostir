@@ -230,6 +230,37 @@ impl Mock {
         Self::with(s, true)
     }
 
+    /// Connected with five monitors at mixed scales, two of them upright, and the
+    /// laptop's screen: tiles as large as the desktop has them, some narrow.
+    pub fn many_monitors() -> Self {
+        let m = Self::connected();
+        {
+            let mut i = m.inner.lock().unwrap();
+            let scaled = |id, name, (w, h): (u32, u32), scale: u16, (x, y)| {
+                let logical = |px: u32| px * 100 / u32::from(scale);
+                Display {
+                    mode: Mode { w, h, scale },
+                    desk: Some(DeskRect {
+                        x,
+                        y,
+                        w: logical(w),
+                        h: logical(h),
+                    }),
+                    ..display(id, name, w, h, x, y)
+                }
+            };
+            i.state.displays = vec![
+                scaled(1, "Prostir-1", (2560, 1440), 100, (0, 560)),
+                scaled(2, "Prostir-2", (2560, 1440), 125, (2560, 704)),
+                scaled(3, "Prostir-3", (1440, 2560), 150, (4608, 0)),
+                scaled(5, "Prostir-4", (1440, 2560), 100, (5568, 0)),
+                scaled(6, "Prostir-12", (1920, 1080), 150, (7008, 1000)),
+                laptop(4),
+            ];
+        }
+        m
+    }
+
     /// Paired headsets, none connected: the monitors kept for the next one and the
     /// PC's own screen.
     pub fn waiting() -> Self {

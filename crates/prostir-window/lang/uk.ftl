@@ -116,6 +116,7 @@ mon-selected = Вибраний монітор
 mon-none = Виберіть монітор на карті.
 mon-size = { $w } × { $h }
 mon-size-scaled = { $w } × { $h }, масштаб { $scale } %
+mon-size-at-scale = { $w } × { $h } · { $scale } %
 mon-scale = Масштаб
 mon-main = Головний монітор
 mon-main-desc = Тут панель і нові вікна.
