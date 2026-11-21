@@ -227,12 +227,12 @@ cd prostir-*/
                   Пакети вище самі тягнуть GStreamer і PipeWire; з архівом встановіть їх самі (див. <a href="#requirements">Вимоги</a>).</li>
               </ul>
             </li>
-            <li>Запустіть Prostir з меню застосунків. Вікна в нього немає: у треї з'явиться іконка. Щоб він запускався разом із сеансом, увімкніть у меню трею «Запускати разом із системою».</li>
+            <li>Запустіть Prostir з меню застосунків: відкриється вікно налаштувань, а в треї з'явиться іконка. Перший запуск також вмикає запуск разом із сеансом; вимикає його «Запускати разом із системою» в меню трею.</li>
             <li>У Hyprland без uwsm запускайте його з конфігу. У <code>hyprland.conf</code>:
-<pre><code>exec-once = prostir</code></pre>
+<pre><code>exec-once = prostir serve</code></pre>
               або в <code>hyprland.lua</code>:
-<pre><code>hl.on("hyprland.start", function () hl.exec_cmd("prostir") end)</code></pre>
-              Якщо ставили з архіву й <code>~/.local/bin</code> немає у <code>PATH</code>, пишіть <code>~/.local/bin/prostir</code> замість <code>prostir</code>. Якщо ввімкнено <code>ecosystem:enforce_permissions</code>, дозвольте ще захоплення екрана, у <code>hyprland.conf</code>:
+<pre><code>hl.on("hyprland.start", function () hl.exec_cmd("prostir serve") end)</code></pre>
+              Якщо ставили з архіву й <code>~/.local/bin</code> немає у <code>PATH</code>, пишіть <code>~/.local/bin/prostir serve</code> замість <code>prostir serve</code>. Якщо ввімкнено <code>ecosystem:enforce_permissions</code>, дозвольте ще захоплення екрана, у <code>hyprland.conf</code>:
 <pre><code>permission = /usr/(local/)?bin/prostir|.*/\.local/bin/prostir, screencopy, allow</code></pre>
               або в <code>hyprland.lua</code>:
 <pre><code>hl.permission("/usr/(local/)?bin/prostir|.*/\\.local/bin/prostir", "screencopy", "allow")</code></pre></li>
@@ -347,11 +347,11 @@ sudo firewall-cmd --reload</code></pre>
         <div>
           <h3>NVIDIA, або шолом каже, що бракує кодера</h3>
           <p>Prostir кодує відеокартою через VA-API, а на NVIDIA через NVENC (плагін GStreamer <code>nvcodec</code>, експериментально й без перевірки). Коли ні те, ні те недоступне, він сам переходить на процесор і кодує через x264. Так буває без плагіна GStreamer <code>va</code>, коли не працює NVENC, і з Mesa, яку постачають Fedora й openSUSE: у ній немає кодування H.264 і HEVC.</p>
-          <p>Для кодування процесором потрібен <code>x264enc</code>: <code>gst-plugins-ugly</code> в Arch, <code>gstreamer1.0-plugins-ugly</code> у Debian і Ubuntu, <code>gstreamer1-plugins-ugly</code> з RPM Fusion у Fedora, <code>gstreamer-plugins-ugly</code> з Packman в openSUSE. Якщо не працює жоден спосіб, шолом покаже, чого бракує. <code class="nw">prostir --software</code> завжди кодує процесором.</p>
+          <p>Для кодування процесором потрібен <code>x264enc</code>: <code>gst-plugins-ugly</code> в Arch, <code>gstreamer1.0-plugins-ugly</code> у Debian і Ubuntu, <code>gstreamer1-plugins-ugly</code> з RPM Fusion у Fedora, <code>gstreamer-plugins-ugly</code> з Packman в openSUSE. Якщо не працює жоден спосіб, шолом покаже, чого бракує. <code class="nw">prostir serve --software</code> завжди кодує процесором.</p>
         </div>
         <div>
           <h3>Після запуску в Hyprland нічого не видно</h3>
-          <p>У Prostir немає вікна; його меню в треї, а власного трею Hyprland не має. Додайте панель із треєм, наприклад Waybar з модулем <code>tray</code>. Для сповіщень запустіть службу сповіщень, наприклад mako, dunst чи swaync.</p>
+          <p>Запущений з конфігу (<code>prostir serve</code>), Prostir працює у фоні з меню в треї, а власного трею Hyprland не має; <code>prostir</code> відкриває вікно налаштувань. Додайте панель із треєм, наприклад Waybar з модулем <code>tray</code>. Для сповіщень запустіть службу сповіщень, наприклад mako, dunst чи swaync.</p>
         </div>
         <div>
           <h3>На ПК не відкривається віконце сполучення</h3>

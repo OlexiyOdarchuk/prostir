@@ -227,12 +227,12 @@ cd prostir-*/
                   The packages above pull in GStreamer and PipeWire; with the tarball, install them yourself (see <a href="#requirements">Requirements</a>).</li>
               </ul>
             </li>
-            <li>Start Prostir from the application menu. It has no window: its icon appears in the tray. To start it with the session, turn on "Start with the system" in the tray menu.</li>
+            <li>Start Prostir from the application menu: its settings window opens, and its icon appears in the tray. The first start also sets it to start with the session; "Start with the system" in the tray menu turns that off.</li>
             <li>On Hyprland without uwsm, start it from the config instead. In <code>hyprland.conf</code>:
-<pre><code>exec-once = prostir</code></pre>
+<pre><code>exec-once = prostir serve</code></pre>
               or in <code>hyprland.lua</code>:
-<pre><code>hl.on("hyprland.start", function () hl.exec_cmd("prostir") end)</code></pre>
-              With the tarball, if <code>~/.local/bin</code> is not on your <code>PATH</code>, write <code>~/.local/bin/prostir</code> instead of <code>prostir</code>. If <code>ecosystem:enforce_permissions</code> is on, also allow screen capture, in <code>hyprland.conf</code>:
+<pre><code>hl.on("hyprland.start", function () hl.exec_cmd("prostir serve") end)</code></pre>
+              With the tarball, if <code>~/.local/bin</code> is not on your <code>PATH</code>, write <code>~/.local/bin/prostir serve</code> instead of <code>prostir serve</code>. If <code>ecosystem:enforce_permissions</code> is on, also allow screen capture, in <code>hyprland.conf</code>:
 <pre><code>permission = /usr/(local/)?bin/prostir|.*/\.local/bin/prostir, screencopy, allow</code></pre>
               or in <code>hyprland.lua</code>:
 <pre><code>hl.permission("/usr/(local/)?bin/prostir|.*/\\.local/bin/prostir", "screencopy", "allow")</code></pre></li>
@@ -347,11 +347,11 @@ sudo firewall-cmd --reload</code></pre>
         <div>
           <h3>NVIDIA, or the headset says an encoder is missing</h3>
           <p>Prostir encodes on the GPU through VA-API, or on NVIDIA through NVENC (the GStreamer <code>nvcodec</code> plugin, experimental and untested). When neither is available, it switches to the CPU and encodes with x264 by itself. This happens without the GStreamer <code>va</code> plugin, when NVENC does not work, and with the Mesa that Fedora and openSUSE ship, which leaves out H.264 and HEVC encoding.</p>
-          <p>The CPU path needs <code>x264enc</code>: <code>gst-plugins-ugly</code> on Arch, <code>gstreamer1.0-plugins-ugly</code> on Debian and Ubuntu, <code>gstreamer1-plugins-ugly</code> from RPM Fusion on Fedora, <code>gstreamer-plugins-ugly</code> from Packman on openSUSE. If neither path works, the headset shows what is missing. <code class="nw">prostir --software</code> always encodes on the CPU.</p>
+          <p>The CPU path needs <code>x264enc</code>: <code>gst-plugins-ugly</code> on Arch, <code>gstreamer1.0-plugins-ugly</code> on Debian and Ubuntu, <code>gstreamer1-plugins-ugly</code> from RPM Fusion on Fedora, <code>gstreamer-plugins-ugly</code> from Packman on openSUSE. If neither path works, the headset shows what is missing. <code class="nw">prostir serve --software</code> always encodes on the CPU.</p>
         </div>
         <div>
           <h3>Nothing appears after starting Prostir on Hyprland</h3>
-          <p>Prostir has no window; its menu is in the tray, and Hyprland has no tray of its own. Add a bar with one, for example Waybar with the <code>tray</code> module. For its notifications, run a notification daemon such as mako, dunst or swaync.</p>
+          <p>Started from the config (<code>prostir serve</code>), Prostir runs in the background with its menu in the tray, and Hyprland has no tray of its own; <code>prostir</code> opens its settings window. Add a bar with one, for example Waybar with the <code>tray</code> module. For its notifications, run a notification daemon such as mako, dunst or swaync.</p>
         </div>
         <div>
           <h3>No pairing dialog opens on the PC</h3>
