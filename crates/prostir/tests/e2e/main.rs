@@ -13,6 +13,7 @@ mod failures;
 mod goodbye;
 mod headsets;
 mod link;
+mod mcp;
 mod pc;
 mod requests;
 mod resize;

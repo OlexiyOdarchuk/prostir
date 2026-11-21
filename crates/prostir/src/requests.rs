@@ -39,7 +39,7 @@ pub fn outcome_of_job(
         Ok(id) => match answer {
             JobAnswer::Done => Outcome::Done,
             JobAnswer::Added => Outcome::Added { id },
-            JobAnswer::Saved(path) => Outcome::Saved {
+            JobAnswer::Saved { path, .. } => Outcome::Saved {
                 path: prostir_proto::state::clip(
                     &home_relative(&path),
                     prostir_proto::request::MAX_PATH,

@@ -17,6 +17,7 @@ mod layout;
 mod listen;
 mod local;
 mod login;
+mod mcp;
 mod outbox;
 mod pacing;
 mod pairing;
@@ -123,6 +124,8 @@ struct Brain {
     /// The settings window typed a code a headset shows: answered once the pairing
     /// attempt ends.
     code_reply: Option<api::Reply>,
+    /// Screenshots asked for on the local API, waiting for the desktop's worker.
+    shots: local::Shots,
     /// The person asked Prostir to quit (the tray, the local API), not a signal.
     quit_asked: bool,
     /// Connections whose session opens once the desktop's worker connected.
@@ -632,6 +635,10 @@ fn main() -> Result<()> {
             };
             ctl::run(&args, client.map_err(Clone::clone), &mut io)
         }
+        Some(Sub::Mcp) => {
+            quiet();
+            mcp::run()
+        }
     };
     std::process::exit(code);
 }
@@ -969,6 +976,7 @@ fn full_with(
         door,
         listening,
         code_reply: None,
+        shots: local::Shots::default(),
         quit_asked: false,
         waiting_desk: Vec::new(),
         desk_gave_up: false,

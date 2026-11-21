@@ -89,6 +89,9 @@ pub(super) enum Sub {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
         args: Vec<String>,
     },
+    /// The same over the Model Context Protocol on stdin and stdout, for an agent
+    /// (`claude mcp add prostir -- prostir mcp`).
+    Mcp,
 }
 
 #[derive(clap::Args, Debug)]

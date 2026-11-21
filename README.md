@@ -507,6 +507,7 @@ prostir
 prostir serve [--monitor WxH[@scale]]... [--codec h265|h264] [--bitrate MBPS] [--software]
               [--keep-primary] [--linger SECONDS] [--port PORT] [--no-discovery] [--no-adb]
 prostir ctl COMMAND [--json]
+prostir mcp
 ```
 
 `prostir`, which the menu entry runs, opens the settings window and starts Prostir in
@@ -535,6 +536,11 @@ busctl --user --timeout=35 call io.github.OlexiyOdarchuk.Prostir \
 
 The methods, signals, errors and the JSON of the state are in
 [LOCAL-API.md](LOCAL-API.md).
+
+`prostir mcp` gives an AI agent the same over the Model Context Protocol, so it can add
+monitors, arrange them, wait for them to run and look at a picture of one. For Claude
+Code: `claude mcp add prostir -- prostir mcp`. The tools are in
+[LOCAL-API.md](LOCAL-API.md#mcp-prostir-mcp).
 
 Without `--monitor`, Prostir brings back the monitors from the last session, each with
 its number, so the headset finds it where it was. They are stored in
