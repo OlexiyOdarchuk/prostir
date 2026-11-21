@@ -174,10 +174,9 @@ impl Asks {
 pub struct ProfileSwitch {
     pub req: ReqId,
     pub places: Vec<Placement>,
-    /// The tilt of the frame the places are in, the circle they stand on and the rows
-    /// they were in, as the profile keeps them (see `profiles::Profile`).
-    pub tilt: f32,
-    pub radius: f32,
+    /// The frame the places are in (none: in the room) and the rows they were in, as
+    /// the profile keeps them (see `profiles::Profile`).
+    pub frame: Option<crate::profiles::ProfileFrame>,
     pub rows: Vec<Vec<usize>>,
     pub ids: Option<Vec<DisplayKey>>,
     /// Until when it waits for its monitors to stream, once the PC made them.
@@ -199,8 +198,7 @@ impl ProfileSwitch {
         Self {
             req,
             places,
-            tilt: 0.0,
-            radius: crate::layout::RADIUS,
+            frame: None,
             rows: Vec::new(),
             ids: None,
             until: None,

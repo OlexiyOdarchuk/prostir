@@ -19,7 +19,7 @@ use prostir_layout::{place, rows, tidy};
 use prostir_proto::state::{DisplayId, Placed, Row};
 
 use crate::ids::{DisplayKey, Thing};
-use crate::persist::{self, LoadError};
+use crate::persist::{self, LoadError, Skipped};
 use crate::settings::Preset;
 
 pub use prostir_layout::circle::{OVERHEAD_PITCH, RADIUS};
@@ -935,34 +935,54 @@ impl Desk {
     /// 0123456789abcdef:3 -0.6 1.6 -1.2 0 0.2 0 0.98 0.77 2560x1440
     /// ```
     ///
-    /// A file this version does not write so is not read at all.
-    pub fn parse(text: &str) -> Result<Self, LoadError> {
+    /// A file without the format line is not read at all. Within, a line this
+    /// version does not know, or one whose value it cannot read, is passed over (and
+    /// counted in what comes back): a display without its line is placed afresh, the
+    /// center and the circle without theirs are the usual ones.
+    pub fn parse(text: &str) -> Result<(Self, Skipped), LoadError> {
         let mut saved = Arrangement::default();
         let mut cinema = None;
+        let mut skipped = Skipped::default();
         for (n, line) in persist::body(text)? {
-            let bad = LoadError::Line(n);
-            let (word, rest) = line.split_once(' ').ok_or(bad)?;
-            match word {
-                "center" if saved.center.is_none() => {
-                    saved.center = Some(parse_center(rest).ok_or(bad)?);
-                }
-                "radius" if saved.radius.is_none() => {
-                    saved.radius = Some(parse_radius(rest).ok_or(bad)?);
-                }
-                "cinema" if cinema.is_none() => cinema = Some(DisplayKey::parse(rest).ok_or(bad)?),
-                _ => {
-                    let key = DisplayKey::parse(word).ok_or(bad)?;
-                    let (p, size) = parse_place(rest, true).ok_or(bad)?;
-                    if saved.placements.insert(key, p).is_some() {
-                        return Err(bad);
-                    }
-                    if let Some(size) = size {
-                        saved.sizes.insert(key, size);
+            if line.is_empty() {
+                continue;
+            }
+            let (word, rest) = line.split_once(' ').unwrap_or((line, ""));
+            let read = match word {
+                "center" => {
+                    saved.center.is_none() && {
+                        saved.center = parse_center(rest);
+                        saved.center.is_some()
                     }
                 }
+                "radius" => {
+                    saved.radius.is_none() && {
+                        saved.radius = parse_radius(rest);
+                        saved.radius.is_some()
+                    }
+                }
+                "cinema" => {
+                    cinema.is_none() && {
+                        cinema = DisplayKey::parse(rest);
+                        cinema.is_some()
+                    }
+                }
+                _ => DisplayKey::parse(word)
+                    .filter(|key| !saved.placements.contains_key(key))
+                    .zip(parse_place(rest, true))
+                    .map(|(key, (p, size))| {
+                        saved.placements.insert(key, p);
+                        if let Some(size) = size {
+                            saved.sizes.insert(key, size);
+                        }
+                    })
+                    .is_some(),
+            };
+            if !read {
+                skipped.line(n);
             }
         }
-        Ok(Self { saved, cinema })
+        Ok((Self { saved, cinema }, skipped))
     }
 
     /// The desk arrangement as last kept.
@@ -987,16 +1007,20 @@ impl Desk {
         }
         let saved = &mut self.saved;
         saved.placements.clear();
-        saved.placements.extend(placements);
+        // Only what the file can say: a place that is not one (a float gone wrong) is
+        // left out, and the display is placed afresh next time.
+        saved
+            .placements
+            .extend(placements.into_iter().filter(|(_, p)| placed_well(p)));
         saved.sizes.clear();
         saved.sizes.extend(
             sizes
                 .iter()
-                .filter(|(id, _)| saved.placements.contains_key(id))
+                .filter(|(id, size)| saved.placements.contains_key(id) && size.0 > 0 && size.1 > 0)
                 .map(|(id, size)| (*id, *size)),
         );
-        saved.center = Some(center);
-        saved.radius = Some(radius);
+        saved.center = Some(center).filter(|(eye, yaw)| eye.is_finite() && yaw.is_finite());
+        saved.radius = Some(radius).filter(|r| r.is_finite() && *r > 0.1);
         true
     }
 
@@ -1049,25 +1073,30 @@ impl Desk {
     }
 }
 
-/// Where the keyboard window lies, as `keyboard.txt` keeps it:
+/// Where the keyboard window lies, as `keyboard.txt` keeps it (none: placed in front
+/// of the user when it shows):
 ///
 /// ```text
 /// format 2
 /// keyboard 0 0.8 -0.4 -0.71 0 0 0.71 0.42
 /// ```
-pub fn parse_keyboard(text: &str) -> Result<Placement, LoadError> {
+pub fn parse_keyboard(text: &str) -> Result<(Option<Placement>, Skipped), LoadError> {
     let mut place = None;
-    let mut last = 1;
+    let mut skipped = Skipped::default();
     for (n, line) in persist::body(text)? {
-        last = n;
+        if line.is_empty() {
+            continue;
+        }
         let p = line
             .strip_prefix("keyboard ")
             .and_then(|rest| parse_place(rest, false))
-            .filter(|_| place.is_none())
-            .ok_or(LoadError::Line(n))?;
-        place = Some(p.0);
+            .filter(|_| place.is_none());
+        match p {
+            Some((p, _)) => place = Some(p),
+            None => skipped.line(n),
+        }
     }
-    place.ok_or(LoadError::Line(last + 1))
+    Ok((place, skipped))
 }
 
 /// The text of `keyboard.txt` for the window at `place` (see [`parse_keyboard`]),
@@ -1119,7 +1148,11 @@ pub(crate) fn parse_place(text: &str, sized: bool) -> Option<(Placement, Option<
         None => None,
         Some(w) if sized => {
             let (w, h) = w.split_once('x')?;
-            Some((w.parse().ok()?, h.parse().ok()?))
+            let size: PixelSize = (w.parse().ok()?, h.parse().ok()?);
+            if size.0 == 0 || size.1 == 0 {
+                return None;
+            }
+            Some(size)
         }
         Some(_) => return None,
     };
@@ -1131,8 +1164,17 @@ pub(crate) fn parse_place(text: &str, sized: bool) -> Option<(Placement, Option<
         rotation: Quat::from_xyzw(n[3], n[4], n[5], n[6]).normalize(),
         width: n[7],
     };
-    (p.position.is_finite() && p.rotation.is_finite() && p.width.is_finite() && p.width > 0.0)
-        .then_some((p, size))
+    placed_well(&p).then_some((p, size))
+}
+
+/// A place the files can keep: a position and a turn that are numbers, a width above
+/// nothing.
+pub(crate) fn placed_well(p: &Placement) -> bool {
+    p.position.is_finite()
+        && p.rotation.is_finite()
+        && p.rotation.length_squared() > 1e-6
+        && p.width.is_finite()
+        && p.width > 0.0
 }
 
 /// The next `N` words as numbers, if they are.
@@ -2326,14 +2368,23 @@ mod tests {
     fn reread(desk: &Desk) -> Desk {
         let mut text = String::new();
         desk.write_text(&mut text);
-        Desk::parse(&text).unwrap()
+        reading(&text)
+    }
+
+    /// `text` read as `layout.txt`, with nothing passed over.
+    fn reading(text: &str) -> Desk {
+        let (desk, skipped) = Desk::parse(text).unwrap();
+        assert!(skipped.is_empty(), "{skipped:?} in {text:?}");
+        desk
     }
 
     /// `profiles` written to their file and read back.
     fn reread_profiles(profiles: &crate::profiles::Slots) -> crate::profiles::Slots {
         let mut text = String::new();
         crate::profiles::write_text(&mut text, profiles);
-        crate::profiles::parse(&text).unwrap()
+        let (back, skipped) = crate::profiles::parse(&text).unwrap();
+        assert!(skipped.is_empty(), "{skipped:?}");
+        back
     }
 
     /// `m` (number, width, height) as a profile takes the monitors: at 100 %.
@@ -2480,39 +2531,39 @@ mod tests {
         };
         let mut text = String::new();
         write_keyboard(&mut text, &place);
-        let back = parse_keyboard(&text).unwrap();
+        let back = parse_keyboard(&text).unwrap().0.unwrap();
         assert!(back.position.distance(place.position) < 1e-6);
         assert!(back.rotation.angle_between(place.rotation) < 1e-4);
         assert!((back.width - place.width).abs() < 1e-6);
         assert_eq!(text.lines().next(), Some(persist::FORMAT));
-        assert_eq!(parse_keyboard(""), Err(LoadError::Format));
-        assert_eq!(
-            parse_keyboard("format 2\ngarbage\n"),
-            Err(LoadError::Line(2))
-        );
-        assert_eq!(parse_keyboard("format 2\n"), Err(LoadError::Line(2)));
-        let twice = format!("{text}{}", text.lines().nth(1).unwrap());
-        assert_eq!(
-            parse_keyboard(&format!("{twice}\n")),
-            Err(LoadError::Line(3))
-        );
+        assert!(matches!(parse_keyboard(""), Err(LoadError::Format)));
+        let (none, skipped) = parse_keyboard("format 2\ngarbage\n").unwrap();
+        assert!(none.is_none() && skipped.first == Some(2));
+        let (none, skipped) = parse_keyboard("format 2\n").unwrap();
+        assert!(none.is_none() && skipped.is_empty());
+        // Twice: the first.
+        let twice = format!("{text}keyboard 0 0 -1 0 0 0 1 0.9\n");
+        let (first, skipped) = parse_keyboard(&twice).unwrap();
+        assert!((first.unwrap().width - 0.5).abs() < 1e-6 && skipped.first == Some(3));
         // As 0.1 wrote it.
-        assert_eq!(
+        assert!(matches!(
             parse_keyboard("0 0.1 1.2 -0.4 -0.56 0 0 0.83 0.5\n"),
             Err(LoadError::Format)
-        );
+        ));
     }
 
-    /// What `layout.txt` holds in format 2 comes back; a file of 0.1 (lines of a
-    /// number and eight more) is not read, nor one with a line it does not write: a
-    /// display twice, a number without its PC, a center or a radius twice, a size
-    /// that is not one, a width of nothing, a turn of nothing, words after the size.
+    /// What `layout.txt` holds in format 2 comes back. A file of 0.1 (lines of a
+    /// number and eight more) is not read at all. Within one, what this version does
+    /// not know or cannot read is passed over and counted, the rest read as without
+    /// it: a display twice keeps its first place, a line of a newer version, a number
+    /// without its PC, a center or a radius twice or that is not one, a size of
+    /// nothing, a width of nothing, a turn of nothing, words after the size.
     #[test]
     fn desk_format_2() {
         let text = "format 2\ncenter 0 1.6 0 0.25\nradius 1.3\ncinema 0123456789abcdef:12\n\
                     0123456789abcdef:3 -0.5 1.5 -0.9 0 0.2 0 0.98 1.38 2560x1440\n\
                     0123456789abcdef:12 0.5 1.5 -0.9 0 -0.2 0 0.98 1.03\n";
-        let desk = Desk::parse(text).unwrap();
+        let desk = reading(text);
         let saved = desk.arrangement();
         let pc = PcId::parse("0123456789abcdef").unwrap();
         let three = DisplayKey::new(pc, DisplayId(3));
@@ -2526,7 +2577,7 @@ mod tests {
         assert_eq!(desk.cinema(), Some(twelve));
         let mut again = String::new();
         desk.write_text(&mut again);
-        let back = Desk::parse(&again).unwrap();
+        let back = reading(&again);
         for (key, p) in &saved.placements {
             let q = back.arrangement().placements[key];
             assert!(q.position.distance(p.position) < 1e-6 && (q.width - p.width).abs() < 1e-6);
@@ -2536,6 +2587,11 @@ mod tests {
             "format 2\ncenter 0 1.6 0 0.25\nradius 1.3\ncinema 0123456789abcdef:12\n"
         ));
         assert_eq!(back.cinema(), Some(twelve));
+        // Another system's line ends, no end to the last line: the same.
+        let crlf = text.replace('\n', "\r\n");
+        let other = reading(crlf.trim_end());
+        assert_eq!(other.arrangement().placements.len(), 2);
+        assert_eq!(other.cinema(), Some(twelve));
         // A display gone takes the cinema's pick with it.
         let mut desk = back;
         assert!(desk.forget(&[twelve]));
@@ -2543,34 +2599,35 @@ mod tests {
         assert!(!desk.forget(&[twelve]));
         assert!(desk.pick_cinema(Some(three)) && !desk.pick_cinema(Some(three)));
         let old = "0 -0.5 -0.08 -0.9 0 0.2 0 0.98 1.38\n1 0.5 -0.08 -0.9 0 -0.2 0 0.98 1.03\n";
-        assert_eq!(Desk::parse(old).err(), Some(LoadError::Format));
+        assert!(matches!(Desk::parse(old), Err(LoadError::Format)));
         let place = "-0.5 1.5 -0.9 0 0.2 0 0.98 1.38";
-        for (bad, line) in [
-            (
-                format!("0123456789abcdef:3 {place}\n0123456789abcdef:3 {place}\n"),
-                3,
-            ),
-            (format!("3 {place}\n"), 2),
-            ("center 0 1.6 0 0\ncenter 0 1.6 0 0\n".to_owned(), 3),
-            ("radius 1.3\nradius 1.3\n".to_owned(), 3),
-            ("radius 0\n".to_owned(), 2),
-            ("cinema 12\n".to_owned(), 2),
-            (
-                "cinema 0123456789abcdef:3\ncinema 0123456789abcdef:3\n".to_owned(),
-                3,
-            ),
-            ("center 0 1.6 0\n".to_owned(), 2),
-            (format!("0123456789abcdef:3 {place} 2560\n"), 2),
-            ("0123456789abcdef:3 0 0 -1 0 0 0 1 0\n".to_owned(), 2),
-            ("0123456789abcdef:3 0 0 -1 0 0 0 0 1\n".to_owned(), 2),
-            (format!("0123456789abcdef:3 {place} 2560x1440 more\n"), 2),
-            ("mirror on\n".to_owned(), 2),
-            ("\n".to_owned(), 2),
+        let first = format!("0123456789abcdef:3 {place}\n");
+        for bad in [
+            "0123456789abcdef:3 0 0 -1 0 0 0 1 9\n".to_owned(),
+            format!("3 {place}\n"),
+            "lens 2\n".to_owned(),
+            "center 0 1.6 0 0\n".to_owned(),
+            "center 0 1.6 0\n".to_owned(),
+            "radius 0\n".to_owned(),
+            "cinema 12\n".to_owned(),
+            format!("0123456789abcdef:4 {place} 2560\n"),
+            format!("0123456789abcdef:4 {place} 0x0\n"),
+            "0123456789abcdef:4 0 0 -1 0 0 0 1 0\n".to_owned(),
+            "0123456789abcdef:4 0 0 -1 0 0 0 0 1\n".to_owned(),
+            format!("0123456789abcdef:4 {place} 2560x1440 more\n"),
         ] {
-            let text = format!("format 2\n{bad}");
+            let text = format!("format 2\ncenter 0 1.6 0 0.25\n{first}{bad}");
+            let (desk, skipped) = Desk::parse(&text).unwrap();
+            assert_eq!((skipped.count, skipped.first), (1, Some(4)), "{bad:?}");
+            let saved = desk.arrangement();
+            assert_eq!(saved.placements.len(), 1, "{bad:?}");
+            assert!(
+                (saved.placements[&three].width - 1.38).abs() < 1e-6,
+                "{bad:?}"
+            );
             assert_eq!(
-                Desk::parse(&text).err(),
-                Some(LoadError::Line(line)),
+                saved.center,
+                Some((Vec3::new(0.0, 1.6, 0.0), 0.25)),
                 "{bad:?}"
             );
         }
@@ -2578,13 +2635,106 @@ mod tests {
         let mut empty = String::new();
         Desk::default().write_text(&mut empty);
         assert_eq!(empty, "format 2\n");
-        assert!(
-            Desk::parse(&empty)
-                .unwrap()
-                .arrangement()
-                .placements
-                .is_empty()
+        assert!(reading(&empty).arrangement().placements.is_empty());
+    }
+
+    /// Two PCs with a display 3 each: two places, both kept and read back, and each
+    /// PC hears of its own displays only (a row of the other's alone is no row).
+    #[test]
+    fn two_pcs_with_a_display_of_one_number() {
+        let (a, b) = (PcId([0xa; 8]), PcId([0xb; 8]));
+        let (a3, b3) = (
+            DisplayKey::new(a, DisplayId(3)),
+            DisplayKey::new(b, DisplayId(3)),
         );
+        let p = |x: f32| Placement {
+            position: Vec3::new(x, 0.0, -1.2),
+            rotation: Quat::IDENTITY,
+            width: 0.8,
+        };
+        let mut desk = Desk::default();
+        desk.keep(
+            [(a3, p(-0.5)), (b3, p(0.5))],
+            &HashMap::new(),
+            ((Vec3::ZERO, 0.0), RADIUS),
+            false,
+        );
+        let back = reread(&desk);
+        assert_eq!(back.arrangement().placements.len(), 2);
+        assert!((back.arrangement().placements[&a3].position.x + 0.5).abs() < 1e-6);
+        assert!((back.arrangement().placements[&b3].position.x - 0.5).abs() < 1e-6);
+        let monitors = [(a3, 2560, 1440), (b3, 2560, 1440)];
+        let placements = back.arrangement().placements.clone();
+        let mut desktop = Desktop::of(
+            &placements,
+            &monitors,
+            (Vec3::ZERO, 0.0),
+            Preset::Arc,
+            Some(a3),
+            None,
+        );
+        assert_eq!(desktop.rows, vec![vec![a3, b3]]);
+        let to = |pc: PcId| move |k: DisplayKey| (k.pc == pc).then_some(k.id);
+        let for_a = desktop.wire(to(a));
+        assert_eq!(for_a.len(), 1);
+        assert_eq!(for_a[0].ids().collect::<Vec<_>>(), [DisplayId(3)]);
+        // B's display alone in a row: that row is no row of A's.
+        desktop.rows = vec![vec![b3], vec![a3]];
+        let for_a = desktop.wire(to(a));
+        assert_eq!(for_a.len(), 1);
+        assert_eq!(for_a[0].ids().collect::<Vec<_>>(), [DisplayId(3)]);
+        assert!(desktop.wire(to(PcId([0xc; 8]))).is_empty());
+    }
+
+    /// Whatever the arrangement (places that went wrong, sizes of nothing, a center
+    /// or a circle that is not one, displays of several PCs), what is kept is read back
+    /// whole: nothing passed over.
+    #[test]
+    fn any_desk_kept_reads_back() {
+        let mut rng = Rng(11);
+        let float = |rng: &mut Rng| match rng.next() % 12 {
+            0 => f32::NAN,
+            1 => f32::NEG_INFINITY,
+            _ => rng.float(-3.0, 3.0),
+        };
+        for case in 0..300 {
+            let n = rng.next() % 20;
+            let mut places = HashMap::new();
+            let mut sizes = HashMap::new();
+            for _ in 0..n {
+                let key = DisplayKey::new(
+                    PcId([(rng.next() % 3) as u8; 8]),
+                    DisplayId((rng.next() % 1000) as u32),
+                );
+                let p = Placement {
+                    position: Vec3::new(float(&mut rng), float(&mut rng), float(&mut rng)),
+                    rotation: Quat::from_rotation_y(float(&mut rng)),
+                    width: float(&mut rng).abs(),
+                };
+                places.insert(key, p);
+                sizes.insert(
+                    key,
+                    ((rng.next() % 3000) as u32, (rng.next() % 3000) as u32),
+                );
+            }
+            let mut desk = Desk::default();
+            let center = (Vec3::new(float(&mut rng), 1.0, 0.0), float(&mut rng));
+            desk.keep(places, &sizes, (center, float(&mut rng)), false);
+            let mut text = String::new();
+            desk.write_text(&mut text);
+            let (back, skipped) = Desk::parse(&text).unwrap();
+            assert!(skipped.is_empty(), "case {case}: {skipped:?}\n{text}");
+            assert_eq!(
+                back.arrangement().placements.len(),
+                desk.arrangement().placements.len(),
+                "case {case}"
+            );
+            assert_eq!(
+                back.arrangement().sizes,
+                desk.arrangement().sizes,
+                "case {case}"
+            );
+        }
     }
 
     /// A monitor that comes back with another resolution keeps the size of a pixel.
@@ -2804,7 +2954,7 @@ mod tests {
             .map(|x| x.0)
             .zip(profile.places.iter().copied())
             .collect();
-        let (placed, rows) = crate::profiles::standing(&made, profile.tilt, &profile.rows, now);
+        let (placed, rows) = crate::profiles::standing(&made, profile.frame, &profile.rows, now);
         (placed.into_iter().collect(), Desktop::history(rows))
     }
 
@@ -2964,11 +3114,11 @@ mod tests {
                 x.0
             );
         }
-        assert_eq!(profile.radius, 1.3);
+        assert_eq!(profile.frame.map(|f| f.radius), Some(1.3));
         assert_eq!(profile.rows, vec![vec![0, 1, 2]]);
         // Not in cinema: as it stands.
         let profile = of(&live(&at_desk), None);
-        assert_eq!(profile.radius, RADIUS);
+        assert_eq!(profile.frame.map(|f| f.radius), Some(RADIUS));
         assert!(profile.places[1].position.distance(at_desk[&1].position) < 1e-5);
         // Not every monitor placed: no places, no rows.
         let profile = of(&live(&view), None);

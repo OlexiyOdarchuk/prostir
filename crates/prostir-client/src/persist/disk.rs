@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 
 use log::warn;
 
-use super::{File, LoadError};
+use super::{Dirty, File, LoadError, Skipped};
 use crate::layout::{self, Desk, Placement};
 use crate::profiles::{self, Slots};
 use crate::settings::Settings;
@@ -75,7 +75,9 @@ fn start_after(dir: &Path, left_for: Duration) -> (Loaded, Saver) {
             None => writers.push((dir.to_owned(), start)),
         }
     }
-    (Loaded::read(dir), Saver::start(dir, start))
+    let loaded = Loaded::read(dir);
+    let saver = Saver::start(dir, start, loaded.untouched);
+    (loaded, saver)
 }
 
 /// Waits until the threads earlier starts left on `dir` end, for `within` at most,
@@ -107,6 +109,9 @@ pub struct Loaded {
     pub desk: Desk,
     pub profiles: Slots,
     pub keyboard: Option<Placement>,
+    /// Files that are there but could not be read nor set aside: not written in this
+    /// start, so what they hold is not lost.
+    pub untouched: Dirty,
 }
 
 impl Loaded {
@@ -115,39 +120,52 @@ impl Loaded {
     /// is set aside as `*.old` (see [`readable`]).
     fn read(dir: &Path) -> Self {
         let text = |file: File| std::fs::read_to_string(dir.join(file.name())).ok();
+        let mut untouched = Dirty::default();
         Self {
             settings: text(File::Settings)
                 .map(|t| Settings::parse(&t))
                 .unwrap_or_default(),
-            desk: readable(dir, File::Desk, Desk::parse).unwrap_or_default(),
-            profiles: readable(dir, File::Profiles, profiles::parse)
+            desk: readable(dir, File::Desk, Desk::parse, &mut untouched).unwrap_or_default(),
+            profiles: readable(dir, File::Profiles, profiles::parse, &mut untouched)
                 .unwrap_or_else(profiles::empty),
-            keyboard: readable(dir, File::Keyboard, layout::parse_keyboard),
+            keyboard: readable(dir, File::Keyboard, layout::parse_keyboard, &mut untouched)
+                .flatten(),
+            untouched,
         }
     }
 }
 
 /// What `file` in `dir` holds, read by `parse`; `None` when it is not there or cannot
-/// be read. A file `parse` does not read (an older version's, an empty one, one cut
-/// short) is renamed to `<name>.old` in its place, replacing an older one, and the app
-/// starts as if it were not there: the log says so, once.
+/// be read. Lines `parse` passed over are said in the log, once. A file `parse` does
+/// not read (no format line: an older version's, a newer format, an empty one), or
+/// one that cannot be read at all, is renamed to `<name>.old` in its place, replacing
+/// an older one, and the app starts as if it were not there: the log says so, once.
+/// One that cannot be set aside either is marked `untouched`: this start does not
+/// write it.
 fn readable<T>(
     dir: &Path,
     file: File,
-    parse: impl FnOnce(&str) -> Result<T, LoadError>,
+    parse: impl FnOnce(&str) -> Result<(T, Skipped), LoadError>,
+    untouched: &mut Dirty,
 ) -> Option<T> {
     let path = dir.join(file.name());
     let why = match std::fs::read_to_string(&path) {
         Ok(text) => match parse(&text) {
-            Ok(read) => return Some(read),
+            Ok((read, skipped)) => {
+                if let Some(first) = skipped.first {
+                    warn!(
+                        "{}: {} lines passed over (the first: line {first}), the rest read",
+                        path.display(),
+                        skipped.count
+                    );
+                }
+                return Some(read);
+            }
             Err(e) => e.to_string(),
         },
         Err(e) if e.kind() == io::ErrorKind::NotFound => return None,
         Err(e) if e.kind() == io::ErrorKind::InvalidData => "not text".to_owned(),
-        Err(e) => {
-            warn!("cannot read {}: {e}", path.display());
-            return None;
-        }
+        Err(e) => e.to_string(),
     };
     let old = dir.join(format!("{}.old", file.name()));
     match std::fs::rename(&path, &old) {
@@ -156,10 +174,13 @@ fn readable<T>(
             path.display(),
             old.display()
         ),
-        Err(e) => warn!(
-            "{} is not read ({why}), and cannot be set aside: {e}",
-            path.display()
-        ),
+        Err(e) => {
+            warn!(
+                "{} is not read ({why}), and cannot be set aside ({e}): it is not written in this start",
+                path.display()
+            );
+            untouched.mark(file);
+        }
     }
     None
 }
@@ -275,6 +296,8 @@ pub struct Saver {
     events: Receiver<PersistEvent>,
     /// Kept for writing in place when the thread is not there.
     to_app: Sender<PersistEvent>,
+    /// Files this start does not write (see [`Loaded::untouched`]).
+    untouched: Dirty,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -284,7 +307,7 @@ impl Saver {
     pub const STOPS_WITHIN: Duration = Duration::from_millis(300);
 
     /// Starts the thread, which writes the files in `dir` for start `start`.
-    fn start(dir: &Path, start: u64) -> Self {
+    fn start(dir: &Path, start: u64, untouched: Dirty) -> Self {
         let paths = File::ALL.map(|f| dir.join(f.name()));
         let shared = Arc::new(Shared::default());
         let (to_app, events) = mpsc::channel();
@@ -313,6 +336,7 @@ impl Saver {
             drafts: Default::default(),
             events,
             to_app,
+            untouched,
             thread,
         }
     }
@@ -321,6 +345,9 @@ impl Saver {
     /// the last time. A text of it still waiting is replaced. Without the thread (it
     /// could not start, or it ended) the file is written in place.
     pub fn save(&mut self, file: File, write: impl FnOnce(&mut String)) {
+        if self.untouched.has(file) {
+            return;
+        }
         let i = file.index();
         let Some(draft) = self.drafts.get_mut(i) else {
             return;
@@ -758,8 +785,7 @@ mod tests {
             primary: 0,
             shown: Vec::new(),
             places: Vec::new(),
-            tilt: 0.0,
-            radius: layout::RADIUS,
+            frame: None,
             rows: Vec::new(),
         });
         saver.save(File::Profiles, |out| profiles::write_text(out, &profiles));
@@ -791,23 +817,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A file this version does not read (0.1's, one without `format 2`, an empty
-    /// one, one cut in the middle of a line, rubbish, one with a line it does not
-    /// write) is set aside as `*.old`, whole, an older `*.old` replaced, and the start
-    /// goes on as without it.
+    /// A file that cannot be read nor set aside (here a folder where the file goes,
+    /// and another where `*.old` goes) is not written in this start: what it holds is
+    /// not lost.
+    #[test]
+    fn a_file_that_cannot_be_read_is_left_alone() {
+        let dir = folder("alone");
+        std::fs::create_dir_all(dir.join("layout.txt")).unwrap();
+        std::fs::write(dir.join("layout.txt").join("inside"), "kept").unwrap();
+        std::fs::create_dir_all(dir.join("layout.txt.old")).unwrap();
+        std::fs::write(dir.join("layout.txt.old").join("inside"), "kept").unwrap();
+        let (loaded, mut saver) = start_after(&dir, Duration::ZERO);
+        assert!(loaded.untouched.has(File::Desk) && !loaded.untouched.has(File::Settings));
+        saver.save(File::Desk, |out| out.push_str("format 2\n"));
+        saver.save(File::Settings, |out| out.push_str("mic off\n"));
+        assert!(saver.flush(Duration::from_secs(10)));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("layout.txt").join("inside")).unwrap(),
+            "kept"
+        );
+        assert_eq!(read(&dir, File::Settings), "mic off\n");
+        drop(saver);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file this version does not read (0.1's, one without `format 2`, one of a
+    /// newer format, an empty one, rubbish) is set aside as `*.old`, whole, an older
+    /// `*.old` replaced, and the start goes on as without it. One of this format with
+    /// a line it does not know is read, without that line, and kept.
     #[test]
     fn files_not_read_are_set_aside() {
         let dir = folder("aside");
         let desk = "format 2\ncenter 0 1.6 0 0\nradius 1.3\n\
                     0123456789abcdef:3 0 1.6 -1.2 0 0 0 1 0.8 2560x1440\n";
         let keyboard = "format 2\nkeyboard 0 0.8 -0.4 -0.7071 0 0 0.7071 0.42\n";
-        let not_read: [&[u8]; 6] = [
+        let not_read: [&[u8]; 5] = [
             b"center 0 1.6 0 0\n3 0 1.6 -1.2 0 0 0 1 0.8 2560x1440\n",
             b"",
-            b"format 2\ncenter 0 1.6 0 0\n0123456789abcdef:3 0 1.6 -1.2 0 0",
+            b"format 3\ncenter 0 1.6 0 0\n",
             b"\xff\xfe\x00rubbish",
-            b"format 2\nmirror on\n",
-            b"format 2\n3 0 1.6 -1.2 0 0 0 1 0.8\n",
+            b"\nformat 2\n",
         ];
         for (n, text) in not_read.iter().enumerate() {
             for file in [File::Desk, File::Profiles, File::Keyboard] {
@@ -825,9 +874,10 @@ mod tests {
                 assert_eq!(old, *text, "case {n}: whole");
             }
         }
-        // Files of this version are read, and the `*.old` ones stay as they are.
-        std::fs::write(dir.join(File::Profiles.name()), "format 2\n").unwrap();
-        std::fs::write(dir.join(File::Desk.name()), desk).unwrap();
+        // Files of this version are read, and the `*.old` ones stay as they are; a line
+        // a newer version added is passed over, and the file kept.
+        std::fs::write(dir.join(File::Profiles.name()), "format 2\nlens 2\n").unwrap();
+        std::fs::write(dir.join(File::Desk.name()), format!("{desk}lens 2\n")).unwrap();
         std::fs::write(dir.join(File::Keyboard.name()), keyboard).unwrap();
         let (loaded, saver) = start_after(&dir, Duration::ZERO);
         drop(saver);
@@ -841,7 +891,7 @@ mod tests {
         assert!((loaded.keyboard.unwrap().width - 0.42).abs() < 1e-6);
         assert_eq!(
             std::fs::read_to_string(dir.join(File::Desk.name())).unwrap(),
-            desk
+            format!("{desk}lens 2\n")
         );
         assert!(dir.join("layout.txt.old").exists());
         assert!(

@@ -914,13 +914,14 @@ impl Scene {
         let Some(switch) = &mut self.profile_switch else {
             return;
         };
-        let (tilt, radius, rows) = (switch.tilt, switch.radius, switch.rows.clone());
+        let (frame, rows) = (switch.frame, switch.rows.clone());
+        let radius = frame.map_or(layout::RADIUS, |f| f.radius);
         match switch.made(ids, Instant::now()) {
             Made::Places(made) if self.settings.cinema => {
                 self.profile_switch = None;
                 let mut desk = self.desk.arrangement().clone();
                 let at = desk.center.unwrap_or(self.center);
-                let (placed, rows) = profiles::standing(&made, tilt, &rows, at);
+                let (placed, rows) = profiles::standing(&made, frame, &rows, at);
                 for (id, p) in placed {
                     desk.placements.insert(id, p);
                     desk.sizes.remove(&id);
@@ -934,7 +935,7 @@ impl Scene {
                 // Seen from the user's eye now as they were from the eye they were
                 // saved around. Worked out here, once the monitors are made: following
                 // the head meanwhile moves the center.
-                let (placed, rows) = profiles::standing(&made, tilt, &rows, self.center);
+                let (placed, rows) = profiles::standing(&made, frame, &rows, self.center);
                 for (id, p) in placed {
                     self.placements.insert(id, p);
                     self.placed_for.remove(&id);
@@ -2347,6 +2348,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         desk,
         profiles: saved_profiles,
         keyboard: keyboard_place,
+        untouched: _,
     } = loaded;
     // This start's own: a new start in the same process begins afresh.
     let mic = Arc::new(Mic::new(settings.mic, app.clone()));
@@ -4698,8 +4700,7 @@ fn handle_action(
             // Placed once the PC answers with its monitors' numbers. Cinema, the
             // background, the curve and the preset are not the profile's: they stay.
             scene.profile_switch = req.map(|req| ProfileSwitch {
-                tilt: p.tilt,
-                radius: p.radius,
+                frame: p.frame,
                 rows: p.rows,
                 ..ProfileSwitch::new(req, p.places)
             });
