@@ -230,11 +230,32 @@ fn a_quick_off_and_on_keeps_the_new_recording() {
 }
 
 /// How many times the PC's thread that follows the sound system woke since it started.
+/// The kernel counts a wake when the thread goes to sleep again, so a thread that has
+/// just been woken (and, on a busy machine, not run yet) is counted only later.
 fn watcher_woke(pc: &Pc) -> Option<u64> {
     pc.wakeups()
         .into_values()
         .find(|(name, _)| name == "sound-events")
         .map(|(_, n)| n)
+}
+
+/// The count of [`watcher_woke`] once it stays the same for a while: the thread is
+/// asleep again after whatever woke it.
+fn watcher_asleep(pc: &Pc) -> u64 {
+    let until = Instant::now() + SOON;
+    let mut last = watcher_woke(pc).expect("no sound-events thread");
+    loop {
+        std::thread::sleep(Duration::from_millis(300));
+        let now = watcher_woke(pc).expect("the sound-events thread went");
+        if now == last {
+            return now;
+        }
+        assert!(
+            Instant::now() < until,
+            "the sound-events thread never sleeps"
+        );
+        last = now;
+    }
 }
 
 /// Whether the headset is asked for its microphone.
@@ -298,7 +319,7 @@ fn the_sound_watcher_sleeps_while_the_sound_is_idle() {
     // The first volume and its echo.
     headset.take_for(Duration::from_secs(1)).unwrap();
     for round in 0..2 {
-        let before = watcher_woke(&pc).expect("no sound-events thread");
+        let before = watcher_asleep(&pc);
         headset.take_for(Duration::from_secs(3)).unwrap();
         let after = watcher_woke(&pc).expect("the sound-events thread went");
         assert_eq!(
@@ -315,10 +336,13 @@ fn the_sound_watcher_sleeps_while_the_sound_is_idle() {
                 v.volume_asks.len() > asks
             })
             .unwrap();
-        assert!(
-            watcher_woke(&pc).unwrap() > after,
-            "the change did not wake it"
-        );
+        // The headset may be asked before the thread is asleep again, and only then
+        // is its wake counted.
+        let until = Instant::now() + SOON;
+        while watcher_woke(&pc).unwrap() <= after {
+            assert!(Instant::now() < until, "the change did not wake it");
+            std::thread::sleep(Duration::from_millis(20));
+        }
         headset.take_for(Duration::from_millis(500)).unwrap();
         assert_eq!(headset.view().volume_asks.len(), asks + 1);
     }
