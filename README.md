@@ -364,7 +364,7 @@ cargo build --release -p prostir
 # Quest: needs the Android SDK with the NDK and build-tools, and the Rust target
 rustup target add aarch64-linux-android
 ./scripts/build-apk.sh --install   # builds build/prostir.apk and installs it with adb
-# The app checks itself on the headset against a fake PC (not in store builds):
+# The app checks itself on the headset against a fake PC (every build but the store's):
 # numbers as key=value lines, exit code 0 when everything passed (the preview build
 # when it is installed; --help says more)
 ./scripts/selftest-headset.sh

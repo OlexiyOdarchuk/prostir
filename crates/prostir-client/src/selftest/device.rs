@@ -16,13 +16,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use android_activity::AndroidApp;
-use jni::objects::{JString, JValue};
+use jni::JNIEnv;
+use jni::objects::{JObject, JString, JValue};
 use log::{info, warn};
 use openxr as xr;
 use prostir_proto::state::{DisplayId, Gen, HeadsetCaps};
 use prostir_testkit::pc::{Clip, Event, FakePc, Happened, PcConfig, trust_each_other};
 
-use super::{Exit, Measured, Options, Probe, Report, Samples, check, is_app_thread};
+use super::{Exit, Measured, Options, Probe, Report, Samples, check, is_app_thread, lock};
 use crate::net::NetEvent;
 
 /// How many times `android_main` started in this process (the first is 1).
@@ -35,7 +36,7 @@ pub fn count_run() -> u32 {
 
 /// The OpenXR session must be focused (worn, the app in front) this soon.
 const FOCUS_WITHIN: Duration = Duration::from_secs(10);
-/// Every stream must show its first picture this soon after the session opened.
+/// Every stream must show its first picture this soon after the fake PC started.
 const PICTURES_WITHIN: Duration = Duration::from_secs(15);
 /// After it starts streaming, before measuring.
 const SETTLE: Duration = Duration::from_secs(2);
@@ -49,6 +50,88 @@ const EXTRA: Duration = Duration::from_secs(60);
 /// Frames kept for percentiles: two minutes at 120 Hz (a longer run keeps its first
 /// two minutes of frames; the counts go on).
 const FRAMES_KEPT: usize = 120 * 120;
+/// `Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY`: started again from the recent apps,
+/// with the intent of the last start, which must not run a selftest again.
+const FROM_HISTORY: i32 = 0x0010_0000;
+/// The monitors the fake PC streams (it picks clips for each).
+const MONITORS: usize = 2;
+
+/// The report's keys, in their order: a report that ends early has them all.
+const KEYS: &[&str] = &[
+    "selftest",
+    "app",
+    "pid",
+    "run",
+    "seconds",
+    "manufacturer",
+    "model",
+    "runtime",
+    "extensions",
+    "caps",
+    "decoders",
+    "streams_max",
+    "layers_max",
+    "volume_steps",
+    "refresh_rates",
+    "refresh_hz",
+    "period_ms",
+    "perf",
+    "threads_left",
+    "battery.start",
+    "connect_ms",
+    "snapshot_ms",
+    "stream.1.clip",
+    "stream.1.first_frame_ms",
+    "stream.1.frames",
+    "stream.1.sent",
+    "stream.2.clip",
+    "stream.2.first_frame_ms",
+    "stream.2.frames",
+    "stream.2.sent",
+    "decode_ms.p50",
+    "decode_ms.p95",
+    "decode_ms.p99",
+    "decode_ms.max",
+    "net_to_decoder_ms.p50",
+    "net_to_decoder_ms.p95",
+    "net_to_decoder_ms.p99",
+    "net_to_decoder_ms.max",
+    "keyframe_asked_ms",
+    "decoder_recovered_ms",
+    "surface_recreated_ms",
+    "stream_restart_ms",
+    "reconnect_ms",
+    "reconnect_picture_ms",
+    "frame_samples",
+    "frame_cpu_ms.p50",
+    "frame_cpu_ms.p95",
+    "frame_cpu_ms.p99",
+    "frame_cpu_ms.max",
+    "frame_wall_ms.p50",
+    "frame_wall_ms.p95",
+    "frame_wall_ms.p99",
+    "frame_wall_ms.max",
+    "frame_cpu_share.p95",
+    "frame_cpu_share.p99",
+    "menu_redraws",
+    "menu_redraw_ms.p95",
+    "menu_redraw_ms.max",
+    "menu_redraw_share.p95",
+    "menu_redraw_share.max",
+    "frames",
+    "frames_missed",
+    "frames_missed_moving",
+    "focus_lost",
+    "layers.max",
+    "persist_ms.max",
+    "alloc_per_frame",
+    "alloc_per_frame.max",
+    "alloc_all_threads_per_s",
+    "battery.end",
+    "fail",
+    "result",
+    "exit",
+];
 
 /// What the selftest asks the app to do, as a person would in the menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +170,7 @@ enum Phase {
 struct Seen {
     generation: Gen,
     started: Instant,
+    /// Its first picture out of the decoder.
     shown: Option<Instant>,
     /// The fake PC's session it belongs to.
     session: u32,
@@ -96,13 +180,11 @@ struct Seen {
 pub struct FrameStart {
     cpu: Duration,
     wall: Instant,
-    allocs: Option<u64>,
 }
 
 pub struct Selftest {
     options: Options,
     report: Report,
-    run: u32,
     begun: Instant,
     /// Set when it has to end before its scenario is over.
     exit: Option<Exit>,
@@ -111,47 +193,82 @@ pub struct Selftest {
     probe: Option<Arc<Mutex<Probe>>>,
     phase: Phase,
     phase_since: Instant,
+    focused: bool,
     focused_at: Option<Instant>,
+    focus_lost: u32,
     connected_at: Option<Instant>,
     displays_at: Option<Instant>,
     /// The fake PC's sessions so far, and the monitors of the last snapshot.
     sessions: u32,
     monitors: Vec<DisplayId>,
     streams: BTreeMap<DisplayId, Seen>,
-    first_frames: BTreeMap<DisplayId, f32>,
+    first_frames: BTreeMap<DisplayId, f64>,
+    /// The broken frame: its stream, number and when it went out.
     broken: Option<(DisplayId, Gen, u32, Instant)>,
-    keyframe_asked_ms: Option<f32>,
-    recovered_ms: Option<f32>,
-    restart: Option<(DisplayId, Instant)>,
-    restart_ms: Option<f32>,
+    keyframe_asked_ms: Option<f64>,
+    recovered_ms: Option<f64>,
+    restart: Option<DisplayId>,
+    restart_ms: Option<f64>,
     dropped_at: Option<Instant>,
-    reconnect_ms: Option<f32>,
-    reconnect_picture_ms: Option<f32>,
+    reconnect_ms: Option<f64>,
+    reconnect_picture_ms: Option<f64>,
+    /// The display period of the frame before, and of the first calm one.
     period: Option<Duration>,
+    steady_period: Option<Duration>,
     last_display_ns: Option<i64>,
     frame_cpu: Samples,
     frame_wall: Samples,
+    frame_share: Samples,
     menu_ms: Samples,
+    menu_share: Samples,
     allocs: Samples,
     persist_ms: Samples,
     missed_steady: u32,
     missed_moving: u32,
     frames: u64,
     layers_max: usize,
+    /// The main thread's allocations at the top of this pass of the main loop, and
+    /// whether the pass before drew a calm frame (its allocations then count).
+    allocs_at_top: Option<u64>,
+    calm_frame: bool,
     /// All threads' allocations and when, at the start of the calm part.
     allocs_all: Option<(u64, Instant)>,
-    allocs_all_per_s: Option<f32>,
+    allocs_all_per_s: Option<f64>,
     /// The menu's tab was switched (once, half way through its time).
     tab_switched: bool,
 }
 
-/// The `selftest` extra of the intent that started the activity, if there is one.
-fn intent_extra() -> Option<String> {
-    crate::mic::with_activity(|env, activity| {
+/// Runs `f` with the running activity (the Activity object of the NativeActivity,
+/// not the Application `ndk_context` holds), in a local frame of its own.
+fn with_activity<T>(
+    app: &AndroidApp,
+    f: impl FnOnce(&mut JNIEnv<'_>, &JObject<'_>) -> jni::errors::Result<T>,
+) -> Option<T> {
+    // SAFETY: the VM of the running NativeActivity.
+    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) }.ok()?;
+    let mut env = vm.attach_current_thread_permanently().ok()?;
+    // SAFETY: the activity's object, valid while the activity runs (this start).
+    let activity = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
+    let result = env.with_local_frame(16, |env| f(env, &activity));
+    if result.is_err() {
+        let _ = env.exception_describe();
+        let _ = env.exception_clear();
+    }
+    result.ok()
+}
+
+/// The `selftest` extra of the intent that started the activity, if there is one
+/// (not when it was started again from the recent apps with an old intent).
+fn intent_extra(app: &AndroidApp) -> Option<String> {
+    with_activity(app, |env, activity| {
         let intent = env
             .call_method(activity, "getIntent", "()Landroid/content/Intent;", &[])?
             .l()?;
         if intent.is_null() {
+            return Ok(None);
+        }
+        let flags = env.call_method(&intent, "getFlags", "()I", &[])?.i()?;
+        if flags & FROM_HISTORY != 0 {
             return Ok(None);
         }
         let key = env.new_string("selftest")?;
@@ -174,8 +291,8 @@ fn intent_extra() -> Option<String> {
 }
 
 /// `AudioManager.getStreamMaxVolume(STREAM_MUSIC)`: steps above silence.
-fn volume_steps() -> Option<i32> {
-    crate::mic::with_activity(|env, activity| {
+fn volume_steps(app: &AndroidApp) -> Option<i32> {
+    with_activity(app, |env, activity| {
         let name = env.new_string("audio")?;
         let manager = env
             .call_method(
@@ -244,7 +361,7 @@ fn threads_left() -> usize {
         .count()
 }
 
-/// The clips in the APK's `assets/selftest/` (development builds have them).
+/// The clips in the APK's `assets/selftest/` (every build but the store's has them).
 fn clips(app: &AndroidApp) -> Vec<Clip> {
     let assets = app.asset_manager();
     let Some(dir) = assets.open_dir(c"selftest") else {
@@ -278,16 +395,23 @@ fn clips(app: &AndroidApp) -> Vec<Clip> {
     clips
 }
 
+fn ms(d: Duration) -> f64 {
+    d.as_secs_f64() * 1000.0
+}
+
+fn battery() -> String {
+    crate::mic::battery().map_or_else(|| "none".into(), |(p, _)| p.to_string())
+}
+
 impl Selftest {
     /// A selftest, if the intent that started the app asks for one; `run` is which
     /// start in this process this is.
-    pub fn requested(run: u32) -> Option<Self> {
-        let extra = intent_extra()?;
+    pub fn requested(app: &AndroidApp, run: u32) -> Option<Self> {
+        let extra = intent_extra(app)?;
         let now = Instant::now();
         let mut test = Self {
             options: Options::default(),
             report: Report::default(),
-            run,
             begun: now,
             exit: None,
             fails: Vec::new(),
@@ -295,7 +419,9 @@ impl Selftest {
             probe: None,
             phase: Phase::Waiting,
             phase_since: now,
+            focused: false,
             focused_at: None,
+            focus_lost: 0,
             connected_at: None,
             displays_at: None,
             sessions: 0,
@@ -311,21 +437,36 @@ impl Selftest {
             reconnect_ms: None,
             reconnect_picture_ms: None,
             period: None,
+            steady_period: None,
             last_display_ns: None,
             frame_cpu: Samples::with_capacity(FRAMES_KEPT),
             frame_wall: Samples::with_capacity(FRAMES_KEPT),
+            frame_share: Samples::with_capacity(FRAMES_KEPT),
             menu_ms: Samples::with_capacity(1024),
+            menu_share: Samples::with_capacity(1024),
             allocs: Samples::with_capacity(FRAMES_KEPT),
             persist_ms: Samples::with_capacity(64),
             missed_steady: 0,
             missed_moving: 0,
             frames: 0,
             layers_max: 0,
+            allocs_at_top: None,
+            calm_frame: false,
             allocs_all: None,
             allocs_all_per_s: None,
             tab_switched: false,
         };
-        test.lay_out_report();
+        let r = &mut test.report;
+        r.lay_out(KEYS);
+        r.set("selftest", 1);
+        r.set("app", prostir_proto::app_version(env!("CARGO_PKG_VERSION")));
+        r.set("pid", std::process::id());
+        r.set("run", run);
+        r.set("manufacturer", property(c"ro.product.manufacturer"));
+        r.set("model", property(c"ro.product.model"));
+        r.set("perf", "default");
+        r.set("threads_left", threads_left());
+        r.set("battery.start", battery());
         match Options::parse(&extra) {
             Ok(options) => test.options = options,
             Err(e) => test.end_early(Exit::NoStart, &e),
@@ -333,40 +474,6 @@ impl Selftest {
         test.report.set("seconds", test.options.seconds);
         info!("selftest: {extra:?}, start {run} in this process");
         Some(test)
-    }
-
-    /// Every key in its place from the start, so reports read alike even when one
-    /// ends early.
-    fn lay_out_report(&mut self) {
-        let r = &mut self.report;
-        r.set("selftest", 1);
-        r.set("app", prostir_proto::app_version(env!("CARGO_PKG_VERSION")));
-        r.set("pid", std::process::id());
-        r.set("run", self.run);
-        r.set("manufacturer", property(c"ro.product.manufacturer"));
-        r.set("model", property(c"ro.product.model"));
-        for key in [
-            "runtime",
-            "extensions",
-            "caps",
-            "decoders",
-            "streams_max",
-            "layers_max",
-            "volume_steps",
-            "refresh_rates",
-            "refresh_hz",
-            "period_ms",
-        ] {
-            r.set(key, "none");
-        }
-        r.set("perf", "default");
-        r.set("connect_ms", "none");
-        r.set("snapshot_ms", "none");
-        r.set("threads_left", threads_left());
-        r.set(
-            "battery.start",
-            crate::mic::battery().map_or_else(|| "none".into(), |(p, _)| p.to_string()),
-        );
     }
 
     fn end_early(&mut self, exit: Exit, why: &str) {
@@ -394,11 +501,11 @@ impl Selftest {
                 &format!("cannot make {}: {e}", dir.display()),
             );
         }
-        let mut settings = crate::settings::Settings {
+        let settings = crate::settings::Settings {
             intro_seen: true,
+            last_tab: 0,
             ..crate::settings::Settings::default()
         };
-        settings.last_tab = 0;
         settings.save(&dir.join("settings.txt"));
         dir
     }
@@ -411,10 +518,7 @@ impl Selftest {
         }
         let clips = clips(app);
         if clips.is_empty() {
-            self.end_early(
-                Exit::NoStart,
-                "no clips in assets/selftest (a store build has none)",
-            );
+            self.end_early(Exit::NoStart, "no clips in assets/selftest");
             return None;
         }
         let pc_key = dir.join("fake-pc-identity");
@@ -429,7 +533,7 @@ impl Selftest {
             identity: pc_key,
             trusted: vec![headset],
             clips,
-            monitors: 2,
+            monitors: MONITORS,
             name: "Prostir selftest".into(),
         });
         match pc {
@@ -449,9 +553,10 @@ impl Selftest {
     }
 
     /// What the OpenXR runtime is and offers (every extension it lists, not only the
-    /// ones the app turns on).
+    /// ones the app turns on), and the system's volume steps.
     pub fn runtime(
         &mut self,
+        app: &AndroidApp,
         instance: &xr::Instance,
         system: xr::SystemId,
         available: &xr::ExtensionSet,
@@ -474,10 +579,9 @@ impl Selftest {
             self.report
                 .set("layers_max", p.graphics_properties.max_layer_count);
         }
-        self.report.set(
-            "volume_steps",
-            volume_steps().map_or_else(|| "none".into(), |s| s.to_string()),
-        );
+        if let Some(steps) = volume_steps(app) {
+            self.report.set("volume_steps", steps);
+        }
     }
 
     /// What the app says it decodes (fixed in this build).
@@ -510,9 +614,16 @@ impl Selftest {
     }
 
     pub fn session_state(&mut self, state: xr::SessionState) {
-        if state == xr::SessionState::FOCUSED && self.focused_at.is_none() {
+        let focused = state == xr::SessionState::FOCUSED;
+        if focused && self.focused_at.is_none() {
             self.focused_at = Some(Instant::now());
         }
+        // Losing the focus in the middle (the system menu, the headset taken off)
+        // makes the numbers incomparable.
+        if self.focused && !focused && !matches!(self.phase, Phase::Waiting | Phase::Done) {
+            self.focus_lost += 1;
+        }
+        self.focused = focused;
     }
 
     /// An event of the network thread, before the app handles it.
@@ -535,12 +646,22 @@ impl Selftest {
         }
     }
 
+    /// At the top of every pass of the main loop: a calm frame's allocations are all
+    /// of the main thread's from one top to the next.
+    pub fn loop_top(&mut self) {
+        let now = crate::alloc_count::main_thread();
+        if let (true, Some(before), Some(after)) = (self.calm_frame, self.allocs_at_top, now) {
+            self.allocs.add(after.saturating_sub(before) as f64);
+        }
+        self.allocs_at_top = now;
+        self.calm_frame = false;
+    }
+
     /// Right after `xrWaitFrame` returned.
     pub fn frame_start(&self) -> FrameStart {
         FrameStart {
             cpu: thread_cpu(),
             wall: Instant::now(),
-            allocs: crate::alloc_count::main_thread(),
         }
     }
 
@@ -554,23 +675,23 @@ impl Selftest {
         menu: Option<Duration>,
         layers: usize,
     ) {
-        let allocs = crate::alloc_count::main_thread()
-            .zip(start.allocs)
-            .map(|(b, a)| b.saturating_sub(a));
         let cpu = thread_cpu().saturating_sub(start.cpu);
         let wall = start.wall.elapsed();
-        if self.period.is_none() && !period.is_zero() {
-            self.report.set_ms("period_ms", Some(ms(period)));
-        }
-        self.period = Some(period).filter(|p| !p.is_zero()).or(self.period);
+        let period = Some(period).filter(|p| !p.is_zero());
+        self.period = period.or(self.period);
         self.frames += 1;
         self.layers_max = self.layers_max.max(layers);
+        let share = |d: Duration| period.map(|p| d.as_secs_f64() / p.as_secs_f64());
         if let Some(menu) = menu {
             self.menu_ms.add(ms(menu));
+            if let Some(s) = share(menu) {
+                self.menu_share.add(s);
+            }
         }
-        let missed = self.last_display_ns.is_some_and(|last| {
-            (display_ns - last) as f64 > 1.5 * period.as_nanos() as f64 && !period.is_zero()
-        });
+        let missed = match (self.last_display_ns, period) {
+            (Some(last), Some(p)) => (display_ns - last) as f64 > 1.5 * p.as_nanos() as f64,
+            _ => false,
+        };
         self.last_display_ns = Some(display_ns);
         match self.phase {
             Phase::Steady => {
@@ -578,9 +699,10 @@ impl Selftest {
                 if menu.is_none() {
                     self.frame_cpu.add(ms(cpu));
                     self.frame_wall.add(ms(wall));
-                    if let Some(n) = allocs {
-                        self.allocs.add(n as f32);
+                    if let Some(s) = share(cpu) {
+                        self.frame_share.add(s);
                     }
+                    self.calm_frame = true;
                 }
             }
             Phase::Move => self.missed_moving += u32::from(missed),
@@ -596,6 +718,7 @@ impl Selftest {
     /// Once a pass of the main loop, frame or not: what the app should do now.
     pub fn step(&mut self) -> Act {
         self.take_pc_events();
+        self.take_pictures();
         let now = Instant::now();
         let in_phase = now - self.phase_since;
         if self.phase != Phase::Done
@@ -626,6 +749,8 @@ impl Selftest {
             }
             Phase::Settle if in_phase >= SETTLE => {
                 self.allocs_all = crate::alloc_count::all().map(|n| (n, now));
+                self.steady_period = self.period;
+                self.report.set_ms("period_ms", self.steady_period.map(ms));
                 self.next(Phase::Steady, now);
                 Act::Nothing
             }
@@ -634,7 +759,7 @@ impl Selftest {
                     (self.allocs_all, crate::alloc_count::all())
                 {
                     self.allocs_all_per_s =
-                        Some(after.saturating_sub(before) as f32 / (now - at).as_secs_f32());
+                        Some(after.saturating_sub(before) as f64 / (now - at).as_secs_f64());
                 }
                 self.next(Phase::Move, now);
                 Act::MoveMonitor
@@ -644,10 +769,7 @@ impl Selftest {
                 Act::OpenMenu
             }
             Phase::Menu if in_phase >= MENU_FOR * 2 => {
-                if let Some(id) = self.monitors.first().copied()
-                    && let Some(pc) = &self.pc
-                    && pc.send_broken_frame(id)
-                {
+                if self.break_a_frame() {
                     self.next(Phase::Broken, now);
                 } else {
                     self.end_early(Exit::Fail, "the fake PC has no session to break a frame in");
@@ -659,15 +781,15 @@ impl Selftest {
                 Act::SwitchTab
             }
             Phase::Broken if self.recovered_ms.is_some() || in_phase >= RECOVER_WITHIN => {
-                if let Some(id) = self
+                let id = self
                     .monitors
                     .get(1)
                     .or_else(|| self.monitors.first())
-                    .copied()
-                    && let Some(pc) = &self.pc
+                    .copied();
+                if let (Some(id), Some(pc)) = (id, &self.pc)
                     && pc.restart_stream(id)
                 {
-                    self.restart = Some((id, now));
+                    self.restart = Some(id);
                 }
                 self.next(Phase::Restart, now);
                 Act::Nothing
@@ -691,6 +813,21 @@ impl Selftest {
         }
     }
 
+    /// Has the fake PC send a frame the first monitor's decoder cannot take, with the
+    /// decoders' pictures of that stream watched from now on.
+    fn break_a_frame(&self) -> bool {
+        let Some(id) = self.monitors.first().copied() else {
+            return false;
+        };
+        let Some(generation) = self.streams.get(&id).map(|s| s.generation) else {
+            return false;
+        };
+        if let Some(probe) = &self.probe {
+            lock(probe).watch(id.0, generation.0);
+        }
+        self.pc.as_ref().is_some_and(|pc| pc.send_broken_frame(id))
+    }
+
     fn next(&mut self, phase: Phase, now: Instant) {
         info!("selftest: {phase:?}");
         self.phase = phase;
@@ -705,6 +842,43 @@ impl Selftest {
                     .get(id)
                     .is_some_and(|s| s.session == self.sessions && s.shown.is_some())
             })
+    }
+
+    /// What came out of the decoders since: first pictures, and the watched stream's
+    /// first picture after its broken frame.
+    fn take_pictures(&mut self) {
+        let Some(probe) = self.probe.clone() else {
+            return;
+        };
+        let p = lock(&probe);
+        for (id, s) in &mut self.streams {
+            if s.shown.is_some() {
+                continue;
+            }
+            let Some(&at) = p.first.get(&(id.0, s.generation.0)) else {
+                continue;
+            };
+            s.shown = Some(at);
+            let first = ms(at.saturating_duration_since(s.started));
+            if s.session == 1 && self.restart != Some(*id) {
+                self.first_frames.entry(*id).or_insert(first);
+            }
+            if self.restart == Some(*id) && s.session == 1 && self.restart_ms.is_none() {
+                self.restart_ms = Some(first);
+            }
+            if let Some(dropped) = self.dropped_at
+                && s.session > 1
+                && self.reconnect_picture_ms.is_none()
+            {
+                self.reconnect_picture_ms = Some(ms(at.saturating_duration_since(dropped)));
+            }
+        }
+        if let Some((_, _, bad, since)) = self.broken
+            && self.recovered_ms.is_none()
+            && let Some(&(_, at)) = p.watched.iter().find(|(seq, _)| *seq > bad)
+        {
+            self.recovered_ms = Some(ms(at.saturating_duration_since(since)));
+        }
     }
 
     fn take_pc_events(&mut self) {
@@ -724,11 +898,28 @@ impl Selftest {
                     && self.sessions > 1
                     && self.reconnect_ms.is_none()
                 {
-                    self.reconnect_ms = Some(ms(at - dropped));
+                    self.reconnect_ms = Some(ms(at.saturating_duration_since(dropped)));
                 }
             }
             Happened::Snapshot { monitors } => self.monitors = monitors,
-            Happened::StreamStarted { id, generation, .. } => {
+            Happened::StreamStarted {
+                id,
+                generation,
+                codec,
+                width,
+                height,
+            } => {
+                if self.sessions == 1 && !self.streams.contains_key(&id) {
+                    let n = self
+                        .monitors
+                        .iter()
+                        .position(|m| *m == id)
+                        .map_or(0, |k| k + 1);
+                    self.report.set(
+                        &format!("stream.{n}.clip"),
+                        format!("{codec:?} {width}x{height}"),
+                    );
+                }
                 self.streams.insert(
                     id,
                     Seen {
@@ -738,48 +929,6 @@ impl Selftest {
                         session: self.sessions,
                     },
                 );
-            }
-            Happened::Shown {
-                id,
-                generation,
-                seq,
-            } => {
-                let session = self.sessions;
-                let Some(s) = self
-                    .streams
-                    .get_mut(&id)
-                    .filter(|s| s.generation == generation && s.session == session)
-                else {
-                    return;
-                };
-                if s.shown.is_none() {
-                    s.shown = Some(at);
-                    let first = ms(at - s.started);
-                    if session == 1 {
-                        self.first_frames.entry(id).or_insert(first);
-                    }
-                    if let Some((r, _)) = self.restart
-                        && r == id
-                        && self.restart_ms.is_none()
-                        && session == 1
-                    {
-                        self.restart_ms = Some(first);
-                    }
-                    if let Some(dropped) = self.dropped_at
-                        && session > 1
-                        && self.reconnect_picture_ms.is_none()
-                    {
-                        self.reconnect_picture_ms = Some(ms(at - dropped));
-                    }
-                }
-                if let Some((b, g, bad, since)) = self.broken
-                    && b == id
-                    && g == generation
-                    && seq > bad
-                    && self.recovered_ms.is_none()
-                {
-                    self.recovered_ms = Some(ms(at - since));
-                }
             }
             Happened::BrokenSent {
                 id,
@@ -791,7 +940,7 @@ impl Selftest {
                     && (b, g) == (id, generation)
                     && self.keyframe_asked_ms.is_none()
                 {
-                    self.keyframe_asked_ms = Some(ms(at - since));
+                    self.keyframe_asked_ms = Some(ms(at.saturating_duration_since(since)));
                 }
             }
             _ => {}
@@ -803,6 +952,7 @@ impl Selftest {
     /// start runs in it), and the exit code otherwise.
     pub fn finish(mut self, external: Option<&Path>, error: Option<&anyhow::Error>) -> (bool, i32) {
         self.take_pc_events();
+        self.take_pictures();
         if let Some(e) = error {
             let exit = if self.focused_at.is_some() {
                 Exit::Fail
@@ -811,8 +961,12 @@ impl Selftest {
             };
             self.end_early(exit, &format!("{e:#}"));
         }
+        if self.exit.is_none() && self.phase != Phase::Done {
+            let phase = self.phase;
+            self.end_early(Exit::Fail, &format!("the app stopped during {phase:?}"));
+        }
         if let Some(pc) = self.pc.take() {
-            for (k, id) in self.monitors.clone().iter().enumerate() {
+            for (k, id) in self.monitors.iter().enumerate() {
                 self.report
                     .set(&format!("stream.{}.sent", k + 1), pc.frames_sent(*id));
             }
@@ -823,7 +977,10 @@ impl Selftest {
         let exit = match self.exit {
             Some(exit) => exit,
             None => {
-                let fails = check(&self.measured());
+                let mut fails = check(&self.measured());
+                if self.focus_lost > 0 {
+                    fails.push(format!("the focus was lost {} times", self.focus_lost));
+                }
                 self.fails.extend(fails);
                 if self.fails.is_empty() {
                     Exit::Pass
@@ -833,10 +990,7 @@ impl Selftest {
             }
         };
         let r = &mut self.report;
-        r.set(
-            "battery.end",
-            crate::mic::battery().map_or_else(|| "none".into(), |(p, _)| p.to_string()),
-        );
+        r.set("battery.end", battery());
         if !self.fails.is_empty() {
             r.set("fail", self.fails.join("; "));
         }
@@ -858,29 +1012,22 @@ impl Selftest {
     }
 
     fn measured(&self) -> Measured {
-        let share = |value: Option<f32>| {
-            let period = self.period.map(ms)?;
-            value.map(|v| v / period)
-        };
         Measured {
             first_frames_ms: self
                 .monitors
                 .iter()
                 .map(|id| self.first_frames.get(id).copied())
                 .collect(),
+            keyframe_asked_ms: self.keyframe_asked_ms,
             decoder_recovered_ms: self.recovered_ms,
             reconnect_ms: self.reconnect_ms,
-            frame_share_p95: share(self.frame_cpu.percentile(0.95)),
-            frame_share_p99: share(self.frame_cpu.percentile(0.99)),
-            menu_share_max: share(self.menu_ms.max()),
+            frame_share_p95: self.frame_share.percentile(0.95),
+            frame_share_p99: self.frame_share.percentile(0.99),
         }
     }
 
     fn fill_report(&mut self) {
-        let m = self.measured();
-        let probe = self.probe.take().map(|p| {
-            std::mem::take(&mut *p.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
-        });
+        let probe = self.probe.take().map(|p| std::mem::take(&mut *lock(&p)));
         let r = &mut self.report;
         for (k, id) in self.monitors.iter().enumerate() {
             let n = k + 1;
@@ -896,6 +1043,9 @@ impl Selftest {
         }
         if let Some(p) = &probe {
             for (key, h) in [("decode_ms", &p.decode), ("net_to_decoder_ms", &p.wait)] {
+                if h.count() == 0 {
+                    continue;
+                }
                 for (name, q) in [("p50", 0.5), ("p95", 0.95), ("p99", 0.99)] {
                     r.set_ms(&format!("{key}.{name}"), Some(ms(h.percentile(q))));
                 }
@@ -904,51 +1054,36 @@ impl Selftest {
         }
         r.set_ms("keyframe_asked_ms", self.keyframe_asked_ms);
         r.set_ms("decoder_recovered_ms", self.recovered_ms);
-        // The decoder's own fault hooks come with its rework (step 7.8b).
-        r.set("surface_recreated_ms", "none");
+        // The decoder's own fault hooks come with its rework (step 7.8b); until then
+        // this stays `none`.
         r.set_ms("stream_restart_ms", self.restart_ms);
         r.set_ms("reconnect_ms", self.reconnect_ms);
         r.set_ms("reconnect_picture_ms", self.reconnect_picture_ms);
+        r.set("frame_samples", self.frame_cpu.len());
         r.set_spread("frame_cpu_ms", &self.frame_cpu);
         r.set_spread("frame_wall_ms", &self.frame_wall);
-        let share = |v: Option<f32>| v.map(|v| format!("{v:.3}"));
-        r.set(
-            "frame_cpu_share.p95",
-            share(m.frame_share_p95).unwrap_or_else(|| "none".into()),
-        );
-        r.set(
-            "frame_cpu_share.p99",
-            share(m.frame_share_p99).unwrap_or_else(|| "none".into()),
-        );
-        r.set_ms("menu_redraw_ms.max", self.menu_ms.max());
-        r.set(
-            "menu_redraw_share.max",
-            share(m.menu_share_max).unwrap_or_else(|| "none".into()),
-        );
+        r.set_share("frame_cpu_share.p95", self.frame_share.percentile(0.95));
+        r.set_share("frame_cpu_share.p99", self.frame_share.percentile(0.99));
         r.set("menu_redraws", self.menu_ms.len());
+        r.set_ms("menu_redraw_ms.p95", self.menu_ms.percentile(0.95));
+        r.set_ms("menu_redraw_ms.max", self.menu_ms.max());
+        r.set_share("menu_redraw_share.p95", self.menu_share.percentile(0.95));
+        r.set_share("menu_redraw_share.max", self.menu_share.max());
         r.set("frames", self.frames);
         r.set("frames_missed", self.missed_steady);
         r.set("frames_missed_moving", self.missed_moving);
+        r.set("focus_lost", self.focus_lost);
         r.set("layers.max", self.layers_max);
         r.set_ms("persist_ms.max", self.persist_ms.max());
         match self.allocs.mean() {
             Some(mean) => r.set("alloc_per_frame", format!("{mean:.1}")),
             None => r.set("alloc_per_frame", "none"),
         }
-        r.set(
-            "alloc_per_frame.max",
-            self.allocs
-                .max()
-                .map_or_else(|| "none".into(), |m| format!("{m:.0}")),
-        );
-        r.set(
-            "alloc_all_threads_per_s",
-            self.allocs_all_per_s
-                .map_or_else(|| "none".into(), |a| format!("{a:.0}")),
-        );
+        if let Some(max) = self.allocs.max() {
+            r.set("alloc_per_frame.max", format!("{max:.0}"));
+        }
+        if let Some(a) = self.allocs_all_per_s {
+            r.set("alloc_all_threads_per_s", format!("{a:.0}"));
+        }
     }
-}
-
-fn ms(d: Duration) -> f32 {
-    d.as_secs_f32() * 1000.0
 }

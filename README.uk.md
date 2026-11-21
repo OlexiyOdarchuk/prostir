@@ -364,7 +364,7 @@ cargo build --release -p prostir
 # Quest: потрібні Android SDK з NDK і build-tools та ціль Rust
 rustup target add aarch64-linux-android
 ./scripts/build-apk.sh --install   # збирає build/prostir.apk і ставить через adb
-# Застосунок перевіряє себе в шоломі проти фальшивого ПК (не в збірці для магазину):
+# Застосунок перевіряє себе в шоломі проти фальшивого ПК (кожна збірка, крім збірки для магазину):
 # числа рядками ключ=значення, код виходу 0, коли все пройшло (збірка preview, якщо
 # вона стоїть; більше в --help)
 ./scripts/selftest-headset.sh

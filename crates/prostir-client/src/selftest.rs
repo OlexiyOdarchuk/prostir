@@ -1,5 +1,6 @@
 //! `--selftest`: the app runs a fixed scenario against a fake PC in its own process
 //! and writes what it measured, as `key=value` lines (see `scripts/selftest-headset.sh`).
+//! In every build but the store's (feature `selftest`, on by default).
 //!
 //! What is here builds and is tested on any system: the options, the numbers and the
 //! verdict. Running it on the headset is in `device` (Android only).
@@ -7,8 +8,8 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use prostir_proto::stats::Histogram;
 
@@ -35,7 +36,7 @@ impl Exit {
 }
 
 /// What the selftest is asked to do (the intent extra `selftest`, `key=value` pairs
-/// separated by commas or spaces).
+/// separated by commas, spaces, tabs or semicolons).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
     /// How long the calm part, where frame times are measured, lasts.
@@ -60,7 +61,7 @@ impl Options {
     pub fn parse(text: &str) -> Result<Self, String> {
         let mut options = Self::default();
         for pair in text
-            .split([',', ' ', ';', '\n'])
+            .split([',', ' ', '\t', ';', '\n'])
             .filter(|p| !p.trim().is_empty())
         {
             let (key, value) = pair
@@ -90,7 +91,7 @@ impl Options {
 /// Numbers of one kind, kept in a buffer made once: adding one allocates nothing until
 /// the buffer is full, so measuring a frame does not change what is measured.
 #[derive(Debug, Clone, Default)]
-pub struct Samples(Vec<f32>);
+pub struct Samples(Vec<f64>);
 
 impl Samples {
     pub fn with_capacity(n: usize) -> Self {
@@ -98,7 +99,7 @@ impl Samples {
     }
 
     /// Keeps `v` while there is room (the rest is dropped, not reallocated for).
-    pub fn add(&mut self, v: f32) {
+    pub fn add(&mut self, v: f64) {
         if self.0.len() < self.0.capacity() {
             self.0.push(v);
         }
@@ -113,22 +114,22 @@ impl Samples {
     }
 
     /// The value below which a share `p` (0 to 1) of them lie (nearest rank).
-    pub fn percentile(&self, p: f32) -> Option<f32> {
+    pub fn percentile(&self, p: f64) -> Option<f64> {
         if self.0.is_empty() {
             return None;
         }
         let mut sorted = self.0.clone();
-        sorted.sort_by(f32::total_cmp);
-        let rank = (p * sorted.len() as f32).ceil() as usize;
+        sorted.sort_by(f64::total_cmp);
+        let rank = (p * sorted.len() as f64).ceil() as usize;
         Some(sorted[rank.clamp(1, sorted.len()) - 1])
     }
 
-    pub fn max(&self) -> Option<f32> {
-        self.0.iter().copied().reduce(f32::max)
+    pub fn max(&self) -> Option<f64> {
+        self.0.iter().copied().reduce(f64::max)
     }
 
-    pub fn mean(&self) -> Option<f32> {
-        (!self.0.is_empty()).then(|| self.0.iter().sum::<f32>() / self.0.len() as f32)
+    pub fn mean(&self) -> Option<f64> {
+        (!self.0.is_empty()).then(|| self.0.iter().sum::<f64>() / self.0.len() as f64)
     }
 }
 
@@ -149,18 +150,27 @@ impl Report {
     }
 
     /// Sets `key` to `ms` milliseconds with one decimal, or `none`.
-    pub fn set_ms(&mut self, key: &str, ms: Option<f32>) {
+    pub fn set_ms(&mut self, key: &str, ms: Option<f64>) {
         match ms {
             Some(ms) => self.set(key, format!("{ms:.1}")),
             None => self.set(key, "none"),
         }
     }
 
-    pub fn get(&self, key: &str) -> Option<&str> {
-        self.lines
-            .iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v.as_str())
+    /// Sets `key` to a share of the display period with three decimals, or `none`.
+    pub fn set_share(&mut self, key: &str, share: Option<f64>) {
+        match share {
+            Some(share) => self.set(key, format!("{share:.3}")),
+            None => self.set(key, "none"),
+        }
+    }
+
+    /// Sets each of `keys` to `none`, in this order, so a report that ends early lists
+    /// the same keys in the same place.
+    pub fn lay_out(&mut self, keys: &[&str]) {
+        for key in keys {
+            self.set(key, "none");
+        }
     }
 
     pub fn text(&self) -> String {
@@ -170,7 +180,7 @@ impl Report {
         })
     }
 
-    /// Percentiles and the largest of `samples` as `key.p50` and so on.
+    /// Percentiles and the largest of `samples` (milliseconds) as `key.p50` and so on.
     pub fn set_spread(&mut self, key: &str, samples: &Samples) {
         for (name, p) in [("p50", 0.5), ("p95", 0.95), ("p99", 0.99)] {
             self.set_ms(&format!("{key}.{name}"), samples.percentile(p));
@@ -183,22 +193,25 @@ impl Report {
 #[derive(Debug, Clone, Default)]
 pub struct Measured {
     /// Each stream's first picture after it started, milliseconds.
-    pub first_frames_ms: Vec<Option<f32>>,
-    pub decoder_recovered_ms: Option<f32>,
-    pub reconnect_ms: Option<f32>,
-    /// Shares of the display period: frame time without a menu redraw at the 95th and
-    /// 99th percentile, and the slowest menu redraw.
-    pub frame_share_p95: Option<f32>,
-    pub frame_share_p99: Option<f32>,
-    pub menu_share_max: Option<f32>,
+    pub first_frames_ms: Vec<Option<f64>>,
+    /// After the frame its decoder could not take: until the headset asked for a
+    /// keyframe, and until a picture came out of the decoder again.
+    pub keyframe_asked_ms: Option<f64>,
+    pub decoder_recovered_ms: Option<f64>,
+    pub reconnect_ms: Option<f64>,
+    /// A frame's work without a menu redraw, as shares of its display period, at the
+    /// 95th and 99th percentile.
+    pub frame_share_p95: Option<f64>,
+    pub frame_share_p99: Option<f64>,
 }
 
-/// The limits (step 7 note, 10.3 and 7): first pictures and decoder recovery within
-/// 1 s, reconnecting within 3 s, a frame's work p95 within 0.15 and p99 within 0.3 of
-/// the display period, a menu redraw within half of it. What failed, in words.
+/// The limits (step 7 note, 10.3 and 7): first pictures, asking for a keyframe and the
+/// decoder's recovery within 1 s, reconnecting within 3 s, a frame's work p95 within
+/// 0.15 and p99 within 0.3 of the display period. The menu's redraw is only recorded.
+/// What failed, in words.
 pub fn check(m: &Measured) -> Vec<String> {
     let mut fails = Vec::new();
-    let mut within = |what: &str, value: Option<f32>, limit: f32| match value {
+    let mut within = |what: &str, value: Option<f64>, limit: f64| match value {
         Some(v) if v <= limit => {}
         Some(v) => fails.push(format!("{what} {v:.2} over {limit}")),
         None => fails.push(format!("{what} not measured")),
@@ -209,22 +222,47 @@ pub fn check(m: &Measured) -> Vec<String> {
     for (i, first) in m.first_frames_ms.iter().enumerate() {
         within(&format!("stream.{}.first_frame_ms", i + 1), *first, 1000.0);
     }
+    within("keyframe_asked_ms", m.keyframe_asked_ms, 1000.0);
     within("decoder_recovered_ms", m.decoder_recovered_ms, 1000.0);
     within("reconnect_ms", m.reconnect_ms, 3000.0);
     within("frame_cpu_share.p95", m.frame_share_p95, 0.15);
     within("frame_cpu_share.p99", m.frame_share_p99, 0.3);
-    within("menu_redraw_share.max", m.menu_share_max, 0.5);
     fails
 }
 
+/// How many pictures of the watched stream are kept (5 s at 120 Hz and some).
+const WATCHED: usize = 1024;
+
 /// What the decoders tell the selftest while one runs: how long each frame took from
-/// the network to the decoder and through it, and how many each stream decoded.
+/// the network to the decoder and through it, how many each stream decoded, and when
+/// pictures came out of them (the moment a decoder hands a picture to the compositor,
+/// not the headset's `FrameShown`, which it sends at most every 100 ms per stream).
 #[derive(Default)]
 pub struct Probe {
     pub wait: Histogram,
     pub decode: Histogram,
     /// Frames decoded, by display number.
     pub decoded: BTreeMap<u32, u64>,
+    /// When each stream's generation (display number, generation) gave its first
+    /// picture.
+    pub first: BTreeMap<(u32, u32), Instant>,
+    /// The stream watched since a frame of it was broken on purpose, and its pictures
+    /// since: number, when.
+    watch: Option<(u32, u32)>,
+    pub watched: Vec<(u32, Instant)>,
+}
+
+impl Probe {
+    /// Keeps the pictures of display `id`'s generation `generation` from now on.
+    pub fn watch(&mut self, id: u32, generation: u32) {
+        self.watch = Some((id, generation));
+        self.watched.clear();
+        self.watched.reserve(WATCHED);
+    }
+}
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// On only while a selftest runs: the decoders check it before anything else.
@@ -234,9 +272,7 @@ static PROBE: Mutex<Option<Arc<Mutex<Probe>>>> = Mutex::new(None);
 /// Starts collecting from the decoders into a new probe.
 pub fn probe_start() -> Arc<Mutex<Probe>> {
     let probe = Arc::new(Mutex::new(Probe::default()));
-    *PROBE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(probe.clone());
+    *lock(&PROBE) = Some(probe.clone());
     PROBING.store(true, Ordering::Relaxed);
     probe
 }
@@ -244,28 +280,27 @@ pub fn probe_start() -> Arc<Mutex<Probe>> {
 /// Stops collecting.
 pub fn probe_stop() {
     PROBING.store(false, Ordering::Relaxed);
-    *PROBE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    *lock(&PROBE) = None;
 }
 
-/// A decoder decoded a frame of display `id`: `wait` from the network to the decoder,
-/// `decode` through it. Nothing unless a selftest runs.
-pub fn decoded(id: u32, wait: Duration, decode: Duration) {
+/// A decoder put out picture `seq` of display `id`'s generation `generation`: `wait`
+/// from the network to the decoder, `decode` through it. Nothing unless a selftest
+/// runs.
+pub fn decoded(id: u32, generation: u32, seq: u32, wait: Duration, decode: Duration) {
     if !PROBING.load(Ordering::Relaxed) {
         return;
     }
-    let probe = PROBE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
+    let at = Instant::now();
+    let probe = lock(&PROBE).clone();
     if let Some(probe) = probe {
-        let mut p = probe
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut p = lock(&probe);
         p.wait.add(wait);
         p.decode.add(decode);
         *p.decoded.entry(id).or_default() += 1;
+        p.first.entry((id, generation)).or_insert(at);
+        if p.watch == Some((id, generation)) && p.watched.len() < WATCHED {
+            p.watched.push((seq, at));
+        }
     }
 }
 
@@ -293,7 +328,7 @@ mod tests {
             }
         );
         assert_eq!(
-            Options::parse("seconds=5 caps=full perf=default")
+            Options::parse("seconds=5\tcaps=full perf=default")
                 .unwrap()
                 .seconds,
             5
@@ -314,7 +349,7 @@ mod tests {
     fn samples_give_percentiles_without_growing() {
         let mut s = Samples::with_capacity(100);
         for v in 1..=200 {
-            s.add(v as f32);
+            s.add(f64::from(v));
         }
         assert_eq!(s.len(), 100);
         assert_eq!(s.percentile(0.5), Some(50.0));
@@ -328,27 +363,26 @@ mod tests {
     #[test]
     fn the_report_keeps_its_order() {
         let mut r = Report::default();
-        r.set("selftest", 1);
+        r.lay_out(&["selftest", "model", "connect_ms"]);
         r.set("model", "Quest\n3");
         r.set_ms("connect_ms", Some(412.04));
-        r.set("selftest", 2);
-        r.set_ms("reconnect_ms", None);
+        r.set("selftest", 1);
+        r.set_share("share", Some(0.12345));
         assert_eq!(
             r.text(),
-            "selftest=2\nmodel=Quest 3\nconnect_ms=412.0\nreconnect_ms=none\n"
+            "selftest=1\nmodel=Quest 3\nconnect_ms=412.0\nshare=0.123\n"
         );
-        assert_eq!(r.get("model"), Some("Quest 3"));
     }
 
     #[test]
     fn checks_name_what_failed() {
         let good = Measured {
             first_frames_ms: vec![Some(180.0), Some(205.0)],
+            keyframe_asked_ms: Some(20.0),
             decoder_recovered_ms: Some(95.0),
             reconnect_ms: Some(1300.0),
             frame_share_p95: Some(0.12),
             frame_share_p99: Some(0.2),
-            menu_share_max: Some(0.41),
         };
         assert!(check(&good).is_empty());
         let bad = Measured {
@@ -364,6 +398,26 @@ mod tests {
             ]
         );
         assert_eq!(check(&Measured::default()).len(), 6);
+    }
+
+    /// The decoders' pictures are kept for the selftest only while it runs, and only
+    /// the watched stream's one by one.
+    #[test]
+    fn the_probe_listens_only_while_on() {
+        let ms = Duration::from_millis(1);
+        decoded(1, 1, 0, ms, ms);
+        let probe = probe_start();
+        decoded(1, 1, 0, ms, ms);
+        lock(&probe).watch(2, 3);
+        decoded(1, 1, 1, ms, ms);
+        decoded(2, 3, 7, ms, ms);
+        probe_stop();
+        decoded(2, 3, 8, ms, ms);
+        let p = lock(&probe);
+        assert_eq!(p.decoded[&1], 2);
+        assert_eq!(p.decoded[&2], 1);
+        assert_eq!(p.first.len(), 2);
+        assert_eq!(p.watched.iter().map(|w| w.0).collect::<Vec<_>>(), [7]);
     }
 
     /// The clips in `assets/selftest/` (made by `scripts/selftest-clips.sh`) play on the

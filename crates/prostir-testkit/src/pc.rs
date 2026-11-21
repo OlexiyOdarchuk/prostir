@@ -10,9 +10,9 @@
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -223,6 +223,9 @@ struct Shared {
     events: Sender<Event>,
     current: Mutex<Option<Current>>,
     stop: AtomicBool,
+    /// The last generation of any stream: they never repeat, not even across
+    /// sessions, so what a headset reports of one is never taken for another's.
+    generation: AtomicU32,
     /// Frames sent, by display, over every session.
     frames: Mutex<std::collections::BTreeMap<DisplayId, u64>>,
 }
@@ -236,11 +239,13 @@ impl Shared {
     }
 
     fn command(&self, cmd: Cmd) -> bool {
-        self.current
-            .lock()
-            .unwrap()
+        lock(&self.current)
             .as_ref()
             .is_some_and(|c| c.cmds.send(cmd).is_ok())
+    }
+
+    fn next_generation(&self) -> Gen {
+        Gen(self.generation.fetch_add(1, Ordering::Relaxed) + 1)
     }
 }
 
@@ -265,6 +270,7 @@ impl FakePc {
             events: tx,
             current: Mutex::new(None),
             stop: AtomicBool::new(false),
+            generation: AtomicU32::new(0),
             frames: Mutex::default(),
         });
         let key = identity.public;
@@ -297,13 +303,7 @@ impl FakePc {
 
     /// Frames sent for display `id` so far, over every session.
     pub fn frames_sent(&self, id: DisplayId) -> u64 {
-        self.shared
-            .frames
-            .lock()
-            .unwrap()
-            .get(&id)
-            .copied()
-            .unwrap_or(0)
+        lock(&self.shared.frames).get(&id).copied().unwrap_or(0)
     }
 
     /// Instead of the next frame of display `id`, one bigger than its decoder takes:
@@ -319,7 +319,7 @@ impl FakePc {
 
     /// Hangs up without a word, as a PC that lost the network would.
     pub fn drop_connection(&self) -> bool {
-        match self.shared.current.lock().unwrap().as_ref() {
+        match lock(&self.shared.current).as_ref() {
             Some(c) => {
                 c.closer.close();
                 true
@@ -355,6 +355,12 @@ impl Drop for FakePc {
     }
 }
 
+/// A lock, also when a thread panicked holding it (the data is counts and handles,
+/// fine to go on with).
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// Makes the headset's and the fake PC's keys (if not there yet) and has the headset
 /// trust the PC: the headset's `identity` and `paired_hosts` files in `headset_dir`,
 /// the PC's key in `pc_identity`. The keys of the headset and of the PC.
@@ -383,7 +389,7 @@ fn serve(listener: &TcpListener, identity: &Identity, config: &PcConfig, shared:
         if let Err(e) = session(stream, identity, config, shared) {
             log::info!("fake PC: session ended: {e:#}");
         }
-        *shared.current.lock().unwrap() = None;
+        *lock(&shared.current) = None;
         shared.tell(Happened::Closed);
     }
 }
@@ -462,7 +468,7 @@ fn session(
     });
     receiver.set_idle_limit(Some(SILENCE));
     let (cmds, cmd_rx) = mpsc::channel();
-    *shared.current.lock().unwrap() = Some(Current {
+    *lock(&shared.current) = Some(Current {
         cmds: cmds.clone(),
         closer: closer.clone(),
     });
@@ -573,22 +579,18 @@ fn stream_until_over(
     shared: &Shared,
 ) -> Result<()> {
     let start = Instant::now();
-    let mut generation = 0u32;
     let mut streams: Vec<Streaming> = picked
         .iter()
         .enumerate()
-        .map(|(k, &clip)| {
-            generation += 1;
-            Streaming {
-                id: DisplayId(k as u32 + 1),
-                lane: lane::VIDEO + k as u8,
-                clip,
-                generation: Gen(generation),
-                seq: 0,
-                unit: 0,
-                next_due: start,
-                broken_next: false,
-            }
+        .map(|(k, &clip)| Streaming {
+            id: DisplayId(k as u32 + 1),
+            lane: lane::VIDEO + k as u8,
+            clip,
+            generation: shared.next_generation(),
+            seq: 0,
+            unit: 0,
+            next_due: start,
+            broken_next: false,
         })
         .collect();
     for s in &streams {
@@ -631,8 +633,7 @@ fn stream_until_over(
             }
             Ok(Cmd::Restart(id)) => {
                 if let Some(s) = streams.iter_mut().find(|s| s.id == id) {
-                    generation += 1;
-                    s.generation = Gen(generation);
+                    s.generation = shared.next_generation();
                     (s.seq, s.unit, s.broken_next) = (0, 0, false);
                     s.next_due = Instant::now();
                     start_stream(tx, config, s, shared)?;
@@ -708,8 +709,10 @@ fn send_frame(
     let seq = s.seq;
     let pts_us = u64::from(seq) * 1_000_000 / u64::from(clip.fps);
     let (keyframe, data) = if std::mem::take(&mut s.broken_next) {
-        // Twice what the decoder was set up to take in one frame.
-        let size = (clip.width as usize * clip.height as usize).max(2 << 20) * 2;
+        // Four times what the headset sets its decoder up to take in one frame
+        // (`max-input-size`: the picture's pixels, at least 2 MiB), so no decoder's
+        // rounded-up input buffer holds it: the frame is lost, as a broken one is.
+        let size = (clip.width as usize * clip.height as usize).max(2 << 20) * 4;
         shared.tell(Happened::BrokenSent {
             id: s.id,
             generation: s.generation,
@@ -739,7 +742,7 @@ fn send_frame(
             data,
         },
     )?;
-    *shared.frames.lock().unwrap().entry(s.id).or_default() += 1;
+    *lock(&shared.frames).entry(s.id).or_default() += 1;
     s.seq += 1;
     s.unit = (s.unit + 1) % clip.len();
     Ok(())
@@ -923,6 +926,37 @@ mod tests {
         wait_for(&pc, |h| *h == Happened::Closed);
         let again = FakeHeadset::connect(pc.addr(), &mut keys, None).unwrap();
         assert_eq!(again.view().order(), [DisplayId(1), DisplayId(2)]);
+        drop(again);
+        pc.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A goodbye reaches the headset with its reason, and the connection closes; a
+    /// stream's generation is new in the next session too.
+    #[test]
+    fn a_goodbye_ends_the_session() {
+        let dir = temp_dir("goodbye");
+        let (pc, mut keys) = started(&dir, 1);
+        let mut headset = FakeHeadset::connect(pc.addr(), &mut keys, None).unwrap();
+        headset
+            .wait(Duration::from_secs(5), "a stream", |v| {
+                !v.streams.is_empty()
+            })
+            .unwrap();
+        let first = headset.view().streams[&DisplayId(1)].generation;
+        assert!(pc.goodbye(prostir_proto::PcGoodbye::Quit.code()));
+        headset.wait_closed(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            headset.view().goodbye,
+            Some(prostir_proto::PcGoodbye::Quit.code())
+        );
+        let mut again = FakeHeadset::connect(pc.addr(), &mut keys, None).unwrap();
+        again
+            .wait(Duration::from_secs(5), "a stream", |v| {
+                !v.streams.is_empty()
+            })
+            .unwrap();
+        assert_ne!(again.view().streams[&DisplayId(1)].generation, first);
         drop(again);
         pc.stop();
         let _ = std::fs::remove_dir_all(&dir);

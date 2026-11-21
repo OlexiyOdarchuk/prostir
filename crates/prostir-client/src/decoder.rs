@@ -324,8 +324,9 @@ impl Timing {
         let (wait, decode) = (queued - received, queued.elapsed());
         self.wait.add(wait);
         self.decode.add(decode);
+        #[cfg(all(feature = "selftest", not(feature = "store")))]
         if let Some(stream) = self.stream {
-            crate::selftest::decoded(stream.id.0, wait, decode);
+            crate::selftest::decoded(stream.id.0, stream.generation.0, seq, wait, decode);
         }
     }
 

@@ -15,7 +15,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$ROOT/crates/prostir-client/assets/selftest"
 SECONDS_LONG=2
 FPS=60
-# Mbit/s: small files; the picture only has to decode, not look good.
+# kbit/s: small files; the picture only has to decode, not look good.
 KBPS=900
 
 for element in videotestsrc x264enc x265enc h264parse h265parse timeoverlay; do

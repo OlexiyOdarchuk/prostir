@@ -6,8 +6,8 @@
 # The app runs a fixed scenario against a fake PC in its own process (its own data,
 # nothing of the person's touched, no real PC involved): two monitors from the clips
 # in the APK, a monitor moved, the menu, a frame the decoder cannot take, a stream
-# started over, the connection dropped and back. Needs a development or preview
-# build (a store build has no clips).
+# started over, the connection dropped and back. Every build has the selftest but the
+# store's, which ignores it (no report comes: exit 3).
 #
 #   scripts/selftest-headset.sh [--seconds N] [--relaunch] [--package NAME] [--out DIR]
 #
@@ -15,8 +15,8 @@
 #                  3600 makes an hour's run for battery and heat
 #   --relaunch     the first run ends without leaving the process, a second start runs
 #                  in the same one: its report must have the same pid and run=2
-#   --package      the app to test: the preview build (dev.prostir.client.preview) if it
-#                  is installed, else dev.prostir.client
+#   --package      dev.prostir.client.preview (the preview build, the default when it
+#                  is installed) or dev.prostir.client (the default otherwise)
 #   --out DIR      where the reports and the app's log go (a new directory in /tmp)
 #
 # ANDROID_SERIAL picks the headset when adb sees several.
@@ -41,6 +41,10 @@ while [[ $# -gt 0 ]]; do
 done
 [[ "$SECONDS_CALM" =~ ^[0-9]+$ ]] && (( SECONDS_CALM >= 1 && SECONDS_CALM <= 7200 )) \
     || { echo "!! --seconds: 1 to 7200" >&2; exit 2; }
+case "$PACKAGE" in
+    "" | dev.prostir.client.preview | dev.prostir.client) ;;
+    *) echo "!! --package: dev.prostir.client.preview or dev.prostir.client" >&2; exit 2 ;;
+esac
 OUT="${OUT:-$(mktemp -d "${TMPDIR:-/tmp}/prostir-selftest.XXXXXX")}"
 mkdir -p "$OUT"
 
@@ -54,6 +58,10 @@ if [[ -z "$PACKAGE" ]]; then
 fi
 installed "$PACKAGE" \
     || { echo "!! $PACKAGE is not installed on the headset" >&2; exit 2; }
+if [[ "$PACKAGE" == dev.prostir.client ]]; then
+    echo ">> testing dev.prostir.client, the app used every day: it is stopped for the test" \
+        "(its own data stays as it is; the selftest keeps its own)"
+fi
 
 # Keeping the headset awake on a table, the way each maker allows: the proximity
 # sensor told it is worn. A headset not in this table has to be worn.
@@ -67,7 +75,13 @@ case "$MAKER" in
         echo ">> no known way to keep a $MAKER headset awake on a table: put it on, then press Enter"
         read -r ;;
 esac
+# Started and not finished: a selftest left running (Ctrl-C, no report in time) is
+# stopped, so its fake PC does not stream on.
+STARTED=0 FINISHED=0
 restore() {
+    if (( STARTED && !FINISHED )); then
+        shell am force-stop "$PACKAGE" >/dev/null || true
+    fi
     if [[ ${#PROX_OFF[@]} -gt 0 ]]; then
         shell "${PROX_OFF[@]}" >/dev/null || true
     fi
@@ -98,6 +112,13 @@ fetch() {
     return 1
 }
 
+# The exit code a report gives: its `exit=`, or 3 when that is not one of the codes.
+exit_of() {
+    local v
+    v="$(sed -n 's/^exit=//p' "$1" | tail -1)"
+    if [[ "$v" =~ ^[0-3]$ ]]; then echo "$v"; else echo 3; fi
+}
+
 start() {
     shell am start -n "$PACKAGE/android.app.NativeActivity" --es selftest "$1" >/dev/null
 }
@@ -116,11 +137,12 @@ sleep 1
 OPTIONS="seconds=$SECONDS_CALM"
 (( RELAUNCH )) && OPTIONS+=",relaunch=1"
 echo ">> $PACKAGE on a $MAKER $(shell getprop ro.product.model): selftest $OPTIONS (up to ${WAIT}s)"
+STARTED=1
 start "$OPTIONS"
 
 code=0
 if fetch "$OUT/selftest.txt"; then
-    code="$(sed -n 's/^exit=//p' "$OUT/selftest.txt")"
+    code="$(exit_of "$OUT/selftest.txt")"
 else
     echo "!! no report within ${WAIT}s" >&2
     code=3
@@ -133,7 +155,7 @@ if (( RELAUNCH )) && [[ -f "$OUT/selftest.txt" ]]; then
     echo ">> second start in the same process"
     start "seconds=$SECONDS_CALM"
     if fetch "$OUT/selftest-2.txt"; then
-        second="$(sed -n 's/^exit=//p' "$OUT/selftest-2.txt")"
+        second="$(exit_of "$OUT/selftest-2.txt")"
         (( second > code )) && code="$second"
         pid1="$(sed -n 's/^pid=//p' "$OUT/selftest.txt")"
         pid2="$(sed -n 's/^pid=//p' "$OUT/selftest-2.txt")"
@@ -147,6 +169,7 @@ if (( RELAUNCH )) && [[ -f "$OUT/selftest.txt" ]]; then
         code=3
     fi
 fi
+(( code < 3 )) && FINISHED=1
 
 read -r BATTERY_END TEMP_END <<<"$(battery)"
 adb logcat -d -T "$SINCE" 2>/dev/null | grep -E 'prostir' > "$OUT/logcat.txt" || true
@@ -161,6 +184,9 @@ echo "pc.device_battery.start=$BATTERY_START"
 echo "pc.device_battery.end=$BATTERY_END"
 echo "pc.device_temp_c.start=${TEMP_START:-none}"
 echo "pc.device_temp_c.end=${TEMP_END:-none}"
+# The app does not wait for its threads on exit yet, so threads_left is only written
+# down for now; it becomes a check once the app joins them.
+echo "pc.threads_left=recorded, not checked"
 echo "pc.out=$OUT"
 echo "pc.exit=$code"
 exit "$code"

@@ -1,4 +1,4 @@
-//! Counts allocations in development builds (a store build has none of this): all
+//! Counts allocations in every build but the store's (which has none of this): all
 //! threads together, and the main thread's alone, so the main loop can say how many
 //! a frame makes (in the log every 10 s, and the selftest's `alloc_per_frame`).
 
@@ -7,10 +7,15 @@ mod counting {
     use std::alloc::{GlobalAlloc, Layout, System};
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-    static ALL: AtomicU64 = AtomicU64::new(0);
-    static MAIN: AtomicU64 = AtomicU64::new(0);
+    /// A counter on a cache line of its own: every thread adds to `ALL`, and sharing a
+    /// line with the others would make each addition slower for all of them.
+    #[repr(align(64))]
+    struct Line<T>(T);
+
+    static ALL: Line<AtomicU64> = Line(AtomicU64::new(0));
+    static MAIN: Line<AtomicU64> = Line(AtomicU64::new(0));
     /// The main thread's `pthread_t`; 0 before it is known.
-    static MAIN_THREAD: AtomicUsize = AtomicUsize::new(0);
+    static MAIN_THREAD: Line<AtomicUsize> = Line(AtomicUsize::new(0));
 
     /// The system's allocator, counting.
     struct Counting;
@@ -21,9 +26,9 @@ mod counting {
     }
 
     fn note() {
-        ALL.fetch_add(1, Ordering::Relaxed);
-        if me() == MAIN_THREAD.load(Ordering::Relaxed) {
-            MAIN.fetch_add(1, Ordering::Relaxed);
+        ALL.0.fetch_add(1, Ordering::Relaxed);
+        if me() == MAIN_THREAD.0.load(Ordering::Relaxed) {
+            MAIN.0.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -59,15 +64,15 @@ mod counting {
     static COUNTING: Counting = Counting;
 
     pub fn set_main_thread() {
-        MAIN_THREAD.store(me(), Ordering::Relaxed);
+        MAIN_THREAD.0.store(me(), Ordering::Relaxed);
     }
 
     pub fn main_thread() -> Option<u64> {
-        Some(MAIN.load(Ordering::Relaxed))
+        Some(MAIN.0.load(Ordering::Relaxed))
     }
 
     pub fn all() -> Option<u64> {
-        Some(ALL.load(Ordering::Relaxed))
+        Some(ALL.0.load(Ordering::Relaxed))
     }
 }
 

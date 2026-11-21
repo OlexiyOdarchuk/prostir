@@ -36,7 +36,8 @@ cargo_flags=(--locked -p prostir-client --target aarch64-linux-android)
 # the APK). Builds from this repository leave both out.
 if [[ "${PROSTIR_STORE:-}" == 1 ]]; then
     : "${PROSTIR_PLATFORM_SDK:?set PROSTIR_PLATFORM_SDK to the unpacked Meta Platform SDK}"
-    cargo_flags+=(--features store)
+    # Without the selftest (and its fake PC) the default feature brings.
+    cargo_flags+=(--no-default-features --features store)
 fi
 [[ "$PROFILE" == release ]] && cargo_flags+=(--release)
 (cd "$ROOT" && cargo build "${cargo_flags[@]}")

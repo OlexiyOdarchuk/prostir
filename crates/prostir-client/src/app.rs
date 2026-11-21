@@ -34,11 +34,14 @@ use crate::net::{Feedback, NetEvent};
 use crate::overlay::{self, Overlay, Sphere};
 use crate::pending::{self, Asks, Made, ProfileSwitch};
 use crate::profiles::{self, Profile};
+#[cfg(all(feature = "selftest", not(feature = "store")))]
 use crate::selftest::device::{self as selftest, Act, Selftest};
 use crate::settings::{Background, HandMode, Settings};
 use crate::ui::{self, Action, MonitorEntry, Panel, Tab, UiState};
 use crate::xrutil::{self, Gfx, ImageLayer, as_layer, pose, posef, vec3};
 use crate::{background, decoder, egl, net, passthrough, physical};
+#[cfg(not(all(feature = "selftest", not(feature = "store"))))]
+use no_selftest::{self as selftest, Act, Selftest};
 
 /// The keyboard window's depth as a share of its width (a keyboard's shape).
 const KEYBOARD_ASPECT: f32 = 0.44;
@@ -132,7 +135,7 @@ pub fn android_main(app: AndroidApp) {
     );
     crate::alloc_count::set_main_thread();
     let start = selftest::count_run();
-    let mut test = Selftest::requested(start);
+    let mut test = Selftest::requested(&app, start);
     let result = run(&app, test.as_mut());
     if let Err(e) = &result {
         error!("{e:#}");
@@ -147,7 +150,9 @@ pub fn android_main(app: AndroidApp) {
                 .name("selftest-exit".into())
                 .spawn(move || {
                     std::thread::sleep(Duration::from_millis(500));
-                    std::process::exit(code);
+                    // SAFETY: ends the process at once, without the exit handlers
+                    // and destructors other threads may still be in the middle of.
+                    unsafe { libc::_exit(code) };
                 });
         }
     }
@@ -2011,7 +2016,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     let system = instance.system(xr::FormFactor::HEAD_MOUNTED_DISPLAY)?;
     let _ = instance.graphics_requirements::<Gfx>(system)?;
     if let Some(t) = test.as_deref_mut() {
-        t.runtime(&instance, system, &available);
+        t.runtime(app, &instance, system, &available);
         t.headset_caps(&headset_caps());
     }
 
@@ -2122,6 +2127,8 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         }
     }
     let _stop_network = StopNetwork(steering.clone());
+    // A selftest connects to its fake PC and nothing else, never to a real PC.
+    debug_assert!(test.is_none() || fake_pc.is_some());
     net::spawn(
         net_tx,
         net::Discovery {
@@ -2254,6 +2261,9 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     let mut allocations = crate::alloc_count::Tally::default();
 
     'main: loop {
+        if let Some(t) = test.as_deref_mut() {
+            t.loop_top();
+        }
         let mut destroy = false;
         let timeout = if session_running {
             Duration::ZERO
@@ -4398,6 +4408,117 @@ fn handle_action(
                 scene.settings.intro_seen = true;
                 scene.settings.save(settings_path);
             }
+        }
+    }
+}
+
+/// Builds without the selftest (the store's): the same calls, for a selftest that
+/// never exists, so they do nothing and cost nothing.
+#[cfg(not(all(feature = "selftest", not(feature = "store"))))]
+mod no_selftest {
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    use android_activity::AndroidApp;
+    use openxr as xr;
+    use prostir_proto::state::HeadsetCaps;
+
+    use crate::net::NetEvent;
+
+    pub fn count_run() -> u32 {
+        0
+    }
+
+    #[expect(
+        dead_code,
+        reason = "made only by a selftest, which this build has not"
+    )]
+    pub enum Act {
+        Nothing,
+        MoveMonitor,
+        OpenMenu,
+        SwitchTab,
+        CloseMenu,
+        Finish,
+    }
+
+    pub struct FrameStart;
+
+    /// No value of it can be made.
+    pub enum Selftest {}
+
+    impl Selftest {
+        pub fn requested(_app: &AndroidApp, _run: u32) -> Option<Self> {
+            None
+        }
+
+        pub fn finish(self, _: Option<&Path>, _: Option<&anyhow::Error>) -> (bool, i32) {
+            match self {}
+        }
+
+        pub fn runtime(
+            &self,
+            _: &AndroidApp,
+            _: &xr::Instance,
+            _: xr::SystemId,
+            _: &xr::ExtensionSet,
+        ) {
+            match *self {}
+        }
+
+        pub fn headset_caps(&self, _: &HeadsetCaps) {
+            match *self {}
+        }
+
+        pub fn data_dir(&self, _: &Path) -> PathBuf {
+            match *self {}
+        }
+
+        pub fn start_pc(&self, _: &AndroidApp, _: &Path) -> Option<std::net::SocketAddr> {
+            match *self {}
+        }
+
+        pub fn over(&self) -> bool {
+            match *self {}
+        }
+
+        pub fn session_state(&self, _: xr::SessionState) {
+            match *self {}
+        }
+
+        pub fn refresh(&self, _: Option<Vec<f32>>, _: Option<f32>) {
+            match *self {}
+        }
+
+        pub fn net_event(&self, _: &NetEvent) {
+            match *self {}
+        }
+
+        pub fn loop_top(&self) {
+            match *self {}
+        }
+
+        pub fn step(&self) -> Act {
+            match *self {}
+        }
+
+        pub fn frame_start(&self) -> FrameStart {
+            match *self {}
+        }
+
+        pub fn frame_end(
+            &self,
+            _: &FrameStart,
+            _: i64,
+            _: Duration,
+            _: Option<Duration>,
+            _: usize,
+        ) {
+            match *self {}
+        }
+
+        pub fn saved(&self, _: Duration) {
+            match *self {}
         }
     }
 }
