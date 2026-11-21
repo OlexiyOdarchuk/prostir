@@ -2397,7 +2397,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         for pick in picks.iter().flatten() {
             let (radius, alpha) = match pick.thing {
                 Thing::Menu | Thing::MenuButton | Thing::Keyboard => (0.012, 0.55),
-                Thing::Display(_) => (0.03, 0.3),
+                Thing::Display(_) | Thing::Adding { .. } => (0.03, 0.3),
                 Thing::Attach(_) => (0.01, 0.5),
                 Thing::Wrist => (0.008, 0.55),
             };

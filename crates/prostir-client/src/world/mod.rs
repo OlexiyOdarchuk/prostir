@@ -2,10 +2,12 @@
 //! by. The presets, "Line up", the magnet, "move all together", following the head,
 //! cinema apart from the desk arrangement, the easing of what is drawn towards where
 //! it goes, the placeholder of a monitor being added, and the places of the menu, its
-//! button and the keyboard window; and what a ray points at.
+//! button and the keyboard window; and what a ray points at, by what is drawn.
 //!
 //! It keeps two places of each display: where it goes (`placements`) and where it is
-//! drawn now (`shown`), which eases after it.
+//! drawn now (`shown`), which eases after it. What a ray hits and what a hand takes is
+//! what is drawn: a monitor still on its way is hit where the person sees it, and taken
+//! from there (its place becomes the drawn one), so it never jumps under the hand.
 //!
 //! Only the app changes it, through these methods: with what the PC and the streams
 //! say (the facts it keeps of them: which displays there are, what each is, which
@@ -106,6 +108,8 @@ struct Listed {
 #[derive(Debug, Clone, Copy)]
 pub struct Adding {
     pub req: ReqId,
+    /// The PC it is asked of.
+    pub pc: PcId,
     pub place: Placement,
     pub size: (u32, u32),
     pub id: Option<DisplayKey>,
@@ -113,6 +117,14 @@ pub struct Adding {
 }
 
 impl Adding {
+    /// What it is in the room.
+    pub fn thing(&self) -> Thing {
+        Thing::Adding {
+            pc: self.pc,
+            req: self.req,
+        }
+    }
+
     /// Its height in the room.
     pub fn height(&self) -> f32 {
         self.place.width * self.size.1 as f32 / self.size.0.max(1) as f32
@@ -1222,12 +1234,15 @@ impl World {
         gaze: Vec3,
         now: Instant,
     ) {
-        self.adding = req.filter(|_| !s.cinema).map(|req| Adding {
-            req,
-            place: self.place_for_new(size, gaze),
-            size,
-            id: None,
-            since: now,
+        self.adding = req.filter(|_| !s.cinema).and_then(|req| {
+            Some(Adding {
+                req,
+                pc: self.pc?,
+                place: self.place_for_new(size, gaze),
+                size,
+                id: None,
+                since: now,
+            })
         });
     }
 
@@ -1485,14 +1500,24 @@ impl World {
             Thing::Menu => Some(self.menu),
             Thing::Keyboard => self.keyboard,
             Thing::Display(id) => self.placements.get(&id).copied(),
-            Thing::MenuButton | Thing::Wrist | Thing::Attach(_) => None,
+            Thing::MenuButton | Thing::Wrist | Thing::Attach(_) | Thing::Adding { .. } => None,
         }
     }
 
-    /// Hand `hand` takes `thing`: where it is taken at; `None` for what cannot be
-    /// taken.
+    /// Hand `hand` takes `thing`, where it is drawn: a monitor still easing towards
+    /// its place goes on from there (its place becomes the drawn one), so it does not
+    /// jump under the hand. Where it is taken at; `None` for what cannot be taken.
     pub fn hold(&mut self, hand: usize, thing: Thing) -> Option<Placement> {
-        let at = self.place(thing)?;
+        let at = match thing {
+            Thing::Display(id) => {
+                let target = self.placements.get_mut(&id)?;
+                if let Some(drawn) = self.shown.get(&id) {
+                    *target = *drawn;
+                }
+                *target
+            }
+            _ => self.place(thing)?,
+        };
         *self.held.get_mut(hand)? = Some(thing);
         Some(at)
     }
@@ -1520,7 +1545,7 @@ impl World {
                 Some(t) => t,
                 None => return,
             },
-            Thing::MenuButton | Thing::Wrist | Thing::Attach(_) => return,
+            Thing::MenuButton | Thing::Wrist | Thing::Attach(_) | Thing::Adding { .. } => return,
         };
         let before = *target;
         *target = p;
@@ -1563,7 +1588,8 @@ impl World {
             | Thing::Display(_)
             | Thing::MenuButton
             | Thing::Wrist
-            | Thing::Attach(_) => {}
+            | Thing::Attach(_)
+            | Thing::Adding { .. } => {}
         }
         stuck
     }
@@ -1706,8 +1732,12 @@ impl World {
 
     // ---- What is seen and pointed at ----
 
-    /// The nearest thing the ray points at. `hidden`: monitors not shown (asked to
-    /// go). Nothing is allocated.
+    /// The nearest thing the ray points at, as drawn: the menu, its button, the palm
+    /// menu, "Attach", the keyboard window, the placeholder, the monitors; the nearest
+    /// hit wins, and of two as near the first in that list (of two monitors, the one
+    /// drawn over the other). A monitor is hit where it is drawn (see `shown`), so one
+    /// easing to another place is hit where the person sees it. `hidden`: monitors
+    /// not shown (asked to go). Nothing is allocated.
     pub fn pick(
         &self,
         ray: Ray,
@@ -1727,14 +1757,6 @@ impl World {
             consider(
                 Thing::Menu,
                 layout::hit_surface(ray, &self.menu, panel_height(s.large_menu), None),
-            );
-        }
-        if s.keyboard_window
-            && let Some(k) = &self.keyboard
-        {
-            consider(
-                Thing::Keyboard,
-                layout::hit_surface(ray, k, k.width * KEYBOARD_ASPECT, None),
             );
         }
         if let Some(b) = &self.button {
@@ -1757,25 +1779,47 @@ impl World {
                 layout::hit_surface(ray, &b, attach_height(), None),
             );
         }
+        if s.keyboard_window
+            && let Some(k) = &self.keyboard
+        {
+            consider(
+                Thing::Keyboard,
+                layout::hit_surface(ray, k, k.width * KEYBOARD_ASPECT, None),
+            );
+        }
+        if let Some(a) = &self.adding {
+            consider(
+                a.thing(),
+                layout::hit_surface(ray, &a.place, a.height(), None),
+            );
+        }
         let curve = self.curve_radius(s);
-        for &id in self.streams.keys() {
-            if hidden(id) {
-                continue;
-            }
-            if let Some(p) = self.placements.get(&id) {
+        for &id in self.drawn.iter().rev() {
+            if let Some((p, height)) = self.drawn_at(id, &hidden) {
                 let c = curve.filter(|_| !self.is_window(id));
-                consider(
-                    Thing::Display(id),
-                    layout::hit_surface(ray, p, self.height_of(id), c),
-                );
+                consider(Thing::Display(id), layout::hit_surface(ray, p, height, c));
             }
         }
         best
     }
 
-    /// The monitor looked at along `ray` (the gaze), and the point looked at across
-    /// its image (0..=1 from the top left); none when the open menu (`menu`) is in
-    /// front of it. Nothing is allocated.
+    /// Monitor `id` as drawn last, if it still stands (streams, has a place, is not
+    /// `hidden`): where, and how high.
+    fn drawn_at(
+        &self,
+        id: DisplayKey,
+        hidden: impl Fn(DisplayKey) -> bool,
+    ) -> Option<(&Placement, f32)> {
+        if hidden(id) || !self.placements.contains_key(&id) {
+            return None;
+        }
+        let p = self.shown.get(&id)?;
+        Some((p, self.height_at(id, p)?))
+    }
+
+    /// The monitor looked at along `ray` (the gaze), as drawn, and the point looked at
+    /// across its image (0..=1 from the top left); none when the open menu (`menu`) is
+    /// in front of it. Nothing is allocated.
     pub fn looked_at(
         &self,
         ray: Ray,
@@ -1784,27 +1828,24 @@ impl World {
         hidden: impl Fn(DisplayKey) -> bool,
     ) -> Option<(DisplayKey, Vec2)> {
         let curve = self.curve_radius(s);
-        let mut looked: Option<(DisplayKey, Hit, Placement, Option<f32>)> = None;
-        for &id in self.streams.keys() {
-            if hidden(id) {
-                continue;
-            }
-            let Some(p) = self.placements.get(&id) else {
+        let mut looked: Option<(DisplayKey, Hit, Placement, f32, Option<f32>)> = None;
+        for &id in self.drawn.iter().rev() {
+            let Some((p, height)) = self.drawn_at(id, &hidden) else {
                 continue;
             };
             let c = curve.filter(|_| !self.is_window(id));
-            if let Some(hit) = layout::hit_surface(ray, p, self.height_of(id), c)
+            if let Some(hit) = layout::hit_surface(ray, p, height, c)
                 && looked.is_none_or(|l| hit.t < l.1.t)
             {
-                looked = Some((id, hit, *p, c));
+                looked = Some((id, hit, *p, height, c));
             }
         }
         // Looking at the menu, not past it.
         let at_menu = menu
             && layout::hit_surface(ray, &self.menu, panel_height(s.large_menu), None)
                 .is_some_and(|m| looked.is_none_or(|l| m.t < l.1.t));
-        let (id, hit, p, c) = looked.filter(|_| !at_menu)?;
-        Some((id, layout::image_uv(&p, self.height_of(id), c, hit.local)))
+        let (id, hit, p, height, c) = looked.filter(|_| !at_menu)?;
+        Some((id, layout::image_uv(&p, height, c, hit.local)))
     }
 
     /// The monitor most straight ahead of the head (not a window panel, nor one

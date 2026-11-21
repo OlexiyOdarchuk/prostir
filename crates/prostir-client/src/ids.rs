@@ -10,7 +10,7 @@
 
 use std::fmt;
 
-use prostir_proto::state::DisplayId;
+use prostir_proto::state::{DisplayId, ReqId};
 
 use crate::layout::Hit;
 
@@ -90,6 +90,9 @@ impl fmt::Display for DisplayKey {
 pub enum Thing {
     /// A display of a PC.
     Display(DisplayKey),
+    /// The placeholder of a monitor being added: where it will appear, until its
+    /// picture comes (the request to its PC).
+    Adding { pc: PcId, req: ReqId },
     /// The menu.
     Menu,
     /// The round button that opens the menu.

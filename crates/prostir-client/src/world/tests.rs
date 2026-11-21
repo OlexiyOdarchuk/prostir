@@ -13,7 +13,7 @@ use prostir_proto::state::{
 
 use super::*;
 use crate::ids::{DisplayKey, PcId, Thing};
-use crate::layout::{Desk, Placement};
+use crate::layout::{Desk, Placement, Ray};
 use crate::pending::{PROFILE_STANDS_WITHIN, ProfileSwitch};
 use crate::persist::File;
 use crate::settings::{Preset, Settings};
@@ -182,6 +182,14 @@ impl Sim {
     }
 }
 
+/// A ray from the head towards `at`.
+fn towards(at: Vec3) -> Ray {
+    Ray {
+        origin: Vec3::ZERO,
+        dir: at.normalize(),
+    }
+}
+
 fn near(a: &Placement, b: &Placement) -> bool {
     a.position.distance(b.position) < 1e-5
         && a.rotation.dot(b.rotation).abs() > 1.0 - 1e-6
@@ -274,6 +282,13 @@ fn a_new_monitor_takes_its_placeholders_place() {
     sim.world
         .adding_started(Some(ReqId(5)), QHD, &sim.s, sim.head.1, sim.now);
     let shown = *sim.world.adding().unwrap();
+    assert_eq!(
+        shown.thing(),
+        Thing::Adding {
+            pc: PC,
+            req: ReqId(5)
+        }
+    );
     // The PC made display 4; its list says so before its stream starts.
     sim.world.adding_made(ReqId(5), Some(k(4)));
     let mut list = three();
@@ -542,6 +557,118 @@ fn a_profile_places_its_monitors_by_their_numbers() {
     assert!(sim.world.placement(k(22)).is_none());
 }
 
+/// Scenario 12. A monitor easing to another place is hit where it is drawn, not where
+/// it goes; once it arrived, where it is.
+#[test]
+fn a_ray_hits_a_monitor_where_it_is_drawn() {
+    let mut sim = Sim::at_desk();
+    // The first two from the left: swapped, each goes to the other's place, and is
+    // drawn on its way.
+    let (one, other) = (sim.world.monitors()[0].0, sim.world.monitors()[1].0);
+    let (a, b) = (sim.place(one), sim.place(other));
+    sim.world.swap(one, 1, &sim.s);
+    assert!(near(&sim.place(one), &b) && near(&sim.place(other), &a));
+    sim.after(11);
+    let drawn = sim.drawn(one);
+    assert!(
+        drawn.position.distance(a.position) < drawn.position.distance(b.position),
+        "on its way"
+    );
+    let pick = |sim: &Sim, at: Vec3| {
+        sim.world
+            .pick(towards(at), &sim.s, Pickable::default(), |_| false)
+            .map(|t| t.thing)
+    };
+    assert_eq!(
+        pick(&sim, drawn.position),
+        Some(Thing::Display(one)),
+        "where it is seen"
+    );
+    assert_eq!(
+        pick(&sim, sim.drawn(other).position),
+        Some(Thing::Display(other)),
+        "where the other is seen"
+    );
+    // Where it goes, the other one is still seen: that is what is hit.
+    assert_eq!(pick(&sim, b.position), Some(Thing::Display(other)));
+    // A monitor asked to go is not hit.
+    assert_ne!(
+        sim.world
+            .pick(
+                towards(drawn.position),
+                &sim.s,
+                Pickable::default(),
+                |id| id == one
+            )
+            .map(|t| t.thing),
+        Some(Thing::Display(one))
+    );
+    sim.settled();
+    assert_eq!(pick(&sim, b.position), Some(Thing::Display(one)), "arrived");
+    assert_eq!(pick(&sim, a.position), Some(Thing::Display(other)));
+}
+
+/// What a ray hits first among things as near: the order of 4.2 (the menu, its
+/// button, the palm menu, "Attach", the keyboard window, the placeholder, the
+/// monitors). A placeholder in front of a monitor is hit, not the monitor behind.
+#[test]
+fn of_two_as_near_the_first_is_hit() {
+    let mut sim = Sim::at_desk();
+    let button = sim.world.button().expect("under the first monitor");
+    sim.world.set_wrist(Some(button));
+    let hit = sim
+        .world
+        .pick(
+            towards(button.position),
+            &sim.s,
+            Pickable::default(),
+            |_| false,
+        )
+        .unwrap();
+    assert_eq!(
+        hit.thing,
+        Thing::MenuButton,
+        "the button before the palm menu"
+    );
+    let menu = Placement {
+        width: panel_width(false),
+        ..button
+    };
+    sim.world.menu = menu;
+    let open = Pickable {
+        menu: true,
+        attach: None,
+    };
+    let hit = sim
+        .world
+        .pick(towards(button.position), &sim.s, open, |_| false)
+        .unwrap();
+    assert_eq!(hit.thing, Thing::Menu, "the menu before all");
+
+    // A placeholder right in front of a monitor.
+    let mut sim = Sim::at_desk();
+    sim.world
+        .adding_started(Some(ReqId(9)), QHD, &sim.s, sim.head.1, sim.now);
+    let mut adding = *sim.world.adding().unwrap();
+    let m = sim.place(k(2));
+    adding.place = Placement {
+        position: m.position * 0.95,
+        ..m
+    };
+    sim.world.adding = Some(adding);
+    let hit = sim
+        .world
+        .pick(towards(m.position), &sim.s, Pickable::default(), |_| false)
+        .unwrap();
+    assert_eq!(
+        hit.thing,
+        Thing::Adding {
+            pc: PC,
+            req: ReqId(9)
+        }
+    );
+}
+
 /// Scenario 13. Two PCs with a display of the same number: two displays, each with a
 /// place of its own, and moving one leaves the other.
 #[test]
@@ -578,7 +705,8 @@ fn two_pcs_with_one_number_have_two_places() {
 }
 
 /// Scenario 17. A monitor moved by a hand is drawn at its new place in the same pass
-/// (no frame behind the hand), over the others.
+/// (no frame behind the hand), over the others; and one taken on its way goes on from
+/// where it is drawn, not from where it was going.
 #[test]
 fn a_drag_is_drawn_in_the_same_pass() {
     let mut sim = Sim::at_desk();
@@ -595,6 +723,18 @@ fn a_drag_is_drawn_in_the_same_pass() {
     let order = sim.world.order_drawing(sim.head.0, |_| false);
     assert_eq!(order.last().map(|o| o.1), Some(k(2)), "over the others");
     sim.world.let_go(0, Thing::Display(k(2)), &sim.s, sim.now);
+
+    // Swapped, and taken on the way.
+    sim.settled();
+    sim.world.swap(k(1), 1, &sim.s);
+    sim.after(30);
+    let drawn = sim.drawn(k(1));
+    assert!(!near(&drawn, &sim.place(k(1))), "still on its way");
+    let at = sim.world.hold(0, Thing::Display(k(1))).unwrap();
+    assert!(near(&at, &drawn), "taken where it is drawn");
+    assert!(near(&sim.place(k(1)), &drawn), "and goes on from there");
+    sim.after(11);
+    assert!(near(&sim.drawn(k(1)), &drawn), "it does not jump");
 }
 
 /// Laid out anew, what the hands held is let go (the app's grabs follow it).
