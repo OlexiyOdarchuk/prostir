@@ -5,8 +5,8 @@ use super::*;
 pub(super) fn overview(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
     let tk = v.tk;
     let p = tk.p;
-    header(ui, v, Page::Overview);
     counting_question(ui, v, s);
+    header(ui, v, Page::Overview);
     let gap = tk.th.shape.section_gap;
     let virtual_count = s
         .displays

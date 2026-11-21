@@ -755,10 +755,15 @@ fn the_counting_question_and_both_answers() {
         let (mut h, handle) = window(Mock::no_headsets().edit(unasked), Setup::default());
         assert_eq!(h.state().ui.page, Page::FirstRun);
         h.get_by_label(QUESTION);
-        // Neither answer looks chosen: both are plain buttons of the same size.
-        let yes = h.get_by_role_and_label(Role::Button, "Так").rect();
-        let no = h.get_by_role_and_label(Role::Button, "Ні").rect();
-        assert_eq!(yes.size(), no.size());
+        // Neither answer is favoured: buttons of the same size, Yes first, neither
+        // focused; and the question comes before the page's own title.
+        let yes = h.get_by_role_and_label(Role::Button, "Так");
+        let no = h.get_by_role_and_label(Role::Button, "Ні");
+        assert_eq!(yes.rect().size(), no.rect().size());
+        assert!(yes.rect().right() < no.rect().left());
+        assert!(!yes.is_focused() && !no.is_focused());
+        let question = h.get_by_label(QUESTION).rect();
+        assert!(question.bottom() < h.get_by_label("Крок 1 з 4").rect().top());
         // The first run goes on meanwhile.
         press(&mut h, "Далі");
         assert_eq!(handle.calls(), [Request::PairNewHeadset]);

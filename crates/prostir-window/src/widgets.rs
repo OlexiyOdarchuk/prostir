@@ -118,10 +118,20 @@ pub fn section_title(ui: &mut Ui, tk: &Tk<'_>, title: &str) {
 
 /// A group of settings that belong together.
 pub fn card<R>(ui: &mut Ui, tk: &Tk<'_>, add: impl FnOnce(&mut Ui) -> R) -> R {
+    card_framed(ui, tk, Stroke::new(tk.th.shape.stroke, tk.p.border), add)
+}
+
+/// A card that asks for the person's attention: its border in the accent colour.
+pub fn card_accent<R>(ui: &mut Ui, tk: &Tk<'_>, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let width = (tk.th.shape.stroke * 2.0).max(1.5);
+    card_framed(ui, tk, Stroke::new(width, tk.p.accent), add)
+}
+
+fn card_framed<R>(ui: &mut Ui, tk: &Tk<'_>, border: Stroke, add: impl FnOnce(&mut Ui) -> R) -> R {
     let pad = tk.th.shape.padding.round().clamp(0.0, 127.0) as i8;
     egui::Frame::new()
         .fill(tk.p.surface)
-        .stroke(Stroke::new(tk.th.shape.stroke, tk.p.border))
+        .stroke(border)
         .corner_radius(tk.r_large())
         .inner_margin(egui::Margin::same(pad))
         .show(ui, |ui| {
@@ -230,16 +240,16 @@ pub fn button_named(
     button_at_least(ui, tk, label, name, 0.0, kind, enabled)
 }
 
-/// Buttons side by side that are equal choices (Yes and No): the same kind and the
-/// same width, none filled with the accent. Returns which one was clicked.
-pub fn equal_buttons(ui: &mut Ui, tk: &Tk<'_>, labels: &[&str]) -> Option<usize> {
+/// Buttons side by side that are equal choices (Yes and No): the same `kind` and the
+/// same width, so none stands out over the other. Returns which one was clicked.
+pub fn equal_buttons(ui: &mut Ui, tk: &Tk<'_>, labels: &[&str], kind: Kind) -> Option<usize> {
     let width = labels
         .iter()
         .map(|l| button_width(ui, tk, l))
         .fold(0.0, f32::max);
     let mut clicked = None;
     for (i, label) in labels.iter().enumerate() {
-        if button_at_least(ui, tk, label, label, width, Kind::Secondary, true).clicked() {
+        if button_at_least(ui, tk, label, label, width, kind, true).clicked() {
             clicked = Some(i);
         }
     }
@@ -552,6 +562,22 @@ pub fn battery(ui: &mut Ui, tk: &Tk<'_>, level: f32, charging: bool) {
     };
     ui.painter()
         .rect_filled(fill, cr(tk.th.shape.radius_small * 0.5), color);
+}
+
+/// Counting: three rising bars in the accent's ink, `size` square.
+pub fn count_icon(ui: &mut Ui, tk: &Tk<'_>, size: f32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    let bar = size * 0.22;
+    let gap = (size - bar * 3.0) / 2.0;
+    let radius = cr(bar * 0.3);
+    for (i, height) in [0.45, 0.7, 1.0].into_iter().enumerate() {
+        let left = rect.left() + i as f32 * (bar + gap);
+        let r = Rect::from_min_max(
+            pos2(left, rect.bottom() - size * height),
+            pos2(left + bar, rect.bottom()),
+        );
+        ui.painter().rect_filled(r, radius, tk.p.accent_ink);
+    }
 }
 
 /// The app icon (packaging/prostir.svg): three screens on an arc around you.
