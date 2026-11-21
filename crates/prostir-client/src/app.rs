@@ -2141,7 +2141,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     );
 
     // SAFETY: the VM pointer is valid for the life of the process.
-    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) }?;
+    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) };
     let _wifi_lock = xrutil::acquire_low_latency_wifi(app, &vm)
         .inspect(|_| info!("Wi-Fi low-latency mode on"))
         .inspect_err(|e| warn!("Wi-Fi low-latency lock unavailable: {e:#}"))

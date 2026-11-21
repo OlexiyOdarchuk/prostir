@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 use jni::objects::{JObject, JValue};
+use jni::{jni_sig, jni_str};
 use log::{info, warn};
 use ndk_sys as ffi;
 use prostir_proto::state::{UpFormat, UpKind, permission};
@@ -188,20 +189,21 @@ fn ensure_permission(stop: &AtomicBool) -> bool {
 /// (android-activity puts it there), not the activity. Enough for system services and
 /// permissions; what needs the Activity itself takes it from the `AndroidApp`.
 pub(crate) fn with_activity<T>(
-    f: impl FnOnce(&mut jni::JNIEnv<'_>, &JObject<'_>) -> jni::errors::Result<T>,
+    f: impl FnOnce(&mut jni::Env<'_>, &JObject<'_>) -> jni::errors::Result<T>,
 ) -> Option<T> {
     let ctx = ndk_context::android_context();
     // SAFETY: the VM of the running NativeActivity.
-    let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }.ok()?;
-    let mut env = vm.attach_current_thread_permanently().ok()?;
-    // SAFETY: a global reference to the Application, kept for the life of the process.
-    let activity = unsafe { JObject::from_raw(ctx.context().cast()) };
-    let result = f(&mut env, &activity);
-    if result.is_err() {
-        let _ = env.exception_describe();
-        let _ = env.exception_clear();
-    }
-    result.ok()
+    let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) };
+    // In a local frame of its own; a Java exception on the way is caught and cleared,
+    // and comes back as the error.
+    vm.attach_current_thread(|env| {
+        // SAFETY: a global reference to the Application, kept for the life of the
+        // process; `JObject` only wraps it, it never deletes it.
+        let activity = unsafe { JObject::from_raw(env, ctx.context().cast()) };
+        f(env, &activity)
+    })
+    .inspect_err(|e| warn!("a call into Android failed: {e}"))
+    .ok()
 }
 
 fn has_permission() -> bool {
@@ -210,8 +212,8 @@ fn has_permission() -> bool {
         let granted = env
             .call_method(
                 activity,
-                "checkSelfPermission",
-                "(Ljava/lang/String;)I",
+                jni_str!("checkSelfPermission"),
+                jni_sig!("(Ljava/lang/String;)I"),
                 &[JValue::Object(&name)],
             )?
             .i()?;
@@ -223,11 +225,11 @@ fn has_permission() -> bool {
 fn request_permission() {
     with_activity(|env, activity| {
         let name = env.new_string(PERMISSION)?;
-        let list = env.new_object_array(1, "java/lang/String", &name)?;
+        let list = env.new_object_array(1, jni_str!("java/lang/String"), &name)?;
         env.call_method(
             activity,
-            "requestPermissions",
-            "([Ljava/lang/String;I)V",
+            jni_str!("requestPermissions"),
+            jni_sig!("([Ljava/lang/String;I)V"),
             &[JValue::Object(&list), JValue::Int(1)],
         )?;
         Ok(())
@@ -299,20 +301,25 @@ pub fn battery() -> Option<(u8, bool)> {
         let manager = env
             .call_method(
                 activity,
-                "getSystemService",
-                "(Ljava/lang/String;)Ljava/lang/Object;",
+                jni_str!("getSystemService"),
+                jni_sig!("(Ljava/lang/String;)Ljava/lang/Object;"),
                 &[JValue::Object(&name)],
             )?
             .l()?;
+        let property = |env: &mut jni::Env<'_>, id| {
+            env.call_method(
+                &manager,
+                jni_str!("getIntProperty"),
+                jni_sig!("(I)I"),
+                &[JValue::Int(id)],
+            )?
+            .i()
+        };
         // BatteryManager.BATTERY_PROPERTY_CAPACITY
-        let percent = env
-            .call_method(&manager, "getIntProperty", "(I)I", &[JValue::Int(4)])?
-            .i()?;
+        let percent = property(env, 4)?;
         // BATTERY_PROPERTY_STATUS: 2 is charging (isCharging also says yes when full
         // and plugged in).
-        let status = env
-            .call_method(&manager, "getIntProperty", "(I)I", &[JValue::Int(6)])?
-            .i()?;
+        let status = property(env, 6)?;
         let charging = status == 2;
         Ok((percent.clamp(0, 100) as u8, charging))
     })

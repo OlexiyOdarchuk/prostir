@@ -124,10 +124,12 @@ pub fn create_surface_swapchain(
     }
     // SAFETY: the handle was just created for this session and is owned by the wrapper.
     let swapchain = unsafe { xr::Swapchain::from_raw(session.clone(), handle) };
-    let env = vm.attach_current_thread_permanently()?;
-    // SAFETY: `surface` is a valid android.view.Surface reference returned by the runtime.
-    let window = unsafe { NativeWindow::from_surface(env.get_raw().cast(), surface.cast()) }
-        .context("ANativeWindow_fromSurface failed")?;
+    let window = vm.attach_current_thread(|env| {
+        // SAFETY: `surface` is a valid android.view.Surface reference returned by the
+        // runtime, and `env` is this thread's.
+        unsafe { NativeWindow::from_surface(env.get_raw().cast(), surface.cast()) }
+            .context("ANativeWindow_fromSurface failed")
+    })?;
     Ok((swapchain, window))
 }
 
@@ -136,19 +138,21 @@ pub fn create_surface_swapchain(
 pub fn acquire_low_latency_wifi(
     app: &AndroidApp,
     vm: &jni::JavaVM,
-) -> Result<jni::objects::GlobalRef> {
+) -> Result<jni::refs::Global<jni::objects::JObject<'static>>> {
     use jni::objects::{JObject, JValue};
+    use jni::{jni_sig, jni_str};
     /// WifiManager.WIFI_MODE_FULL_LOW_LATENCY (API 29).
     const WIFI_MODE_FULL_LOW_LATENCY: i32 = 4;
-    let mut env = vm.attach_current_thread_permanently()?;
-    let result = (|| -> jni::errors::Result<jni::objects::GlobalRef> {
-        // SAFETY: the activity reference stays valid while the app runs.
-        let activity = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
+    // A Java exception on the way is caught and comes back as the error.
+    let lock = vm.attach_current_thread(|env| -> jni::errors::Result<_> {
+        // SAFETY: the activity reference stays valid while the app runs; `JObject`
+        // only wraps it, it never deletes it.
+        let activity = unsafe { JObject::from_raw(env, app.activity_as_ptr().cast()) };
         let context = env
             .call_method(
                 &activity,
-                "getApplicationContext",
-                "()Landroid/content/Context;",
+                jni_str!("getApplicationContext"),
+                jni_sig!("()Landroid/content/Context;"),
                 &[],
             )?
             .l()?;
@@ -156,8 +160,8 @@ pub fn acquire_low_latency_wifi(
         let wifi = env
             .call_method(
                 &context,
-                "getSystemService",
-                "(Ljava/lang/String;)Ljava/lang/Object;",
+                jni_str!("getSystemService"),
+                jni_sig!("(Ljava/lang/String;)Ljava/lang/Object;"),
                 &[JValue::Object(&service)],
             )?
             .l()?;
@@ -165,23 +169,24 @@ pub fn acquire_low_latency_wifi(
         let lock = env
             .call_method(
                 &wifi,
-                "createWifiLock",
-                "(ILjava/lang/String;)Landroid/net/wifi/WifiManager$WifiLock;",
+                jni_str!("createWifiLock"),
+                jni_sig!("(ILjava/lang/String;)Landroid/net/wifi/WifiManager$WifiLock;"),
                 &[
                     JValue::Int(WIFI_MODE_FULL_LOW_LATENCY),
                     JValue::Object(&tag),
                 ],
             )?
             .l()?;
-        env.call_method(&lock, "setReferenceCounted", "(Z)V", &[JValue::Bool(0)])?;
-        env.call_method(&lock, "acquire", "()V", &[])?;
+        env.call_method(
+            &lock,
+            jni_str!("setReferenceCounted"),
+            jni_sig!("(Z)V"),
+            &[JValue::Bool(false)],
+        )?;
+        env.call_method(&lock, jni_str!("acquire"), jni_sig!("()V"), &[])?;
         env.new_global_ref(lock)
-    })();
-    if result.is_err() {
-        let _ = env.exception_describe();
-        let _ = env.exception_clear();
-    }
-    Ok(result?)
+    })?;
+    Ok(lock)
 }
 
 /// GL function loader for the EGL context the session was created with.

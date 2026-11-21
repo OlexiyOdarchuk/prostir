@@ -67,12 +67,16 @@ impl Entitlement {
         // The SDK wants the Activity. `ndk_context` holds the Application (that is
         // what android-activity puts there), so the activity comes from the app.
         // SAFETY: the VM comes from the running NativeActivity.
-        let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) }.ok()?;
-        let env = vm.attach_current_thread_permanently().ok()?;
+        let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) };
         let app_id = CString::new(APP_ID).ok()?;
-        // SAFETY: valid app id, the running activity's object and JNIEnv for this
-        // thread.
-        let result = unsafe { init(app_id.as_ptr(), app.activity_as_ptr(), env.get_raw().cast()) };
+        let result = vm
+            .attach_current_thread(|env| -> jni::errors::Result<i32> {
+                // SAFETY: valid app id, the running activity's object and the JNIEnv
+                // of this thread.
+                Ok(unsafe { init(app_id.as_ptr(), app.activity_as_ptr(), env.get_raw().cast()) })
+            })
+            .inspect_err(|e| warn!("store: {e}"))
+            .ok()?;
         if result != 0 {
             warn!("store: platform initialization failed ({result})");
             return None;
