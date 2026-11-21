@@ -106,7 +106,8 @@
 - Prostir starts with the system by default: its first start turns that on, and
   from then on it is kept as you choose it. Turn it off in the tray ("Start with the
   system"), the settings window or with `prostir ctl autostart off`; it stays off,
-  also after updates.
+  also after updates. An update from 0.1 keeps what 0.1 did: on with its autostart
+  entry (or systemd's socket), off without.
 - On KDE Plasma (and other desktops with systemd) nothing of Prostir runs until a
   headset comes: systemd waits for it (`prostir.socket`) and starts Prostir when the
   headset connects, asks for the PC or is plugged in by USB. Turning it on enables

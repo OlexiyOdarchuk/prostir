@@ -772,6 +772,15 @@ fn window_at_first_start(mut args: Args) -> Args {
     args
 }
 
+/// Whether the first start of this version turns starting with the session on: yes on
+/// a new install, and where it is not set from here (Hyprland's config, which the
+/// notification of [`platform::autostart::first_start`] is about). After an update
+/// from 0.1 (`ran_before`), which kept no choice of its own, as 0.1 had it: on when
+/// its autostart entry or systemd's socket is there (`enabled`), else off for good.
+fn autostart_at_first_start(ran_before: bool, available: bool, enabled: bool) -> bool {
+    !(ran_before && available && !enabled)
+}
+
 /// The service started again while it runs (`prostir serve` by hand, or an autostart
 /// line while the menu started it): the running one opens its settings window, or
 /// brings it forward, as `prostir` does, and this one ends. Its exit code.
@@ -863,13 +872,25 @@ fn full_with(
         software: args.software.then_some(true),
         screens: None,
     };
+    // Prostir ran for this user before (0.1, which kept no choice about autostart),
+    // looked at before the store writes anything.
+    let ran_before = store::config_dir().is_some_and(|d| !store::first_start(&d));
     let mut store = Store::open(store::config_dir(), run);
     store.start_with(&args.monitors);
     // Starting with the session is on by default: the first start turns it on, and
     // the choice is kept, so turned off it stays off through every update.
     if store.wanted().autostart.is_none() {
-        platform::autostart::first_start();
-        store.change(|s| s.autostart = Some(true));
+        let on = autostart_at_first_start(
+            ran_before,
+            platform::autostart::available(),
+            platform::autostart::enabled(),
+        );
+        if on {
+            platform::autostart::first_start();
+        } else {
+            info!("an update from 0.1, which did not start with the session: autostart stays off");
+        }
+        store.change(|s| s.autostart = Some(on));
     }
     // The first start says that this build counts its users and how to turn it off,
     // a day before the first count.
@@ -1006,6 +1027,22 @@ mod tests {
 
     fn read(args: &[&str]) -> Result<Cli, clap::Error> {
         Cli::read_from(std::iter::once("prostir").chain(args.iter().copied()))
+    }
+
+    /// A new install starts with the session; an update from 0.1 as 0.1 did (its entry
+    /// or socket there, or not); Hyprland's config is not set from here.
+    #[test]
+    fn autostart_at_the_first_start_of_0_2() {
+        use super::autostart_at_first_start as on;
+        // (ran before, available here, on now)
+        assert!(on(false, true, false), "a new install");
+        assert!(on(false, false, false), "a new install on Hyprland");
+        assert!(on(true, true, true), "0.1 started with the session");
+        assert!(!on(true, true, false), "0.1 did not: it stays off");
+        assert!(
+            on(true, false, false),
+            "Hyprland: its config, and the notification"
+        );
     }
 
     /// `-v` and `--version` from every way in; `-m` stays the monitor.

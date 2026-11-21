@@ -366,3 +366,22 @@ fn autostart_is_on_by_default_and_off_stays_off() {
     assert_eq!(pc.count_log("fake autostart"), 0, "off stays off");
     pc.quit();
 }
+
+/// An update from 0.1 that did not start with the session (no entry of its own, no
+/// socket): 0.1 kept no choice, so the first start of 0.2 keeps it off, for good.
+#[test]
+fn an_update_from_0_1_without_autostart_keeps_it_off() {
+    let dir = TestDir::new("autostart-0-1");
+    // What 0.1 left: its monitors.
+    dir.save_monitors(TWO_MONITORS);
+    let mut pc = Pc::start(&dir, &Options::default());
+    pc.wait_log(SOON, "autostart stays off");
+    assert_eq!(pc.count_log("fake autostart"), 0, "not turned on");
+    pc.quit();
+    assert!(dir.saved("settings.txt").contains("autostart off\n"));
+
+    let pc = Pc::start(&dir, &Options::default());
+    assert_eq!(pc.count_log("fake autostart"), 0, "kept");
+    assert_eq!(pc.count_log("autostart stays off"), 0, "decided once");
+    pc.quit();
+}
