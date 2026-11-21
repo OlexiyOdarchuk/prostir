@@ -149,7 +149,7 @@ fn a_nudge_without_history_is_reported() {
     for _ in 0..cases(2000) {
         let scene = regular(&mut rng);
         let (_, plan0) = pipeline(&scene);
-        let mut nudged = scene.clone();
+        let mut nudged = scene;
         let k = rng.below(nudged.monitors.len());
         let id = nudged.monitors[k].id;
         let m = &mut nudged.monitors[k];
@@ -541,7 +541,7 @@ fn after_lining_up_the_desktop_matches_the_view() {
         let rows = rows_of(&ids, &scene.room(), None);
         let lid = scene.get(MIRROR).map(|m| m.id);
         let done = line_up(&scene.monitors, &scene.frame, scene.main, Some(&rows), lid);
-        let mut lined = scene.clone();
+        let mut lined = scene;
         for m in &mut lined.monitors {
             m.placement = done[&m.id];
         }

@@ -1,0 +1,9 @@
+# The Rust every build of Prostir uses: CI, release builds and local work, so clippy
+# finds the same things everywhere and a release can be rebuilt byte for byte. Moving
+# to a newer Rust is a commit of its own that also fixes what the new clippy finds.
+# `rust-version` in Cargo.toml is separate: the oldest Rust distributions may build with.
+[toolchain]
+channel = "1.100.0"
+components = ["clippy", "rustfmt"]
+targets = ["aarch64-linux-android"]
+profile = "minimal"
