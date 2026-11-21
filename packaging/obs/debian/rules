@@ -47,6 +47,10 @@ override_dh_auto_install:
 	install -Dm644 LICENSE-EXCEPTION.md debian/prostir/usr/share/doc/prostir/LICENSE-EXCEPTION.md
 	install -Dm644 THIRD-PARTY-LICENSES.txt debian/prostir/usr/share/doc/prostir/THIRD-PARTY-LICENSES.txt
 
+# dwz cannot always read the DWARF Rust writes (it fails the build on some versions),
+# and the dbgsym package needs no compression of it: left out.
+override_dh_dwz:
+
 override_dh_auto_clean:
 	rm -rf target debian/cargo-home
 
