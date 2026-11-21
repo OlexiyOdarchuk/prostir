@@ -26,7 +26,7 @@ use crate::i18n::t;
 use crate::layout::panel_size;
 use crate::platform::{
     ActiveWindow, DeskPlan, Desktop, Geometry, MonitorSpec, Output, OutputHealth, OutputKey,
-    VirtualSpec, dialogs,
+    VirtualSpec, dialogs, scale_of,
 };
 use crate::router::Router;
 use crate::screen::{ScreenId, SizeAction, SizeGuard};
@@ -185,6 +185,10 @@ struct Slot {
     size_guard: SizeGuard,
     /// The desktop closing it was said.
     closed_told: bool,
+    /// When it was made, the last scale the desktop was seen to have it at that is not
+    /// the one it was made with, and when.
+    made_at: Instant,
+    scale_seen: Option<u16>,
 }
 
 impl Slot {
@@ -200,6 +204,8 @@ impl Slot {
             kept: None,
             size_guard: SizeGuard::default(),
             closed_told: false,
+            made_at: Instant::now(),
+            scale_seen: None,
         }
     }
 
@@ -269,6 +275,8 @@ pub struct Worker {
     /// After the desktop refused a layout: when to try again, and how many times it did.
     layout_retry: (Instant, u32),
     primary_checked: Instant,
+    /// When the monitors' scales on the desktop were looked at last.
+    scales_looked: Instant,
     panels_checked: Instant,
     physical_due: Instant,
 }
@@ -340,6 +348,7 @@ impl Worker {
             layout_waits: false,
             layout_retry: (now, 0),
             primary_checked: now,
+            scales_looked: now,
             panels_checked: now,
             physical_due: now,
         }
@@ -571,6 +580,7 @@ impl Worker {
     fn upkeep(&mut self) {
         self.begin("looking after the outputs");
         self.check_sizes();
+        self.check_scales();
         self.check_closed();
         self.retry_unopened();
         self.check_primary();

@@ -54,6 +54,7 @@ impl Brain {
                     self.phase = Phase::Idle;
                 }
             }
+            DeskNews::Rescaled => keep_screens(&mut self.store, displays, true),
             DeskNews::Job(job, result, answer) => {
                 let outcome = requests::outcome_of_job(result, answer);
                 for s in self.sessions.values_mut() {

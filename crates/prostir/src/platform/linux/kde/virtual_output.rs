@@ -24,7 +24,7 @@ use anyhow::{Context, Result, bail};
 use super::kscreen;
 use crate::encoder::Input;
 use crate::platform::linux::is_panel;
-use crate::platform::{OutputKey, PhysicalDisplay, VirtualSpec};
+use crate::platform::{OutputKey, PhysicalDisplay, VirtualSpec, needs_scale};
 use log::{info, warn};
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
 use wayland_client::protocol::{wl_output, wl_registry};
@@ -83,9 +83,7 @@ impl OutputInfo {
     }
 }
 
-/// The KScreen setting for the output's scale, 100 % too: KWin keeps each output's
-/// settings by name, so an output made anew under the same name has the scale it had
-/// last (125 % set a moment ago, say) until it is told another.
+/// The KScreen setting for the output's scale.
 fn scale_setting(spec: &VirtualSpec) -> String {
     format!("scale.{}", spec.factor())
 }
@@ -446,7 +444,14 @@ impl Screencast {
             Duration::from_secs(10),
         )?;
         info!("Prostir-{number}: {spec}, PipeWire node {}", output.node);
-        kscreen::set(output.output_name(), &scale_setting(spec));
+        // Made anew, it has the scale KWin kept for its name: told the one wanted
+        // unless it has it already.
+        let listed = kscreen::geometries()
+            .get(&OutputKey::new(output.output_name()))
+            .map(|g| (g.w, g.h));
+        if needs_scale(spec, listed) {
+            kscreen::set(output.output_name(), &scale_setting(spec));
+        }
         Ok(output)
     }
 }
@@ -586,7 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn every_scale_is_set_100_too() {
+    fn the_scale_setting() {
         let spec = |scale| VirtualSpec {
             id: crate::screen::ScreenId::saved(3),
             number: 4,
@@ -595,7 +600,6 @@ mod tests {
             scale,
             refresh: 60,
         };
-        // 100 too: made anew, the output first has the scale KWin kept for its name.
         assert_eq!(scale_setting(&spec(100)), "scale.1");
         assert_eq!(scale_setting(&spec(125)), "scale.1.25");
         assert_eq!(scale_setting(&spec(150)), "scale.1.5");

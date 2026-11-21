@@ -106,6 +106,9 @@ pub enum DeskNews {
     NoDesktop(anyhow::Error),
     /// The answer to a job someone waits for.
     Job(JobId, Result<state::DisplayId, anyhow::Error>, JobAnswer),
+    /// A monitor's scale was given in the desktop's own settings and taken: the set
+    /// kept for next time has it.
+    Rescaled,
 }
 
 /// What a job's answer carries for the headset.
@@ -532,6 +535,16 @@ impl Displays {
             Done::Placed { on_desk, upto } => {
                 self.on_desk = on_desk;
                 self.placing.laid_out(upto, Instant::now());
+            }
+            Done::Rescaled { id, percent } => {
+                if let Some(Screen {
+                    kind: ScreenKind::Virtual { spec },
+                    ..
+                }) = self.screens.get_mut(&id)
+                {
+                    spec.scale = f64::from(percent) / 100.0;
+                    return DeskNews::Rescaled;
+                }
             }
             Done::Physical(seen) => self.sync_physical(&seen, new_id),
             Done::Focus(key) => self.focus = key.and_then(|k| self.id_of_output(&k)),

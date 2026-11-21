@@ -194,7 +194,7 @@ exist, monitor requests change the set kept for the next headset (its monitors s
 | `remove_monitor` | `id` | `LastDisplay` for the last one |
 | `retry_monitor` | `id` | a failed monitor tried again now; `UnknownDisplay` for no such monitor |
 | `show_physical` | `id`, `shown` (bool) | a display of the PC in the headset |
-| `set_scale` | `id`, `scale` (percent) | another scale for a monitor: its output is made anew under the same name and id (it stands `starting` meanwhile); `BadSize` for a scale the desktop does not give its size |
+| `set_scale` | `id`, `scale` (percent) | another scale for a monitor: its output is made anew under the same name and id (it stands `starting` meanwhile); `BadSize` for a scale the desktop does not give its size. A scale given to a monitor in the desktop's own display settings is taken as well, within a few seconds: the state and the set kept for next time follow it, the output stays as it is |
 | `place` | `id`, `x`, `y` | moves a display on the desktop to about `x`, `y` (its top-left corner, logical pixels): into the row it is then in, between its neighbours left and right, or a row of its own above or under the others; the desktop's arrangement then lines it up. Only while the monitors are on the desktop (`Unsupported` otherwise). The main headset's next arrangement (when the person moves a monitor in the headset) replaces it; the headset's own 3D arrangement is not changed |
 | `set_primary` | `id` | the desktop's primary display |
 | `set_quality` | `mbit` (5 to 100) | per monitor |

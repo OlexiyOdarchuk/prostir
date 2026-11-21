@@ -962,6 +962,56 @@ fn the_volume_from_the_pc_reaches_the_headset() {
     assert_eq!(error_name(&bad), "BadArgument");
 }
 
+/// A scale given to a monitor in the desktop's own settings is taken: the local API and
+/// the set kept for next time have it, and the monitor's output stays as it is.
+#[test]
+fn a_scale_given_on_the_desktop_is_taken() {
+    let (dir, pc, _keys, _headset) = session("api-outside-scale", &Options::default());
+    let Some(bus) = &pc.bus else {
+        return;
+    };
+    let bus = bus.connect();
+    let started = Instant::now();
+    let a = loop {
+        let (_, state) = get_state(&bus);
+        if let Some(d) = state.displays.first()
+            && d.desk.is_some()
+            && d.state == prostir_api::DisplayState::Running
+        {
+            break d.clone();
+        }
+        assert!(started.elapsed() < SOON, "no monitor on the desktop");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(a.mode.scale, 100);
+    let made = pc.count_log(&format!("fake desktop: created {}", a.output));
+    pc.desktop(&format!("scale {} 150", a.output));
+    let want = (
+        (f64::from(a.mode.w) / 1.5).round() as u32,
+        (f64::from(a.mode.h) / 1.5).round() as u32,
+    );
+    let started = Instant::now();
+    loop {
+        let (_, state) = get_state(&bus);
+        let d = state.display(a.id).expect("the same id");
+        if d.mode.scale == 150 && d.desk.map(|r| (r.w, r.h)) == Some(want) {
+            break;
+        }
+        assert!(started.elapsed() < START, "not taken: {d:?}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        pc.count_log(&format!("fake desktop: created {}", a.output)),
+        made,
+        "the output was not made anew"
+    );
+    let started = Instant::now();
+    while !dir.saved("screens.txt").contains("@1.5") {
+        assert!(started.elapsed() < SOON, "{}", dir.saved("screens.txt"));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// Back and forth between scales from the PC, 100 % among them: each one is applied,
 /// the monitor's place on the desktop as large as its pixels at that scale.
 #[test]

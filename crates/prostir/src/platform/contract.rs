@@ -497,6 +497,44 @@ impl VirtualSpec {
     pub fn factor(&self) -> f64 {
         f64::from(self.scale) / 100.0
     }
+
+    /// Its size on the desktop at its scale, in logical pixels.
+    pub fn logical(&self) -> (i32, i32) {
+        let at = |px: u32| (f64::from(px) / self.factor()).round() as i32;
+        (at(self.w), at(self.h))
+    }
+}
+
+/// Whether a monitor just made is to be told its scale: unless the desktop lists it at
+/// `spec`'s scale already (`listed`: its logical size there). A desktop that keeps each
+/// output's settings by name, as KWin does, makes it at the scale that name had last,
+/// 125 % a moment ago say, also where 100 % is wanted now.
+pub fn needs_scale(spec: &VirtualSpec, listed: Option<(i32, i32)>) -> bool {
+    let (w, h) = spec.logical();
+    listed.is_none_or(|(lw, lh)| (lw - w).abs() > 1 || (lh - h).abs() > 1)
+}
+
+/// The scale in percent a monitor of `pixels` stands at, listed by the desktop at the
+/// logical size `listed`: a multiple of 5 where it is that within 1. None where the two
+/// sides do not give the same scale (another program's stream resized it, say).
+pub fn scale_of(pixels: (u32, u32), listed: (i32, i32)) -> Option<u16> {
+    if listed.0 <= 0 || listed.1 <= 0 {
+        return None;
+    }
+    let across = f64::from(pixels.0) * 100.0 / f64::from(listed.0);
+    let down = f64::from(pixels.1) * 100.0 / f64::from(listed.1);
+    // A logical pixel rounded either way on a side of 240 is 0.4 %.
+    if (across - down).abs() > across * 0.01 + 1.0 {
+        return None;
+    }
+    let percent = across.round();
+    let fives = (percent / 5.0).round() * 5.0;
+    let percent = if (percent - fives).abs() <= 1.0 {
+        fives
+    } else {
+        percent
+    };
+    u16::try_from(percent as i64).ok()
 }
 
 /// `2560x1440`, or `3840x2160@1.5` with a scale.
@@ -666,6 +704,46 @@ mod windows_shape {
         };
         assert!(matches!(&locked, OutputHealth::Paused { why } if !why.is_empty()));
         assert_ne!(locked, OutputHealth::Closed);
+    }
+
+    fn spec(w: u32, h: u32, scale: u16) -> VirtualSpec {
+        VirtualSpec {
+            id: ScreenId::saved(3),
+            number: 4,
+            w,
+            h,
+            scale,
+            refresh: 60,
+        }
+    }
+
+    /// Made anew at the scale its name had last, a monitor is told the one wanted,
+    /// 100 % too; one listed at it already needs nothing.
+    #[test]
+    fn a_scale_is_set_unless_the_desktop_has_it() {
+        let s = spec(2560, 1440, 100);
+        assert!(needs_scale(&s, None), "not listed yet");
+        assert!(needs_scale(&s, Some((2048, 1152))), "at 125 % from before");
+        assert!(!needs_scale(&s, Some((2560, 1440))));
+        let s = spec(2560, 1440, 125);
+        assert!(needs_scale(&s, Some((2560, 1440))));
+        assert!(!needs_scale(&s, Some((2048, 1152))));
+        // Rounded either way by the desktop.
+        let s = spec(1920, 1080, 150);
+        assert!(!needs_scale(&s, Some((1280, 721))));
+    }
+
+    #[test]
+    fn the_scale_a_desktop_lists_an_output_at() {
+        assert_eq!(scale_of((2560, 1440), (2560, 1440)), Some(100));
+        assert_eq!(scale_of((2560, 1440), (2048, 1152)), Some(125));
+        assert_eq!(scale_of((1440, 2560), (960, 1707)), Some(150));
+        assert_eq!(scale_of((640, 360), (427, 240)), Some(150));
+        assert_eq!(scale_of((1920, 1080), (1097, 617)), Some(175));
+        assert_eq!(scale_of((2560, 1440), (2327, 1309)), Some(110));
+        // Resized by another program: the sides disagree.
+        assert_eq!(scale_of((2560, 1440), (320, 240)), None);
+        assert_eq!(scale_of((2560, 1440), (0, 0)), None);
     }
 
     #[test]

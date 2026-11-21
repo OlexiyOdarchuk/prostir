@@ -270,6 +270,12 @@ pub enum Done {
         on_desk: BTreeMap<OutputKey, DeskRect>,
         upto: u64,
     },
+    /// The desktop has monitor `id` at another scale than it was made with, given in
+    /// the desktop's own settings: it is taken (in percent), the output stays.
+    Rescaled {
+        id: ScreenId,
+        percent: u16,
+    },
     /// The PC's own displays, connected and on now.
     Physical(Vec<PhysicalDisplay>),
     /// The output the user works on.
