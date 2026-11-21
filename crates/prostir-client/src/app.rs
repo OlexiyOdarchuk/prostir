@@ -3679,7 +3679,7 @@ fn handle_net_event(
             match xrutil::create_surface_swapchain(session, vm, width, height) {
                 Ok((swapchain, window)) => {
                     let stop = Arc::new(AtomicBool::new(false));
-                    let decoder = decoder::spawn(
+                    let decoder = decoder::spawn(decoder::DecoderJob {
                         stream,
                         codec,
                         width,
@@ -3687,8 +3687,8 @@ fn handle_net_event(
                         window,
                         frames,
                         feedback,
-                        stop.clone(),
-                    );
+                        stop: stop.clone(),
+                    });
                     scene.monitors.insert(
                         id,
                         Monitor {
