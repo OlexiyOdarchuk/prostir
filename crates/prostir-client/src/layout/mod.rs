@@ -31,7 +31,7 @@ pub use grab::Grab;
 pub use hit::{Cylinder, Hit, Ray, hit, hit_surface, image_point, image_uv};
 pub use saved::{Arrangement, Desk, PixelSize, parse_keyboard, write_keyboard};
 pub(crate) use saved::{parse_place, parse_radius, parse_tilt, placed_well, upright, write_place};
-pub use stick::{Stick, stick, stick_on_wall};
+pub use stick::{Stick, StickScratch, stick, stick_on_wall};
 
 pub use prostir_layout::circle::{OVERHEAD_PITCH, RADIUS};
 

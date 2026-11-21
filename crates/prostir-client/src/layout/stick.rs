@@ -130,14 +130,35 @@ fn hinge(n: &Placement, nh: f32, mw: f32, mh: f32, b: &Beside, eye: Vec3) -> Pla
 /// A monitor of the arrangement: placement, height, width in pixels.
 type Part<K> = (K, Placement, f32, f32);
 
-fn parts<K: Key>(placements: &HashMap<K, Placement>, monitors: &[(K, u32, u32)]) -> Vec<Part<K>> {
-    monitors
-        .iter()
-        .filter_map(|&(id, w, h)| {
-            let p = *placements.get(&id)?;
-            Some((id, p, p.width * h as f32 / w.max(1) as f32, w.max(1) as f32))
-        })
-        .collect()
+/// The memory the magnet works in, kept from one call to the next: it is asked every
+/// frame while a monitor is dragged, and allocates nothing once this is large enough.
+#[derive(Debug)]
+pub struct StickScratch<K> {
+    parts: Vec<Part<K>>,
+    /// On a wall: (id, centre in the wall's frame, width, height).
+    wall: Vec<(K, Vec3, f32, f32)>,
+}
+
+impl<K> Default for StickScratch<K> {
+    fn default() -> Self {
+        Self {
+            parts: Vec::new(),
+            wall: Vec::new(),
+        }
+    }
+}
+
+/// The placed ones of `monitors`, into `out`.
+fn parts<K: Key>(
+    placements: &HashMap<K, Placement>,
+    monitors: &[(K, u32, u32)],
+    out: &mut Vec<Part<K>>,
+) {
+    out.clear();
+    out.extend(monitors.iter().filter_map(|&(id, w, h)| {
+        let p = *placements.get(&id)?;
+        Some((id, p, p.width * h as f32 / w.max(1) as f32, w.max(1) as f32))
+    }));
 }
 
 /// The neighbour `m` would join among `others`, and how: the nearest as seen from
@@ -182,15 +203,18 @@ pub struct Stick<K> {
 /// The magnet for one monitor: let go almost against another (within 15 % of a
 /// monitor, as seen from `eye`) and at about the same distance, where it would stick
 /// to it, edge to edge, where along the edge it is (see [`hinge`]); `None` otherwise.
+/// Worked out in `scratch`.
 pub fn stick<K: Key>(
     placements: &HashMap<K, Placement>,
     monitors: &[(K, u32, u32)],
     eye: Vec3,
     id: K,
+    scratch: &mut StickScratch<K>,
 ) -> Option<Stick<K>> {
-    let all = parts(placements, monitors);
+    parts(placements, monitors, &mut scratch.parts);
+    let all = &scratch.parts;
     let m = *all.iter().find(|m| m.0 == id)?;
-    let (n, b) = nearest(&m, &all, eye)?;
+    let (n, b) = nearest(&m, all, eye)?;
     if b.gap >= 0.15 * m.1.width.min(n.1.width) {
         return None;
     }
@@ -213,19 +237,20 @@ pub fn stick<K: Key>(
 }
 
 /// The magnet on a wall: like [`stick`], but in the wall's plane (monitors there are
-/// flat in one plane, facing the same way).
+/// flat in one plane, facing the same way). Worked out in `scratch`.
 pub fn stick_on_wall<K: Key>(
     placements: &HashMap<K, Placement>,
     monitors: &[(K, u32, u32)],
     center: (Vec3, f32),
     id: K,
+    scratch: &mut StickScratch<K>,
 ) -> Option<Stick<K>> {
     let unturn = Quat::from_rotation_y(-center.1);
     let turn = Quat::from_rotation_y(center.1);
-    // (id, local centre, width, height)
-    let all: Vec<(K, Vec3, f32, f32)> = monitors
-        .iter()
-        .filter_map(|&(oid, w, h)| {
+    scratch.wall.clear();
+    scratch
+        .wall
+        .extend(monitors.iter().filter_map(|&(oid, w, h)| {
             let p = placements.get(&oid)?;
             Some((
                 oid,
@@ -233,8 +258,8 @@ pub fn stick_on_wall<K: Key>(
                 p.width,
                 p.width * h as f32 / w.max(1) as f32,
             ))
-        })
-        .collect();
+        }));
+    let all = &scratch.wall;
     let (_, mut at, mw, mh) = *all.iter().find(|m| m.0 == id)?;
     let gaps = |a: Vec3, aw: f32, ah: f32, b: Vec3, bw: f32, bh: f32| {
         (
@@ -246,8 +271,8 @@ pub fn stick_on_wall<K: Key>(
         let (gx, gy) = gaps(at, mw, mh, o.1, o.2, o.3);
         (gx.max(gy).max(0.0), at.distance(o.1))
     };
-    let others: Vec<(K, Vec3, f32, f32)> = all.iter().filter(|o| o.0 != id).copied().collect();
-    let n = *others.iter().min_by(|a, b| {
+    let others = || all.iter().filter(|o| o.0 != id);
+    let n = *others().min_by(|a, b| {
         let (sa, da) = sep(a);
         let (sb, db) = sep(b);
         sa.total_cmp(&sb).then(da.total_cmp(&db))
@@ -273,8 +298,8 @@ pub fn stick_on_wall<K: Key>(
         at.x = align(at.x, mw / 2.0, n.1.x, n.2 / 2.0);
     }
     // Still on top of another one: past it, the same way.
-    for _ in 0..others.len() {
-        let Some(o) = others.iter().find(|o| {
+    for _ in 0..others().count() {
+        let Some(o) = others().find(|o| {
             let (gx, gy) = gaps(at, mw, mh, o.1, o.2, o.3);
             gx < -1e-3 && gy < -1e-3
         }) else {

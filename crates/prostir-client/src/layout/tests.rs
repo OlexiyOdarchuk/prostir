@@ -423,15 +423,33 @@ fn the_magnet_needs_a_monitor_almost_against_another() {
     };
     // Let go 3 cm off: sticks back, edge to edge.
     let p = moved(Vec3::new(0.03, 0.01, 0.0));
-    let s = stick(&p, &two, Vec3::ZERO, 1).expect("sticks");
+    let s = stick(&p, &two, Vec3::ZERO, 1, &mut StickScratch::default()).expect("sticks");
     assert!(s.across && s.side > 0.0);
     let mut after = p;
     after.insert(1, s.placement);
     assert!(seam(&after[&0], &after[&1]) < 1e-3);
     // A clear gap left on purpose (40 cm): no magnet.
-    assert!(stick(&moved(Vec3::new(0.4, 0.0, 0.0)), &two, Vec3::ZERO, 1).is_none());
+    assert!(
+        stick(
+            &moved(Vec3::new(0.4, 0.0, 0.0)),
+            &two,
+            Vec3::ZERO,
+            1,
+            &mut StickScratch::default()
+        )
+        .is_none()
+    );
     // Pulled half a metre nearer on purpose: no magnet.
-    assert!(stick(&moved(Vec3::new(0.0, 0.0, 0.5)), &two, Vec3::ZERO, 1).is_none());
+    assert!(
+        stick(
+            &moved(Vec3::new(0.0, 0.0, 0.5)),
+            &two,
+            Vec3::ZERO,
+            1,
+            &mut StickScratch::default()
+        )
+        .is_none()
+    );
 }
 
 #[test]
@@ -453,7 +471,7 @@ fn dropped_on_a_seam_it_joins_the_nearer_monitor() {
             width: p[&1].width,
         },
     );
-    let s = stick(&p, &three, Vec3::ZERO, 0).expect("sticks");
+    let s = stick(&p, &three, Vec3::ZERO, 0, &mut StickScratch::default()).expect("sticks");
     assert_eq!(s.neighbour, 2);
 }
 
@@ -463,7 +481,8 @@ fn on_a_wall_the_magnet_stays_in_the_plane() {
     let mut p = arrange(Preset::Wall, &two, None, None, None);
     let w = p[&0].width;
     p.get_mut(&1).unwrap().position = p[&0].position + Vec3::new(w + 0.1, 0.02, 0.05);
-    let s = stick_on_wall(&p, &two, (Vec3::ZERO, 0.0), 1).expect("sticks");
+    let s = stick_on_wall(&p, &two, (Vec3::ZERO, 0.0), 1, &mut StickScratch::default())
+        .expect("sticks");
     assert!((s.placement.position.z - p[&0].position.z).abs() < 1e-5);
     assert!((s.placement.position.x - (p[&0].position.x + w)).abs() < 1e-4);
     assert!((s.placement.position.y - p[&0].position.y).abs() < 1e-4);
@@ -1620,7 +1639,7 @@ fn glued(
             width,
         },
     );
-    let s = stick(p, m, Vec3::ZERO, id).expect("the magnet takes it");
+    let s = stick(p, m, Vec3::ZERO, id, &mut StickScratch::default()).expect("the magnet takes it");
     assert!(
         !s.across,
         "{id} glued over or under {}, not beside",
@@ -2074,7 +2093,14 @@ fn line_up_keeps_a_monitor_glued_over_two_glued() {
         );
     }
     let mut glued_upright = upright.clone();
-    let s = stick(&glued_upright, &owner, Vec3::ZERO, 6).expect("sticks");
+    let s = stick(
+        &glued_upright,
+        &owner,
+        Vec3::ZERO,
+        6,
+        &mut StickScratch::default(),
+    )
+    .expect("sticks");
     assert!(!s.across);
     glued_upright.insert(6, s.placement);
     let lined = |p: &Placements| {

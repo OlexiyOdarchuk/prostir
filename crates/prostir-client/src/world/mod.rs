@@ -237,6 +237,8 @@ pub struct World {
     held: [Option<Thing>; 2],
     resizing: Option<DisplayKey>,
 
+    /// The magnet's memory (see `stick_of`), asked every frame of a drag.
+    stick: layout::StickScratch<DisplayKey>,
     /// Displays the last list no longer has (see [`World::listed`]), and streams it
     /// placed: kept to be filled again.
     gone: Vec<DisplayKey>,
@@ -304,6 +306,7 @@ impl World {
             wrist: None,
             held: [None, None],
             resizing: None,
+            stick: layout::StickScratch::default(),
             gone: Vec::new(),
             waiting: Vec::new(),
             saves: Dirty::default(),
@@ -1476,7 +1479,7 @@ impl World {
 
     /// The magnet: where monitor `id`, let go now, would stick (not on a wall, where
     /// monitors stay in its plane, nor for the laptop screen or window panels).
-    pub fn stick_of(&self, s: &Settings, id: DisplayKey) -> Option<layout::Stick<DisplayKey>> {
+    pub fn stick_of(&mut self, s: &Settings, id: DisplayKey) -> Option<layout::Stick<DisplayKey>> {
         // Lying down the monitors are a tilted band the presets keep exact; window
         // panels float on their own.
         if self.cinema
@@ -1489,9 +1492,21 @@ impl World {
             return None;
         }
         if s.preset == Preset::Wall {
-            layout::stick_on_wall(&self.placements, &self.sizes, self.center, id)
+            layout::stick_on_wall(
+                &self.placements,
+                &self.sizes,
+                self.center,
+                id,
+                &mut self.stick,
+            )
         } else {
-            layout::stick(&self.placements, &self.sizes, self.center.0, id)
+            layout::stick(
+                &self.placements,
+                &self.sizes,
+                self.center.0,
+                id,
+                &mut self.stick,
+            )
         }
     }
 
