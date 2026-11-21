@@ -1184,19 +1184,25 @@ fn run_session(
             gaps.restart();
             media_bytes = 0;
         }
-        // A part of the PC's state: kept, checked, and told to the app.
-        let msg = match pc.apply(msg.clone()) {
-            Ok(None) => {
-                tell_part(events, &msg);
-                if let HostMsg::Sound { part } = &msg
-                    && !part.to_headset
-                {
-                    player = None;
+        // A part of the PC's state: kept, checked, and told to the app. Pictures and
+        // sound, most of what comes, are never parts: they go on as they are, not
+        // copied.
+        let msg = if matches!(msg, HostMsg::Frame { .. } | HostMsg::Audio { .. }) {
+            Some(msg)
+        } else {
+            match pc.apply(msg.clone()) {
+                Ok(None) => {
+                    tell_part(events, &msg);
+                    if let HostMsg::Sound { part } = &msg
+                        && !part.to_headset
+                    {
+                        player = None;
+                    }
+                    None
                 }
-                None
+                Ok(Some(msg)) => Some(msg),
+                Err(e) => break Err(e.into()),
             }
-            Ok(Some(msg)) => Some(msg),
-            Err(e) => break Err(e.into()),
         };
         // The microphone streams while a PC program records from it (`UpWanted`) and
         // the user's switch on the headset is on.
