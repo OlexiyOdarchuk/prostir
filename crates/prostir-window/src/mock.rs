@@ -658,12 +658,16 @@ impl Inner {
             }
             Request::ForgetAll => s.headsets.clear(),
             Request::SoundToHeadset { on } => s.sound.to_headset = *on,
-            Request::Volume { .. } => {
-                return Err(refused(
-                    ApiError::Unsupported,
-                    "Гучність з ПК з'явиться в наступній версії.",
-                ));
-            }
+            // As the service: only while the headset shares its volume.
+            Request::Volume { level } => match &mut s.sound.volume {
+                Some(v) => v.level = (*level).min(100),
+                None => {
+                    return Err(refused(
+                        ApiError::Unsupported,
+                        "Гучність цього шолома з ПК не змінюється: лише його кнопками.",
+                    ));
+                }
+            },
             Request::SetMic { .. } => {
                 return Err(refused(
                     ApiError::Unsupported,

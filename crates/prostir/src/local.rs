@@ -395,10 +395,19 @@ impl Brain {
                     "Monitors are placed while they are on the desktop",
                 )),
             },
-            Request::Volume { .. } => unsupported(t(
-                "Гучність шолома з ПК буде з кроком звуку",
-                "The headset's volume from the PC comes with the sound step",
-            )),
+            Request::Volume { level } => {
+                if self
+                    .lead_mut()
+                    .is_some_and(|s| s.volume_from_pc(level.min(100)))
+                {
+                    done()
+                } else {
+                    unsupported(t(
+                        "Гучність цього шолома з ПК не змінюється: лише його кнопками",
+                        "This headset's volume is not changed from the PC, only with its buttons",
+                    ))
+                }
+            }
             // Handled above.
             Request::Recenter
             | Request::LineUp

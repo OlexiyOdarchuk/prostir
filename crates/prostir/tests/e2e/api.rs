@@ -814,6 +814,50 @@ fn a_monitor_added_from_the_pc_shows_where_the_headset_puts_it() {
     assert!(after >= Duration::from_secs(2), "shown after {after:?}");
 }
 
+/// The volume set in the settings window: the headset's sound device goes there, the
+/// headset is asked once and its step stands on both sides and in the state.
+#[test]
+fn the_volume_from_the_pc_reaches_the_headset() {
+    let (_dir, mut pc, _keys, mut headset) = session("api-volume", &Options::default());
+    let Some(bus) = &pc.bus else {
+        return;
+    };
+    let bus = bus.connect();
+    crate::sound::wait_first_volume(&mut pc, &mut headset);
+    let (_, state) = get_state(&bus);
+    assert!(state.sound.volume.is_some(), "{:?}", state.sound);
+    let asks = headset.view().volume_asks.len();
+    // Not the first level's step (40), so the device moves.
+    let level = 73;
+    call(
+        &bus,
+        "Call",
+        &(format!(r#"{{"request":"volume","level":{level}}}"#).as_str(),),
+    )
+    .unwrap();
+    let step = prostir_testkit::quest_step(level);
+    headset
+        .wait(SOON, "the headset asked for the volume", |v| {
+            v.volume_asks.len() > asks
+        })
+        .unwrap();
+    crate::sound::wait_written(&pc, &mut headset, step);
+    assert_eq!(headset.volume(), Some(step));
+    assert_eq!(headset.view().volume_asks.len(), asks + 1, "asked once");
+    let started = Instant::now();
+    loop {
+        let (_, state) = get_state(&bus);
+        if state.sound.volume.map(|v| v.level) == Some(step) {
+            break;
+        }
+        assert!(started.elapsed() < SOON, "{:?}", state.sound);
+        headset.take_for(Duration::from_millis(50)).unwrap();
+    }
+    // Quiet after: the device's echo of the level asks nothing more.
+    headset.take_for(Duration::from_secs(1)).unwrap();
+    assert_eq!(headset.view().volume_asks.len(), asks + 1);
+}
+
 /// Back and forth between scales from the PC, 100 % among them: each one is applied,
 /// the monitor's place on the desktop as large as its pixels at that scale.
 #[test]

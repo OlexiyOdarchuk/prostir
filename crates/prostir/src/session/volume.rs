@@ -80,6 +80,27 @@ impl Session {
         do_volume(sink, act, &self.outbox);
     }
 
+    /// The PC's settings window sets the volume: the device goes to `level` (its mute
+    /// as it is) and the headset is asked for it, as when the device's own slider
+    /// moves. False where the volume is not shared with this headset.
+    pub fn volume_from_pc(&mut self, level: u8) -> bool {
+        if self.shared_volume().is_none() {
+            return false;
+        }
+        let Some((sink, pc)) = &mut self.volume else {
+            return false;
+        };
+        let muted = sink
+            .level()
+            .or_else(|| self.publisher.headset.volume.map(|v| (v.level, v.muted)))
+            .is_some_and(|(_, muted)| muted);
+        info!("volume: {level} from the PC's settings");
+        sink.set(level.min(100), muted);
+        let act = pc.set_here(level, muted, Instant::now());
+        do_volume(sink, act, &self.outbox);
+        true
+    }
+
     /// Follows the device's volume: a move waiting asks the headset, its answers go to
     /// the device once the slider rests.
     pub fn volume_due(&mut self) {

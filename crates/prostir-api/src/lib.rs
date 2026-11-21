@@ -155,7 +155,8 @@ pub enum Request {
     SoundToHeadset {
         on: bool,
     },
-    /// The headset's volume (with step 6.6; until then `Unsupported`).
+    /// The main headset's volume, while the PC shares it (`sound.volume` is not null);
+    /// `Unsupported` otherwise.
     Volume {
         level: u8,
     },

@@ -219,7 +219,7 @@ brings them:
 
 | `request` | Arguments | |
 |---|---|---|
-| `volume` | `level` | the headset's volume from the PC (step 6.6, sound) |
+| `volume` | `level` (0 to 100) | the main headset's volume from the PC: its sound device goes to that level and the headset is asked for it, as when the device's own slider moves; `Unsupported` while `sound.volume` is `null` |
 | `set_mic` | `on` | always: the headset microphone's switch is the headset user's, changed only in the headset; the state shows it (`session.mic_on`) |
 
 ## Answers
