@@ -177,3 +177,31 @@ fn a_nudge_across_no_glue_moves_little() {
     );
     assert!(broken * 100 <= same * 4, "{broken} of {same}");
 }
+
+/// Reported (`--ignored`): how long "Line up" takes over the hand scenes of T1 to T5
+/// (800 of them): the median, the 95th percentile and the longest, in microseconds.
+#[test]
+#[ignore = "a report, not a check"]
+fn report_line_up_timings() {
+    let mut rng = Rng::new(0x3e7a_0007);
+    let mut took: Vec<u128> = Vec::with_capacity(800);
+    for _ in 0..800 {
+        let scene = hand_scene(&mut rng);
+        let ids: Vec<u8> = scene.monitors.iter().map(|m| m.id).collect();
+        let rows = prostir_layout::rows::rows_of(&ids, &scene.room(), None);
+        let lid = scene.get(MIRROR).map(|m| m.id);
+        let start = std::time::Instant::now();
+        let done = line_up(&scene.monitors, &scene.frame, scene.main, Some(&rows), lid);
+        took.push(start.elapsed().as_micros());
+        std::hint::black_box(done);
+    }
+    took.sort_unstable();
+    let at = |q: f64| took[((took.len() - 1) as f64 * q) as usize];
+    eprintln!(
+        "line up over {} hand scenes: median {} us, p95 {} us, longest {} us",
+        took.len(),
+        at(0.5),
+        at(0.95),
+        took[took.len() - 1]
+    );
+}

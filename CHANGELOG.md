@@ -39,7 +39,8 @@
   a gap you left between two rows stays. A monitor the magnet glued over or under
   another stays glued: Line up closes the middle of the seam as you see it instead of
   lifting the monitor clear and leaving a gap (a wide flat monitor over a curved row
-  overlaps the row a little at its ends, the nearer monitor in front).
+  overlaps the row a little at its ends, the nearer monitor in front, never by more
+  than 12 % of a monitor's height; where it would, the monitor is lifted clear).
 - A monitor stays in its row while you move it about. A portrait monitor between two
   others no longer jumps into a row of its own when one of them is nudged; a monitor
   leaves its row only when you clearly move it out.

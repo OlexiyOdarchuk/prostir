@@ -249,20 +249,7 @@ pub fn see<K: Copy>(frame: &Frame, monitors: &[Monitor<K>]) -> Vec<Seen<K>> {
         .map(|m| {
             let local = |p: Vec3| frame.to_local(p).as_dvec3();
             let around = azimuth(local(m.placement.position));
-            let corners = m.placement.corners(m.height()).map(local);
-            let mut az = corners.map(|c| unwrap(azimuth(c), around));
-            let mut el = corners.map(elevation);
-            az.sort_by(f64::total_cmp);
-            el.sort_by(f64::total_cmp);
-            let (left, right) = ((az[0] + az[1]) / 2.0, (az[2] + az[3]) / 2.0);
-            let (bottom, top) = ((el[0] + el[1]) / 2.0, (el[2] + el[3]) / 2.0);
-            Seen {
-                id: m.id,
-                left,
-                right: right.max(left + 1e-9),
-                bottom,
-                top: top.max(bottom + 1e-9),
-            }
+            seen_corners(m.id, m.placement.corners(m.height()).map(local), around)
         })
         .collect();
     let cut = widest_gap(&raw);
@@ -406,6 +393,25 @@ pub fn touches<K: Copy>(seen: &[Seen<K>], gap: f64, seam: f64) -> Vec<Touch<K>> 
         }
     }
     out
+}
+
+/// A monitor `id` with its `corners` in a frame's own coordinates (the eye at the
+/// origin), as seen, its azimuths moved by whole turns to lie around `around`: an edge
+/// is the mean of the two corners nearest that way (see [`see`]).
+pub fn seen_corners<K>(id: K, corners: [DVec3; 4], around: f64) -> Seen<K> {
+    let mut az = corners.map(|c| unwrap(azimuth(c), around));
+    let mut el = corners.map(elevation);
+    az.sort_by(f64::total_cmp);
+    el.sort_by(f64::total_cmp);
+    let (left, right) = ((az[0] + az[1]) / 2.0, (az[2] + az[3]) / 2.0);
+    let (bottom, top) = ((el[0] + el[1]) / 2.0, (el[2] + el[3]) / 2.0);
+    Seen {
+        id,
+        left,
+        right: right.max(left + 1e-9),
+        bottom,
+        top: top.max(bottom + 1e-9),
+    }
 }
 
 /// One monitor placed in a frame's own coordinates (eye at the origin, -Z ahead), as

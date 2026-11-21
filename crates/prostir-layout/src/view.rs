@@ -8,7 +8,9 @@
 use glam::{DVec3, Vec3};
 
 use crate::desk::{NOISE, Relation, View};
-use crate::space::{Frame, Monitor, Seen, Side, Touch, azimuth, elevation, see, unwrap};
+use crate::space::{
+    Frame, Monitor, Seen, Side, Touch, azimuth, elevation, see, seen_corners, unwrap,
+};
 
 /// The room as the desk plan sees it.
 #[derive(Debug, Clone)]
@@ -75,8 +77,8 @@ impl<K: Copy + PartialEq> Room<K> {
         let (Some(ma), Some(mb)) = (self.get(a), self.get(b)) else {
             return Vec::new();
         };
-        let ea = Self::edge(ma, side);
-        let eb = Self::edge(mb, side.opposite());
+        let ea = edge(ma, side);
+        let eb = edge(mb, side.opposite());
         let (ca, cb) = (ma.seen.center_x(), mb.seen.center_x());
         let range = |e: &Edge, around: f64| {
             let (x, y) = (e.angle(0.0, around), e.angle(1.0, around));
@@ -101,7 +103,7 @@ impl<K: Copy + PartialEq> Room<K> {
     /// the top, or the left).
     pub fn angle_along(&self, k: K, side: Side, pixel: f64) -> Option<f64> {
         let m = self.get(k)?;
-        let e = Self::edge(m, side);
+        let e = edge(m, side);
         let t = if e.down {
             1.0 - pixel / e.pixels
         } else {
@@ -113,7 +115,7 @@ impl<K: Copy + PartialEq> Room<K> {
     /// Metres per pixel along `k`'s edge on `side`.
     pub fn metres_per_pixel(&self, k: K, side: Side) -> Option<f64> {
         let m = self.get(k)?;
-        let e = Self::edge(m, side);
+        let e = edge(m, side);
         Some((e.to - e.from).length() / e.pixels)
     }
 
@@ -155,36 +157,36 @@ impl<K: Copy + PartialEq> Room<K> {
     pub fn center_x(&self, k: K) -> Option<f64> {
         Some(self.get(k)?.seen.center_x())
     }
+}
 
-    /// The edge of `m` on `side` (as a segment, pixel 0 at its start).
-    fn edge(m: &Shown<K>, side: Side) -> Edge {
-        let [tl, tr, br, bl] = m.corners;
-        match side {
-            Side::Right => Edge {
-                from: br,
-                to: tr,
-                pixels: m.px.1,
-                down: true,
-            },
-            Side::Left => Edge {
-                from: bl,
-                to: tl,
-                pixels: m.px.1,
-                down: true,
-            },
-            Side::Above => Edge {
-                from: tl,
-                to: tr,
-                pixels: m.px.0,
-                down: false,
-            },
-            Side::Below => Edge {
-                from: bl,
-                to: br,
-                pixels: m.px.0,
-                down: false,
-            },
-        }
+/// The edge of `m` on `side` (as a segment, pixel 0 at its start).
+fn edge<K>(m: &Shown<K>, side: Side) -> Edge {
+    let [tl, tr, br, bl] = m.corners;
+    match side {
+        Side::Right => Edge {
+            from: br,
+            to: tr,
+            pixels: m.px.1,
+            down: true,
+        },
+        Side::Left => Edge {
+            from: bl,
+            to: tl,
+            pixels: m.px.1,
+            down: true,
+        },
+        Side::Above => Edge {
+            from: tl,
+            to: tr,
+            pixels: m.px.0,
+            down: false,
+        },
+        Side::Below => Edge {
+            from: bl,
+            to: br,
+            pixels: m.px.0,
+            down: false,
+        },
     }
 }
 
@@ -245,61 +247,7 @@ impl Edge {
 
 impl<K: Copy + PartialEq> View<K> for Room<K> {
     fn relate(&self, a: K, b: K, side: Side) -> Option<Relation> {
-        let (ma, mb) = (self.get(a)?, self.get(b)?);
-        // `b` must be on that side of `a` at all.
-        let on_side = match side {
-            Side::Right => mb.seen.center_x() > ma.seen.center_x(),
-            Side::Left => mb.seen.center_x() < ma.seen.center_x(),
-            Side::Above => mb.seen.center_y() > ma.seen.center_y(),
-            Side::Below => mb.seen.center_y() < ma.seen.center_y(),
-        };
-        if !on_side {
-            return None;
-        }
-        let ea = Self::edge(ma, side);
-        let eb = Self::edge(mb, side.opposite());
-        // Each edge's azimuths around its own monitor's middle: every middle is already
-        // cut where `see` cuts, so the two edges are comparable.
-        let (ca, cb) = (ma.seen.center_x(), mb.seen.center_x());
-        let range = |e: &Edge, around: f64| {
-            let (x, y) = (e.angle(0.0, around), e.angle(1.0, around));
-            (x.min(y), x.max(y))
-        };
-        let ((a0, a1), (b0, b1)) = (range(&ea, ca), range(&eb, cb));
-        let (lo, hi) = (a0.max(b0), a1.min(b1));
-        let m = if hi > lo {
-            (lo + hi) / 2.0
-        } else {
-            (a0 + a1 + b0 + b1) / 4.0
-        };
-        let (ta, tb) = (ea.find(m, ca), eb.find(m, cb));
-        let shared = if hi > lo {
-            (ea.pixel(ea.find(hi, ca)) - ea.pixel(ea.find(lo, ca))).abs()
-        } else {
-            0.0
-        };
-        // Across the edge, from `a` outwards, in `a`'s pixels.
-        let (across_a, across_b) = (ea.across(ta, ca), eb.across(tb, cb));
-        let outwards = match side {
-            Side::Right | Side::Above => across_b - across_a,
-            Side::Left | Side::Below => across_a - across_b,
-        };
-        let scale = match side {
-            Side::Right | Side::Left => ma.px.0 / ma.seen.width(),
-            Side::Above | Side::Below => ma.px.1 / ma.seen.height(),
-        };
-        let size_across = match side {
-            Side::Right | Side::Left => ma.seen.width(),
-            Side::Above | Side::Below => ma.seen.height(),
-        };
-        Some(Relation {
-            offset: ea.pixel(ta) - eb.pixel(tb),
-            at: ea.pixel(ta),
-            shared,
-            seam: ((hi - lo) / (a1 - a0).min(b1 - b0).max(1e-12)).clamp(0.0, 1.0),
-            gap: outwards * scale,
-            apart: outwards / size_across,
-        })
+        relate_shown(self.get(a)?, self.get(b)?, side)
     }
 
     fn between(&self, a: K, b: K) -> bool {
@@ -328,4 +276,129 @@ impl<K: Copy + PartialEq> View<K> for Room<K> {
     fn height(&self, k: K) -> Option<f64> {
         self.get(k).map(|m| m.seen.height())
     }
+}
+
+/// How `mb` stands on `side` of `ma` as seen (see [`View::relate`]).
+fn relate_shown<K>(ma: &Shown<K>, mb: &Shown<K>, side: Side) -> Option<Relation> {
+    // `b` must be on that side of `a` at all.
+    let on_side = match side {
+        Side::Right => mb.seen.center_x() > ma.seen.center_x(),
+        Side::Left => mb.seen.center_x() < ma.seen.center_x(),
+        Side::Above => mb.seen.center_y() > ma.seen.center_y(),
+        Side::Below => mb.seen.center_y() < ma.seen.center_y(),
+    };
+    if !on_side {
+        return None;
+    }
+    let ea = edge(ma, side);
+    let eb = edge(mb, side.opposite());
+    // Each edge's azimuths around its own monitor's middle: every middle is already
+    // cut where `see` cuts, so the two edges are comparable.
+    let (ca, cb) = (ma.seen.center_x(), mb.seen.center_x());
+    let range = |e: &Edge, around: f64| {
+        let (x, y) = (e.angle(0.0, around), e.angle(1.0, around));
+        (x.min(y), x.max(y))
+    };
+    let ((a0, a1), (b0, b1)) = (range(&ea, ca), range(&eb, cb));
+    let (lo, hi) = (a0.max(b0), a1.min(b1));
+    let m = if hi > lo {
+        (lo + hi) / 2.0
+    } else {
+        (a0 + a1 + b0 + b1) / 4.0
+    };
+    let (ta, tb) = (ea.find(m, ca), eb.find(m, cb));
+    let shared = if hi > lo {
+        (ea.pixel(ea.find(hi, ca)) - ea.pixel(ea.find(lo, ca))).abs()
+    } else {
+        0.0
+    };
+    // Across the edge, from `a` outwards, in `a`'s pixels.
+    let (across_a, across_b) = (ea.across(ta, ca), eb.across(tb, cb));
+    let outwards = match side {
+        Side::Right | Side::Above => across_b - across_a,
+        Side::Left | Side::Below => across_a - across_b,
+    };
+    let scale = match side {
+        Side::Right | Side::Left => ma.px.0 / ma.seen.width(),
+        Side::Above | Side::Below => ma.px.1 / ma.seen.height(),
+    };
+    let size_across = match side {
+        Side::Right | Side::Left => ma.seen.width(),
+        Side::Above | Side::Below => ma.seen.height(),
+    };
+    Some(Relation {
+        offset: ea.pixel(ta) - eb.pixel(tb),
+        at: ea.pixel(ta),
+        shared,
+        seam: ((hi - lo) / (a1 - a0).min(b1 - b0).max(1e-12)).clamp(0.0, 1.0),
+        gap: outwards * scale,
+        apart: outwards / size_across,
+    })
+}
+
+/// `a` and `b` in a frame's own coordinates (the eye at the origin) as a room of their
+/// own sees them, with nothing allocated: two monitors at a time.
+fn shown_pair<K: Copy>(a: &Monitor<K>, b: &Monitor<K>) -> (Shown<K>, Shown<K>) {
+    let shown = |m: &Monitor<K>, around: f64| {
+        let corners = m.placement.corners(m.height()).map(|c: Vec3| c.as_dvec3());
+        Shown {
+            id: m.id,
+            corners,
+            px: (f64::from(m.px.w), f64::from(m.px.h)),
+            seen: seen_corners(m.id, corners, around),
+        }
+    };
+    let around = azimuth(a.placement.position.as_dvec3());
+    let b_around = unwrap(azimuth(b.placement.position.as_dvec3()), around);
+    (shown(a, around), shown(b, b_around))
+}
+
+/// How `b` stands on `side` of `a` as [`Room::relate`] has it for a room of the two,
+/// both in a frame's own coordinates (the eye at the origin), with nothing allocated.
+pub fn relate_pair<K: Copy>(a: &Monitor<K>, b: &Monitor<K>, side: Side) -> Option<Relation> {
+    let (ma, mb) = shown_pair(a, b);
+    relate_shown(&ma, &mb, side)
+}
+
+/// How far, as seen, the edge of `b` facing `a` reaches into `a` across the edge of `a`
+/// on `side` where they face each other: the most of `samples` points spread over the
+/// stretch they share, as a share of `a`'s size across (its height over or under it, its
+/// width beside it); 0 or less where they do not overlap. Both in a frame's own
+/// coordinates. `None` when `b` is not on that side or they share no stretch.
+pub fn reach_pair<K: Copy>(
+    a: &Monitor<K>,
+    b: &Monitor<K>,
+    side: Side,
+    samples: usize,
+) -> Option<f64> {
+    let (ma, mb) = shown_pair(a, b);
+    relate_shown(&ma, &mb, side).filter(|r| r.shared > 0.0)?;
+    let ea = edge(&ma, side);
+    let eb = edge(&mb, side.opposite());
+    let (ca, cb) = (ma.seen.center_x(), mb.seen.center_x());
+    let range = |e: &Edge, around: f64| {
+        let (x, y) = (e.angle(0.0, around), e.angle(1.0, around));
+        (x.min(y), x.max(y))
+    };
+    let ((a0, a1), (b0, b1)) = (range(&ea, ca), range(&eb, cb));
+    let (lo, hi) = (a0.max(b0), a1.min(b1));
+    let size_across = match side {
+        Side::Right | Side::Left => ma.seen.width(),
+        Side::Above | Side::Below => ma.seen.height(),
+    };
+    let n = samples.max(2);
+    (0..n)
+        .map(|j| {
+            let angle = lo + (hi - lo) * j as f64 / (n - 1) as f64;
+            let (across_a, across_b) = (
+                ea.across(ea.find(angle, ca), ca),
+                eb.across(eb.find(angle, cb), cb),
+            );
+            let into = match side {
+                Side::Right | Side::Above => across_a - across_b,
+                Side::Left | Side::Below => across_b - across_a,
+            };
+            into / size_across
+        })
+        .reduce(f64::max)
 }
