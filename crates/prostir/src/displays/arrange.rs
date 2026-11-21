@@ -3,6 +3,20 @@
 
 use super::*;
 
+/// How long a monitor just added waits for the headset to place it before its stand-in
+/// place counts: the headset shows it first and sends an arrangement once it held
+/// for 0.8 s.
+pub(super) const PLACE_WAIT: Duration = Duration::from_secs(4);
+
+/// A monitor just added that the headset is to place.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Placing {
+    /// Its stand-in place counts from then on.
+    pub until: Instant,
+    /// The headset's arrangement has it: the next layout puts it where it stays.
+    pub placed: bool,
+}
+
 impl Displays {
     /// The virtual monitors.
     pub(super) fn monitors(&self) -> impl Iterator<Item = &Screen> {
@@ -51,7 +65,36 @@ impl Displays {
         }
         let number = self.free_number();
         self.add_as(id, number, spec);
+        // A headset that places the monitors gives this one its place once it shows
+        // it; meanwhile the desktop has it at a stand-in place.
+        let headset_places = self.router.receivers() > 0
+            && self
+                .rows
+                .iter()
+                .flatten()
+                .any(|e| e.center.is_some() && e.middle.is_some());
+        if headset_places {
+            self.placing.insert(
+                id,
+                Placing {
+                    until: Instant::now() + PLACE_WAIT,
+                    placed: false,
+                },
+            );
+        }
         Ok(())
+    }
+
+    /// Whether the desktop has monitor `id` where it stays (else at a stand-in place
+    /// until the headset placed it, for up to [`PLACE_WAIT`]).
+    pub fn desk_known(&self, id: ScreenId, now: Instant) -> bool {
+        self.placing.get(&id).is_none_or(|p| now >= p.until)
+    }
+
+    /// The desktop was laid out: the monitors the headset placed meanwhile are where
+    /// they stay.
+    pub(super) fn placed_now(&mut self, now: Instant) {
+        self.placing.retain(|_, p| !p.placed && now < p.until);
     }
 
     /// Adds monitor `id` (output `number`) to the set, at the end of the bottom row
@@ -125,6 +168,7 @@ impl Displays {
     /// arrangement.
     pub(super) fn forget(&mut self, id: ScreenId) {
         self.too_big.remove(&id);
+        self.placing.remove(&id);
         for row in &mut self.rows {
             row.retain(|e| e.id != id);
         }
@@ -307,6 +351,13 @@ impl Displays {
                 Some(row) => row.extend(missing),
                 None => rows.push(missing),
             }
+        }
+        // Placed by the headset: where it stays once the desktop is laid out with it.
+        for (id, p) in &mut self.placing {
+            p.placed |= rows
+                .iter()
+                .flatten()
+                .any(|e| e.id == *id && e.center.is_some() && e.middle.is_some());
         }
         self.rows = rows;
     }

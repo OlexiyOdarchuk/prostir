@@ -749,11 +749,13 @@ impl Brain {
                 // told, failed (by its own decoders and streams, never by a stand-in).
                 let part = d.pc_view();
                 let lead_part = lead.map(|s| d.displays_part(s.caps()));
+                let now = std::time::Instant::now();
                 let list = part
                     .displays
                     .iter()
                     .map(|w| {
-                        let output = d.output_of(ScreenId::from_wire(w.id));
+                        let id = ScreenId::from_wire(w.id);
+                        let output = d.output_of(id);
                         let failed_there = lead_part
                             .as_ref()
                             .and_then(|p| p.get(w.id))
@@ -761,6 +763,11 @@ impl Brain {
                         let mut w = w.clone();
                         if let Some(t) = failed_there {
                             w.state = t.state.clone();
+                        }
+                        // A monitor just added stands nowhere until the headset placed
+                        // it: a map then shows it once, where it stays.
+                        if !d.desk_known(id, now) {
+                            w.desk = None;
                         }
                         api_display(&w, output.unwrap_or_default())
                     })

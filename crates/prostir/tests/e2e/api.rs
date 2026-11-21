@@ -707,6 +707,113 @@ fn monitors_scaled_and_placed_from_the_pc() {
     assert_eq!(error_name(&bad), "BadSize");
 }
 
+/// A monitor added from the PC while the headset places the monitors: the local API
+/// shows it nowhere on the desktop until the headset placed it and the desktop was laid
+/// out so, then where it stays, never at the stand-in place before. One the headset
+/// does not place shows at the PC's place after a few seconds.
+#[test]
+fn a_monitor_added_from_the_pc_shows_where_the_headset_puts_it() {
+    use prostir_proto::ClientMsg;
+    use prostir_proto::state::{Placed, Row};
+    let (_dir, pc, _keys, mut headset) = session("api-adding", &Options::default());
+    let Some(bus) = &pc.bus else {
+        return;
+    };
+    let bus = bus.connect();
+    let order = headset.view().order();
+    let (m1, m2) = (order[0], order[1]);
+    let at = |id, center, middle| Placed {
+        id,
+        center: Some(center),
+        middle: Some(middle),
+    };
+    // 640x360 and 480x272 side by side, tops level.
+    let mut entries = vec![at(m1, 320, 180), at(m2, 880, 136)];
+    headset
+        .send(&ClientMsg::Arrange {
+            rows: vec![Row {
+                entries: entries.clone(),
+            }],
+        })
+        .unwrap();
+    let started = Instant::now();
+    loop {
+        let (_, state) = get_state(&bus);
+        if state.displays.iter().all(|d| d.desk.is_some()) {
+            break;
+        }
+        assert!(started.elapsed() < SOON, "not placed: {:?}", state.displays);
+        headset.take_for(Duration::from_millis(50)).unwrap();
+    }
+    let add = |bus: &Connection| -> u32 {
+        let reply: String = call(
+            bus,
+            "Call",
+            &(r#"{"request":"add_monitor","w":640,"h":360}"#,),
+        )
+        .unwrap()
+        .body()
+        .deserialize()
+        .unwrap();
+        let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        u32::try_from(reply["id"].as_u64().expect("the new monitor's id")).unwrap()
+    };
+    let new = add(&bus);
+    // Made and streaming, laid out by the PC meanwhile: still nowhere in the API.
+    headset
+        .wait(START, "the new monitor showing", View::all_monitors_show)
+        .unwrap();
+    let shown = Instant::now();
+    while shown.elapsed() < Duration::from_millis(800) {
+        let (_, state) = get_state(&bus);
+        let d = state.display(new).expect("the new monitor");
+        assert_eq!(d.desk, None, "at a stand-in place: {d:?}");
+        headset.take_for(Duration::from_millis(50)).unwrap();
+    }
+    // The headset puts it over the first one.
+    entries.insert(0, at(prostir_proto::state::DisplayId(new), 320, -180));
+    headset
+        .send(&ClientMsg::Arrange {
+            rows: vec![
+                Row {
+                    entries: vec![entries[0]],
+                },
+                Row {
+                    entries: entries[1..].to_vec(),
+                },
+            ],
+        })
+        .unwrap();
+    let started = Instant::now();
+    let first = loop {
+        let (_, state) = get_state(&bus);
+        if let Some(r) = state.display(new).and_then(|d| d.desk) {
+            break (r, state);
+        }
+        assert!(started.elapsed() < SOON, "never on the desktop");
+        headset.take_for(Duration::from_millis(20)).unwrap();
+    };
+    let (r, state) = first;
+    let under = state.display(m1.0).unwrap().desk.unwrap();
+    assert!(r.y + r.h as i32 <= under.y, "{r:?} over {under:?}");
+    headset.take_for(Duration::from_millis(500)).unwrap();
+    let (_, state) = get_state(&bus);
+    assert_eq!(state.display(new).unwrap().desk, Some(r), "it did not move");
+
+    // Not placed by the headset: where the PC put it, a few seconds later.
+    let other = add(&bus);
+    let started = Instant::now();
+    let after = loop {
+        let (_, state) = get_state(&bus);
+        if state.display(other).and_then(|d| d.desk).is_some() {
+            break started.elapsed();
+        }
+        assert!(started.elapsed() < START, "never on the desktop");
+        headset.take_for(Duration::from_millis(50)).unwrap();
+    };
+    assert!(after >= Duration::from_secs(2), "shown after {after:?}");
+}
+
 /// Back and forth between scales from the PC, 100 % among them: each one is applied,
 /// the monitor's place on the desktop as large as its pixels at that scale.
 #[test]

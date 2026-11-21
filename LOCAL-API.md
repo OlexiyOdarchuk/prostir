@@ -321,7 +321,7 @@ change older clients would misread.
 | `displays[].output` | the desktop's name for the output, while it has one |
 | `displays[].builtin`, `shown` | a display of the PC: the laptop's panel; shown in the headset |
 | `displays[].mode` | the stream's size and the scale in percent |
-| `displays[].desk` | where it is on the desktop, in logical pixels, while it is there |
+| `displays[].desk` | where it is on the desktop, in logical pixels, while it is there; `null` too for a monitor just added while the headset places the monitors, until the desktop has it where the headset put it (at most a few seconds), so a map never shows it at a stand-in place |
 | `displays[].state` | `starting`, `running`, `failed` (see `failure`; it keeps its place and is tried again), `absent` (a display of the PC that is not connected now: the lid closed, the cable out), `kept` (a monitor of the set kept for the next headset, while no monitors are on the desktop) |
 | `primary` | the desktop's primary display |
 | `limits` | for the main headset while one is connected, else what any headset gets: `sizes` to offer `[w, h]`, `scales` (percent), `displays_max` (virtual monitors), `physical_max`, `streams_max`, `min` and `max` size |

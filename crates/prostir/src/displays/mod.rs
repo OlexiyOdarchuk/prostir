@@ -128,6 +128,10 @@ pub struct Displays {
     /// Where each output is on the desktop as laid out last, by name: Prostir's and the
     /// PC's own displays, shown or not.
     on_desk: BTreeMap<OutputKey, state::DeskRect>,
+    /// Monitors just added while the headset places the monitors itself: their place
+    /// on the desktop is a stand-in until the headset's arrangement has them and the
+    /// desktop was laid out with it (see [`Displays::desk_known`]).
+    placing: BTreeMap<ScreenId, arrange::Placing>,
     /// When each display of the PC was last connected, in seconds since 1970 (0: not
     /// known), to forget the least recently seen of those not connected.
     physical_seen: BTreeMap<ScreenId, u64>,
@@ -208,6 +212,7 @@ impl Displays {
             detaching: BTreeMap::new(),
             rows: set.rows.clone(),
             on_desk: BTreeMap::new(),
+            placing: BTreeMap::new(),
             physical_seen: set.physical.iter().map(|(id, p)| (*id, p.seen)).collect(),
             too_big: BTreeMap::new(),
             settings: settings.clone(),
@@ -518,7 +523,10 @@ impl Displays {
                     self.screens.remove(&id);
                 }
             }
-            Done::Placed(on_desk) => self.on_desk = on_desk,
+            Done::Placed(on_desk) => {
+                self.on_desk = on_desk;
+                self.placed_now(Instant::now());
+            }
             Done::Physical(seen) => self.sync_physical(&seen, new_id),
             Done::Focus(key) => self.focus = key.and_then(|k| self.id_of_output(&k)),
             Done::Job { job, result } => return self.job_done(job, result),
