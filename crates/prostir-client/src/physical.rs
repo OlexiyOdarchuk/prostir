@@ -5,7 +5,7 @@
 
 use prostir_proto::state::{Display, DisplayKind, DisplayState, Displays};
 
-use crate::i18n::Lang;
+use crate::lang::Texts;
 use crate::layout::ScreenId;
 
 /// Connected now, so showing it shows something.
@@ -39,16 +39,14 @@ pub fn switch(displays: &Displays) -> Option<&Display> {
 
 /// What the person calls display `d` of the PC: the laptop's own panel is the laptop
 /// screen, another one goes by its name on the PC (`HDMI-A-1`).
-pub fn label(d: &Display, l: Lang) -> String {
+pub fn label(d: &Display, l: &Texts) -> String {
     match &d.kind {
-        DisplayKind::Physical { builtin: true, .. } => {
-            l.t("Екран ноутбука", "Laptop screen").to_owned()
-        }
+        DisplayKind::Physical { builtin: true, .. } => l.t("laptop-screen").to_owned(),
         DisplayKind::Physical { connector, .. } if !connector.is_empty() => {
-            format!("{} {connector}", l.t("Екран", "Display"))
+            l.f("pc-display-named", &[("name", connector.into())])
         }
-        _ if !d.name.is_empty() => format!("{} {}", l.t("Екран", "Display"), d.name),
-        _ => l.t("Екран ПК", "PC display").to_owned(),
+        _ if !d.name.is_empty() => l.f("pc-display-named", &[("name", (&d.name).into())]),
+        _ => l.t("pc-display").to_owned(),
     }
 }
 
@@ -122,7 +120,7 @@ mod tests {
         assert_eq!(mirror(&shown), Some(117), "the connected one first");
         assert_eq!(mirror(&hidden), Some(100), "its place kept");
         assert_eq!(
-            label(switch(&shown).unwrap(), Lang::Uk),
+            label(switch(&shown).unwrap(), &crate::lang::builtin("uk")),
             "Екран HDMI-A-1",
             "named"
         );
@@ -143,6 +141,6 @@ mod tests {
         assert_eq!(switch(&both(None)).map(|d| d.id.0), Some(117));
         let only = list(vec![laptop.clone()], None);
         assert_eq!(switch(&only).map(|d| d.id.0), Some(100));
-        assert_eq!(label(&laptop, Lang::En), "Laptop screen");
+        assert_eq!(label(&laptop, &crate::lang::builtin("en")), "Laptop screen");
     }
 }

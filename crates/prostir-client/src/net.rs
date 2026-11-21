@@ -26,7 +26,7 @@ use prostir_proto::stats::{Gaps, Period};
 use prostir_proto::{ClientMsg, Codec, HeadsetGoodbye, HostMsg, PcGoodbye};
 
 use crate::audio::{Gains, Player};
-use crate::i18n::Lang;
+use crate::lang::{Lang, Texts};
 use crate::mic::{Mic, Recorder};
 use crate::outbox::{Lanes, Outbox};
 use crate::ui::OfferWhy;
@@ -306,7 +306,7 @@ struct Steer {
     /// What the headset says about itself when it opens a session (`Open`).
     headset: HeadsetState,
     /// The menu's language, for what this thread names (a PC over USB).
-    lang: Lang,
+    texts: Option<Texts>,
 }
 
 type PeerKey = [u8; 32];
@@ -390,12 +390,12 @@ impl Steering {
     }
 
     /// The menu's language changed.
-    pub fn set_lang(&self, lang: Lang) {
-        self.lock().lang = lang;
+    pub fn set_texts(&self, texts: Texts) {
+        self.lock().texts = Some(texts);
     }
 
-    fn lang(&self) -> Lang {
-        self.lock().lang
+    fn texts(&self) -> Option<Texts> {
+        self.lock().texts.clone()
     }
 
     /// A PC was forgotten in the menu: the next connection reads the trust file again.
@@ -1091,19 +1091,16 @@ fn run_session(
         }
     }
     let _close = CloseOnExit(closer.clone());
-    let host = name.clone().unwrap_or_else(|| {
-        if addr.ip().is_loopback() {
-            steering.lang().t("ПК (USB)", "PC (USB)").into()
-        } else {
-            addr.ip().to_string()
-        }
+    let host = name.clone().unwrap_or_else(|| match steering.texts() {
+        Some(texts) if addr.ip().is_loopback() => texts.t("pc-usb").to_owned(),
+        _ => addr.ip().to_string(),
     });
     // Versions first, before pairing: this exchange is the same in every version, so
     // a PC of any version says which side to update.
     let app = prostir_proto::app_version(env!("CARGO_PKG_VERSION"));
     handshake::send_hello(&mut *sender, &app)?;
     let language = match handshake::read_answer(&mut *receiver)? {
-        Answer::Welcome { language, .. } => Lang::from_code(&language),
+        Answer::Welcome { language, .. } => Lang::from_tag(&language),
         Answer::Incompatible { protocol, app } => {
             let _ = events.send(NetEvent::Incompatible {
                 pc_newer: prostir_proto::peer_is_newer(protocol, &app),

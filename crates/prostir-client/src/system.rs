@@ -1,7 +1,8 @@
 //! What the app asks the system. The `system` thread asks now and then, away from the
 //! frame (a call into Java takes its time): for now the battery, once a minute and
-//! every 15 s while the palm menu shows, read afresh when it appears. What does not
-//! change (the headset's model) is asked once at the start.
+//! every 15 s while the palm menu shows, read afresh when it appears. It also reads the
+//! language files when the menu's language changes (see [`crate::lang`]). What does not
+//! change (the headset's model, its language) is asked once at the start.
 
 #![expect(
     clippy::disallowed_methods,
@@ -17,6 +18,7 @@ use jni::strings::JNIStr;
 use jni::{jni_sig, jni_str};
 use log::warn;
 
+use crate::lang::{Known, Lang, Loader, Texts};
 use crate::mic::with_app_context;
 
 /// How often the battery is read, and while the palm menu shows it.
@@ -30,11 +32,19 @@ pub enum SystemEvent {
     /// The battery: percent and whether it is charging; `None` when Android did not
     /// say.
     Battery(Option<(u8, bool)>),
+    /// A language loaded, ready for the menu.
+    Texts(Texts),
+    /// The languages there are files for, listed again.
+    Languages(Vec<Known>),
 }
 
 enum SystemCmd {
     /// The palm menu (which shows the battery) appeared or went.
     PalmMenu(bool),
+    /// Load this language's files.
+    Language(Lang),
+    /// List the language files again.
+    Languages,
 }
 
 /// The running thread, for one start of the app: it stops when this is dropped.
@@ -46,13 +56,13 @@ pub struct System {
 
 impl System {
     /// Starts the thread; the battery was just read (see [`battery`]), so its first
-    /// reading comes a minute later.
-    pub fn start() -> Self {
+    /// reading comes a minute later. `loader` reads the language files from now on.
+    pub fn start(loader: Loader) -> Self {
         let (cmds, from_app) = mpsc::channel();
         let (to_app, events) = mpsc::channel();
         let thread = std::thread::Builder::new()
             .name("system".into())
-            .spawn(move || run(&from_app, &to_app))
+            .spawn(move || run(&from_app, &to_app, loader))
             .inspect_err(|e| warn!("no system thread: {e}"))
             .ok();
         Self {
@@ -66,6 +76,21 @@ impl System {
     pub fn palm_menu(&self, shown: bool) {
         if let Some(cmds) = &self.cmds {
             let _ = cmds.send(SystemCmd::PalmMenu(shown));
+        }
+    }
+
+    /// Load the files of `lang`; [`SystemEvent::Texts`] brings them.
+    pub fn load_language(&self, lang: Lang) {
+        if let Some(cmds) = &self.cmds {
+            let _ = cmds.send(SystemCmd::Language(lang));
+        }
+    }
+
+    /// List the language files again (one may have been added);
+    /// [`SystemEvent::Languages`] brings the list.
+    pub fn list_languages(&self) {
+        if let Some(cmds) = &self.cmds {
+            let _ = cmds.send(SystemCmd::Languages);
         }
     }
 
@@ -85,7 +110,7 @@ impl Drop for System {
     }
 }
 
-fn run(cmds: &Receiver<SystemCmd>, events: &Sender<SystemEvent>) {
+fn run(cmds: &Receiver<SystemCmd>, events: &Sender<SystemEvent>, mut loader: Loader) {
     let mut palm = false;
     let mut read_at = Instant::now();
     loop {
@@ -100,6 +125,21 @@ fn run(cmds: &Receiver<SystemCmd>, events: &Sender<SystemEvent>) {
                 let appeared = shown && !palm;
                 palm = shown;
                 appeared
+            }
+            Ok(SystemCmd::Language(lang)) => {
+                if events.send(SystemEvent::Texts(loader.load(lang))).is_err() {
+                    return;
+                }
+                false
+            }
+            Ok(SystemCmd::Languages) => {
+                if events
+                    .send(SystemEvent::Languages(loader.languages()))
+                    .is_err()
+                {
+                    return;
+                }
+                false
             }
             Err(RecvTimeoutError::Timeout) => true,
             Err(RecvTimeoutError::Disconnected) => return,
@@ -151,6 +191,44 @@ pub fn model() -> String {
     });
     let (manufacturer, model) = said.unwrap_or_default();
     crate::device::model_name(&manufacturer, &model)
+}
+
+/// The headset's own language (`Locale.getDefault()`, else the system property
+/// `persist.sys.locale`); none when the system does not say.
+pub fn language() -> Option<Lang> {
+    let tag = with_app_context(|env, _| {
+        let locale = env
+            .call_static_method(
+                jni_str!("java/util/Locale"),
+                jni_str!("getDefault"),
+                jni_sig!("()Ljava/util/Locale;"),
+                &[],
+            )?
+            .l()?;
+        let tag = env
+            .call_method(
+                &locale,
+                jni_str!("toLanguageTag"),
+                jni_sig!("()Ljava/lang/String;"),
+                &[],
+            )?
+            .l()?;
+        if tag.is_null() {
+            return Ok(String::new());
+        }
+        env.cast_local::<JString<'_>>(tag)?.try_to_string(env)
+    })
+    .filter(|t| !t.is_empty() && t != "und")
+    .or_else(|| {
+        let out = std::process::Command::new("getprop")
+            .arg("persist.sys.locale")
+            .output()
+            .ok()?;
+        Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    })?;
+    let lang = Lang::from_tag(&tag);
+    log::info!("system language {tag:?}: {lang:?}");
+    lang
 }
 
 /// The headset's battery: percent and whether it is charging (`BatteryManager`).

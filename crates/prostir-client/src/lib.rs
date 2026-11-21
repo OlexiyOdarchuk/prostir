@@ -11,7 +11,7 @@
 pub mod background;
 pub mod commands;
 pub mod device;
-pub mod i18n;
+pub mod lang;
 pub mod layout;
 pub mod outbox;
 pub mod pending;

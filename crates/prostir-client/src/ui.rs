@@ -8,7 +8,7 @@ use prostir_proto::Codec;
 use prostir_proto::state::{Encoding, ErrorCode, Limits};
 use tiny_skia::{FillRule, Paint, Path, PathBuilder, Pixmap, Rect, Stroke, Transform};
 
-use crate::i18n::{Lang, Language};
+use crate::lang::{Language, Moment, Texts};
 use crate::layout::ScreenId;
 use crate::profiles::Profile;
 use crate::settings::{Background, Curve, HandMode, Preset, Settings, Sky};
@@ -78,14 +78,15 @@ pub enum Place {
 }
 
 impl Place {
-    fn name(self, l: Lang) -> Option<&'static str> {
+    /// The message that names it; none where it is not known.
+    fn name(self) -> Option<&'static str> {
         Some(match self {
             Place::Unknown => return None,
-            Place::Left => l.t("ліворуч", "left"),
-            Place::Center => l.t("по центру", "middle"),
-            Place::Right => l.t("праворуч", "right"),
-            Place::Above => l.t("згори", "above"),
-            Place::Below => l.t("знизу", "below"),
+            Place::Left => "place-left",
+            Place::Center => "place-middle",
+            Place::Right => "place-right",
+            Place::Above => "place-above",
+            Place::Below => "place-below",
         })
     }
 }
@@ -151,8 +152,8 @@ pub struct UiState {
     /// The headset's battery: percent, charging.
     pub battery: Option<(u8, bool)>,
     /// Local time, `14:05`, and the date, `Ср, 18 лист.`, for the palm menu.
-    pub clock: String,
-    pub date: String,
+    pub clock: std::sync::Arc<str>,
+    pub date: std::sync::Arc<str>,
     /// The paired PC waiting for a second press to be forgotten.
     pub confirm_forget: Option<usize>,
     /// What the display of the PC the switch shows or hides is called; none while no
@@ -172,7 +173,10 @@ pub struct UiState {
     /// A profile whose "Save current" was pressed once (press again to overwrite).
     pub confirm_save: Option<usize>,
     pub tab: Tab,
-    pub lang: Lang,
+    /// The menu's language.
+    pub texts: Texts,
+    /// The languages there are files for.
+    pub languages: std::sync::Arc<[crate::lang::Known]>,
     /// First run: show the tips page instead of the tabs.
     pub intro: bool,
     /// The PC speaks another protocol: (the PC is newer, the PC app's version).
@@ -216,50 +220,28 @@ pub enum Failure {
 }
 
 impl Failure {
-    /// What the person reads, in their language; `None` where only the PC's detail
-    /// says what happened.
-    pub fn text(self, l: Lang) -> Option<&'static str> {
+    /// The message the person reads; `None` where only the PC's detail says what
+    /// happened.
+    pub fn text(self) -> Option<&'static str> {
         Some(match self {
-            Self::NotConnected => l.t("Немає з'єднання з ПК", "No connection to the PC"),
-            Self::Disconnected => l.t(
-                "З'єднання з ПК обірвалося",
-                "The connection to the PC broke",
-            ),
-            Self::TimedOut => l.t("ПК не відповідає", "The PC does not answer"),
+            Self::NotConnected => "failure-not-connected",
+            Self::Disconnected => "failure-disconnected",
+            Self::TimedOut => "failure-timed-out",
             Self::Pc(code) => match code.known() {
-                ErrorCode::UNSUPPORTED => l.t("ПК цього не вміє", "The PC cannot do this"),
-                ErrorCode::NOT_ALLOWED => {
-                    l.t("Цьому шолому не дозволено", "Not allowed for this headset")
-                }
-                ErrorCode::UNKNOWN_DISPLAY => {
-                    l.t("Такого екрана вже немає", "That display is gone")
-                }
-                ErrorCode::LIMIT => l.t("Досягнуто межі", "The limit is reached"),
-                ErrorCode::BAD_SIZE => l.t(
-                    "Розмір, якого ПК не робить або шолом не покаже",
-                    "A size the PC does not make or the headset cannot show",
-                ),
-                ErrorCode::LAST_DISPLAY => {
-                    l.t("Останній монітор лишається", "The last monitor stays")
-                }
-                ErrorCode::NO_WINDOW => {
-                    l.t("На ПК немає активного вікна", "No active window on the PC")
-                }
-                ErrorCode::DESKTOP => l.t(
-                    "Стільниця ПК цього не зробила",
-                    "The PC's desktop did not do it",
-                ),
-                ErrorCode::ENCODER => l.t(
-                    "Кодувальник ПК не запустився",
-                    "The PC's encoder did not start",
-                ),
-                ErrorCode::CAPTURE => l.t("Зображення не знято", "The picture could not be taken"),
-                ErrorCode::SOUND => l.t("Звук не перемкнувся", "The sound could not be switched"),
-                ErrorCode::NOT_ON_DISPLAYS => {
-                    l.t("Миша не на моніторах", "The mouse is not on the monitors")
-                }
-                ErrorCode::NO_SUCH_PROFILE => l.t("Немає такого профілю", "No such profile"),
-                ErrorCode::BAD_ARGUMENT => l.t("Неправильне значення", "A value out of range"),
+                ErrorCode::UNSUPPORTED => "failure-unsupported",
+                ErrorCode::NOT_ALLOWED => "failure-not-allowed",
+                ErrorCode::UNKNOWN_DISPLAY => "failure-unknown-display",
+                ErrorCode::LIMIT => "failure-limit",
+                ErrorCode::BAD_SIZE => "failure-bad-size",
+                ErrorCode::LAST_DISPLAY => "failure-last-display",
+                ErrorCode::NO_WINDOW => "failure-no-window",
+                ErrorCode::DESKTOP => "failure-desktop",
+                ErrorCode::ENCODER => "failure-encoder",
+                ErrorCode::CAPTURE => "failure-capture",
+                ErrorCode::SOUND => "failure-sound",
+                ErrorCode::NOT_ON_DISPLAYS => "failure-not-on-displays",
+                ErrorCode::NO_SUCH_PROFILE => "failure-no-such-profile",
+                ErrorCode::BAD_ARGUMENT => "failure-bad-argument",
                 _ => return None,
             },
         })
@@ -296,11 +278,12 @@ impl UiState {
     /// A short line for control `what`: waiting, or why it failed (the code's text,
     /// else the PC's detail), and whether it is a failure.
     fn ask_note(&self, what: Asked) -> Option<(String, bool)> {
-        let l = self.lang;
+        let l = &self.texts;
         Some(match self.ask(what)? {
-            AskState::Waiting => (l.t("Зачекайте…", "Working…").to_owned(), false),
+            AskState::Waiting => (l.t("ask-waiting").to_owned(), false),
             AskState::Failed { why, detail } => (
-                why.text(l).map_or_else(|| detail.clone(), str::to_owned),
+                why.text()
+                    .map_or_else(|| detail.clone(), |id| l.t(id).to_owned()),
                 true,
             ),
         })
@@ -309,9 +292,7 @@ impl UiState {
     /// The PC's detail under a failure of control `what`, when there is a text above it.
     fn ask_detail(&self, what: Asked) -> Option<&str> {
         match self.ask(what)? {
-            AskState::Failed { why, detail }
-                if why.text(self.lang).is_some() && !detail.is_empty() =>
-            {
+            AskState::Failed { why, detail } if why.text().is_some() && !detail.is_empty() => {
                 Some(detail)
             }
             _ => None,
@@ -484,10 +465,15 @@ enum Item {
         medium: bool,
         color: [u8; 4],
         text: String,
+        /// How wide it may be (the panel's edge when wider); a longer text is drawn
+        /// smaller (see [`Panel::fit`]).
+        room: f32,
     },
     Button {
         rect: Rect,
         label: String,
+        /// The label's size: smaller when a long one does not fit (see [`Panel::fit`]).
+        size: f32,
         style: Style,
         action: Option<Action>,
     },
@@ -624,11 +610,13 @@ impl Panel {
         if self.state.as_ref() == Some(state) {
             return;
         }
-        self.items = if self.wrist {
+        let mut items = if self.wrist {
             self.build_wrist(state)
         } else {
             self.build(state)
         };
+        self.fit(&mut items);
+        self.items = items;
         self.state = Some(state.clone());
         self.hovered = None;
         self.dirty = true;
@@ -676,6 +664,7 @@ impl Panel {
     /// clean; checked by the tests for every page in both languages.
     pub fn overflows(&mut self) -> Vec<String> {
         let items = std::mem::take(&mut self.items);
+        let (width, height) = (self.pixmap.width() as f32, self.pixmap.height() as f32);
         let mut boxes: Vec<(Rect, String, bool)> = Vec::new(); // (bounds, text, is_button)
         let mut found = Vec::new();
         for item in &items {
@@ -701,13 +690,17 @@ impl Panel {
                         found.push(format!("wedge too narrow: {label:?} ({tw:.0} > {room:.0})"));
                     }
                 }
-                Item::Button { rect: r, label, .. } => {
+                Item::Button {
+                    rect: r,
+                    label,
+                    size,
+                    ..
+                } => {
                     found.extend(self.missing_glyphs(label));
-                    if r.bottom() > HEIGHT as f32 - 36.0 {
+                    if r.bottom() > height - 36.0 {
                         found.push(format!("below the bottom: button {label:?}"));
                     }
-                    let size = button_font_size(label);
-                    let tw = self.text_width(label, size, true);
+                    let tw = self.text_width(label, *size, true);
                     if tw > r.width() - 16.0 {
                         found.push(format!(
                             "button too narrow: {label:?} ({tw:.0} > {:.0})",
@@ -725,15 +718,21 @@ impl Panel {
                     size,
                     medium,
                     text,
+                    room,
                     ..
                 } => {
                     found.extend(self.missing_glyphs(text));
                     let tw = self.text_width(text, *size, *medium);
+                    if tw > *room + 0.5 {
+                        found.push(format!(
+                            "wider than its room: {text:?} ({tw:.0} > {room:.0})"
+                        ));
+                    }
                     // Below the error line (which itself sits at HEIGHT - 34).
-                    if *baseline > HEIGHT as f32 - 34.0 {
+                    if *baseline > height - 34.0 {
                         found.push(format!("below the bottom: {text:?}"));
                     }
-                    if x + tw > WIDTH as f32 - 32.0 {
+                    if x + tw > width - 32.0 {
                         found.push(format!("off the panel: {text:?}"));
                     }
                     let r = rect(*x, baseline - size * 0.75, tw, size * 0.95);
@@ -754,6 +753,45 @@ impl Panel {
         found
     }
 
+    /// Texts and labels longer than their room (a language with longer words than
+    /// those the layout was made with) drawn smaller, down to [`SMALLEST`], so they
+    /// stay on their button and off their neighbours. What fits stays as it is.
+    fn fit(&mut self, items: &mut [Item]) {
+        let width = self.pixmap.width() as f32;
+        for item in items.iter_mut() {
+            match item {
+                Item::Button {
+                    rect, label, size, ..
+                } => {
+                    let room = rect.width() - 16.0;
+                    *size = self.fitting(label, *size, true, room);
+                }
+                Item::Text {
+                    x,
+                    size,
+                    medium,
+                    text,
+                    room,
+                    ..
+                } => {
+                    let room = room.min(width - 32.0 - *x);
+                    *size = self.fitting(text, *size, *medium, room);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// The size up to `size` at which `s` is at most `room` wide, but not below
+    /// [`SMALLEST`].
+    fn fitting(&mut self, s: &str, size: f32, medium: bool, room: f32) -> f32 {
+        let mut size = size;
+        while size > SMALLEST && self.text_width(s, size, medium) > room {
+            size = (size - 1.0).max(SMALLEST);
+        }
+        size
+    }
+
     fn missing_glyphs(&self, text: &str) -> Option<String> {
         let missing: String = text
             .chars()
@@ -766,7 +804,7 @@ impl Panel {
     /// Six sectors around a round button in the middle (clock, date, battery).
     fn build_wrist(&mut self, s: &UiState) -> Vec<Item> {
         use std::f32::consts::TAU;
-        let l = s.lang;
+        let l = &s.texts;
         let st = s.settings;
         let (w, h) = (WRIST_WIDTH as f32, WRIST_HEIGHT as f32);
         let (cx, cy) = (w / 2.0, h / 2.0);
@@ -778,16 +816,12 @@ impl Panel {
             color: [16, 18, 24, 235],
         }];
         let sectors = [
-            (l.t("Перед собою", "In front"), false, Action::Recenter),
-            (l.t("Фокус", "Focus"), st.focus, Action::Focus(!st.focus)),
-            (
-                l.t("Кінотеатр", "Cinema"),
-                st.cinema,
-                Action::Cinema(!st.cinema),
-            ),
-            (l.t("Де миша?", "Mouse?"), false, Action::FindMouse),
-            (l.t("Знімок", "Screenshot"), false, Action::Screenshot),
-            (l.t("Вирівняти", "Line up"), false, Action::Tidy),
+            (l.t("wrist-in-front"), false, Action::Recenter),
+            (l.t("focus"), st.focus, Action::Focus(!st.focus)),
+            (l.t("cinema"), st.cinema, Action::Cinema(!st.cinema)),
+            (l.t("wrist-mouse"), false, Action::FindMouse),
+            (l.t("wrist-screenshot"), false, Action::Screenshot),
+            (l.t("line-up"), false, Action::Tidy),
         ];
         let (r0, r1) = (outer * 0.4, outer - 10.0);
         let step = TAU / sectors.len() as f32;
@@ -835,32 +869,45 @@ impl Panel {
             action: Some(Action::OpenMenu),
         });
         let (date, time, menu) = (18.0, 42.0, 18.0);
-        let centred = |this: &mut Self, s: &str, size: f32, medium: bool| {
-            cx - this.text_width(s, size, medium) / 2.0
+        // In the middle, as big as fits across the circle at that height (`room`).
+        let centred = |this: &mut Self, s: &str, size: f32, medium: bool, room: f32| {
+            let size = this.fitting(s, size, medium, room);
+            let x = cx - this.text_width(s, size, medium) / 2.0;
+            (x, size)
         };
+        // Across the middle, `above` (or below) it, inside the sectors around it.
+        let inner = r0 - 12.0;
+        let free = r0 - 4.0;
+        let across = |above: f32| 2.0 * (free * free - above * above).max(0.0).sqrt();
         if let Some((percent, charging)) = s.battery {
-            let battery = if charging {
-                format!("{percent} % · {}", l.t("заряджається", "charging"))
+            let id = if charging {
+                "battery-charging"
             } else {
-                format!("{percent} %")
+                "battery-level"
             };
-            let size = 15.0;
-            let x = centred(self, &battery, size, false);
+            let battery = l.f(id, &[("percent", percent.into())]);
+            let (x, size) = centred(self, &battery, 15.0, false, across(64.0));
             let color = if percent <= 15 && !charging {
                 DANGER
             } else {
                 MUTED
             };
-            items.push(text(x, cy - 52.0, size, false, color, &battery));
+            items.push(text_in(
+                across(64.0),
+                text(x, cy - 52.0, size, false, color, &battery),
+            ));
         }
-        let x = centred(self, &s.date, date, false);
-        items.push(text(x, cy - 26.0, date, false, MUTED, &s.date));
+        let (x, date) = centred(self, &s.date, date, false, across(40.0));
+        items.push(text_in(
+            across(40.0),
+            text(x, cy - 26.0, date, false, MUTED, &s.date),
+        ));
         // "12:05 PM" is wider than "14:05": smaller, to stay in the circle.
         let mut time = time;
-        while time > 22.0 && self.text_width(&s.clock, time, true) > 1.6 * (r0 - 12.0) {
+        while time > 22.0 && self.text_width(&s.clock, time, true) > 1.6 * inner {
             time -= 1.0;
         }
-        let x = centred(self, &s.clock, time, true);
+        let (x, time) = centred(self, &s.clock, time, true, 1.6 * inner);
         items.push(text(
             x,
             cy + 16.0,
@@ -869,9 +916,12 @@ impl Panel {
             [255, 255, 255, 255],
             &s.clock,
         ));
-        let label = l.t("Меню", "Menu");
-        let x = centred(self, label, menu, false);
-        items.push(text(x, cy + 46.0, menu, false, MUTED, label));
+        let label = l.t("menu");
+        let (x, menu) = centred(self, label, menu, false, across(50.0));
+        items.push(text_in(
+            across(50.0),
+            text(x, cy + 46.0, menu, false, MUTED, label),
+        ));
         items
     }
 
@@ -886,7 +936,7 @@ impl Panel {
     }
 
     fn build(&mut self, s: &UiState) -> Vec<Item> {
-        let l = s.lang;
+        let l = &s.texts;
         let mut items = vec![Item::Panel(rect(0.0, 0.0, WIDTH as f32, HEIGHT as f32))];
         let w = WIDTH as f32;
 
@@ -902,16 +952,10 @@ impl Panel {
             &prostir_proto::app_version(env!("CARGO_PKG_VERSION")),
         ));
         let (status, light) = match &s.host {
-            _ if s.update.is_some() => (
-                l.t("Потрібне оновлення", "Update needed").to_owned(),
-                DANGER,
-            ),
-            _ if s.pairing.is_some() => (l.t("Сполучення…", "Pairing…").to_owned(), WAIT),
-            Some(h) => (
-                format!("{} {h}", l.t("Підключено до", "Connected to")),
-                GOOD,
-            ),
-            None => (l.t("Шукаю ПК…", "Looking for a PC…").to_owned(), WAIT),
+            _ if s.update.is_some() => (l.t("status-update-needed").to_owned(), DANGER),
+            _ if s.pairing.is_some() => (l.t("status-pairing").to_owned(), WAIT),
+            Some(h) => (l.f("status-connected", &[("pc", h.into())]), GOOD),
+            None => (l.t("status-searching").to_owned(), WAIT),
         };
         let sw = self.text_width(&status, 21.0, false);
         let change_w = if s.host.is_some() { 190.0 } else { 0.0 };
@@ -926,7 +970,7 @@ impl Panel {
         if s.host.is_some() {
             items.push(button(
                 rect(w - 98.0 - 170.0, 32.0, 170.0, 48.0),
-                l.t("Змінити ПК", "Change PC"),
+                l.t("change-pc"),
                 Style::Normal,
                 Some(Action::ChangeHost),
             ));
@@ -977,11 +1021,11 @@ impl Panel {
 
         // Tabs: everyday things, the monitors, everything set once.
         let tabs = [
-            (Tab::Quick, l.t("Швидке", "Quick")),
-            (Tab::Monitors, l.t("Монітори", "Monitors")),
+            (Tab::Quick, l.t("tab-quick")),
+            (Tab::Monitors, l.t("tab-monitors")),
             (
                 Tab::Settings(s.tab.section().unwrap_or_default()),
-                l.t("Налаштування", "Settings"),
+                l.t("tab-settings"),
             ),
         ];
         let tab_w = (w - 2.0 * lx - 2.0 * 10.0) / 3.0;
@@ -1019,7 +1063,7 @@ impl Panel {
     /// The code to type on the PC, or a keypad for the PC's code.
     fn build_pairing(
         &mut self,
-        l: Lang,
+        l: &Texts,
         p: &PairingView,
         items: &mut Vec<Item>,
         lx: f32,
@@ -1032,70 +1076,31 @@ impl Panel {
             21.0,
             false,
             MUTED,
-            &format!("{} {}", l.t("Сполучення з", "Pairing with"), p.host),
+            &l.f("pairing-with", &[("pc", (&p.host).into())]),
         ));
         y += 40.0;
         if p.failed {
-            items.push(text(
-                lx,
-                y,
-                20.0,
-                true,
-                DANGER,
-                l.t(
-                    "Код не підійшов. Спробуйте ще раз",
-                    "The code did not match. Try again",
-                ),
-            ));
+            items.push(text(lx, y, 20.0, true, DANGER, l.t("pairing-failed")));
             y += 34.0;
         }
         if let Some(code) = &p.code {
-            items.push(text(
-                lx,
-                y,
-                20.0,
-                false,
-                TEXT,
-                l.t(
-                    "Введіть цей код у віконці Prostir на ноутбуці:",
-                    "Type this code into the Prostir window on the PC:",
-                ),
-            ));
+            items.push(text(lx, y, 20.0, false, TEXT, l.t("pairing-type-on-pc")));
             y += 30.0;
             items.push(Item::Box(rect(lx, y, lw, 130.0), [255, 255, 255, 16]));
             let cw = self.text_width(code, 84.0, true);
             items.push(text(lx + (lw - cw) / 2.0, y + 98.0, 84.0, true, TEXT, code));
             y += 150.0;
-            items.push(text(
-                lx,
-                y,
-                18.0,
-                false,
-                MUTED,
-                l.t(
-                    "Це потрібно лише один раз для кожного ПК.",
-                    "This is needed only once per PC.",
-                ),
-            ));
+            items.push(text(lx, y, 18.0, false, MUTED, l.t("pairing-once")));
             y += 30.0;
             items.push(button(
                 rect(lx, y, lw, 50.0),
-                l.t(
-                    "Навпаки: код на ноутбуці, ввести тут",
-                    "The other way: code on the PC, type it here",
-                ),
+                l.t("pairing-other-way-type-here"),
                 Style::Normal,
                 Some(Action::PairOtherWay),
             ));
             return y + 62.0;
         }
-        for line in [
-            l.t("Введіть код, який показує ПК", "Type the code the PC shows"),
-            l.t(
-                "(сповіщення або іконка Prostir у треї):",
-                "(a notification or the Prostir tray icon):",
-            ),
-        ] {
+        for line in [l.t("pairing-type-pc-code"), l.t("pairing-where-pc-code")] {
             items.push(text(lx, y, 20.0, false, TEXT, line));
             y += 30.0;
         }
@@ -1115,8 +1120,8 @@ impl Panel {
         ));
         y += 76.0;
         let ready = p.typed.len() == 6;
-        let erase = l.t("Стерти", "Delete");
-        let done = l.t("Готово", "Done");
+        let erase = l.t("key-delete");
+        let done = l.t("key-done");
         let keys = [
             "1", "2", "3", "4", "5", "6", "7", "8", "9", erase, "0", done,
         ];
@@ -1139,10 +1144,7 @@ impl Panel {
         y += 4.0 * (kh + 8.0) + 4.0;
         items.push(button(
             rect(lx, y, lw, 50.0),
-            l.t(
-                "Навпаки: код у шоломі, ввести на ноутбуці",
-                "The other way: code in the headset, type it on the PC",
-            ),
+            l.t("pairing-other-way-type-on-pc"),
             Style::Normal,
             Some(Action::PairOtherWay),
         ));
@@ -1158,7 +1160,7 @@ impl Panel {
         lw: f32,
         mut y: f32,
     ) -> f32 {
-        let l = s.lang;
+        let l = &s.texts;
         y += 18.0;
         if let Some(typed) = &s.ip_input {
             let shown = if typed.is_empty() {
@@ -1182,7 +1184,7 @@ impl Panel {
                 "9",
                 ".",
                 "0",
-                l.t("Стерти", "Delete"),
+                l.t("key-delete"),
             ];
             let (kw, kh) = ((lw - 20.0) / 3.0, 50.0);
             for (i, k) in keys.iter().enumerate() {
@@ -1203,7 +1205,7 @@ impl Panel {
             let ready = !typed.is_empty();
             items.push(button(
                 rect(lx, y, half, 50.0),
-                l.t("Підключитися", "Connect"),
+                l.t("connect"),
                 if ready {
                     Style::Selected
                 } else {
@@ -1213,7 +1215,7 @@ impl Panel {
             ));
             items.push(button(
                 rect(lx + half + 10.0, y, half, 50.0),
-                l.t("Скасувати", "Cancel"),
+                l.t("cancel"),
                 Style::Normal,
                 Some(Action::CancelKeypad),
             ));
@@ -1226,18 +1228,11 @@ impl Panel {
                 21.0,
                 true,
                 MUTED,
-                l.t("Шукаю ПК у мережі…", "Looking for PCs on the network…"),
+                l.t("connect-searching"),
             ));
             y += 48.0;
         } else {
-            items.push(text(
-                lx,
-                y + 14.0,
-                21.0,
-                false,
-                MUTED,
-                l.t("Знайдено", "Found"),
-            ));
+            items.push(text(lx, y + 14.0, 21.0, false, MUTED, l.t("connect-found")));
             y += 30.0;
             for (i, (name, addr)) in s.found.iter().enumerate().take(5) {
                 let label = format!("{name}   {addr}");
@@ -1254,16 +1249,8 @@ impl Panel {
                 let name: String = name.chars().take(30).collect();
                 for line in [
                     name,
-                    l.t(
-                        "видно в мережі, але з'єднання блокується.",
-                        "is on the network, but the connection is blocked.",
-                    )
-                    .to_owned(),
-                    l.t(
-                        "Дозвольте в брандмауері ПК порт TCP 47830.",
-                        "Allow TCP port 47830 in the PC's firewall.",
-                    )
-                    .to_owned(),
+                    l.t("connect-blocked").to_owned(),
+                    l.t("connect-allow-port").to_owned(),
                 ] {
                     items.push(text(lx, y + 16.0, 18.0, false, DANGER, &line));
                     y += 28.0;
@@ -1273,7 +1260,7 @@ impl Panel {
         }
         items.push(button(
             rect(lx, y + 6.0, 280.0, 48.0),
-            l.t("Ввести IP вручну", "Type an IP address"),
+            l.t("connect-type-ip"),
             Style::Normal,
             Some(Action::ShowKeypad),
         ));
@@ -1313,6 +1300,7 @@ impl Panel {
                     medium,
                     color,
                     text,
+                    ..
                 } => self.draw_text(&mut pixmap, *x, *baseline, *size, *medium, *color, text),
                 Item::Wedge {
                     cx,
@@ -1348,9 +1336,11 @@ impl Panel {
                 Item::Button {
                     rect: r,
                     label,
+                    size,
                     style,
                     ..
                 } => {
+                    let size = *size;
                     let hovered = self.hovered == Some(i);
                     let (bg, fg) = match (style, hovered) {
                         (Style::Selected, _) => (ACCENT, [255, 255, 255, 255]),
@@ -1383,7 +1373,6 @@ impl Panel {
                         }
                         _ => {}
                     }
-                    let size = button_font_size(label);
                     let tw = self.text_width(label, size, true);
                     let baseline = r.top() + r.height() / 2.0 + size * 0.36;
                     self.draw_text(
@@ -1597,7 +1586,7 @@ pub fn menu_button_image(size: u32, hovered: bool) -> Vec<u8> {
 /// The monitors as seen from where the user sits, on a small map: press one to pick
 /// it, and its actions show underneath.
 fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32) -> f32 {
-    let l = s.lang;
+    let l = &s.texts;
     let map_h = 210.0;
     items.push(Item::Box(rect(lx, y, lw, map_h), [255, 255, 255, 8]));
     // Fit everything seen into the box, keeping proportions.
@@ -1685,30 +1674,36 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
             22.0,
             true,
             TEXT,
-            &format!("{} {}", l.t("Монітор", "Monitor"), m.label),
+            &l.f("monitor-n", &[("n", (&m.label).into())]),
         ));
         // Removing it or making it primary: how that stands, in place of its size.
         let note = s
             .ask_note(Asked::Remove(m.id))
             .or_else(|| s.ask_note(Asked::MakePrimary(m.id)));
-        items.push(text(
-            lx,
-            y + 50.0,
-            16.0,
-            false,
-            if note.as_ref().is_some_and(|n| n.1) {
-                DANGER
-            } else {
-                MUTED
-            },
-            &match (note.as_ref(), m.place.name(l)) {
-                (Some((note, _)), _) => note.clone(),
-                (None, Some(place)) => format!("{} × {} · {place}", m.width, m.height),
-                (None, None) => format!("{} × {}", m.width, m.height),
-            },
-        ));
         let remove = rect(lx + lw - 58.0, y + 7.0, 48.0, 48.0);
         let primary = rect(lx + lw - 58.0 - 10.0 - 210.0, y + 7.0, 210.0, 48.0);
+        // Left of the buttons.
+        items.push(text_in(
+            primary.left() - lx - 10.0,
+            text(
+                lx,
+                y + 50.0,
+                16.0,
+                false,
+                if note.as_ref().is_some_and(|n| n.1) {
+                    DANGER
+                } else {
+                    MUTED
+                },
+                &match (note.as_ref(), m.place.name()) {
+                    (Some((note, _)), _) => note.clone(),
+                    (None, Some(place)) => {
+                        format!("{} × {} · {}", m.width, m.height, l.t(place))
+                    }
+                    (None, None) => format!("{} × {}", m.width, m.height),
+                },
+            ),
+        ));
         if s.confirm_remove == Some(m.id) {
             items.push(button(
                 rect(
@@ -1717,7 +1712,7 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
                     remove.right() - primary.left(),
                     48.0,
                 ),
-                l.t("Прибрати? Ще раз", "Remove? Press again"),
+                l.t("monitor-remove-confirm"),
                 Style::Armed,
                 Some(Action::Remove(m.id)),
             ));
@@ -1725,14 +1720,14 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
             if s.primary == Some(m.id) {
                 items.push(button(
                     primary,
-                    l.t("Головний", "Primary"),
+                    l.t("monitor-primary"),
                     Style::Selected,
                     None,
                 ));
             } else {
                 items.push(button(
                     primary,
-                    l.t("Зробити головним", "Make primary"),
+                    l.t("monitor-make-primary"),
                     Style::Normal,
                     Some(Action::MakePrimary(m.id)),
                 ));
@@ -1760,7 +1755,7 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
             22.0,
             true,
             TEXT,
-            &format!("{} {}", l.t("Вікно", "Window"), i + 1),
+            &l.f("window-n", &[("n", (i + 1).into())]),
         ));
         items.push(text(
             lx + 20.0,
@@ -1784,11 +1779,11 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
     let name = s
         .mirror_name
         .clone()
-        .unwrap_or_else(|| l.t("Екран ПК", "PC display").to_owned());
+        .unwrap_or_else(|| l.t("pc-display").to_owned());
     let title = if let Some((note, _)) = s.ask_note(Asked::Mirror) {
         format!("{name} · {note}")
     } else if !connected {
-        format!("{name} · {}", l.t("не підключено", "not connected"))
+        format!("{name} · {}", l.t("pc-display-not-connected"))
     } else {
         name
     };
@@ -1801,13 +1796,13 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
         &title,
         vec![
             (
-                l.t("Показано", "Shown"),
+                l.t("pc-display-shown"),
                 Action::SetMirror(true),
                 s.mirror_wanted,
                 connected,
             ),
             (
-                l.t("Приховано", "Hidden"),
+                l.t("pc-display-hidden"),
                 Action::SetMirror(false),
                 !s.mirror_wanted,
                 connected,
@@ -1817,10 +1812,7 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
     y -= 16.0;
     items.push(button(
         rect(lx, y, lw, 52.0),
-        l.t(
-            "Вирівняти: прибрати шви (кнопка A)",
-            "Line up: close the seams (A button)",
-        ),
+        l.t("monitors-line-up"),
         Style::Normal,
         Some(Action::Tidy),
     ));
@@ -1828,24 +1820,12 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
 }
 
 /// A row with a title, a muted note and one button on the right.
-fn hints(l: Lang, items: &mut Vec<Item>, lx: f32, mut y: f32) {
+fn hints(l: &Texts, items: &mut Vec<Item>, lx: f32, mut y: f32) {
     for line in [
-        l.t(
-            "Пальцем: торкніться кнопки або тягніть меню за порожнє місце",
-            "Finger: touch a button, or drag the menu by an empty spot",
-        ),
-        l.t(
-            "Здалеку рукою: щипок натискає, щипок з утриманням переносить",
-            "Hand from afar: pinch to press, pinch and hold to move",
-        ),
-        l.t(
-            "Контролер: курок натискає, grip переносить",
-            "Controller: trigger presses, grip moves",
-        ),
-        l.t(
-            "Стік, поки тримаєте: відстань і розмір. A: вирівняти",
-            "Stick while holding: distance and size. A: line up",
-        ),
+        l.t("hint-finger"),
+        l.t("hint-hand"),
+        l.t("hint-controller"),
+        l.t("hint-stick"),
     ] {
         items.push(text(lx, y, 19.0, false, MUTED, line));
         y += 30.0;
@@ -1889,15 +1869,8 @@ fn segmented(
 
 /// Add a monitor, layout, curve.
 fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, mut y: f32) -> f32 {
-    let l = s.lang;
-    items.push(text(
-        rx,
-        y,
-        21.0,
-        false,
-        MUTED,
-        l.t("Додати монітор", "Add a monitor"),
-    ));
+    let l = &s.texts;
+    items.push(text(rx, y, 21.0, false, MUTED, l.t("add-monitor")));
     y += 18.0;
     // The sizes the PC offers (it says them when the headset connects), six at most.
     let max = s.limits.as_ref().map(|l| usize::from(l.virtual_max));
@@ -1954,15 +1927,7 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
             18.0,
             false,
             MUTED,
-            &format!(
-                "{} {max} {}",
-                l.t("Максимум", "At most"),
-                l.count(
-                    max as u64,
-                    ["монітор", "монітори", "моніторів"],
-                    ["monitor", "monitors"]
-                )
-            ),
+            &l.f("monitors-at-most", &[("count", max.into())]),
         ));
         y += 10.0;
     }
@@ -1973,22 +1938,22 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
         rx,
         rw,
         &mut y,
-        l.t("Розкладка", "Layout"),
+        l.t("layout"),
         vec![
             (
-                l.t("Навколо мене", "Around me"),
+                l.t("layout-around"),
                 Action::Preset(Preset::Arc),
                 st.preset == Preset::Arc,
                 true,
             ),
             (
-                l.t("Стіна", "Wall"),
+                l.t("layout-wall"),
                 Action::Preset(Preset::Wall),
                 st.preset == Preset::Wall,
                 true,
             ),
             (
-                l.t("Лежачи", "Lying down"),
+                l.t("layout-lying"),
                 Action::Preset(Preset::Overhead),
                 st.preset == Preset::Overhead,
                 true,
@@ -2000,22 +1965,22 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
         rx,
         rw,
         &mut y,
-        l.t("Вигин", "Curve"),
+        l.t("curve"),
         vec![
             (
-                l.t("Пласкі", "Flat"),
+                l.t("curve-flat"),
                 Action::Curve(Curve::Flat),
                 st.curve == Curve::Flat,
                 true,
             ),
             (
-                l.t("Легкий", "Gentle"),
+                l.t("curve-gentle"),
                 Action::Curve(Curve::Gentle),
                 st.curve == Curve::Gentle,
                 s.curve_available,
             ),
             (
-                l.t("Сильний", "Strong"),
+                l.t("curve-strong"),
                 Action::Curve(Curve::Strong),
                 st.curve == Curve::Strong,
                 s.curve_available,
@@ -2030,10 +1995,10 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
         rx,
         half,
         &mut y,
-        l.t("Слідом за головою", "Follow my head"),
+        l.t("follow-head"),
         vec![
-            (l.t("Ні", "Off"), Action::Follow(false), !st.follow, true),
-            (l.t("Так", "On"), Action::Follow(true), st.follow, true),
+            (l.t("no"), Action::Follow(false), !st.follow, true),
+            (l.t("yes"), Action::Follow(true), st.follow, true),
         ],
     );
     segmented(
@@ -2041,10 +2006,10 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
         rx + half + 16.0,
         half,
         &mut y2,
-        l.t("Прилипання", "Stick together"),
+        l.t("magnet"),
         vec![
-            (l.t("Ні", "Off"), Action::Magnet(false), !st.magnet, true),
-            (l.t("Так", "On"), Action::Magnet(true), st.magnet, true),
+            (l.t("no"), Action::Magnet(false), !st.magnet, true),
+            (l.t("yes"), Action::Magnet(true), st.magnet, true),
         ],
     );
     y = y.max(y2);
@@ -2053,20 +2018,10 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
         rx,
         rw,
         &mut y,
-        l.t("Тягнути", "Drag"),
+        l.t("drag"),
         vec![
-            (
-                l.t("Один монітор", "One monitor"),
-                Action::MoveAll(false),
-                !st.move_all,
-                true,
-            ),
-            (
-                l.t("Усі разом", "All together"),
-                Action::MoveAll(true),
-                st.move_all,
-                true,
-            ),
+            (l.t("drag-one"), Action::MoveAll(false), !st.move_all, true),
+            (l.t("drag-all"), Action::MoveAll(true), st.move_all, true),
         ],
     );
     // The cinema screen can be picked before switching to cinema.
@@ -2085,7 +2040,7 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
                 if short {
                     m.label.clone()
                 } else {
-                    format!("{} {}", l.t("Монітор", "Monitor"), m.label)
+                    l.f("monitor-n", &[("n", (&m.label).into())])
                 }
             })
             .collect();
@@ -2094,7 +2049,7 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
             rx,
             rw,
             &mut y,
-            l.t("Екран для кінотеатру", "Cinema screen"),
+            l.t("cinema-screen"),
             s.monitors
                 .iter()
                 .zip(&labels)
@@ -2115,7 +2070,7 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
 
 /// Background and hands on the left, focus mode on the right.
 fn build_look(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, rx: f32, rw: f32, top: f32) {
-    let l = s.lang;
+    let l = &s.texts;
     let st = s.settings;
     let mut y = top;
     let bg = |b: Background| (Action::Background(b), st.background == b);
@@ -2128,13 +2083,13 @@ fn build_look(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, rx: f32, rw:
         lx,
         lw,
         &mut y,
-        l.t("Фон", "Background"),
+        l.t("background"),
         vec![
-            (l.t("Чорний", "Black"), a1, s1, true),
-            (l.t("Кімната", "Room"), a2, s2, s.room_available),
-            (l.t("Притемнена", "Dimmed"), a4, s4, s.room_available),
+            (l.t("background-black"), a1, s1, true),
+            (l.t("background-room"), a2, s2, s.room_available),
+            (l.t("background-dimmed"), a4, s4, s.room_available),
             (
-                l.t("Своє фото", "Own photo"),
+                l.t("background-own"),
                 a3,
                 s3,
                 s.panorama_available && s.custom_available,
@@ -2144,10 +2099,7 @@ fn build_look(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, rx: f32, rw:
     // Where an own photo comes from, while there is none yet.
     if s.panorama_available && !s.custom_available {
         for (k, line) in [
-            l.t(
-                "Своє фото: панорама 360° у файлі",
-                "Own photo: a 360° picture saved as",
-            ),
+            l.t("background-own-where"),
             "Android/data/dev.prostir.client/files/background.jpg",
         ]
         .into_iter()
@@ -2165,10 +2117,10 @@ fn build_look(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, rx: f32, rw:
         y += 68.0;
     }
     let skies = [
-        (l.t("Ніч", "Night"), Sky::Night),
-        (l.t("Захід", "Sunset"), Sky::Sunset),
-        (l.t("Космос", "Space"), Sky::Space),
-        (l.t("Сяйво", "Aurora"), Sky::Aurora),
+        (l.t("sky-night"), Sky::Night),
+        (l.t("sky-sunset"), Sky::Sunset),
+        (l.t("sky-space"), Sky::Space),
+        (l.t("sky-aurora"), Sky::Aurora),
     ];
     segmented(
         items,
@@ -2192,50 +2144,30 @@ fn build_look(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, rx: f32, rw:
         rx,
         rw,
         &mut y,
-        l.t("Фокус", "Focus"),
+        l.t("focus"),
         vec![
-            (
-                l.t("Вимкнено", "Off"),
-                Action::Focus(false),
-                !st.focus,
-                true,
-            ),
-            (
-                l.t("Затемнювати інші", "Dim the others"),
-                Action::Focus(true),
-                st.focus,
-                true,
-            ),
+            (l.t("off"), Action::Focus(false), !st.focus, true),
+            (l.t("focus-dim-others"), Action::Focus(true), st.focus, true),
         ],
     );
     y -= 12.0;
-    items.push(text(
-        rx,
-        y,
-        19.0,
-        false,
-        MUTED,
-        l.t(
-            "Монітори, на яких немає миші, темнішають.",
-            "Monitors without the mouse get darker.",
-        ),
-    ));
+    items.push(text(rx, y, 19.0, false, MUTED, l.t("focus-note")));
     y += 48.0;
     segmented(
         items,
         rx,
         rw,
         &mut y,
-        l.t("Вікно на клавіатуру", "Keyboard window"),
+        l.t("keyboard-window"),
         vec![
             (
-                l.t("Вимкнено", "Off"),
+                l.t("off"),
                 Action::KeyboardWindow(false),
                 !st.keyboard_window,
                 s.keyboard_available,
             ),
             (
-                l.t("Показувати", "Show"),
+                l.t("show"),
                 Action::KeyboardWindow(true),
                 st.keyboard_window,
                 s.keyboard_available,
@@ -2243,17 +2175,7 @@ fn build_look(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, rx: f32, rw:
         ],
     );
     y -= 12.0;
-    items.push(text(
-        rx,
-        y,
-        19.0,
-        false,
-        MUTED,
-        l.t(
-            "Видно справжній стіл; поставте його на клавіатуру.",
-            "Shows the real desk; put it over the keyboard.",
-        ),
-    ));
+    items.push(text(rx, y, 19.0, false, MUTED, l.t("keyboard-window-note")));
     y += 48.0;
     let every = st.rest_every;
     segmented(
@@ -2261,32 +2183,30 @@ fn build_look(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, rx: f32, rw:
         rx,
         rw,
         &mut y,
-        l.t("Нагадування про відпочинок", "Rest reminders"),
+        l.t("rest"),
         [
-            (0, l.t("Вимкнено", "Off")),
-            (20, l.t("Кожні 20 хв", "Every 20 min")),
-            (60, l.t("Щогодини", "Hourly")),
+            (0, l.t("off")),
+            (20, l.t("rest-every-20")),
+            (60, l.t("rest-hourly")),
         ]
         .into_iter()
         .map(|(m, label)| (label, Action::RestEvery(m), every == m, true))
         .collect(),
     );
+    let levels = [100u8, 80, 60, 40];
+    let labels = levels.map(|p| l.f("percent", &[("value", p.into())]));
     segmented(
         items,
         rx,
         rw,
         &mut y,
-        l.t("Яскравість моніторів", "Monitor brightness"),
-        [100u8, 80, 60, 40]
-            .into_iter()
-            .map(|p| {
+        l.t("brightness"),
+        levels
+            .iter()
+            .zip(&labels)
+            .map(|(&p, label)| {
                 (
-                    match p {
-                        100 => "100 %",
-                        80 => "80 %",
-                        60 => "60 %",
-                        _ => "40 %",
-                    },
+                    label.as_str(),
                     Action::Brightness(p),
                     st.brightness == p,
                     true,
@@ -2298,43 +2218,28 @@ fn build_look(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, rx: f32, rw:
 
 /// A PC to pair with (a new one, or one that forgot this headset): pair only if the
 /// user says so.
-fn build_pair_offer(l: Lang, items: &mut Vec<Item>, x: f32, w: f32, host: &str, why: OfferWhy) {
+fn build_pair_offer(l: &Texts, items: &mut Vec<Item>, x: f32, w: f32, host: &str, why: OfferWhy) {
     let mut y = 180.0;
     let title = match why {
-        OfferWhy::New => l.t("Новий ПК", "A new PC"),
-        OfferWhy::WrongCodes => l.t(
-            "Код не підійшов кілька разів",
-            "The code did not match several times",
-        ),
-        OfferWhy::Forgotten => l.t(
-            "ПК більше не знає цей шолом",
-            "The PC no longer knows this headset",
-        ),
+        OfferWhy::New => l.t("offer-new"),
+        OfferWhy::WrongCodes => l.t("offer-wrong-codes"),
+        OfferWhy::Forgotten => l.t("offer-forgotten"),
     };
     items.push(text(x, y, 34.0, true, TEXT, title));
     y += 60.0;
     let host: String = host.chars().take(40).collect();
     items.push(text(x, y, 24.0, false, TEXT, &host));
     y += 44.0;
-    for line in [
-        l.t(
-            "Сполучайте шолом лише зі своїм ПК.",
-            "Pair the headset only with your own PC.",
-        ),
-        l.t(
-            "Потрібно ввести код з одного пристрою на іншому.",
-            "You will type a code from one device into the other.",
-        ),
-    ] {
+    for line in [l.t("offer-own-pc"), l.t("offer-code")] {
         items.push(text(x, y, 20.0, false, MUTED, line));
         y += 32.0;
     }
     y += 20.0;
     let half = (w - 12.0) / 2.0;
     let pair = match why {
-        OfferWhy::New => l.t("Сполучити", "Pair"),
-        OfferWhy::WrongCodes => l.t("Спробувати ще", "Try again"),
-        OfferWhy::Forgotten => l.t("Сполучити знову", "Pair again"),
+        OfferWhy::New => l.t("offer-pair"),
+        OfferWhy::WrongCodes => l.t("offer-try-again"),
+        OfferWhy::Forgotten => l.t("offer-pair-again"),
     };
     items.push(button(
         rect(x, y, half, 56.0),
@@ -2344,7 +2249,7 @@ fn build_pair_offer(l: Lang, items: &mut Vec<Item>, x: f32, w: f32, host: &str, 
     ));
     items.push(button(
         rect(x + half + 12.0, y, half, 56.0),
-        l.t("Не зараз", "Not now"),
+        l.t("offer-not-now"),
         Style::Normal,
         Some(Action::PairAnswer(false)),
     ));
@@ -2353,7 +2258,7 @@ fn build_pair_offer(l: Lang, items: &mut Vec<Item>, x: f32, w: f32, host: &str, 
 /// The headset and the PC cannot talk: which one to update, and where (`headset`:
 /// where this build of the headset app is updated).
 fn build_update(
-    l: Lang,
+    l: &Texts,
     items: &mut Vec<Item>,
     x: f32,
     w: f32,
@@ -2364,19 +2269,15 @@ fn build_update(
     let ours = prostir_proto::app_version(env!("CARGO_PKG_VERSION"));
     let mut y = 180.0;
     let title = if pc_newer {
-        l.t(
-            "Оновіть застосунок у шоломі",
-            "Update the app in the headset",
-        )
+        l.t("update-headset")
     } else {
-        l.t("Оновіть Prostir на ПК", "Update Prostir on the PC")
+        l.t("update-pc")
     };
     items.push(text(x, y, 34.0, true, TEXT, title));
     y += 60.0;
-    let versions = format!(
-        "{} {pc_app}, {} {ours}.",
-        l.t("Версія на ПК:", "The PC has"),
-        l.t("у шоломі:", "the headset has")
+    let versions = l.f(
+        "update-versions",
+        &[("pc", pc_app.into()), ("headset", ours.into())],
     );
     items.push(text(x, y, 22.0, false, MUTED, &versions));
     y += 36.0;
@@ -2386,23 +2287,14 @@ fn build_update(
         22.0,
         false,
         MUTED,
-        l.t(
-            "Різні версії не можуть з'єднатися.",
-            "Different versions cannot connect.",
-        ),
+        l.t("update-versions-differ"),
     ));
     y += 50.0;
     items.push(Item::Box(rect(x, y, w, 130.0), [255, 255, 255, 12]));
     let (how, where_) = if pc_newer {
-        (headset.how, headset.place)
+        (l.t(headset.how), headset.place)
     } else {
-        (
-            l.t(
-                "Завантажте нову версію для ПК з",
-                "Download the new PC version from",
-            ),
-            "prostir.ishawyha.dev",
-        )
+        (l.t("update-pc-from"), SITE)
     };
     items.push(text(x + 28.0, y + 50.0, 22.0, false, TEXT, how));
     items.push(text(x + 28.0, y + 100.0, 32.0, true, ACCENT, where_));
@@ -2413,30 +2305,17 @@ fn build_update(
         19.0,
         false,
         MUTED,
-        l.t(
-            "Шолом сам підключиться, щойно версії зійдуться.",
-            "The headset connects by itself once the versions match.",
-        ),
+        l.t("update-connects-by-itself"),
     ));
 }
 
-/// The desktops the PC part supports, as the headset names them (Ukrainian, English).
-/// Add new ones here.
-pub const DESKTOPS: (&str, &str) = ("KDE Plasma 6 або Hyprland", "KDE Plasma 6 or Hyprland");
+/// Prostir's site: the PC part, and which desktops it runs on (kept there, so a new
+/// one needs no new headset app).
+pub const SITE: &str = "prostir.ishawyha.dev";
 
 /// Before any PC is found: what Prostir needs and where to get the PC part.
-fn build_welcome(l: Lang, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
-    items.push(text(
-        x,
-        y + 6.0,
-        26.0,
-        true,
-        TEXT,
-        l.t(
-            "Prostir показує монітори вашого ПК",
-            "Prostir shows your PC's monitors",
-        ),
-    ));
+fn build_welcome(l: &Texts, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
+    items.push(text(x, y + 6.0, 26.0, true, TEXT, l.t("welcome-title")));
     y += 36.0;
     items.push(text(
         x,
@@ -2444,48 +2323,24 @@ fn build_welcome(l: Lang, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
         19.0,
         false,
         MUTED,
-        &format!(
-            "{} {}.",
-            l.t("Потрібен ПК з", "It needs a PC with"),
-            l.t(DESKTOPS.0, DESKTOPS.1),
-        ),
+        &l.f("welcome-pc-app", &[("site", SITE.into())]),
     ));
     y += 30.0;
-    let steps: [(&str, &str, &str, &str, bool); 3] = [
+    let steps: [(&str, &str, bool); 3] = [
+        (l.t("welcome-install"), SITE, true),
+        (l.t("welcome-start"), l.t("welcome-start-note"), false),
+        // USB needs developer mode and adb: not something a store install has.
         (
-            "Встановіть Prostir на ПК",
-            "Install Prostir on the PC",
-            "prostir.ishawyha.dev",
-            "prostir.ishawyha.dev",
-            true,
-        ),
-        (
-            "Запустіть його",
-            "Start it",
-            "У треї з'явиться іконка Prostir.",
-            "The Prostir icon appears in the tray.",
+            l.t("welcome-finds"),
+            l.t(if cfg!(feature = "store") {
+                "welcome-finds-wifi"
+            } else {
+                "welcome-finds-wifi-usb"
+            }),
             false,
         ),
-        // USB needs developer mode and adb: not something a store install has.
-        if cfg!(feature = "store") {
-            (
-                "Шолом знайде ПК сам",
-                "The headset finds the PC",
-                "У тій самій мережі Wi‑Fi.",
-                "On the same Wi‑Fi network.",
-                false,
-            )
-        } else {
-            (
-                "Шолом знайде ПК сам",
-                "The headset finds the PC",
-                "У тій самій мережі Wi‑Fi або через кабель USB.",
-                "On the same Wi‑Fi network, or over a USB cable.",
-                false,
-            )
-        },
     ];
-    for (n, (uk_title, en_title, uk, en, link)) in steps.into_iter().enumerate() {
+    for (n, (title, note, link)) in steps.into_iter().enumerate() {
         y += 16.0;
         let h = if link { 116.0 } else { 96.0 };
         items.push(Item::Box(rect(x, y, w, h), [255, 255, 255, 12]));
@@ -2497,14 +2352,7 @@ fn build_welcome(l: Lang, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
             ACCENT,
             &format!("{}", n + 1),
         ));
-        items.push(text(
-            x + 64.0,
-            y + 38.0,
-            23.0,
-            true,
-            TEXT,
-            l.t(uk_title, en_title),
-        ));
+        items.push(text(x + 64.0, y + 38.0, 23.0, true, TEXT, title));
         let (size, color, medium) = if link {
             (30.0, ACCENT, true)
         } else {
@@ -2516,7 +2364,7 @@ fn build_welcome(l: Lang, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
             size,
             medium,
             color,
-            l.t(uk, en),
+            note,
         ));
         y += h;
     }
@@ -2524,70 +2372,28 @@ fn build_welcome(l: Lang, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
 
 /// The first-run page: how to reach the menu, move and line up monitors, and what
 /// happens when the headset comes off.
-fn build_intro(l: Lang, items: &mut Vec<Item>, x: f32, w: f32) {
+fn build_intro(l: &Texts, items: &mut Vec<Item>, x: f32, w: f32) {
     let mut y = 160.0;
-    items.push(text(
-        x,
-        y,
-        28.0,
-        true,
-        TEXT,
-        l.t(
-            "Монітори вже тут. Кілька порад:",
-            "Your monitors are here. A few tips:",
-        ),
-    ));
+    items.push(text(x, y, 28.0, true, TEXT, l.t("intro-title")));
     y += 34.0;
-    let tips: [(&str, &str, &str, &str); 5] = [
-        (
-            "Меню",
-            "Menu",
-            "Кругла кнопка під головним монітором або кнопка меню чи X на лівому контролері.",
-            "The round button under the main monitor, or the menu or X button on the left controller.",
-        ),
-        (
-            "Перенести монітор",
-            "Move a monitor",
-            "Тримайте grip і наводьте. Руками: щипок і тримати пів секунди.",
-            "Hold grip and point. With hands: pinch and hold for half a second.",
-        ),
-        (
-            "Вирівняти",
-            "Line up",
-            "Кнопка A прибирає шви між моніторами. Відпущений біля іншого монітор пристає сам.",
-            "The A button closes the seams between monitors. One let go next to another sticks to it.",
-        ),
-        (
-            "Пальцем",
-            "With a finger",
-            "Коли руки в полі зору, меню можна просто торкатися, як планшет.",
-            "With hands in view, just touch the menu like a tablet.",
-        ),
-        (
-            "Зняли шолом",
-            "Headset off",
-            "Через 10 с вікна, звук і мікрофон повертаються на ПК.",
-            "After 10 s, windows, sound and microphone go back to the PC.",
-        ),
+    let tips = [
+        ("intro-menu", "intro-menu-text"),
+        ("intro-move", "intro-move-text"),
+        ("intro-line-up", "intro-line-up-text"),
+        ("intro-finger", "intro-finger-text"),
+        ("intro-off", "intro-off-text"),
     ];
-    for (uk_title, en_title, uk, en) in tips {
+    for (title, tip) in tips {
         y += 28.0;
         items.push(Item::Box(rect(x, y, w, 96.0), [255, 255, 255, 12]));
-        items.push(text(
-            x + 24.0,
-            y + 38.0,
-            23.0,
-            true,
-            TEXT,
-            l.t(uk_title, en_title),
-        ));
-        items.push(text(x + 24.0, y + 74.0, 20.0, false, MUTED, l.t(uk, en)));
+        items.push(text(x + 24.0, y + 38.0, 23.0, true, TEXT, l.t(title)));
+        items.push(text(x + 24.0, y + 74.0, 20.0, false, MUTED, l.t(tip)));
         y += 96.0;
     }
     y += 36.0;
     items.push(button(
         rect(x, y, 280.0, 56.0),
-        l.t("Зрозуміло", "Got it"),
+        l.t("intro-done"),
         Style::Selected,
         Some(Action::IntroDone),
     ));
@@ -2615,41 +2421,34 @@ fn tile(
     } else {
         (TEXT, MUTED)
     };
-    items.push(text(r.left() + 26.0, r.top() + 62.0, 27.0, true, fg, title));
+    let room = r.width() - 48.0;
+    items.push(text_in(
+        room,
+        text(r.left() + 26.0, r.top() + 62.0, 27.0, true, fg, title),
+    ));
     // What it asked the PC for and how that stands, in place of its state.
     let (state, color) = match note {
         Some((note, true)) => (note.as_str(), DANGER),
         Some((note, false)) => (note.as_str(), sub),
         None => (state, sub),
     };
-    items.push(text(
-        r.left() + 24.0,
-        r.top() + 104.0,
-        19.0,
-        false,
-        color,
-        state,
+    items.push(text_in(
+        room,
+        text(r.left() + 24.0, r.top() + 104.0, 19.0, false, color, state),
     ));
 }
 
 /// Everyday things in one place: profiles to switch to, and toggles as tiles.
 fn build_quick(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
-    let l = s.lang;
+    let l = &s.texts;
     let st = s.settings;
     let connected = s.host.is_some();
-    items.push(text(
-        x,
-        y + 14.0,
-        21.0,
-        true,
-        SECTION,
-        l.t("Профіль", "Profile"),
-    ));
+    items.push(text(x, y + 14.0, 21.0, true, SECTION, l.t("profile")));
     y += 32.0;
     let names = [
-        l.t("Робота", "Work"),
-        l.t("Кіно", "Cinema"),
-        l.t("Лежачи", "Lying down"),
+        l.t("profile-work"),
+        l.t("profile-cinema"),
+        l.t("layout-lying"),
     ];
     let cw = (w - 2.0 * 12.0) / 3.0;
     for (i, name) in names.iter().enumerate() {
@@ -2669,11 +2468,7 @@ fn build_quick(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
     }
     y += 72.0 + 40.0;
     let on_off = |on: bool| {
-        if on {
-            l.t("Увімкнено", "On")
-        } else {
-            l.t("Вимкнено", "Off")
-        }
+        if on { l.t("on") } else { l.t("off") }
     };
     let tw = (w - 2.0 * 12.0) / 3.0;
     let th = 140.0;
@@ -2683,75 +2478,72 @@ fn build_quick(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
         .is_none_or(|l| s.windows.len() >= usize::from(l.windows_max));
     let tiles: [(&str, String, bool, Option<Action>); 9] = [
         (
-            l.t("Перед собою", "In front of me"),
-            l.t("Повернути все до себе", "Turn everything to me")
-                .to_owned(),
+            l.t("quick-in-front"),
+            l.t("quick-in-front-state").to_owned(),
             false,
             Some(Action::Recenter),
         ),
         (
-            l.t("Фокус", "Focus"),
+            l.t("focus"),
             on_off(st.focus).to_owned(),
             st.focus,
             Some(Action::Focus(!st.focus)),
         ),
         (
-            l.t("Кінотеатр", "Cinema"),
+            l.t("cinema"),
             on_off(st.cinema).to_owned(),
             st.cinema,
             Some(Action::Cinema(!st.cinema)),
         ),
         (
-            l.t("Вікно на клавіатуру", "Keyboard window"),
+            l.t("keyboard-window"),
             on_off(st.keyboard_window).to_owned(),
             st.keyboard_window,
             s.keyboard_available
                 .then_some(Action::KeyboardWindow(!st.keyboard_window)),
         ),
         (
-            l.t("Звук ПК", "PC sound"),
+            l.t("pc-sound"),
             if s.audio_wanted {
-                l.t("У шоломі", "In the headset")
+                l.t("sound-in-headset")
             } else {
-                l.t("На ПК", "On the PC")
+                l.t("sound-on-pc")
             }
             .to_owned(),
             s.audio_wanted,
             connected.then_some(Action::SetAudio(!s.audio_wanted)),
         ),
         (
-            l.t("Мікрофон", "Microphone"),
+            l.t("microphone"),
             if s.mic_wanted {
-                l.t("Мікрофон шолома", "The headset's")
+                l.t("quick-mic-headset")
             } else {
-                l.t("Мікрофон ПК", "The PC's")
+                l.t("quick-mic-pc")
             }
             .to_owned(),
             s.mic_wanted,
             connected.then_some(Action::SetMic(!s.mic_wanted)),
         ),
         (
-            l.t("Відкріпити вікно", "Detach window"),
+            l.t("quick-detach"),
             if full {
-                l.t("Уже три: закрийте одне", "Three already: close one")
+                l.t("quick-detach-full")
             } else {
-                l.t("Активне вікно ПК окремо", "The PC's active window apart")
+                l.t("quick-detach-state")
             }
             .to_owned(),
             false,
             (connected && !full).then_some(Action::DetachWindow),
         ),
         (
-            l.t("Вікно сюди", "Window here"),
-            l.t("На монітор перед вами", "To the monitor in front")
-                .to_owned(),
+            l.t("quick-window-here"),
+            l.t("quick-window-here-state").to_owned(),
             false,
             connected.then_some(Action::WindowHere),
         ),
         (
-            l.t("Знімок екрана", "Screenshot"),
-            l.t("Монітора перед вами", "Of the monitor in front")
-                .to_owned(),
+            l.t("quick-screenshot"),
+            l.t("quick-screenshot-state").to_owned(),
             false,
             connected.then_some(Action::Screenshot),
         ),
@@ -2781,29 +2573,18 @@ fn build_quick(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
 
 /// Saves the current setup into one of the profiles (second press confirms).
 fn save_as_profile(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
-    let l = s.lang;
-    items.push(text(
-        x,
-        y,
-        21.0,
-        true,
-        SECTION,
-        l.t("Зберегти як профіль", "Save as profile"),
-    ));
+    let l = &s.texts;
+    items.push(text(x, y, 21.0, true, SECTION, l.t("profile-save")));
     y += 18.0;
     let names = [
-        l.t("Робота", "Work"),
-        l.t("Кіно", "Cinema"),
-        l.t("Лежачи", "Lying down"),
+        l.t("profile-work"),
+        l.t("profile-cinema"),
+        l.t("layout-lying"),
     ];
     let bw = (w - 2.0 * 10.0) / 3.0;
     for (i, name) in names.iter().enumerate() {
         let armed = s.confirm_save == Some(i);
-        let label = if armed {
-            l.t("Замінити?", "Replace?")
-        } else {
-            name
-        };
+        let label = if armed { l.t("profile-replace") } else { name };
         let style = match (s.host.is_some(), armed) {
             (false, _) => Style::Disabled,
             (true, true) => Style::Armed,
@@ -2820,15 +2601,15 @@ fn save_as_profile(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f3
 
 /// Settings: the parts listed on the left, the chosen one on the right.
 fn build_settings(s: &UiState, section: Section, items: &mut Vec<Item>, top: f32) {
-    let l = s.lang;
+    let l = &s.texts;
     let (nx, nw) = (44.0, 230.0);
     let sections = [
-        (Section::Look, l.t("Вигляд", "Look")),
-        (Section::Controls, l.t("Керування", "Controls")),
-        (Section::Sound, l.t("Звук", "Sound")),
-        (Section::Language, l.t("Мова", "Language")),
-        (Section::Pc, l.t("ПК", "PC")),
-        (Section::Help, l.t("Довідка", "Help")),
+        (Section::Look, l.t("section-look")),
+        (Section::Controls, l.t("section-controls")),
+        (Section::Sound, l.t("section-sound")),
+        (Section::Language, l.t("section-language")),
+        (Section::Pc, l.t("section-pc")),
+        (Section::Help, l.t("section-help")),
     ];
     for (i, (sec, label)) in sections.into_iter().enumerate() {
         let r = rect(nx, top + i as f32 * 60.0, nw, 52.0);
@@ -2857,82 +2638,78 @@ fn build_settings(s: &UiState, section: Section, items: &mut Vec<Item>, top: f32
         }
         Section::Sound => build_sound(s, items, cx, cw.min(620.0), ctop - 12.0),
         Section::Language => {
-            let mut y = ctop;
-            segmented(
-                items,
-                cx,
-                cw.min(620.0),
-                &mut y,
-                l.t("Мова меню · Language", "Menu language · Мова"),
-                vec![
-                    (
-                        l.t("Як на ПК", "Same as PC"),
-                        Action::Language(Language::LikePc),
-                        s.settings.language == Language::LikePc,
-                        true,
-                    ),
-                    (
-                        "Українська",
-                        Action::Language(Language::Fixed(Lang::Uk)),
-                        s.settings.language == Language::Fixed(Lang::Uk),
-                        true,
-                    ),
-                    (
-                        "English",
-                        Action::Language(Language::Fixed(Lang::En)),
-                        s.settings.language == Language::Fixed(Lang::En),
-                        true,
-                    ),
-                ],
-            );
-            // The clock and date on the palm menu, each choice shown as it looks.
             let w = cw.min(620.0);
-            let st = s.settings;
+            let mut y = ctop;
+            let chosen = s.settings.language;
+            let choice = |label, language: Language| {
+                (label, Action::Language(language), chosen == language, true)
+            };
             segmented(
                 items,
                 cx,
                 w,
                 &mut y,
-                l.t("Час", "Time"),
+                l.t("language-title"),
                 vec![
-                    ("14:05", Action::Clock12h(false), !st.clock_12h, true),
-                    ("2:05 PM", Action::Clock12h(true), st.clock_12h, true),
+                    choice(l.t("language-like-pc"), Language::LikePc),
+                    choice(l.t("language-like-system"), Language::LikeSystem),
+                ],
+            );
+            // Every language there is a file for, by the name it calls itself, three
+            // to a row.
+            for row in s.languages.chunks(3) {
+                let options: Vec<_> = row
+                    .iter()
+                    .map(|k| choice(k.name.as_str(), Language::Fixed(k.lang)))
+                    .collect();
+                // The buttons of a shorter last row as wide as those of a full one.
+                let k = options.len() as f32;
+                let width = k * (w - 20.0) / 3.0 + 10.0 * (k - 1.0);
+                segmented(items, cx, width, &mut y, "", options);
+            }
+            // The clock and date on the palm menu, each choice shown as it looks.
+            let st = s.settings;
+            let example = Moment::EXAMPLE;
+            let clocks = [false, true].map(|twelve| l.clock(twelve, &example));
+            segmented(
+                items,
+                cx,
+                w,
+                &mut y,
+                l.t("time"),
+                vec![
+                    (
+                        clocks[0].as_str(),
+                        Action::Clock12h(false),
+                        !st.clock_12h,
+                        true,
+                    ),
+                    (
+                        clocks[1].as_str(),
+                        Action::Clock12h(true),
+                        st.clock_12h,
+                        true,
+                    ),
                 ],
             );
             use crate::settings::DateStyle;
-            segmented(
-                items,
-                cx,
-                w,
-                &mut y,
-                l.t("Дата", "Date"),
-                vec![
-                    (
-                        l.t("Мовою меню", "As the menu"),
-                        Action::DateStyle(DateStyle::LikeMenu),
-                        st.date_style == DateStyle::LikeMenu,
-                        true,
-                    ),
-                    (
-                        "Ср, 18 лист.",
-                        Action::DateStyle(DateStyle::Ukrainian),
-                        st.date_style == DateStyle::Ukrainian,
-                        true,
-                    ),
-                    (
-                        "Wed, Nov 18",
-                        Action::DateStyle(DateStyle::English),
-                        st.date_style == DateStyle::English,
-                        true,
-                    ),
-                    (
-                        "18.11.2026",
-                        Action::DateStyle(DateStyle::Numbers),
-                        st.date_style == DateStyle::Numbers,
-                        true,
-                    ),
-                ],
-            );
+            let styles = [DateStyle::Ukrainian, DateStyle::English, DateStyle::Numbers];
+            let dates = styles.map(|style| l.date(style, &example));
+            let mut options = vec![(
+                l.t("date-like-menu"),
+                Action::DateStyle(DateStyle::LikeMenu),
+                st.date_style == DateStyle::LikeMenu,
+                true,
+            )];
+            options.extend(styles.iter().zip(&dates).map(|(&style, label)| {
+                (
+                    label.as_str(),
+                    Action::DateStyle(style),
+                    st.date_style == style,
+                    true,
+                )
+            }));
+            segmented(items, cx, w, &mut y, l.t("date"), options);
         }
         Section::Pc => {
             let w = cw.min(700.0);
@@ -2943,20 +2720,10 @@ fn build_settings(s: &UiState, section: Section, items: &mut Vec<Item>, top: f32
                 cx,
                 w,
                 &mut y,
-                l.t("Сповіщення ПК у шоломі", "PC notifications in the headset"),
+                l.t("pc-notifications"),
                 vec![
-                    (
-                        l.t("Вимкнено", "Off"),
-                        Action::Notifications(false),
-                        !on,
-                        true,
-                    ),
-                    (
-                        l.t("Увімкнено", "On"),
-                        Action::Notifications(true),
-                        on,
-                        true,
-                    ),
+                    (l.t("off"), Action::Notifications(false), !on, true),
+                    (l.t("on"), Action::Notifications(true), on, true),
                 ],
             );
             paired_pcs(s, items, cx, w, y + 10.0);
@@ -2966,7 +2733,7 @@ fn build_settings(s: &UiState, section: Section, items: &mut Vec<Item>, top: f32
             hints(l, items, cx, ctop + 10.0);
             items.push(button(
                 rect(cx, ctop + 170.0, 300.0, 50.0),
-                l.t("Показати підказки знову", "Show the tips again"),
+                l.t("help-show-tips"),
                 Style::Normal,
                 Some(Action::ShowTips),
             ));
@@ -2976,10 +2743,7 @@ fn build_settings(s: &UiState, section: Section, items: &mut Vec<Item>, top: f32
                 19.0,
                 false,
                 MUTED,
-                &format!(
-                    "Prostir {} · prostir.ishawyha.dev",
-                    env!("CARGO_PKG_VERSION")
-                ),
+                &format!("Prostir {} · {SITE}", env!("CARGO_PKG_VERSION")),
             ));
         }
     }
@@ -2987,7 +2751,7 @@ fn build_settings(s: &UiState, section: Section, items: &mut Vec<Item>, top: f32
 
 /// Hands, the mouse, the menu's size and which hand does what.
 fn build_controls(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
-    let l = s.lang;
+    let l = &s.texts;
     let st = s.settings;
     let (lx, lw) = (x, w);
     segmented(
@@ -2995,22 +2759,22 @@ fn build_controls(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32
         lx,
         lw,
         &mut y,
-        l.t("Руки", "Hands"),
+        l.t("hands"),
         vec![
             (
-                l.t("Сховати", "Hide"),
+                l.t("hide"),
                 Action::Hands(HandMode::Hidden),
                 st.hands == HandMode::Hidden,
                 true,
             ),
             (
-                l.t("Показувати", "Show"),
+                l.t("show"),
                 Action::Hands(HandMode::Visible),
                 st.hands == HandMode::Visible,
                 true,
             ),
             (
-                l.t("І керувати", "Show and use"),
+                l.t("hands-use"),
                 Action::Hands(HandMode::Control),
                 st.hands == HandMode::Control,
                 true,
@@ -3019,8 +2783,8 @@ fn build_controls(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32
     );
     let on_off = |on: bool, act: fn(bool) -> Action, enabled: bool| {
         vec![
-            (l.t("Вимкнено", "Off"), act(false), !on, enabled),
-            (l.t("Увімкнено", "On"), act(true), on, enabled),
+            (l.t("off"), act(false), !on, enabled),
+            (l.t("on"), act(true), on, enabled),
         ]
     };
     segmented(
@@ -3028,7 +2792,7 @@ fn build_controls(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32
         lx,
         lw,
         &mut y,
-        l.t("Миша за поглядом", "Mouse follows the gaze"),
+        l.t("gaze-mouse"),
         on_off(st.gaze_mouse, Action::GazeMouse, s.can_move_mouse),
     );
     items.push(text(
@@ -3038,15 +2802,9 @@ fn build_controls(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32
         false,
         MUTED,
         if s.can_move_mouse || s.host.is_none() {
-            l.t(
-                "Подивились на інший монітор: миша переходить туди.",
-                "Look at another monitor and the mouse moves there.",
-            )
+            l.t("gaze-mouse-note")
         } else {
-            l.t(
-                "Цей робочий стіл не дозволяє переміщати мишу (є на Hyprland).",
-                "This desktop does not let the mouse be moved (Hyprland does).",
-            )
+            l.t("gaze-mouse-unavailable")
         },
     ));
     y += 22.0;
@@ -3055,16 +2813,16 @@ fn build_controls(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32
         lx,
         lw,
         &mut y,
-        l.t("Розмір меню", "Menu size"),
+        l.t("menu-size"),
         vec![
             (
-                l.t("Звичайний", "Normal"),
+                l.t("menu-size-normal"),
                 Action::LargeMenu(false),
                 !st.large_menu,
                 true,
             ),
             (
-                l.t("Великий", "Large"),
+                l.t("menu-size-large"),
                 Action::LargeMenu(true),
                 st.large_menu,
                 true,
@@ -3076,16 +2834,16 @@ fn build_controls(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32
         lx,
         lw,
         &mut y,
-        l.t("Меню на долоні", "Palm menu"),
+        l.t("palm-menu"),
         vec![
             (
-                l.t("На лівій руці", "Left hand"),
+                l.t("palm-menu-left"),
                 Action::LeftHanded(false),
                 !st.left_handed,
                 true,
             ),
             (
-                l.t("На правій руці", "Right hand"),
+                l.t("palm-menu-right"),
                 Action::LeftHanded(true),
                 st.left_handed,
                 true,
@@ -3097,16 +2855,16 @@ fn build_controls(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32
         lx,
         lw,
         &mut y,
-        l.t("Частота екрана шолома", "Headset display rate"),
+        l.t("display-rate"),
         vec![
             (
-                "90 Hz",
+                l.t("display-rate-normal"),
                 Action::BatterySaver(false),
                 !st.battery_saver,
                 true,
             ),
             (
-                l.t("72 Hz, довше від заряду", "72 Hz, lasts longer"),
+                l.t("display-rate-saver"),
                 Action::BatterySaver(true),
                 st.battery_saver,
                 true,
@@ -3119,10 +2877,7 @@ fn build_controls(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32
         18.0,
         false,
         MUTED,
-        l.t(
-            "Відео йде 60 кадрів на секунду, тож 72 Hz його не обрізає.",
-            "The video runs at 60 frames a second, so 72 Hz keeps all of it.",
-        ),
+        l.t("display-rate-note"),
     ));
     y += 22.0;
     segmented(
@@ -3130,19 +2885,11 @@ fn build_controls(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32
         lx,
         lw,
         &mut y,
-        l.t(
-            "Кругла кнопка меню біля монітора",
-            "Round menu button by the monitor",
-        ),
+        l.t("menu-button"),
         vec![
+            (l.t("show"), Action::MenuButton(true), st.menu_button, true),
             (
-                l.t("Показувати", "Show"),
-                Action::MenuButton(true),
-                st.menu_button,
-                true,
-            ),
-            (
-                l.t("Сховати", "Hide"),
+                l.t("hide"),
                 Action::MenuButton(false),
                 !st.menu_button,
                 true,
@@ -3153,18 +2900,11 @@ fn build_controls(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32
 
 /// The PCs this headset is paired with, each with "Forget" (pressed twice).
 fn paired_pcs(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
-    let l = s.lang;
-    items.push(text(
-        x,
-        y,
-        21.0,
-        true,
-        SECTION,
-        l.t("Сполучені ПК", "Paired PCs"),
-    ));
+    let l = &s.texts;
+    items.push(text(x, y, 21.0, true, SECTION, l.t("paired-pcs")));
     y += 14.0;
     if s.paired.is_empty() {
-        items.push(text(x, y + 26.0, 19.0, false, MUTED, l.t("Немає", "None")));
+        items.push(text(x, y + 26.0, 19.0, false, MUTED, l.t("paired-none")));
         return;
     }
     // Two fit; with more, one and how many others.
@@ -3185,9 +2925,9 @@ fn paired_pcs(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
         items.push(button(
             rect(x + w - 200.0, y + 6.0, 192.0, 44.0),
             if armed {
-                l.t("Забути? Ще раз", "Forget? Again")
+                l.t("paired-forget-confirm")
             } else {
-                l.t("Забути", "Forget")
+                l.t("paired-forget")
             },
             if armed { Style::Armed } else { Style::Normal },
             Some(Action::ForgetPc(i)),
@@ -3201,14 +2941,14 @@ fn paired_pcs(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
             18.0,
             false,
             MUTED,
-            &format!("{} {}", l.t("І ще", "And"), s.paired.len() - shown),
+            &l.f("paired-more", &[("count", (s.paired.len() - shown).into())]),
         ));
     }
 }
 
 /// How the PC encodes: quality, codec, graphics card or CPU, text preset.
 fn build_pc(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -> f32 {
-    let l = s.lang;
+    let l = &s.texts;
     let Some(pc) = &s.pc else {
         items.push(text(
             x,
@@ -3216,10 +2956,7 @@ fn build_pc(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -> f
             21.0,
             false,
             MUTED,
-            l.t(
-                "Доступно, коли ПК підключено.",
-                "Available while a PC is connected.",
-            ),
+            l.t("pc-not-connected"),
         ));
         return y + 70.0;
     };
@@ -3230,8 +2967,8 @@ fn build_pc(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -> f
     let none = EncodingChange::default();
     // How the last change stands, after the first title.
     let title = match s.ask_note(Asked::Encoding) {
-        Some((note, _)) => format!("{} · {note}", l.t("Якість відео", "Video quality")),
-        None => l.t("Якість відео", "Video quality").to_owned(),
+        Some((note, _)) => format!("{} · {note}", l.t("pc-quality")),
+        None => l.t("pc-quality").to_owned(),
     };
     segmented(
         items,
@@ -3240,9 +2977,9 @@ fn build_pc(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -> f
         &mut y,
         &title,
         [
-            (15, l.t("Економна", "Economy")),
-            (30, l.t("Звичайна", "Normal")),
-            (50, l.t("Висока", "High")),
+            (15, l.t("pc-quality-economy")),
+            (30, l.t("pc-quality-normal")),
+            (50, l.t("pc-quality-high")),
         ]
         .into_iter()
         .map(|(q, label)| {
@@ -3260,10 +2997,10 @@ fn build_pc(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -> f
         x,
         w,
         &mut y,
-        l.t("Кодує", "Encoding on"),
+        l.t("pc-encoding-on"),
         vec![
             (
-                l.t("Відеокарта", "Graphics card"),
+                l.t("pc-gpu"),
                 set(EncodingChange {
                     software: Some(false),
                     ..none
@@ -3272,7 +3009,7 @@ fn build_pc(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -> f
                 any_gpu,
             ),
             (
-                l.t("Процесор", "Processor"),
+                l.t("pc-cpu"),
                 set(EncodingChange {
                     software: Some(true),
                     codec: Some(Codec::H264),
@@ -3288,7 +3025,7 @@ fn build_pc(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -> f
         x,
         w,
         &mut y,
-        l.t("Кодек", "Codec"),
+        l.t("pc-codec"),
         vec![
             (
                 "HEVC",
@@ -3310,27 +3047,17 @@ fn build_pc(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -> f
             ),
         ],
     );
-    items.push(text(
-        x,
-        y - 18.0,
-        18.0,
-        false,
-        MUTED,
-        l.t(
-            "HEVC: найчіткіший текст. H.264: менше пам'яті на ПК.",
-            "HEVC: the sharpest text. H.264: less memory on the PC.",
-        ),
-    ));
+    items.push(text(x, y - 18.0, 18.0, false, MUTED, l.t("pc-codec-note")));
     y += 22.0;
     segmented(
         items,
         x,
         w,
         &mut y,
-        l.t("Чіткіший текст (+2 мс)", "Sharper text (+2 ms)"),
+        l.t("pc-sharp"),
         vec![
             (
-                l.t("Вимкнено", "Off"),
+                l.t("off"),
                 set(EncodingChange {
                     sharp: Some(false),
                     ..none
@@ -3339,7 +3066,7 @@ fn build_pc(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -> f
                 gpu,
             ),
             (
-                l.t("Увімкнено", "On"),
+                l.t("on"),
                 set(EncodingChange {
                     sharp: Some(true),
                     ..none
@@ -3354,12 +3081,12 @@ fn build_pc(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -> f
 
 /// PC sound and headset microphone.
 fn build_sound(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32) {
-    let l = s.lang;
+    let l = &s.texts;
     // The current state is the highlighted option, not a button label to decode.
     y += 18.0;
     let title = match s.ask_note(Asked::Sound) {
-        Some((note, _)) => format!("{} · {note}", l.t("Звук ПК грає", "PC sound plays")),
-        None => l.t("Звук ПК грає", "PC sound plays").to_owned(),
+        Some((note, _)) => format!("{} · {note}", l.t("sound-plays")),
+        None => l.t("sound-plays").to_owned(),
     };
     segmented(
         items,
@@ -3369,13 +3096,13 @@ fn build_sound(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32)
         &title,
         vec![
             (
-                l.t("У шоломі", "In the headset"),
+                l.t("sound-in-headset"),
                 Action::SetAudio(true),
                 s.audio_wanted,
                 true,
             ),
             (
-                l.t("На ПК", "On the PC"),
+                l.t("sound-on-pc"),
                 Action::SetAudio(false),
                 !s.audio_wanted,
                 true,
@@ -3387,16 +3114,16 @@ fn build_sound(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32)
         lx,
         lw,
         &mut y,
-        l.t("Програми на ПК чують", "PC apps hear"),
+        l.t("sound-apps-hear"),
         vec![
             (
-                l.t("Мікрофон шолома", "The headset's mic"),
+                l.t("sound-mic-headset"),
                 Action::SetMic(true),
                 s.mic_wanted,
                 true,
             ),
             (
-                l.t("Мікрофон ПК", "The PC's mic"),
+                l.t("sound-mic-pc"),
                 Action::SetMic(false),
                 !s.mic_wanted,
                 true,
@@ -3405,22 +3132,13 @@ fn build_sound(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32)
     );
     y -= 24.0;
     if s.mic_denied {
-        for line in [
-            l.t(
-                "Prostir не має доступу до мікрофона. Дозвольте його",
-                "Prostir may not use the microphone. Allow it in the",
-            ),
-            l.t(
-                "в налаштуваннях шолома (дозволи застосунків).",
-                "headset settings (app permissions).",
-            ),
-        ] {
+        for line in [l.t("sound-mic-denied-1"), l.t("sound-mic-denied-2")] {
             items.push(text(lx, y, 19.0, false, DANGER, line));
             y += 30.0;
         }
         items.push(button(
             rect(lx, y - 8.0, 260.0, 48.0),
-            l.t("Спитати ще раз", "Ask again"),
+            l.t("sound-ask-again"),
             Style::Normal,
             Some(Action::AskMic),
         ));
@@ -3432,16 +3150,16 @@ fn build_sound(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32)
         lx,
         lw,
         &mut y,
-        l.t("Звук з боку екрана", "Sound from the screen"),
+        l.t("sound-from-screen"),
         vec![
             (
-                l.t("Вимкнено", "Off"),
+                l.t("off"),
                 Action::SoundFromScreen(false),
                 !s.settings.sound_from_screen,
                 true,
             ),
             (
-                l.t("Увімкнено", "On"),
+                l.t("on"),
                 Action::SoundFromScreen(true),
                 s.settings.sound_from_screen,
                 true,
@@ -3454,34 +3172,22 @@ fn build_sound(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32)
         18.0,
         false,
         MUTED,
-        l.t(
-            "Звук лунає з того монітора, де вікно, яке грає.",
-            "Sound comes from the monitor with the window playing it.",
-        ),
+        l.t("sound-from-screen-note"),
     ));
     y += 30.0;
     for line in [
-        l.t(
-            "Поки шолом підключено, звук із ПК грає в шоломі,",
-            "While the headset is connected, PC sound plays in it",
-        ),
-        l.t(
-            "а програми на ПК чують мікрофон шолома.",
-            "and PC apps hear the headset microphone.",
-        ),
-        l.t(
-            "Мікрофон вмикається, лише коли програма записує.",
-            "The microphone turns on only while an app records.",
-        ),
-        l.t(
-            "Коли шолом знято, звук і мікрофон повертаються на ПК.",
-            "Take the headset off and both return to the PC.",
-        ),
+        l.t("sound-about-1"),
+        l.t("sound-about-2"),
+        l.t("sound-about-3"),
+        l.t("sound-about-4"),
     ] {
         items.push(text(lx, y, 19.0, false, MUTED, line));
         y += 30.0;
     }
 }
+
+/// The smallest a text or label is drawn to make it fit.
+const SMALLEST: f32 = 13.0;
 
 fn button_font_size(label: &str) -> f32 {
     match label {
@@ -3535,6 +3241,31 @@ fn text(x: f32, baseline: f32, size: f32, medium: bool, color: [u8; 4], s: &str)
         medium,
         color,
         text: s.to_owned(),
+        room: f32::INFINITY,
+    }
+}
+
+/// A text that may be at most `room` wide (in a column, on a tile).
+fn text_in(room: f32, item: Item) -> Item {
+    match item {
+        Item::Text {
+            x,
+            baseline,
+            size,
+            medium,
+            color,
+            text,
+            ..
+        } => Item::Text {
+            x,
+            baseline,
+            size,
+            medium,
+            color,
+            text,
+            room,
+        },
+        other => other,
     }
 }
 
@@ -3542,6 +3273,7 @@ fn button(rect: Rect, label: &str, style: Style, action: Option<Action>) -> Item
     Item::Button {
         rect,
         label: label.to_owned(),
+        size: button_font_size(label),
         style,
         action,
     }
@@ -3621,6 +3353,31 @@ mod tests {
             ],
             scales: vec![100, 125, 150],
         }
+    }
+
+    /// The built-in languages, as the menu lists them.
+    fn languages() -> std::sync::Arc<[crate::lang::Known]> {
+        ["en", "uk"]
+            .iter()
+            .map(|code| {
+                let texts = crate::lang::builtin(code);
+                crate::lang::Known {
+                    lang: texts.lang(),
+                    name: texts.t(prostir_lang::NAME_ID).to_owned(),
+                }
+            })
+            .collect()
+    }
+
+    /// The longer pseudo-language (see [`crate::lang::pseudo`]).
+    fn pseudo() -> Texts {
+        let qps: &'static str =
+            Box::leak(crate::lang::pseudo(crate::lang::BUILTIN[0].1).into_boxed_str());
+        let mut loader =
+            crate::lang::Loader::with(&[crate::lang::BUILTIN[0], ("qps", qps)], Vec::new());
+        #[expect(clippy::disallowed_methods, reason = "built-in files only, in a test")]
+        let texts = loader.load(crate::lang::Lang::new("qps").expect("a code"));
+        texts
     }
 
     pub fn sample_state() -> UiState {
@@ -3704,10 +3461,11 @@ mod tests {
             confirm_remove: None,
             confirm_save: None,
             tab: Tab::Monitors,
-            lang: Lang::Uk,
+            texts: crate::lang::builtin("uk"),
+            languages: languages(),
             intro: false,
             update: None,
-            update_from: NoStore.update_hint(Lang::Uk),
+            update_from: NoStore.update_hint(),
             profiles: (0..crate::profiles::SLOTS)
                 .map(Profile::default_for)
                 .collect(),
@@ -3877,7 +3635,11 @@ mod tests {
     #[test]
     fn nothing_overflows() {
         let mut states = Vec::new();
-        for lang in [Lang::Uk, Lang::En] {
+        for lang in [
+            crate::lang::builtin("uk"),
+            crate::lang::builtin("en"),
+            pseudo(),
+        ] {
             for tab in [
                 Tab::Quick,
                 Tab::Monitors,
@@ -3889,7 +3651,7 @@ mod tests {
                 Tab::Settings(Section::Help),
             ] {
                 let mut st = sample_state();
-                st.lang = lang;
+                st.texts = lang.clone();
                 st.tab = tab;
                 states.push(st.clone());
                 st.confirm_remove = Some(103);
@@ -3900,10 +3662,7 @@ mod tests {
                 st.mirror_wanted = false;
                 st.mirror_name = None;
                 st.active_profile = Some(1);
-                st.error = Some(format!(
-                    "{} 6",
-                    lang.t("Максимум моніторів:", "At most monitors:")
-                ));
+                st.error = Some(lang.f("monitors-at-most", &[("count", 6.into())]));
                 states.push(st.clone());
                 // Every control waiting for the PC, then every one failed, on the
                 // pages that have them.
@@ -3965,7 +3724,7 @@ mod tests {
             }
             for why in [OfferWhy::New, OfferWhy::WrongCodes, OfferWhy::Forgotten] {
                 let mut offer = sample_state();
-                offer.lang = lang;
+                offer.texts = lang.clone();
                 offer.host = None;
                 offer.pair_offer = Some((
                     "a-very-long-pc-name.example.lan 192.168.100.200".into(),
@@ -3975,17 +3734,17 @@ mod tests {
             }
             for pc_newer in [true, false] {
                 let mut update = sample_state();
-                update.lang = lang;
+                update.texts = lang.clone();
                 update.host = None;
                 update.update = Some((pc_newer, "0.12.3".into()));
                 states.push(update);
             }
             let mut intro = sample_state();
-            intro.lang = lang;
+            intro.texts = lang.clone();
             intro.intro = true;
             states.push(intro);
             let mut offline = sample_state();
-            offline.lang = lang;
+            offline.texts = lang.clone();
             offline.host = None;
             offline.found = vec![("workstation".into(), "192.168.1.10".into())];
             states.push(offline.clone());
@@ -3996,7 +3755,7 @@ mod tests {
                 (None, "4829".to_owned(), true),
             ] {
                 let mut pairing = sample_state();
-                pairing.lang = lang;
+                pairing.texts = lang.clone();
                 pairing.pairing = Some(PairingView {
                     host: "workstation".into(),
                     code,
@@ -4011,11 +3770,59 @@ mod tests {
             let mut p = Panel::new();
             p.set_state(st);
             for o in p.overflows() {
-                problems.push(format!("{:?}/{:?}: {o}", st.lang, st.tab));
+                problems.push(format!("{:?}/{:?}: {o}", st.texts, st.tab));
+            }
+            // The built-in languages fit as they are: nothing of theirs is drawn
+            // smaller.
+            if st.texts.lang().as_str() != "qps" {
+                let sizes = |items: &[Item]| -> Vec<(String, f32)> {
+                    items
+                        .iter()
+                        .filter_map(|i| match i {
+                            Item::Text { text, size, .. } => Some((text.clone(), *size)),
+                            Item::Button { label, size, .. } => Some((label.clone(), *size)),
+                            _ => None,
+                        })
+                        .collect()
+                };
+                let made = Panel::new().build(st);
+                for ((text, was), (_, now)) in sizes(&made).iter().zip(sizes(&p.items)) {
+                    if (was - now).abs() > f32::EPSILON {
+                        problems.push(format!("{:?}: {text:?} drawn smaller", st.texts));
+                    }
+                }
             }
         }
         problems.dedup();
         assert!(problems.is_empty(), "{}", problems.join("\n"));
+    }
+
+    /// The palm menu in every language, the longer one too, without text that does not
+    /// fit.
+    #[test]
+    fn the_palm_menu_fits() {
+        for lang in [
+            crate::lang::builtin("uk"),
+            crate::lang::builtin("en"),
+            pseudo(),
+        ] {
+            for (battery, twelve) in [
+                (Some((100, true)), true),
+                (Some((9, false)), false),
+                (None, false),
+            ] {
+                let mut st = sample_state();
+                let day = Moment::EXAMPLE;
+                st.clock = lang.clock(twelve, &day).into();
+                st.date = lang.date(crate::settings::DateStyle::LikeMenu, &day).into();
+                st.battery = battery;
+                st.texts = lang.clone();
+                let mut p = Panel::wrist();
+                p.set_state(&st);
+                let problems = p.overflows();
+                assert!(problems.is_empty(), "{lang:?}: {}", problems.join("\n"));
+            }
+        }
     }
 
     /// The Monitors tab for `monitors` (id, width, height, desktop centre in pixels)

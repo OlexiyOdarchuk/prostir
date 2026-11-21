@@ -3,7 +3,7 @@
 use std::path::Path;
 
 pub use crate::background::Sky;
-use crate::i18n::{Lang, Language};
+use crate::lang::{Lang, Language};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Preset {
@@ -235,12 +235,12 @@ impl Settings {
                 Some(("rest-every", v)) => s.rest_every = v.trim().parse().unwrap_or(0),
                 Some(("language", v)) => {
                     s.language = match v {
-                        "uk" => Language::Fixed(Lang::Uk),
-                        "en" => Language::Fixed(Lang::En),
-                        _ => Language::LikePc,
+                        "like-pc" => Language::LikePc,
+                        "like-system" => Language::LikeSystem,
+                        code => Lang::new(code).map_or(Language::LikePc, Language::Fixed),
                     }
                 }
-                Some(("pc-language", v)) => s.pc_language = Lang::from_code(v),
+                Some(("pc-language", v)) => s.pc_language = Lang::from_tag(v),
                 Some(("hands", v)) => {
                     s.hands = match v {
                         "hidden" => HandMode::Hidden,
@@ -311,11 +311,12 @@ impl Settings {
             on(self.cinema),
             self.cinema_screen
                 .map_or_else(|| "auto".to_owned(), |i| i.to_string()),
-            match self.language {
+            match &self.language {
                 Language::LikePc => "like-pc",
-                Language::Fixed(l) => l.code(),
+                Language::LikeSystem => "like-system",
+                Language::Fixed(l) => l.as_str(),
             },
-            self.pc_language.map_or("", Lang::code),
+            self.pc_language.as_ref().map_or("", Lang::as_str),
             if self.intro_seen { "seen" } else { "new" },
             on(self.keyboard_window),
             on(self.mic),
@@ -384,11 +385,35 @@ mod tests {
             notifications: true,
             no_limits: true,
             rest_every: 20,
-            language: Language::Fixed(Lang::En),
-            pc_language: Some(Lang::Uk),
+            language: Language::Fixed(Lang::FALLBACK),
+            pc_language: Lang::new("uk"),
         };
         s.save(&path);
         assert_eq!(Settings::load(&path), s);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Any language code is kept, and the two "like" choices; what is not a code is
+    /// "like the PC", as before.
+    #[test]
+    fn languages() {
+        let read = |v: &str| Settings::parse(&format!("language {v}\n")).language;
+        assert_eq!(read("uk"), Language::Fixed(Lang::new("uk").unwrap()));
+        assert_eq!(read("pt-BR"), Language::Fixed(Lang::new("pt-BR").unwrap()));
+        assert_eq!(read("like-system"), Language::LikeSystem);
+        assert_eq!(read("like-pc"), Language::LikePc);
+        assert_eq!(read("../../etc"), Language::LikePc);
+        for language in [
+            Language::LikeSystem,
+            Language::Fixed(Lang::new("de").unwrap()),
+        ] {
+            let s = Settings {
+                language,
+                ..Settings::default()
+            };
+            assert_eq!(Settings::parse(&s.to_text()).language, language);
+        }
+        let pc = Settings::parse("pc-language uk_UA.UTF-8\n").pc_language;
+        assert_eq!(pc.map(|l| l.to_string()).as_deref(), Some("uk-UA"));
     }
 }
