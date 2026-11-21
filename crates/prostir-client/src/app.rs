@@ -530,6 +530,18 @@ struct Scene {
     saves: persist::Dirty,
     /// The files whose failed save the menu told of, once each.
     save_failures_told: persist::Dirty,
+    /// The files' writer of this start. Last, and stopped when the scene goes (see
+    /// `Drop`), however `run` ends.
+    saver: persist::Saver,
+}
+
+impl Drop for Scene {
+    /// What the last pass changed is written, and the files' writer ends, before the
+    /// app does, also when `run` ends early with an error or a panic.
+    fn drop(&mut self) {
+        self.save_due();
+        self.saver.stop(persist::Saver::STOPS_WITHIN);
+    }
 }
 
 impl Scene {
@@ -959,21 +971,78 @@ impl Scene {
         }
     }
 
-    /// A file could not be saved: said once in this start for each file (the next save
-    /// tries again, and the log says each time).
-    fn save_failed(&mut self, file: persist::File, error: String) {
-        if self.save_failures_told.has(file) {
-            return;
+    /// The files changed in this pass (`saves`), handed to the files' writer: each
+    /// one's text written into the writer's buffer for it, once, whatever changed it
+    /// how often. The writing itself is done on the writer's thread.
+    fn save_due(&mut self) {
+        use persist::File;
+        for file in self.saves.take() {
+            match file {
+                File::Settings => self.saver.save(file, |out| self.settings.write_text(out)),
+                File::Desk => self.saver.save(file, |out| self.desk.write_text(out)),
+                File::Profiles => self
+                    .saver
+                    .save(file, |out| profiles::write_text(out, &self.profiles)),
+                File::Keyboard => {
+                    if let Some(place) = &self.keyboard_place {
+                        self.saver
+                            .save(file, |out| layout::write_keyboard(out, place));
+                    }
+                }
+            }
         }
-        self.save_failures_told.mark(file);
-        let id = match file {
-            persist::File::Settings => "error-save-settings",
-            persist::File::Desk => "error-save-desk",
-            persist::File::Profiles => "error-save-profiles",
-            persist::File::Keyboard => "error-save-keyboard",
+    }
+
+    /// Hands over what changed and waits until it is written (for
+    /// [`persist::Saver::STOPS_WITHIN`] at most): the app is `why` (paused, or the
+    /// headset taken off), and may not come back.
+    fn flush_saves(&mut self, why: &str) {
+        self.save_due();
+        if !self.saver.flush(persist::Saver::STOPS_WITHIN) {
+            warn!(
+                "{why}: the files were not all written within {} ms",
+                persist::Saver::STOPS_WITHIN.as_millis()
+            );
+        }
+    }
+
+    /// What the files' writer said: a file that could not be saved is told once in
+    /// this start (the next save tries again, and the log says each time), and files
+    /// that failed together in one message.
+    fn saves_told(&mut self) {
+        let mut failed = persist::Dirty::default();
+        let mut first: Option<(persist::File, String)> = None;
+        while let Some(event) = self.saver.try_recv() {
+            match event {
+                persist::PersistEvent::Failed { file, error } => {
+                    if !self.save_failures_told.has(file) && !failed.has(file) {
+                        failed.mark(file);
+                        first.get_or_insert((file, error));
+                    }
+                }
+            }
+        }
+        let Some((file, error)) = first else {
+            return;
+        };
+        let mut several = 0;
+        for f in failed.take() {
+            self.save_failures_told.mark(f);
+            several += 1;
+        }
+        let id = if several > 1 {
+            "error-save-files"
+        } else {
+            match file {
+                persist::File::Settings => "error-save-settings",
+                persist::File::Desk => "error-save-desk",
+                persist::File::Profiles => "error-save-profiles",
+                persist::File::Keyboard => "error-save-keyboard",
+            }
         };
         let text = self.texts().f(id, &[("error", error.into())]);
-        self.show_error(text);
+        // The log has it already, from the writer.
+        self.put_error(text);
     }
 
     /// Takes `saved` as the desk arrangement. Window panels stay where they are; a
@@ -1907,12 +1976,17 @@ impl Scene {
             .update(now, s.clock_12h, s.date_style, self.lang.texts());
     }
 
+    fn show_error(&mut self, text: String) {
+        warn!("{text}");
+        self.put_error(text);
+    }
+
+    /// [`Scene::show_error`] without the line in the log.
     #[expect(
         clippy::disallowed_methods,
         reason = "until step 7.7 passes the time in and moves the threads to the shell"
     )]
-    fn show_error(&mut self, text: String) {
-        warn!("{text}");
+    fn put_error(&mut self, text: String) {
         self.error = Some((text, Instant::now()));
     }
 
@@ -2185,27 +2259,22 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         return Ok(());
     }
     // A write cut short leaves its temporary file; the real one is whole.
-    for name in [
-        "settings.txt",
-        "layout.txt",
-        "profiles.txt",
-        "keyboard.txt",
-        "identity",
-        "paired_hosts",
-    ] {
+    let persisted = persist::File::ALL.map(persist::File::name);
+    for name in persisted.into_iter().chain(["identity", "paired_hosts"]) {
         prostir_proto::secure::remove_leftovers(&data_dir.join(name));
     }
     // The files are read here once; from now on the model in memory is what counts,
     // and the files' writer only writes them, off the frame. However this function
-    // ends, what waits is written and the thread waited for (see `persist::Saver`).
+    // ends, what waits is written and the thread waited for (see `persist::Saver`,
+    // and `Scene`'s `Drop` once the scene has it).
+    let (loaded, saver) = persist::start(&data_dir);
     let persist::Loaded {
         mut settings,
         desk,
         profiles: saved_profiles,
         profiles_saved,
         keyboard: keyboard_place,
-    } = persist::Loaded::read(&data_dir);
-    let mut saver = persist::Saver::start(&data_dir);
+    } = loaded;
     // This start's own: a new start in the same process begins afresh.
     let mic = Arc::new(Mic::new(settings.mic, app.clone()));
     let gains = Arc::new(Gains::default());
@@ -2429,6 +2498,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         placed_for: HashMap::new(),
         saves: persist::Dirty::default(),
         save_failures_told: persist::Dirty::default(),
+        saver,
     };
     // The language's file had lines that could not be read: said once, in front.
     if let Some(warning) = scene.texts().warning() {
@@ -2471,7 +2541,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             t.loop_top();
         }
         // What the last pass changed goes to the files' writer, however the pass ended.
-        save_due(&mut scene, &mut saver);
+        scene.save_due();
         let mut destroy = false;
         let mut paused = false;
         let timeout = if session_running {
@@ -2491,7 +2561,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         }
         if paused {
             // The system may end a paused app without a word: what waits is written now.
-            flush_saves(&mut scene, &mut saver, "paused");
+            scene.flush_saves("paused");
         }
         if let StoreCheck::NotOwned { store: name } = store.poll() {
             let since = *not_owned_since.get_or_insert_with(Instant::now);
@@ -2586,10 +2656,10 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                             session.end()?;
                             session_running = false;
                             // Taken off (the headset may sleep for long): saved now.
-                            flush_saves(&mut scene, &mut saver, "stopping");
+                            scene.flush_saves("stopping");
                         }
                         xr::SessionState::IDLE => {
-                            flush_saves(&mut scene, &mut saver, "idle");
+                            scene.flush_saves("idle");
                         }
                         xr::SessionState::EXITING | xr::SessionState::LOSS_PENDING => break 'main,
                         _ => {}
@@ -2632,11 +2702,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         if let Some(reading) = newest {
             scene.battery_read(reading);
         }
-        while let Some(event) = saver.try_recv() {
-            match event {
-                persist::PersistEvent::Failed { file, error } => scene.save_failed(file, error),
-            }
-        }
+        scene.saves_told();
         // Another language chosen (or the PC's changed): loaded on the system thread,
         // the menu keeps the one it has until then.
         if let Some(lang) = scene.wanted_lang() {
@@ -2794,7 +2860,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                     handle_action(&mut scene, action, &mut passthrough, &mut controls);
                     // Handed to the files' writer now, so the time is the whole of what
                     // saving costs the frame.
-                    save_due(&mut scene, &mut saver);
+                    scene.save_due();
                     if let Some(t) = test.as_deref_mut() {
                         t.saved(took.elapsed());
                     }
@@ -2813,7 +2879,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                     &mut passthrough,
                     &mut controls,
                 );
-                save_due(&mut scene, &mut saver);
+                scene.save_due();
                 if let Some(t) = test.as_deref_mut() {
                     t.saved(took.elapsed());
                 }
@@ -3760,43 +3826,9 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     }
 
     info!("exiting");
-    // What waits is written, and the thread ends, before the app does.
-    save_due(&mut scene, &mut saver);
-    saver.stop(persist::Saver::STOPS_WITHIN);
+    // What waits is written, and the files' writer ends (see `Scene`'s `Drop`).
     drop(scene);
     Ok(())
-}
-
-/// The files the last pass changed (`Scene::saves`), handed to the files' writer: each
-/// one's text written into the writer's buffer for it, once, whatever changed it how
-/// often. The writing itself is done on the writer's thread.
-fn save_due(scene: &mut Scene, saver: &mut persist::Saver) {
-    use persist::File;
-    for file in scene.saves.take() {
-        match file {
-            File::Settings => saver.save(file, |out| scene.settings.write_text(out)),
-            File::Desk => saver.save(file, |out| scene.desk.write_text(out)),
-            File::Profiles => saver.save(file, |out| profiles::write_text(out, &scene.profiles)),
-            File::Keyboard => {
-                if let Some(place) = &scene.keyboard_place {
-                    saver.save(file, |out| layout::write_keyboard(out, place));
-                }
-            }
-        }
-    }
-}
-
-/// Hands over what changed and waits until it is written (for
-/// [`persist::Saver::STOPS_WITHIN`] at most): the app is `why` (paused, or the headset
-/// taken off), and may not come back.
-fn flush_saves(scene: &mut Scene, saver: &mut persist::Saver, why: &str) {
-    save_due(scene, saver);
-    if !saver.flush(persist::Saver::STOPS_WITHIN) {
-        warn!(
-            "{why}: the files were not all written within {} ms",
-            persist::Saver::STOPS_WITHIN.as_millis()
-        );
-    }
 }
 
 /// What to tell the user about a connection that ended; nothing where there is

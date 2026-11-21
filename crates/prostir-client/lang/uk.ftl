@@ -291,6 +291,7 @@ error-save-settings = Не вдалося зберегти налаштуван�
 error-save-desk = Не вдалося зберегти розстановку: { $error }
 error-save-profiles = Не вдалося зберегти профілі: { $error }
 error-save-keyboard = Не вдалося зберегти місце вікна на клавіатуру: { $error }
+error-save-files = Не вдалося зберегти зміни: { $error }
 pc-usb = ПК (USB)
 bye-pc-quit = Програму на ПК закрито
 bye-forgotten = ПК більше не знає цей шолом. Сполучіть знову

@@ -2,7 +2,7 @@
 //! changed.
 //!
 //! The model in memory is what counts from the start on. The files are read once, at
-//! the start ([`Loaded::read`]), and after that only written, off the frame, by the
+//! the start ([`start`]), and after that only written, off the frame, by the
 //! [`Saver`] on a thread of its own; nothing reads them back, so a write that lands
 //! later breaks nothing. A pass of the loop only marks what changed ([`Dirty`]); after
 //! it each marked file's text is written once into the saver's buffers and handed over
@@ -12,23 +12,24 @@
 
 mod disk;
 
-pub use disk::{Loaded, PersistEvent, Saver};
+pub use disk::{Loaded, PersistEvent, Saver, start, write_now};
 
-/// A file the headset keeps in its own folder.
+/// A file the headset keeps in its own folder, in the order they are written when
+/// several wait: what is hardest to make again first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum File {
-    /// `settings.txt`: what is chosen in the menu.
-    Settings,
     /// `layout.txt`: the desk arrangement.
     Desk,
     /// `profiles.txt`: the saved setups.
     Profiles,
     /// `keyboard.txt`: where the keyboard window lies.
     Keyboard,
+    /// `settings.txt`: what is chosen in the menu.
+    Settings,
 }
 
 impl File {
-    pub const ALL: [File; 4] = [File::Settings, File::Desk, File::Profiles, File::Keyboard];
+    pub const ALL: [File; 4] = [File::Desk, File::Profiles, File::Keyboard, File::Settings];
 
     /// Its name in the app's folder.
     pub fn name(self) -> &'static str {
@@ -94,7 +95,7 @@ mod tests {
         assert!(dirty.has(File::Desk) && !dirty.has(File::Keyboard));
         assert_eq!(
             dirty.take().collect::<Vec<_>>(),
-            [File::Settings, File::Desk]
+            [File::Desk, File::Settings]
         );
         assert!(dirty.is_empty());
         assert_eq!(dirty.take().count(), 0);
@@ -105,7 +106,7 @@ mod tests {
         let names: Vec<&str> = File::ALL.iter().map(|f| f.name()).collect();
         assert_eq!(
             names,
-            ["settings.txt", "layout.txt", "profiles.txt", "keyboard.txt"]
+            ["layout.txt", "profiles.txt", "keyboard.txt", "settings.txt"]
         );
     }
 }

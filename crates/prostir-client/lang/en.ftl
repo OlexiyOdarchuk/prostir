@@ -322,6 +322,8 @@ error-save-desk = Could not save the arrangement: { $error }
 error-save-profiles = Could not save the profiles: { $error }
 # $error (String): what went wrong, as the system says it
 error-save-keyboard = Could not save where the keyboard window lies: { $error }
+# $error (String): what went wrong, as the system says it
+error-save-files = Could not save the changes: { $error }
 pc-usb = PC (USB)
 bye-pc-quit = The PC app was closed
 bye-forgotten = The PC no longer knows this headset. Pair them again

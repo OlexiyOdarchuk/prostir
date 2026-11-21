@@ -8,13 +8,20 @@
 //! swapped and never made anew. The main thread holds the lock only to swap a buffer,
 //! the thread only to take one; the write itself (with its `fsync`) is done without
 //! it.
+//!
+//! Android may start the app again in the same process. A thread an earlier start
+//! left (it did not stop in time) must not write its older texts over the newer
+//! start's: the newer start waits for it a little before it reads the files, and from
+//! then on owns the folder ([`WRITERS`]), so the older thread writes nothing more.
 
 #![expect(
     clippy::disallowed_methods,
     reason = "the files' writer: the shell's thread that reads and writes the headset's files"
 )]
 
+use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
@@ -26,6 +33,73 @@ use super::File;
 use crate::layout::{self, Desk, Placement};
 use crate::profiles::{self, Profile};
 use crate::settings::Settings;
+
+/// How long a start waits for the `persist` thread of an earlier start, still
+/// writing, before it reads the files (at the start, before the first frame).
+const LEFT_FOR: Duration = Duration::from_secs(2);
+
+/// Which start writes each folder's files, by its number. Held through each write, so
+/// a start that takes a folder over knows no write of an older start is under way,
+/// and none begins after.
+static WRITERS: Mutex<Vec<(PathBuf, u64)>> = Mutex::new(Vec::new());
+/// The number of the last start.
+static STARTS: AtomicU64 = AtomicU64::new(0);
+/// Threads earlier starts left, still writing when they stopped.
+static LEFT: Mutex<Vec<Left>> = Mutex::new(Vec::new());
+
+/// A `persist` thread that did not stop in time, and its folder.
+struct Left {
+    dir: PathBuf,
+    shared: Arc<Shared>,
+    thread: JoinHandle<()>,
+}
+
+fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// What the files in `dir` hold, and the thread that writes them from now on. A
+/// thread an earlier start left on these files is waited for first (two seconds at
+/// most); one still not done writes nothing more.
+pub fn start(dir: &Path) -> (Loaded, Saver) {
+    start_after(dir, LEFT_FOR)
+}
+
+fn start_after(dir: &Path, left_for: Duration) -> (Loaded, Saver) {
+    wait_for_left(dir, left_for);
+    let start = STARTS.fetch_add(1, Ordering::Relaxed) + 1;
+    {
+        let mut writers = locked(&WRITERS);
+        match writers.iter_mut().find(|(d, _)| d.as_path() == dir) {
+            Some(writer) => writer.1 = start,
+            None => writers.push((dir.to_owned(), start)),
+        }
+    }
+    (Loaded::read(dir), Saver::start(dir, start))
+}
+
+/// Waits until the threads earlier starts left on `dir` end, for `within` at most,
+/// and joins those that did; the others are kept for a later start.
+fn wait_for_left(dir: &Path, within: Duration) {
+    let until = Instant::now() + within;
+    let left: Vec<Left> = locked(&LEFT).extract_if(.., |l| l.dir == dir).collect();
+    for l in left {
+        if l.shared.ended_by(until) {
+            if l.thread.join().is_err() {
+                warn!("the persist thread of an earlier start panicked");
+            }
+        } else {
+            warn!("the persist thread of an earlier start is still writing: it writes no more");
+            locked(&LEFT).push(l);
+        }
+    }
+}
+
+/// Writes `text` as `file` in `dir` now, whole or not at all: for what the app's files
+/// are to hold before it starts (the selftest's settings).
+pub fn write_now(dir: &Path, file: File, text: &str) -> io::Result<()> {
+    prostir_proto::secure::write_atomic(&dir.join(file.name()), text.as_bytes())
+}
 
 /// What the files held at the start.
 pub struct Loaded {
@@ -40,7 +114,7 @@ pub struct Loaded {
 impl Loaded {
     /// Reads the files in `dir`; one that is not there, or cannot be read, is as if
     /// empty.
-    pub fn read(dir: &Path) -> Self {
+    fn read(dir: &Path) -> Self {
         let text = |file: File| std::fs::read_to_string(dir.join(file.name())).ok();
         Self {
             settings: text(File::Settings)
@@ -76,11 +150,14 @@ struct Slot {
 #[derive(Default)]
 struct State {
     slots: [Slot; FILES],
+    /// Where the thread looks for the next file waiting: after the one it wrote last,
+    /// so a file saved over and over does not keep the others waiting.
+    next_from: usize,
     /// The thread is writing a file.
     busy: bool,
     /// Asked to end: the thread writes what waits, then ends.
     stop: bool,
-    /// The thread has ended.
+    /// The thread has ended (or never started): files are written in place.
     finished: bool,
     /// Writes done, for the tests.
     #[cfg(test)]
@@ -88,16 +165,21 @@ struct State {
     /// The thread takes nothing while held, for the tests.
     #[cfg(test)]
     held: bool,
+    /// The thread waits before writing the text it took, for the tests.
+    #[cfg(test)]
+    held_in_write: bool,
 }
 
 impl State {
-    /// The first file waiting, unless the thread is held.
+    /// The next file waiting, unless the thread is held.
     fn next(&self) -> Option<usize> {
         #[cfg(test)]
         if self.held {
             return None;
         }
-        self.slots.iter().position(|s| s.queued)
+        (0..FILES)
+            .map(|k| (self.next_from + k) % FILES)
+            .find(|&i| self.slots.get(i).is_some_and(|s| s.queued))
     }
 
     /// Something is still to be written or being written.
@@ -116,7 +198,7 @@ struct Shared {
 
 impl Shared {
     fn lock(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+        locked(&self.state)
     }
 
     fn wait<'a>(&self, state: MutexGuard<'a, State>) -> MutexGuard<'a, State> {
@@ -130,18 +212,34 @@ impl Shared {
             .wait_timeout(state, left)
             .map_or_else(|e| e.into_inner().0, |(state, _)| state)
     }
+
+    /// Waits until the thread has ended, until `until` at most; true when it has.
+    fn ended_by(&self, until: Instant) -> bool {
+        let mut state = self.lock();
+        while !state.finished {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            state = self.wait_for(state, left);
+        }
+        true
+    }
 }
 
 /// The `persist` thread of one start of the app, and the main thread's side of it.
 /// Dropped, it writes what waits and ends within [`Saver::STOPS_WITHIN`].
 pub struct Saver {
     shared: Arc<Shared>,
+    dir: PathBuf,
+    /// This start's number (see [`WRITERS`]).
+    start: u64,
     /// Where each file is written.
     paths: [PathBuf; FILES],
     /// The main thread's buffer for each file's text, swapped into its slot.
     drafts: [String; FILES],
     events: Receiver<PersistEvent>,
-    /// Kept for writing in place when the thread could not start.
+    /// Kept for writing in place when the thread is not there.
     to_app: Sender<PersistEvent>,
     thread: Option<JoinHandle<()>>,
 }
@@ -151,21 +249,32 @@ impl Saver {
     /// paused, the headset taken off, or the app closes.
     pub const STOPS_WITHIN: Duration = Duration::from_millis(300);
 
-    /// Starts the thread, which writes the files in `dir`.
-    pub fn start(dir: &Path) -> Self {
+    /// Starts the thread, which writes the files in `dir` for start `start`.
+    fn start(dir: &Path, start: u64) -> Self {
         let paths = File::ALL.map(|f| dir.join(f.name()));
         let shared = Arc::new(Shared::default());
         let (to_app, events) = mpsc::channel();
         let thread = {
-            let (shared, paths, to_app) = (shared.clone(), paths.clone(), to_app.clone());
+            let writer = Writer {
+                shared: shared.clone(),
+                dir: dir.to_owned(),
+                start,
+                paths: paths.clone(),
+                to_app: to_app.clone(),
+            };
             std::thread::Builder::new()
                 .name("persist".into())
-                .spawn(move || run(&shared, &paths, &to_app))
+                .spawn(move || writer.run())
                 .inspect_err(|e| warn!("no persist thread, files are written in place: {e}"))
                 .ok()
         };
+        if thread.is_none() {
+            shared.lock().finished = true;
+        }
         Self {
             shared,
+            dir: dir.to_owned(),
+            start,
             paths,
             drafts: Default::default(),
             events,
@@ -175,7 +284,8 @@ impl Saver {
     }
 
     /// Hands `file` to the thread, its text written by `write` into a buffer kept from
-    /// the last time. A text of it still waiting is replaced.
+    /// the last time. A text of it still waiting is replaced. Without the thread (it
+    /// could not start, or it ended) the file is written in place.
     pub fn save(&mut self, file: File, write: impl FnOnce(&mut String)) {
         let i = file.index();
         let Some(draft) = self.drafts.get_mut(i) else {
@@ -183,19 +293,20 @@ impl Saver {
         };
         draft.clear();
         write(draft);
-        if self.thread.is_none() {
-            if let Some(path) = self.paths.get(i) {
-                write_file(file, path, draft, &self.to_app);
+        let mut state = self.shared.lock();
+        if !state.finished {
+            if let Some(slot) = state.slots.get_mut(i) {
+                std::mem::swap(&mut slot.text, draft);
+                slot.queued = true;
             }
+            drop(state);
+            self.shared.changed.notify_all();
             return;
         }
-        let mut state = self.shared.lock();
-        if let Some(slot) = state.slots.get_mut(i) {
-            std::mem::swap(&mut slot.text, draft);
-            slot.queued = true;
-        }
         drop(state);
-        self.shared.changed.notify_all();
+        if let Some(path) = self.paths.get(i) {
+            write_file(file, path, (&self.dir, self.start), draft, &self.to_app);
+        }
     }
 
     /// Waits until everything handed over is written, for `within` at most; true when
@@ -219,31 +330,24 @@ impl Saver {
     }
 
     /// Asks the thread to write what waits and end, and waits for it for `within` at
-    /// most. A thread that did not end by then is left (the log says so): a new start
-    /// in the same process does not wait for it, and its temporary files have names
-    /// of their own (see `write_atomic`).
+    /// most. A thread that did not end by then is left (the log says so): the next
+    /// start in the same process waits for it a little, and then it writes no more.
     pub fn stop(&mut self, within: Duration) {
         let Some(thread) = self.thread.take() else {
             return;
         };
-        let until = Instant::now() + within;
-        let mut state = self.shared.lock();
-        state.stop = true;
+        self.shared.lock().stop = true;
         self.shared.changed.notify_all();
-        while !state.finished {
-            let left = until.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                break;
-            }
-            state = self.shared.wait_for(state, left);
-        }
-        let finished = state.finished;
-        drop(state);
-        if !finished {
+        if !self.shared.ended_by(Instant::now() + within) {
             warn!(
                 "the persist thread did not stop within {} ms",
                 within.as_millis()
             );
+            locked(&LEFT).push(Left {
+                dir: self.dir.clone(),
+                shared: self.shared.clone(),
+                thread,
+            });
         } else if thread.join().is_err() {
             warn!("the persist thread panicked");
         }
@@ -268,44 +372,89 @@ impl Drop for Saver {
     }
 }
 
-/// The thread: takes the first file waiting, writes it, and again, until asked to end
-/// with nothing waiting.
-fn run(shared: &Shared, paths: &[PathBuf; FILES], to_app: &Sender<PersistEvent>) {
-    let mut work = String::new();
-    let mut state = shared.lock();
-    loop {
-        if let Some(i) = state.next() {
-            if let Some(slot) = state.slots.get_mut(i) {
-                std::mem::swap(&mut slot.text, &mut work);
-                slot.queued = false;
+/// The thread's side.
+struct Writer {
+    shared: Arc<Shared>,
+    dir: PathBuf,
+    start: u64,
+    paths: [PathBuf; FILES],
+    to_app: Sender<PersistEvent>,
+}
+
+/// However the thread ends, even in a panic: it is said to have ended, so nothing
+/// waits for it, and the main thread writes in place from then on.
+struct Ends<'a>(&'a Shared);
+
+impl Drop for Ends<'_> {
+    fn drop(&mut self) {
+        let mut state = self.0.lock();
+        state.busy = false;
+        state.finished = true;
+        drop(state);
+        self.0.changed.notify_all();
+    }
+}
+
+impl Writer {
+    /// Takes the next file waiting, writes it, and again, until asked to end with
+    /// nothing waiting.
+    fn run(self) {
+        let _ends = Ends(&self.shared);
+        let mut work = String::new();
+        let mut state = self.shared.lock();
+        loop {
+            if let Some(i) = state.next() {
+                if let Some(slot) = state.slots.get_mut(i) {
+                    std::mem::swap(&mut slot.text, &mut work);
+                    slot.queued = false;
+                }
+                state.next_from = (i + 1) % FILES;
+                state.busy = true;
+                #[cfg(test)]
+                {
+                    self.shared.changed.notify_all();
+                    while state.held_in_write {
+                        state = self.shared.wait(state);
+                    }
+                }
+                drop(state);
+                if let (Some(file), Some(path)) = (File::ALL.get(i), self.paths.get(i)) {
+                    write_file(*file, path, (&self.dir, self.start), &work, &self.to_app);
+                }
+                state = self.shared.lock();
+                state.busy = false;
+                #[cfg(test)]
+                {
+                    state.writes += 1;
+                }
+                self.shared.changed.notify_all();
+            } else if state.stop && !state.pending() {
+                return;
+            } else {
+                state = self.shared.wait(state);
             }
-            state.busy = true;
-            drop(state);
-            if let (Some(file), Some(path)) = (File::ALL.get(i), paths.get(i)) {
-                write_file(*file, path, &work, to_app);
-            }
-            state = shared.lock();
-            state.busy = false;
-            #[cfg(test)]
-            {
-                state.writes += 1;
-            }
-            shared.changed.notify_all();
-        } else if state.stop && !state.pending() {
-            state.finished = true;
-            drop(state);
-            shared.changed.notify_all();
-            return;
-        } else {
-            state = shared.wait(state);
         }
     }
 }
 
-/// Writes `text` as `file` at `path` (whole or not at all), and says so when it
-/// cannot.
-fn write_file(file: File, path: &Path, text: &str, to_app: &Sender<PersistEvent>) {
-    if let Err(e) = prostir_proto::secure::write_atomic(path, text.as_bytes()) {
+/// Writes `text` as `file` at `path` (whole or not at all) for the start of `dir` and
+/// `start`, unless a newer start has the folder; says so when it cannot.
+fn write_file(
+    file: File,
+    path: &Path,
+    (dir, start): (&Path, u64),
+    text: &str,
+    to_app: &Sender<PersistEvent>,
+) {
+    let writers = locked(&WRITERS);
+    if !writers.iter().any(|(d, s)| d == dir && *s == start) {
+        drop(writers);
+        warn!("{} is written by a newer start: not saved", path.display());
+        return;
+    }
+    let written = prostir_proto::secure::write_atomic(path, text.as_bytes());
+    drop(writers);
+    if let Err(e) = written {
         warn!("cannot save {}: {e}", path.display());
         let _ = to_app.send(PersistEvent::Failed {
             file,
@@ -327,15 +476,24 @@ mod tests {
         dir
     }
 
+    fn saver(dir: &Path) -> Saver {
+        start_after(dir, Duration::ZERO).1
+    }
+
     fn read(dir: &Path, file: File) -> String {
         std::fs::read_to_string(dir.join(file.name())).unwrap_or_default()
+    }
+
+    fn release(shared: &Shared) {
+        shared.lock().held = false;
+        shared.changed.notify_all();
     }
 
     /// Saves of a file while it waits replace each other: the newest is written, once.
     #[test]
     fn the_newest_text_wins() {
         let dir = folder("newest");
-        let mut saver = Saver::start(&dir);
+        let mut saver = saver(&dir);
         saver.hold(true);
         for n in 0..100 {
             saver.save(File::Desk, |out| {
@@ -354,12 +512,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A newer text that comes while the older one is being written is written after
+    /// it: twice, the newest last.
+    #[test]
+    fn a_newer_text_while_the_older_is_written() {
+        let dir = folder("while");
+        let mut saver = saver(&dir);
+        saver.shared.lock().held_in_write = true;
+        saver.save(File::Settings, |out| out.push_str("1\n"));
+        let mut state = saver.shared.lock();
+        while !state.busy {
+            state = saver.shared.wait(state);
+        }
+        drop(state);
+        saver.save(File::Settings, |out| out.push_str("2\n"));
+        saver.shared.lock().held_in_write = false;
+        saver.shared.changed.notify_all();
+        assert!(saver.flush(Duration::from_secs(10)));
+        assert_eq!(saver.writes(), 2);
+        assert_eq!(read(&dir, File::Settings), "2\n");
+        drop(saver);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Several files waiting are written the arrangement first, and a file saved again
+    /// and again does not keep the others waiting.
+    #[test]
+    fn files_take_turns() {
+        let mut state = State::default();
+        for slot in &mut state.slots {
+            slot.queued = true;
+        }
+        assert_eq!(state.next(), Some(File::Desk.index()));
+        state.next_from = File::Settings.index();
+        assert_eq!(state.next(), Some(File::Settings.index()));
+        state.next_from = 0;
+        state.slots[File::Desk.index()].queued = false;
+        assert_eq!(state.next(), Some(File::Profiles.index()));
+        state.next_from = File::Keyboard.index() + 1;
+        state.slots[File::Desk.index()].queued = true;
+        assert_eq!(state.next(), Some(File::Settings.index()));
+    }
+
     /// Every file handed over is written by the flush, each with its own text; the
     /// buffers keep their memory, and a shorter text after a longer one is whole.
     #[test]
     fn a_flush_writes_every_file() {
         let dir = folder("flush");
-        let mut saver = Saver::start(&dir);
+        let mut saver = saver(&dir);
         for file in File::ALL {
             saver.save(file, |out| out.push_str("a long first text\n"));
         }
@@ -382,7 +582,7 @@ mod tests {
         let parent = folder("failed");
         // Not there yet: nothing can be written in it.
         let dir = parent.join("later");
-        let mut saver = Saver::start(&dir);
+        let mut saver = saver(&dir);
         for _ in 0..2 {
             saver.save(File::Profiles, |out| out.push_str("[0]\n"));
             assert!(saver.flush(Duration::from_secs(10)));
@@ -404,44 +604,102 @@ mod tests {
     }
 
     /// Stopped, the thread writes what waits and ends; the main thread waits for it.
+    /// After it, a save is written in place.
     #[test]
     fn stopping_writes_what_waits() {
         let dir = folder("stop");
-        let mut saver = Saver::start(&dir);
+        let mut saver = saver(&dir);
         saver.hold(true);
         saver.save(File::Settings, |out| out.push_str("mic off\n"));
         saver.hold(false);
         saver.stop(Duration::from_secs(10));
         assert!(saver.thread.is_none());
         assert_eq!(read(&dir, File::Settings), "mic off\n");
+        saver.save(File::Settings, |out| out.push_str("mic on\n"));
+        assert_eq!(read(&dir, File::Settings), "mic on\n");
         // Stopped twice, or dropped after: nothing more to wait for.
         saver.stop(Duration::from_secs(10));
         drop(saver);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A thread held past the time given is left, and said so; the app goes on.
+    /// The thread ended by a panic is said to have ended: nothing waits for it, and a
+    /// save is written in place.
     #[test]
-    fn a_thread_that_does_not_stop_in_time_is_left() {
-        let dir = folder("left");
-        let mut saver = Saver::start(&dir);
-        saver.hold(true);
-        saver.save(File::Keyboard, |out| out.push_str("0 0 0 0 0 0 0 1 0.5\n"));
+    fn a_thread_that_ended_leaves_saving_in_place() {
+        let dir = folder("ended");
+        let mut saver = saver(&dir);
         let shared = saver.shared.clone();
-        let started = Instant::now();
-        saver.stop(Duration::from_millis(30));
-        assert!(started.elapsed() < Duration::from_secs(5));
-        assert!(!shared.lock().finished);
-        // Let go, it writes and ends on its own.
-        shared.lock().held = false;
-        shared.changed.notify_all();
-        let until = Instant::now() + Duration::from_secs(10);
-        while !shared.lock().finished && Instant::now() < until {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert!(shared.lock().finished);
+        let panicked = std::thread::spawn(move || {
+            let _ends = Ends(&shared);
+            panic!("the thread's end, as a panic leaves it");
+        });
+        assert!(panicked.join().is_err());
+        assert!(saver.shared.lock().finished);
+        saver.save(File::Keyboard, |out| out.push_str("0 0 0 0 0 0 0 1 0.5\n"));
+        assert!(saver.flush(Duration::from_secs(10)));
         assert_eq!(read(&dir, File::Keyboard), "0 0 0 0 0 0 0 1 0.5\n");
         drop(saver);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A thread an earlier start left (it did not stop in time) never writes its older
+    /// text over the newer start's: still held when the newer start has waited long
+    /// enough, it writes nothing once let go.
+    #[test]
+    fn a_left_thread_never_writes_over_a_newer_start() {
+        let dir = folder("left");
+        let mut old = saver(&dir);
+        old.hold(true);
+        old.save(File::Settings, |out| out.push_str("mic off\n"));
+        let old_shared = old.shared.clone();
+        let started = Instant::now();
+        old.stop(Duration::from_millis(30));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(!old_shared.lock().finished, "left");
+        drop(old);
+        // The newer start waits for it a little, then takes the folder over.
+        let (loaded, mut new) = start_after(&dir, Duration::from_millis(50));
+        assert!(
+            loaded.settings.mic,
+            "nothing of the older start was written"
+        );
+        new.save(File::Settings, |out| out.push_str("mic on\n"));
+        assert!(new.flush(Duration::from_secs(10)));
+        release(&old_shared);
+        assert!(old_shared.ended_by(Instant::now() + Duration::from_secs(10)));
+        assert_eq!(read(&dir, File::Settings), "mic on\n");
+        drop(new);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A left thread that is done while the newer start waits for it is joined, and
+    /// the newer start reads what it wrote.
+    #[test]
+    fn a_left_thread_is_waited_for() {
+        let dir = folder("waited");
+        let mut old = saver(&dir);
+        old.hold(true);
+        old.save(File::Settings, |out| out.push_str("mic off\n"));
+        let old_shared = old.shared.clone();
+        old.stop(Duration::from_millis(30));
+        drop(old);
+        let letting_go = {
+            let shared = old_shared.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                release(&shared);
+            })
+        };
+        let (loaded, new) = start_after(&dir, Duration::from_secs(10));
+        letting_go.join().unwrap();
+        assert!(old_shared.lock().finished);
+        assert!(
+            !loaded.settings.mic,
+            "the older start's text, written before reading"
+        );
+        assert!(!locked(&LEFT).iter().any(|l| l.dir == dir), "joined");
+        drop(new);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -449,11 +707,10 @@ mod tests {
     #[test]
     fn the_start_reads_what_was_saved() {
         let dir = folder("read");
-        let empty = Loaded::read(&dir);
+        let (empty, mut saver) = start_after(&dir, Duration::ZERO);
         assert_eq!(empty.settings, Settings::default());
         assert!(empty.desk.arrangement().placements.is_empty());
         assert!(!empty.profiles_saved && empty.keyboard.is_none());
-        let mut saver = Saver::start(&dir);
         let settings = Settings {
             mic: false,
             ..Settings::default()
@@ -475,8 +732,9 @@ mod tests {
             false,
         );
         saver.save(File::Desk, |out| desk.write_text(out));
+        saver.stop(Duration::from_secs(10));
         drop(saver);
-        let back = Loaded::read(&dir);
+        let (back, _saver) = start_after(&dir, Duration::ZERO);
         assert_eq!(back.settings, settings);
         assert!(back.profiles_saved);
         assert_eq!(back.profiles, profiles);

@@ -523,9 +523,9 @@ impl Selftest {
             last_tab: 0,
             ..crate::settings::Settings::default()
         };
-        let path = dir.join(crate::persist::File::Settings.name());
-        if let Err(e) = prostir_proto::secure::write_atomic(&path, settings.to_text().as_bytes()) {
-            warn!("cannot save {}: {e}", path.display());
+        let file = crate::persist::File::Settings;
+        if let Err(e) = crate::persist::write_now(&dir, file, &settings.to_text()) {
+            warn!("cannot save {} in {}: {e}", file.name(), dir.display());
         }
         dir
     }
