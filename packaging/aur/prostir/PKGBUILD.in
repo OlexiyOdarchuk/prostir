@@ -13,7 +13,7 @@ license=('GPL-3.0-or-later')
 depends=('glibc' 'gcc-libs' 'gstreamer' 'gst-plugins-base-libs' 'gst-plugins-good'
          'gst-plugins-bad-libs' 'gst-plugin-va' 'gst-plugin-pipewire' 'pipewire'
          'pipewire-audio' 'pulse-native-provider' 'libpulse' 'mesa' 'curl'
-         # The settings window loads these at run time.
+         # Loaded at run time: wayland by the service too, the rest by the settings window.
          'libglvnd' 'wayland' 'libxkbcommon')
 makedepends=('cargo' 'pkgconf')
 optdepends=('gst-plugins-ugly: encoding on the CPU with x264 (NVIDIA, or no VA-API encoder)'

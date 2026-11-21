@@ -85,7 +85,8 @@ prostir-testkit.workspace = true
 # h265parse; pw-cli and pw-loopback; pactl and pacat; kscreen-doctor and qdbus6 on KDE
 # Plasma; grim for screenshots on Hyprland (optional). The settings window
 # (`prostir window`) loads libEGL, libwayland-client, -cursor and -egl and libxkbcommon
-# at run time (the X11 libraries in an X11 session), so they are listed by hand.
+# at run time (the X11 libraries in an X11 session), and the service libwayland-client
+# too (its own Wayland connections), so they are listed by hand.
 [package.metadata.deb]
 name = "prostir"
 maintainer = "Prostir contributors <https://github.com/OlexiyOdarchuk/prostir>"

@@ -1006,13 +1006,11 @@ fn api_display(d: &wire::Display, output: String) -> api::Display {
 /// it, else this very file, also after an update replaced it.
 use prostir_window::launch::this_program;
 
-/// A library path for the settings window only, as a package sets it (Nix).
-const WINDOW_LIBRARY_PATH: &str = "PROSTIR_WINDOW_LIBRARY_PATH";
-
 /// Opens the settings window (one per user: a second start brings the first one
-/// forward): `prostir window`, a process of its own, so the service never loads the
-/// window's libraries and a window that crashes takes nothing else down. Its process
-/// is waited for on a thread of its own, which sleeps until it closes.
+/// forward): `prostir window`, a process of its own, so the service never starts the
+/// window's toolkit or loads its graphics libraries (EGL, X11), and a window that
+/// crashes takes nothing else down. Its process is waited for on a thread of its own,
+/// which sleeps until it closes.
 pub fn open_settings() -> Result<(), Failure> {
     // A test build never opens a real window on the desktop the tests run on.
     if cfg!(feature = "fake-desktop") {
@@ -1022,15 +1020,6 @@ pub fn open_settings() -> Result<(), Failure> {
     let failed = |e: std::io::Error| Failure::new(ApiError::Other, format!("prostir window: {e}"));
     let mut window = std::process::Command::new(this_program().map_err(failed)?);
     window.arg("window").stdin(std::process::Stdio::null());
-    // Where a package keeps the window's libraries apart (Nix): on the window's library
-    // path only, never the service's or the programs it runs.
-    if let Some(libs) = std::env::var_os(WINDOW_LIBRARY_PATH).filter(|l| !l.is_empty()) {
-        let old = std::env::var_os("LD_LIBRARY_PATH").unwrap_or_default();
-        let paths = std::env::split_paths(&libs).chain(std::env::split_paths(&old));
-        if let Ok(path) = std::env::join_paths(paths.filter(|p| !p.as_os_str().is_empty())) {
-            window.env("LD_LIBRARY_PATH", path);
-        }
-    }
     let mut child = window.spawn().map_err(failed)?;
     std::thread::Builder::new()
         .name("settings-window".into())

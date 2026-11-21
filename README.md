@@ -512,7 +512,7 @@ prostir ctl COMMAND [--json]
 `prostir`, which the menu entry runs, opens the settings window and starts Prostir in
 the background first if it is not running. `prostir serve` runs Prostir in the
 background (autostart, systemd and Hyprland's `exec-once` start it so). The window is
-a process of its own, so the background part never loads the window's libraries.
+a process of its own, so the background part never loads its graphics libraries (EGL, X11).
 `-v` or `--version` prints the version, with any command.
 
 `prostir ctl` asks the running Prostir, from a terminal, a script or a hot key (KDE's

@@ -28,7 +28,8 @@ BuildRequires:  pkgconfig(gstreamer-video-1.0) >= 1.24
 
 # The libraries the program links come from rpm's automatic requirements. These are
 # the GStreamer plugins and the commands Prostir runs, and the libraries the settings
-# window loads at run time (EGL, Wayland, the keyboard).
+# window loads at run time (EGL, Wayland, the keyboard; libwayland-client the service
+# too, for its own Wayland connections).
 Requires:       curl
 Requires:       pulseaudio-utils
 %if 0%{?suse_version}

@@ -146,7 +146,7 @@
   starts Prostir in the background if it is not running; the tray has "Settings…" too.
   `prostir serve` runs it in the background, as autostart and systemd start it: on
   Hyprland, change `exec-once = prostir` to `exec-once = prostir serve`. The window is
-  a process of its own, so the background part never loads the window's libraries
+  a process of its own, so the background part never loads its graphics libraries (EGL, X11)
   and a window that crashes takes nothing else down.
 
 ### Sound

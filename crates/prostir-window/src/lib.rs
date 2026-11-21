@@ -1,7 +1,10 @@
 //! Prostir's settings window: a library of the `prostir` program, which shows it in a
-//! process of its own (`prostir window`, [`run`]), so the service never loads a
-//! toolkit. It keeps no settings of its own: it reads the state of the Prostir running
-//! in the background over its local API and asks it for changes.
+//! process of its own (`prostir window`, [`run`]), so the service never starts the
+//! toolkit or loads the window's graphics libraries (EGL, X11). It does load
+//! libwayland-client, for its own Wayland connections: built into one program with the
+//! window, wayland-client uses the system's library (at run time) everywhere. The
+//! window keeps no settings of its own: it reads the state of the Prostir running in
+//! the background over its local API and asks it for changes.
 //!
 //! - [`api`]: the state and requests as JSON, and the [`api::Client`] trait;
 //!   [`dbus`] talks to the service on the session bus, [`mock`] is one in memory.

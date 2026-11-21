@@ -62,10 +62,12 @@ let
   # Intel graphics only come with x86 machines.
   ++ lib.optional stdenv.hostPlatform.isx86_64 "${intel-media-driver}/lib/dri"
   ++ [ "${mesa}/lib/dri" ];
-  # The settings window (`prostir window`) loads these at run time (EGL, Wayland,
-  # the keyboard; X11 in an X11 session) rather than linking them; the service never
-  # loads them.
-  windowLibs = [
+  # Libraries the program loads at run time (dlopen) rather than linking them, so they
+  # go on its RUNPATH: libwayland-client for the service's own Wayland connections
+  # (KDE's virtual outputs, Hyprland's screen capture) and the window's; EGL, the
+  # keyboard and X11 (in an X11 session) for the settings window (`prostir window`).
+  # The RUNPATH is the program's own: the programs it runs do not inherit it.
+  runtimeLibs = [
     libGL
     libxkbcommon
     wayland
@@ -135,15 +137,18 @@ rustPlatform.buildRustPackage {
     install -Dm644 packaging/udev/70-prostir-quest.rules \
       $out/lib/udev/rules.d/70-prostir-quest.rules
     # PROSTIR_EXE: the service starts the window, and the window the service, through
-    # this wrapper. PROSTIR_WINDOW_LIBRARY_PATH: the service puts the window's
-    # libraries on the window's library path only, so neither it nor the programs it
-    # runs (the system's own, first on PATH) load them.
+    # this wrapper.
     wrapProgram $out/bin/prostir \
-      --set PROSTIR_WINDOW_LIBRARY_PATH "${lib.makeLibraryPath windowLibs}" \
       --prefix GST_PLUGIN_SYSTEM_PATH_1_0 : "${lib.makeSearchPathOutput "lib" "lib/gstreamer-1.0" plugins}" \
       --set-default LIBVA_DRIVERS_PATH "${lib.concatStringsSep ":" vaDrivers}" \
       --suffix PATH : "${lib.makeBinPath tools}" \
       --set PROSTIR_EXE "$out/bin/prostir"
+  '';
+
+  # After the fixup, which shrinks the RUNPATH to the libraries the program links:
+  # those it loads at run time are not among them.
+  postFixup = ''
+    patchelf --add-rpath "${lib.makeLibraryPath runtimeLibs}" $out/bin/.prostir-wrapped
   '';
 
   meta = {

@@ -415,7 +415,7 @@ the same item ("Settings…").
 
 The window is a process of its own: the service starts its own program again as
 `prostir window` (a hidden command), so a window that crashes takes nothing else down
-and the service never loads the window's libraries (EGL, Wayland's and X11's). The
+and the service never loads the window's graphics libraries (EGL, X11). The
 window's app id is `io.github.OlexiyOdarchuk.Prostir`, the desktop entry's name.
 
 The settings window owns `io.github.OlexiyOdarchuk.Prostir.Settings` on the session
