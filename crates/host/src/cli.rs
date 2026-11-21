@@ -1,11 +1,15 @@
-//! The command line: `prostir`, `prostir serve`, `prostir open` and `prostir ctl`.
+//! The command line: `prostir` (the window), `prostir serve` (the service) and
+//! `prostir ctl`; `prostir window` is the window's own process, which `prostir` and
+//! the service start.
 
 use super::*;
 
 #[derive(Parser, Debug)]
 #[command(
     about = "Virtual monitors for KDE Plasma and Hyprland, streamed to a Meta Quest 3",
-    args_conflicts_with_subcommands = true
+    long_about = "Virtual monitors for KDE Plasma and Hyprland, streamed to a Meta Quest 3.\n\n\
+                  Without a command: opens the settings window, starting Prostir in the \
+                  background if it is not running."
 )]
 pub(super) struct Cli {
     /// Print the version (as the log says it: `Prostir 0.2.0`) and exit.
@@ -13,17 +17,21 @@ pub(super) struct Cli {
     pub(crate) version: bool,
     #[command(subcommand)]
     pub(crate) command: Option<Sub>,
-    /// Without a command: as `prostir serve`.
-    #[command(flatten)]
-    pub(crate) serve: Args,
 }
 
 #[derive(Subcommand, Debug)]
 pub(super) enum Sub {
-    /// Run: wait for the headset and serve it (the same as no command).
+    /// Run in the background: wait for the headset and serve it (autostart and
+    /// systemd start it so).
     Serve(Args),
-    /// Open the settings window, starting Prostir first if it is not running.
-    Open,
+    /// The settings window itself, in a process of its own (`prostir` and the
+    /// service start it).
+    #[command(hide = true)]
+    Window {
+        /// A made-up PC with a headset, to try the window without Prostir.
+        #[arg(long)]
+        mock: bool,
+    },
     /// Ask the running Prostir something (`prostir ctl help` lists the commands).
     #[command(disable_help_flag = true)]
     Ctl {
@@ -81,7 +89,7 @@ pub(super) struct Args {
     /// Do not run `adb reverse` for USB connections.
     #[arg(long)]
     pub(crate) no_adb: bool,
-    /// Open the settings window once Prostir is ready (`prostir open` starts it so).
+    /// Open the settings window once Prostir is ready (`prostir` starts it so).
     #[arg(long)]
     pub(crate) open_settings: bool,
 }

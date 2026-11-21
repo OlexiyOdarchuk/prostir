@@ -692,7 +692,7 @@ fn event_line(event: &api::Event) -> Option<String> {
     })
 }
 
-/// How Prostir was woken for the window (`prostir open`).
+/// How Prostir was woken for the window (`prostir`).
 pub enum Woken {
     /// Started anew (`prostir serve --open-settings`): it opens the window itself.
     Started(std::process::Child),
@@ -701,10 +701,10 @@ pub enum Woken {
     Asleep { opens_window: bool },
 }
 
-/// How long `prostir open` waits for a sleeping Prostir to come on the bus.
+/// How long `prostir` waits for a sleeping Prostir to come on the bus.
 const WAKE_WAIT: Duration = Duration::from_secs(30);
 
-/// `prostir open` (the menu entry): the settings window, from Prostir. When Prostir
+/// `prostir` (the menu entry): the settings window, from Prostir. When Prostir
 /// is not running, `start` starts it (`prostir serve --open-settings`, which opens the
 /// window itself once it is on the bus), and this waits for as long as it lives and
 /// is not on the bus yet.
@@ -713,7 +713,7 @@ pub fn open(client: &dyn CtlClient, wake: &dyn Fn() -> std::io::Result<Woken>) -
         let woken = match wake() {
             Ok(woken) => woken,
             Err(e) => {
-                eprintln!("prostir open: {e}");
+                eprintln!("prostir: {e}");
                 return NOT_RUNNING;
             }
         };
@@ -738,7 +738,7 @@ pub fn open(client: &dyn CtlClient, wake: &dyn Fn() -> std::io::Result<Woken>) -
             };
             if let Some(how) = ended {
                 eprintln!(
-                    "prostir open: {} ({how})",
+                    "prostir: {} ({how})",
                     t(
                         "Prostir завершився, не запустившись",
                         "Prostir ended before it started"
@@ -753,7 +753,7 @@ pub fn open(client: &dyn CtlClient, wake: &dyn Fn() -> std::io::Result<Woken>) -
         Ok(_) => DONE,
         // Prostir runs, which is what matters without the window.
         Err(ClientError::Refused(f)) => {
-            eprintln!("prostir open: {f}");
+            eprintln!("prostir: {f}");
             DONE
         }
         Err(ClientError::TimedOut) => TIMED_OUT,

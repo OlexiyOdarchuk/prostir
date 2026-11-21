@@ -1,5 +1,5 @@
 //! The lock file of the one Prostir of a user: held (`flock`) for the life of the
-//! process that took it, and saying who that is (`watcher 1234`), so `prostir open`
+//! process that took it, and saying who that is (`watcher 1234`), so `prostir`
 //! can wake the sockets' watcher. The same on every Linux desktop and the fake one.
 
 use std::io::{Seek, Write};

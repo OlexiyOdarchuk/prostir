@@ -1,8 +1,8 @@
 //! Starting Prostir: the settings window is its own window and the tray icon the
-//! program minimized, so starting it again by any way in (the menu's `prostir open`,
-//! plain `prostir`, `prostir serve` of an older menu entry or autostart line) opens or
-//! brings forward the window of the one running and ends well; a click on the icon
-//! does the same; the very first start opens it; `--version` says the version.
+//! program minimized, so starting it again by any way in (the menu's plain `prostir`,
+//! `prostir serve` of an autostart line or a terminal) opens or brings forward the
+//! window of the one running and ends well; a click on the icon does the same; the
+//! very first start opens it; `--version` says the version, on every command.
 
 use std::process::Command;
 
@@ -24,7 +24,8 @@ fn the_version_from_every_way_in() {
         &["-v"],
         &["serve", "--version"],
         &["ctl", "--version"],
-        &["open", "-v"],
+        &["window", "-v"],
+        &["window", "--version"],
     ] {
         let out = Command::new(env!("CARGO_BIN_EXE_prostir"))
             .args(args)
@@ -51,7 +52,7 @@ fn starting_again_opens_the_settings_window() {
         0,
         "not at a start that is not the first"
     );
-    for args in [&[][..], &["serve"], &["serve", "--stay"], &["open"]] {
+    for args in [&[][..], &["serve"], &["serve", "--stay"]] {
         let before = pc.count_log(WINDOW);
         let again = pc.again(args);
         assert_eq!(again.code, 0, "prostir {args:?}: {again:?}");
@@ -64,7 +65,7 @@ fn starting_again_opens_the_settings_window() {
     pc.wait_log(SOON, "fake tray: activate");
 }
 
-/// Asleep in its sockets' watcher, a second `prostir` wakes it for the window.
+/// Asleep in its sockets' watcher, `prostir` (the menu) wakes it for the window.
 #[test]
 fn starting_again_wakes_the_watcher_for_the_window() {
     let dir = TestDir::new("start-again-asleep");

@@ -448,7 +448,7 @@ impl Pc {
         }
         let bus = Bus::start(&root.join("run"));
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_prostir"));
-        cmd.args(["--port", "0", "--no-adb"])
+        cmd.args(["serve", "--port", "0", "--no-adb"])
             .args(match (options.discovery, options.beacon_to) {
                 (true, None) => ["--discovery-port", "0", "--no-beacon"].as_slice(),
                 (true, Some(_)) => ["--discovery-port", "0"].as_slice(),

@@ -41,7 +41,7 @@ const ALL_CODE: &[(&str, &str)] = &[
     ("launch.rs", include_str!("../src/launch.rs")),
     ("lib.rs", include_str!("../src/lib.rs")),
     ("link.rs", include_str!("../src/link.rs")),
-    ("main.rs", include_str!("../src/main.rs")),
+    ("run.rs", include_str!("../src/run.rs")),
     ("mock.rs", include_str!("../src/mock.rs")),
     ("portal.rs", include_str!("../src/portal.rs")),
     ("snap.rs", include_str!("../src/snap.rs")),

@@ -1002,46 +1002,41 @@ fn api_display(d: &wire::Display, output: String) -> api::Display {
     }
 }
 
-/// The settings window's program: `prostir-settings` next to this one, else on
-/// `PATH`.
-fn settings_program() -> Option<std::path::PathBuf> {
-    const NAME: &str = "prostir-settings";
-    let beside = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join(NAME)))
-        .filter(|p| p.is_file());
-    beside.or_else(|| {
-        std::env::var_os("PATH").and_then(|path| {
-            std::env::split_paths(&path)
-                .map(|dir| dir.join(NAME))
-                .find(|p| p.is_file())
-        })
-    })
+/// This program, to start again (the window, the service): as a wrapper (Nix) names
+/// it, else this very file.
+fn this_program() -> std::io::Result<std::path::PathBuf> {
+    match std::env::var_os("PROSTIR_EXE").filter(|e| !e.is_empty()) {
+        Some(exe) => Ok(exe.into()),
+        None => std::env::current_exe(),
+    }
 }
 
+/// A library path for the settings window only, as a package sets it (Nix).
+const WINDOW_LIBRARY_PATH: &str = "PROSTIR_WINDOW_LIBRARY_PATH";
+
 /// Opens the settings window (one per user: a second start brings the first one
-/// forward). Its process is waited for on a thread of its own, which sleeps until it
-/// closes.
+/// forward): `prostir window`, a process of its own, so the service never loads the
+/// window's libraries and a window that crashes takes nothing else down. Its process
+/// is waited for on a thread of its own, which sleeps until it closes.
 pub fn open_settings() -> Result<(), Failure> {
     // A test build never opens a real window on the desktop the tests run on.
     if cfg!(feature = "fake-desktop") {
         info!("fake desktop: the settings window opens");
         return Ok(());
     }
-    let missing = || {
-        Failure::new(
-            ApiError::Unsupported,
-            t(
-                "Вікно налаштувань не встановлено",
-                "The settings window is not installed",
-            ),
-        )
-    };
-    let program = settings_program().ok_or_else(missing)?;
-    let mut child = std::process::Command::new(&program)
-        .stdin(std::process::Stdio::null())
-        .spawn()
-        .map_err(|e| Failure::new(ApiError::Other, format!("{}: {e}", program.display())))?;
+    let failed = |e: std::io::Error| Failure::new(ApiError::Other, format!("prostir window: {e}"));
+    let mut window = std::process::Command::new(this_program().map_err(failed)?);
+    window.arg("window").stdin(std::process::Stdio::null());
+    // Where a package keeps the window's libraries apart (Nix): on the window's library
+    // path only, never the service's or the programs it runs.
+    if let Some(libs) = std::env::var_os(WINDOW_LIBRARY_PATH).filter(|l| !l.is_empty()) {
+        let old = std::env::var_os("LD_LIBRARY_PATH").unwrap_or_default();
+        let paths = std::env::split_paths(&libs).chain(std::env::split_paths(&old));
+        if let Ok(path) = std::env::join_paths(paths.filter(|p| !p.as_os_str().is_empty())) {
+            window.env("LD_LIBRARY_PATH", path);
+        }
+    }
+    let mut child = window.spawn().map_err(failed)?;
     std::thread::Builder::new()
         .name("settings-window".into())
         .spawn(move || {
@@ -1051,7 +1046,7 @@ pub fn open_settings() -> Result<(), Failure> {
     Ok(())
 }
 
-/// Wakes Prostir for the settings window (`prostir open`, Prostir not on the bus): the
+/// Wakes Prostir for the settings window (`prostir`, Prostir not on the bus): the
 /// sockets' watcher starts it for the window (SIGUSR1); else systemd starts it, when
 /// its socket waits for the headset; else it starts anew.
 pub fn wake_for_window() -> std::io::Result<crate::ctl::Woken> {
@@ -1071,16 +1066,11 @@ pub fn wake_for_window() -> std::io::Result<crate::ctl::Woken> {
 }
 
 /// Starts `prostir serve --open-settings` on its own, apart from this terminal
-/// (`prostir open`). What it says goes where this program's errors go (the journal,
+/// (`prostir`). What it says goes where this program's errors go (the journal,
 /// when the desktop started it).
 fn start_detached() -> std::io::Result<std::process::Child> {
     use std::os::unix::process::CommandExt;
-    // A wrapper (Nix) names the program to start; else this very file.
-    let exe = match std::env::var_os("PROSTIR_EXE").filter(|e| !e.is_empty()) {
-        Some(exe) => exe.into(),
-        None => std::env::current_exe()?,
-    };
-    let mut command = std::process::Command::new(exe);
+    let mut command = std::process::Command::new(this_program()?);
     command
         .args(["serve", "--open-settings"])
         .stdin(std::process::Stdio::null())

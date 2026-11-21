@@ -1,7 +1,7 @@
 //! Starting with the session: systemd's `prostir.socket` where the user's systemd
 //! runs and the package installed the units (nothing runs until a headset comes), else
 //! an XDG autostart entry (`prostir serve`: the small sockets' watcher). Hyprland
-//! starts Prostir from its own config (`exec-once = prostir`, which XDG autostart
+//! starts Prostir from its own config (`exec-once = prostir serve`, which XDG autostart
 //! does not reach without uwsm), so it is not set from here there.
 //!
 //! It is on by default: the first start of Prostir for a user turns it on
@@ -252,8 +252,8 @@ pub fn first_start() {
         crate::platform::dialogs::notify(
             t("Запуск разом із Hyprland", "Starting with Hyprland"),
             t(
-                "Щоб Prostir чекав на шолом після входу, додайте в конфіг Hyprland рядок: exec-once = prostir",
-                "For Prostir to wait for the headset after login, add this line to the Hyprland config: exec-once = prostir",
+                "Щоб Prostir чекав на шолом після входу, додайте в конфіг Hyprland рядок: exec-once = prostir serve",
+                "For Prostir to wait for the headset after login, add this line to the Hyprland config: exec-once = prostir serve",
             ),
         );
     }
@@ -275,7 +275,7 @@ pub fn quit_until_login() {
 }
 
 /// Starts Prostir through systemd, when its socket waits for the headset: whether it
-/// did (`prostir open`, Prostir not running).
+/// did (`prostir`, Prostir not running).
 pub fn start_service() -> bool {
     socket_waits() && Places::here().systemctl(&["start", "--no-block", "prostir.service"])
 }

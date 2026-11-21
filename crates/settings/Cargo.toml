@@ -7,19 +7,13 @@ authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
-description = "Prostir settings window: monitors, headsets, sound and look of the PC part"
+description = "Prostir settings window (a library of the prostir program): monitors, headsets, sound and look of the PC part"
 publish = false
-
-[[bin]]
-name = "prostir-settings"
-path = "src/main.rs"
 
 [dependencies]
 prostir-lang.workspace = true
 # The local API's types, shared with the service (LOCAL-API.md).
 prostir-api.workspace = true
-# The version as the service says it (`--version`).
-prostir-proto.workspace = true
 # glow: the window needs nothing wgpu adds, and starts faster without it.
 # links and clipboard: "Open the releases page" and pasting the pairing code.
 eframe = { version = "0.37", default-features = false, features = ["glow", "wayland", "x11", "accesskit", "links", "clipboard"] }

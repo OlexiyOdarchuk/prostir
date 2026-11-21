@@ -1,7 +1,7 @@
 # Prostir local API
 
 Programs of the same user on the PC (`prostir ctl`, the settings window
-`prostir-settings`, scripts, hot keys) talk to the running Prostir through this API.
+`prostir window`, scripts, hot keys) talk to the running Prostir through this API.
 The headset protocol is a separate thing (`PROTOCOL.md`).
 
 The requests, answers, events and the state are Rust types in the crate
@@ -34,12 +34,12 @@ On Windows (later) the same JSON goes over a named pipe `\\.\pipe\prostir-<SID>`
 object a line; nothing else of this document changes.
 
 Prostir is not D-Bus activatable: when it is not running, calls fail with
-`org.freedesktop.DBus.Error.ServiceUnknown` at once. `prostir open` starts it.
+`org.freedesktop.DBus.Error.ServiceUnknown` at once. `prostir` starts it.
 
 Prostir is on the bus only while something needs it. Asleep, nothing of it runs but
 what holds its sockets: systemd's `prostir.socket`, or without systemd its small
 sockets' watcher (`prostir serve` itself), which is not on the bus. A headset that
-comes (connects, or asks for the PC), `prostir open`, the tray's notice of a new
+comes (connects, or asks for the PC), `prostir`, the tray's notice of a new
 headset start it; it leaves again 10 s after nothing needs it: no headset connected
 and no monitors waiting for one, no settings window on the bus, no pairing window
 open. A client follows it coming and going with `NameOwnerChanged` (below).
@@ -209,7 +209,7 @@ exist, monitor requests change the set kept for the next headset (its monitors s
 | `window_look` | `theme` (`system`, `light`, `dark`), `palette` (a word: `ink`, `graphite`), `language` (a code or `null`) | the settings window's look, kept in `settings.txt` |
 | `forget_headset` | `headset`: its `key`, its whole key (64 hex digits) or its name | its session ends |
 | `forget_all` | | every paired headset |
-| `show_settings` | | starts `prostir-settings` (it keeps one window per user itself); `Unsupported` when it is not installed |
+| `show_settings` | | starts the settings window, `prostir window`, a process of its own (it keeps one window per user itself) |
 | `quit` | | Prostir quits after answering, as the tray's "Quit": nothing waits for the headset afterwards (the sockets' watcher quits too; under systemd the socket stops until the next login) |
 
 ### Not yet
@@ -392,22 +392,31 @@ headset (asleep)` (`"asleep": true` too) when the sockets' watcher or systemd's 
 waits for a headset, or that port 47830 is taken by another program (`"port_taken":
 true`), and exits with 2.
 
-## `prostir open` and the settings window
+## `prostir` and the settings window
 
-`prostir` without a command is `prostir serve`, as in 0.1 (`exec-once = prostir`, a
-terminal): the sockets' watcher, which sleeps until a headset comes and then starts the
-full program (`prostir serve --stay` runs the full program all along instead, with its
-sockets opened itself). The menu entry runs `prostir open`. When Prostir runs, it asks
-it for the settings window (`ShowSettings`). When it sleeps, it wakes it: the watcher
-(SIGUSR1), which starts it with the window, or systemd (`systemctl --user start
-prostir.service`), and then asks for the window once it is on the bus, 30 s at most.
-When nothing runs, it starts `prostir serve --open-settings` on its own (its log goes
-where `open`'s errors go: the journal, when the desktop started it), which opens the
-window once it is on the bus; `open` waits for that as long as the new Prostir lives,
-and says so when it ends first. Prostir takes its name on the bus before it starts
-GStreamer, so this is quick. Prostir starts `prostir-settings` from next to its own
-program, else from `PATH`; without it, Prostir still runs and `open` says the window
-is not installed. The tray has the same item ("Settings…").
+One program, `prostir`, in two processes. `prostir` without a command (the menu entry,
+`io.github.OlexiyOdarchuk.Prostir.desktop`) opens the settings window. `prostir serve`
+is the service: the sockets' watcher, which sleeps until a headset comes and then
+starts the full program (`prostir serve --stay` runs the full program all along
+instead, with its sockets opened itself). Autostart entries, systemd's
+`prostir.service` and Hyprland's `exec-once = prostir serve` start it so.
+
+When Prostir runs, `prostir` asks it for the settings window (`ShowSettings`). When it
+sleeps, it wakes it: the watcher (SIGUSR1), which starts it with the window, or systemd
+(`systemctl --user start prostir.service`), and then asks for the window once it is on
+the bus, 30 s at most. When nothing runs, it starts `prostir serve --open-settings` on
+its own (its log goes where `prostir`'s errors go: the journal, when the desktop
+started it), which opens the window once it is on the bus; `prostir` waits for that as
+long as the new Prostir lives, and says so when it ends first. Prostir takes its name
+on the bus before it starts GStreamer, so this is quick. `prostir serve` started again
+while Prostir runs opens the window of the running one too, and so does a click on the
+tray icon; the very first start of Prostir for a user opens it as well. The tray has
+the same item ("Settings…").
+
+The window is a process of its own: the service starts its own program again as
+`prostir window` (a hidden command), so a window that crashes takes nothing else down
+and the service never loads the window's libraries (EGL, Wayland's and X11's). The
+window's app id is `io.github.OlexiyOdarchuk.Prostir`, the desktop entry's name.
 
 The settings window owns `io.github.OlexiyOdarchuk.Prostir.Settings` on the session
 bus (one window per user: a second start calls `Present` on

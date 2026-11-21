@@ -1,4 +1,4 @@
-//! The settings window's client (`prostir-settings`' D-Bus client, the code the
+//! The settings window's client (`prostir window`'s D-Bus client, the code the
 //! window runs) against the real service on a session bus of the test's own: the
 //! state, its changes, and the requests the window sends, with the answers it relies
 //! on (the revision of the state with the change). Skipped, saying so, without

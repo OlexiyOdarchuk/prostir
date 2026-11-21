@@ -1,18 +1,24 @@
-//! `prostir-settings`: the settings window of the Prostir PC part.
+//! The settings window as a program of its own: `prostir window`, a process apart
+//! from the service (the service starts it), so a window that crashes takes nothing
+//! else down and the service never loads the window's libraries.
 //!
-//! `PROSTIR_SETTINGS_MOCK=1` (or `--mock`) shows a made-up PC with a headset instead of
-//! talking to the Prostir running in the background, to try the window without one.
+//! `--mock` (or `PROSTIR_SETTINGS_MOCK=1`) shows a made-up PC with a headset instead
+//! of talking to the Prostir running in the background, to try the window without one.
 
 use std::time::Instant;
 
+use crate::api::Client;
+use crate::app::{CloseNote, Starter, start_prostir};
+use crate::instance::{self, Start};
+use crate::launch::Started;
+use crate::mock::Mock;
+use crate::portal::SystemScheme;
+use crate::{App, NoBus, Options, dbus, theme};
 use eframe::egui;
-use prostir_settings::api::Client;
-use prostir_settings::app::CloseNote;
-use prostir_settings::app::start_prostir;
-use prostir_settings::instance::{self, Start};
-use prostir_settings::mock::Mock;
-use prostir_settings::portal::SystemScheme;
-use prostir_settings::{App, NoBus, Options, dbus, theme};
+
+/// The window's app id: the name of Prostir's one desktop entry
+/// (`io.github.OlexiyOdarchuk.Prostir.desktop`), so the desktop shows its name and icon.
+pub const APP_ID: &str = "io.github.OlexiyOdarchuk.Prostir";
 
 /// The window with the time it took to show, for the log.
 struct Timed {
@@ -31,15 +37,13 @@ impl eframe::App for Timed {
     }
 }
 
-fn main() -> eframe::Result {
-    if prostir_settings::asks_version(std::env::args().skip(1)) {
-        println!("{}", prostir_settings::version_line());
-        return Ok(());
-    }
+/// Shows the settings window until it closes; `mock`: on a made-up PC. A second
+/// window brings the first one forward and returns at once.
+pub fn run(mock: bool) -> eframe::Result {
     let started = Instant::now();
+    forget_window_libraries();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
-    let mock = std::env::args().any(|a| a == "--mock")
-        || std::env::var_os("PROSTIR_SETTINGS_MOCK").is_some_and(|v| v == "1");
+    let mock = mock || std::env::var_os("PROSTIR_SETTINGS_MOCK").is_some_and(|v| v == "1");
 
     let bus = dbus::session();
     let mut presented = None;
@@ -84,14 +88,14 @@ fn main() -> eframe::Result {
         }
         _ => None,
     };
-    let (client, start): (Box<dyn Client>, prostir_settings::app::Starter) = if mock {
+    let (client, start): (Box<dyn Client>, Starter) = if mock {
         let m = Mock::connected().live();
         let handle = m.handle();
         (
             Box::new(m),
             Box::new(move || {
                 handle.set_running(true);
-                Ok(prostir_settings::launch::Started::Launched)
+                Ok(Started::Launched)
             }),
         )
     } else {
@@ -111,7 +115,7 @@ fn main() -> eframe::Result {
             .with_min_inner_size([960.0, 640.0])
             .with_title("Prostir")
             // The same name as the .desktop file, so the desktop shows its icon.
-            .with_app_id(instance::NAME),
+            .with_app_id(APP_ID),
         renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
@@ -144,4 +148,31 @@ fn main() -> eframe::Result {
             }))
         }),
     )
+}
+
+/// The library path a package gave the window alone (Nix: `PROSTIR_WINDOW_LIBRARY_PATH`,
+/// put first on `LD_LIBRARY_PATH` by the service) is taken off the environment again,
+/// so the programs the window starts (Prostir's service, the file manager, the web
+/// browser) never load the window's libraries in place of their own. The window keeps
+/// finding them: the dynamic loader read the path when the process started.
+///
+/// Called before any thread starts: it changes the environment.
+fn forget_window_libraries() {
+    let Some(ours) = std::env::var_os("PROSTIR_WINDOW_LIBRARY_PATH").filter(|l| !l.is_empty())
+    else {
+        return;
+    };
+    let ours: Vec<_> = std::env::split_paths(&ours).collect();
+    let path = std::env::var_os("LD_LIBRARY_PATH").unwrap_or_default();
+    let rest: Vec<_> = std::env::split_paths(&path)
+        .filter(|p| !p.as_os_str().is_empty() && !ours.contains(p))
+        .collect();
+    // SAFETY: called at the start of `prostir window`, before any thread exists, so
+    // nothing reads the environment meanwhile.
+    unsafe {
+        match std::env::join_paths(rest) {
+            Ok(rest) if !rest.is_empty() => std::env::set_var("LD_LIBRARY_PATH", rest),
+            _ => std::env::remove_var("LD_LIBRARY_PATH"),
+        }
+    }
 }

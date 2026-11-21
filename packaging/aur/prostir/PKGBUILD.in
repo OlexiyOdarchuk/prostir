@@ -54,7 +54,7 @@ build() {
   # makepkg strips and makes the debug package itself: from line tables, not from a
   # program the release profile already stripped.
   export CARGO_PROFILE_RELEASE_DEBUG=1 CARGO_PROFILE_RELEASE_STRIP=false
-  cargo build --frozen --release -p prostir-host -p prostir-settings
+  cargo build --frozen --release -p prostir-host --bin prostir
 }
 
 check() {
@@ -70,9 +70,7 @@ check() {
 package() {
   cd "prostir-${pkgver}"
   install -Dm755 target/release/prostir "${pkgdir}/usr/bin/prostir"
-  install -Dm755 target/release/prostir-settings "${pkgdir}/usr/bin/prostir-settings"
-  install -Dm644 packaging/prostir.desktop "${pkgdir}/usr/share/applications/prostir.desktop"
-  install -Dm644 packaging/io.github.OlexiyOdarchuk.Prostir.Settings.desktop "${pkgdir}/usr/share/applications/io.github.OlexiyOdarchuk.Prostir.Settings.desktop"
+  install -Dm644 packaging/io.github.OlexiyOdarchuk.Prostir.desktop "${pkgdir}/usr/share/applications/io.github.OlexiyOdarchuk.Prostir.desktop"
   install -Dm644 packaging/prostir.svg "${pkgdir}/usr/share/icons/hicolor/scalable/apps/prostir.svg"
   # Not enabled here: Prostir's first start enables the socket for its user (and the
   # preset for new users, where presets apply); the tray turns it off for good.

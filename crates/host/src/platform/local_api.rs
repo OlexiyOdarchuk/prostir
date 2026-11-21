@@ -1,5 +1,5 @@
 //! The local API on D-Bus (see `crate::api` and `LOCAL-API.md`): the service on the
-//! session bus, and the client `prostir ctl` and `prostir open` use. The same on
+//! session bus, and the client `prostir ctl` and `prostir` use. The same on
 //! every Linux desktop and with the fake one (the end-to-end tests run it on a
 //! private bus). Only programs of the same user reach the session bus, so the same
 //! trust as the tray, which shows the same things.
@@ -656,7 +656,7 @@ impl Object {
     ) -> zbus::Result<()>;
 }
 
-/// The client: `prostir ctl` and `prostir open` on the session bus.
+/// The client: `prostir ctl` and `prostir` on the session bus.
 pub struct Client {
     bus: Connection,
 }

@@ -67,7 +67,7 @@ jobs:
       - name: Debian and RPM packages
         run: |
           cargo install --locked cargo-deb@3.8.0 cargo-generate-rpm@0.21.1
-          # Already stripped as they ship (symbol names kept): no stripping again.
+          # Already stripped as it ships (symbol names kept): no stripping again.
           cargo deb -p prostir-host --no-build --no-strip -o dist/
           cargo generate-rpm -p crates/host -o dist/
           (cd dist && sha256sum ./*.tar.gz ./*.apk ./*.deb ./*.rpm THIRD-PARTY-LICENSES.txt | sed 's| \./| |' > SHA256SUMS)

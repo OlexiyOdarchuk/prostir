@@ -4,8 +4,8 @@
 #   prostir-<version>.apk                   headset app
 #   THIRD-PARTY-LICENSES.txt                licenses of everything bundled in both
 # Signing of the APK: see scripts/build-apk.sh (KEYSTORE…), debug key otherwise.
-# The .deb and .rpm are made afterwards from target/release/prostir and
-# target/release/prostir-settings (release workflow). The release profile strips them.
+# The .deb and .rpm are made afterwards from target/release/prostir (release
+# workflow). The release profile strips it.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -25,12 +25,12 @@ PROFILE=release ./scripts/build-apk.sh
 cp build/prostir.apk "$DIST/prostir-$VERSION.apk"
 cp build/THIRD-PARTY-LICENSES.txt "$DIST/"
 
-cargo build --release --locked -p prostir-host --bin prostir -p prostir-settings --bin prostir-settings
+cargo build --release --locked -p prostir-host --bin prostir
 # Where cargo builds: its own CARGO_TARGET_DIR when set, else target/ here.
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
-cp "$TARGET_DIR/release/prostir" "$TARGET_DIR/release/prostir-settings" "$DIST/$NAME/"
+cp "$TARGET_DIR/release/prostir" "$DIST/$NAME/"
 mkdir -p "$DIST/$NAME/packaging"
-cp packaging/prostir.svg packaging/prostir.desktop packaging/io.github.OlexiyOdarchuk.Prostir.Settings.desktop "$DIST/$NAME/packaging/"
+cp packaging/prostir.svg packaging/io.github.OlexiyOdarchuk.Prostir.desktop "$DIST/$NAME/packaging/"
 cp -r packaging/systemd packaging/udev "$DIST/$NAME/packaging/"
 cp scripts/install.sh LICENSE LICENSE-EXCEPTION.md build/THIRD-PARTY-LICENSES.txt \
     README.md README.uk.md CHANGELOG.md "$DIST/$NAME/"

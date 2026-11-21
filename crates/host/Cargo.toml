@@ -45,6 +45,8 @@ prostir-layout.workspace = true
 prostir-api.workspace = true
 # Texts with a count, in the plural form each language needs (Fluent).
 prostir-lang.workspace = true
+# The settings window (`prostir window`, a process of its own).
+prostir-settings.workspace = true
 anyhow.workspace = true
 # A reply for a D-Bus method that waits for the control loop (the local API).
 async-channel = "2"
@@ -71,20 +73,18 @@ wayland-protocols-wlr = { version = "0.3", features = ["client"], optional = tru
 
 [dev-dependencies]
 prostir-testkit.workspace = true
-# The settings window's D-Bus client, driven against the service (tests/e2e/window.rs).
-prostir-settings.workspace = true
 
 # Packages built in the release workflow: `cargo deb -p prostir-host` and
 # `cargo generate-rpm -p crates/host`, after scripts/package-release.sh (which writes
-# build/THIRD-PARTY-LICENSES.txt and builds prostir-settings too; the release profile
-# strips the programs).
+# build/THIRD-PARTY-LICENSES.txt and builds the program; the release profile strips
+# it).
 # Same files as scripts/install.sh puts in ~/.local.
 #
 # Runtime needs: GStreamer with the VA plugin (hardware encoding), x264enc for the CPU
 # fallback (NVIDIA, or no VA encoder), pipewiresrc, pulsesrc, h264parse and
 # h265parse; pw-cli and pw-loopback; pactl and pacat; kscreen-doctor and qdbus6 on KDE
 # Plasma; grim for screenshots on Hyprland (optional). The settings window
-# (prostir-settings) loads libEGL, libwayland-client, -cursor and -egl and libxkbcommon
+# (`prostir window`) loads libEGL, libwayland-client, -cursor and -egl and libxkbcommon
 # at run time (the X11 libraries in an X11 session), so they are listed by hand.
 [package.metadata.deb]
 name = "prostir"
@@ -102,9 +102,7 @@ recommends = "mesa-va-drivers | intel-media-va-driver-non-free | intel-media-va-
 suggests = "adb, grim, libx11-6, libx11-xcb1, libxcursor1, libxi6, libxkbcommon-x11-0, libxrandr2, libxrender1"
 assets = [
     ["target/release/prostir", "usr/bin/", "755"],
-    ["target/release/prostir-settings", "usr/bin/", "755"],
-    ["../../packaging/prostir.desktop", "usr/share/applications/", "644"],
-    ["../../packaging/io.github.OlexiyOdarchuk.Prostir.Settings.desktop", "usr/share/applications/", "644"],
+    ["../../packaging/io.github.OlexiyOdarchuk.Prostir.desktop", "usr/share/applications/", "644"],
     ["../../packaging/prostir.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
     # Installed, not enabled: the first start of Prostir enables the socket for its user
     # (and the preset for new users); the tray turns it off for good.
@@ -130,9 +128,7 @@ license = "GPL-3.0-or-later"
 auto-req = "no"
 assets = [
     { source = "target/release/prostir", dest = "/usr/bin/prostir", mode = "755" },
-    { source = "target/release/prostir-settings", dest = "/usr/bin/prostir-settings", mode = "755" },
-    { source = "../../packaging/prostir.desktop", dest = "/usr/share/applications/prostir.desktop", mode = "644" },
-    { source = "../../packaging/io.github.OlexiyOdarchuk.Prostir.Settings.desktop", dest = "/usr/share/applications/io.github.OlexiyOdarchuk.Prostir.Settings.desktop", mode = "644" },
+    { source = "../../packaging/io.github.OlexiyOdarchuk.Prostir.desktop", dest = "/usr/share/applications/io.github.OlexiyOdarchuk.Prostir.desktop", mode = "644" },
     { source = "../../packaging/prostir.svg", dest = "/usr/share/icons/hicolor/scalable/apps/prostir.svg", mode = "644" },
     { source = "../../packaging/systemd/prostir.socket", dest = "/usr/lib/systemd/user/prostir.socket", mode = "644" },
     { source = "../../packaging/systemd/prostir.service", dest = "/usr/lib/systemd/user/prostir.service", mode = "644" },

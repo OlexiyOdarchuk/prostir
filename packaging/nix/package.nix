@@ -1,4 +1,4 @@
-# The PC app (`prostir`) and its settings window (`prostir-settings`), for Nix and
+# The PC app (`prostir`, with its settings window: `prostir window`), for Nix and
 # NixOS: `nix build`, `nix run`, or the flake's package in a NixOS or Home Manager
 # configuration.
 {
@@ -62,8 +62,9 @@ let
   # Intel graphics only come with x86 machines.
   ++ lib.optional stdenv.hostPlatform.isx86_64 "${intel-media-driver}/lib/dri"
   ++ [ "${mesa}/lib/dri" ];
-  # The settings window loads these at run time (EGL, Wayland, the keyboard; X11 in
-  # an X11 session) rather than linking them.
+  # The settings window (`prostir window`) loads these at run time (EGL, Wayland,
+  # the keyboard; X11 in an X11 session) rather than linking them; the service never
+  # loads them.
   windowLibs = [
     libGL
     libxkbcommon
@@ -89,8 +90,7 @@ rustPlatform.buildRustPackage {
       # Every workspace member, the headset app and the fake headset for tests too:
       # cargo needs them present.
       (root + "/crates")
-      (root + "/packaging/prostir.desktop")
-      (root + "/packaging/io.github.OlexiyOdarchuk.Prostir.Settings.desktop")
+      (root + "/packaging/io.github.OlexiyOdarchuk.Prostir.desktop")
       (root + "/packaging/prostir.svg")
       (root + "/packaging/systemd")
       (root + "/packaging/udev")
@@ -103,10 +103,6 @@ rustPlatform.buildRustPackage {
     "prostir-host"
     "--bin"
     "prostir"
-    "-p"
-    "prostir-settings"
-    "--bin"
-    "prostir-settings"
   ];
   # The tests need a desktop session and the headset's toolchain; CI runs them.
   doCheck = false;
@@ -123,10 +119,9 @@ rustPlatform.buildRustPackage {
   ];
 
   postInstall = ''
-    install -Dm644 packaging/prostir.desktop $out/share/applications/prostir.desktop
+    install -Dm644 packaging/io.github.OlexiyOdarchuk.Prostir.desktop \
+      $out/share/applications/io.github.OlexiyOdarchuk.Prostir.desktop
     install -Dm644 packaging/prostir.svg $out/share/icons/hicolor/scalable/apps/prostir.svg
-    install -Dm644 packaging/io.github.OlexiyOdarchuk.Prostir.Settings.desktop \
-      $out/share/applications/io.github.OlexiyOdarchuk.Prostir.Settings.desktop
     # Not enabled here: Prostir's first start enables the socket for its user (on
     # NixOS, `systemd.packages = [ prostir ];` makes the units and the preset known);
     # the tray turns it off for good.
@@ -139,11 +134,12 @@ rustPlatform.buildRustPackage {
     # A Quest plugged in starts it where the socket is on (`services.udev.packages`).
     install -Dm644 packaging/udev/70-prostir-quest.rules \
       $out/lib/udev/rules.d/70-prostir-quest.rules
-    # PATH: "Start Prostir" runs the prostir next to it.
-    wrapProgram $out/bin/prostir-settings \
-      --prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath windowLibs}" \
-      --prefix PATH : "$out/bin"
+    # PROSTIR_EXE: the service starts the window, and the window the service, through
+    # this wrapper. PROSTIR_WINDOW_LIBRARY_PATH: the service puts the window's
+    # libraries on the window's library path only, so neither it nor the programs it
+    # runs (the system's own, first on PATH) load them.
     wrapProgram $out/bin/prostir \
+      --set PROSTIR_WINDOW_LIBRARY_PATH "${lib.makeLibraryPath windowLibs}" \
       --prefix GST_PLUGIN_SYSTEM_PATH_1_0 : "${lib.makeSearchPathOutput "lib" "lib/gstreamer-1.0" plugins}" \
       --set-default LIBVA_DRIVERS_PATH "${lib.concatStringsSep ":" vaDrivers}" \
       --suffix PATH : "${lib.makeBinPath tools}" \

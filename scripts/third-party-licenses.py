@@ -4,8 +4,8 @@ that ends up inside Prostir's release files besides Prostir itself.
 
     scripts/third-party-licenses.py [-o FILE] [--openxr-aar AAR]
 
-It walks the normal (not dev, not build) dependencies of the PC programs
-(prostir-host and prostir-settings for x86_64 Linux) and the headset app
+It walks the normal (not dev, not build) dependencies of the PC program
+(prostir-host, with the settings window, for x86_64 Linux) and the headset app
 (prostir-client for Android), reads each crate's license files from the local Cargo
 registry, and adds the font (in the APK and the settings window) and the Khronos
 OpenXR loader that the APK bundles. Only the Python standard library and
@@ -25,7 +25,6 @@ import zipfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PARTS = [
     ("prostir-host", "x86_64-unknown-linux-gnu", "PC"),
-    ("prostir-settings", "x86_64-unknown-linux-gnu", "PC"),
     ("prostir-client", "aarch64-linux-android", "headset"),
 ]
 # For "A OR B" the first license in this list that a crate offers is the one we use.
@@ -227,7 +226,7 @@ def main():
     w("part keeps its own license. Where a crate lets you choose between licenses, the one")
     w("in the \"Used\" column is the one these release files rely on.")
     w("")
-    w("PC: the prostir and prostir-settings programs (tar.gz, .deb, .rpm, AUR).")
+    w("PC: the prostir program (tar.gz, .deb, .rpm, AUR).")
     w("headset: the Quest app (.apk).")
     w("")
     w("")

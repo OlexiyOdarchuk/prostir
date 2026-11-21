@@ -1,5 +1,5 @@
 # Started by prostir.socket when a headset comes, by a Quest plugged in by USB
-# (70-prostir-quest.rules), or by `prostir open`; it leaves by itself once no headset
+# (70-prostir-quest.rules), or by `prostir` (the menu); it leaves by itself once no headset
 # needs it, and the socket waits again. Only while the socket is on: a Quest plugged in
 # starts nothing where "Start with the system" is off.
 [Unit]

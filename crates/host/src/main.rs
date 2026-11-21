@@ -591,8 +591,18 @@ fn main() -> Result<()> {
     }
     let quiet = || init_log("warn");
     let code = match cli.command {
-        None => serve(cli.serve)?,
+        None => {
+            quiet();
+            open_window()
+        }
         Some(Sub::Serve(args)) => serve(args)?,
+        Some(Sub::Window { mock }) => match prostir_settings::run(mock) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("prostir window: {e}");
+                1
+            }
+        },
         Some(Sub::Ctl { args }) => {
             quiet();
             let client = platform::local_api::Client::connect(ctl::WAIT);
@@ -604,18 +614,20 @@ fn main() -> Result<()> {
             };
             ctl::run(&args, client.map_err(Clone::clone), &mut io)
         }
-        Some(Sub::Open) => {
-            quiet();
-            match platform::local_api::Client::connect(ctl::WAIT) {
-                Ok(client) => ctl::open(&client, &local::wake_for_window),
-                Err(e) => {
-                    eprintln!("prostir open: no session bus ({e:?})");
-                    ctl::NOT_RUNNING
-                }
-            }
-        }
     };
     std::process::exit(code);
+}
+
+/// `prostir` (the menu entry): the settings window, from the running Prostir, which is
+/// woken or started first when it is not running. Its exit code.
+fn open_window() -> i32 {
+    match platform::local_api::Client::connect(ctl::WAIT) {
+        Ok(client) => ctl::open(&client, &local::wake_for_window),
+        Err(e) => {
+            eprintln!("prostir: no session bus ({e:?})");
+            ctl::NOT_RUNNING
+        }
+    }
 }
 
 /// Where the program's sockets came from, which says how it ends.
@@ -701,18 +713,12 @@ fn window_at_first_start(mut args: Args) -> Args {
     args
 }
 
-/// Prostir started again while it runs (the menu, `prostir`, `prostir serve` of an
-/// older menu entry or autostart line): the running one opens its settings window, or
-/// brings it forward, as `prostir open` does, and this one ends. Its exit code.
+/// The service started again while it runs (`prostir serve` by hand, or an autostart
+/// line while the menu started it): the running one opens its settings window, or
+/// brings it forward, as `prostir` does, and this one ends. Its exit code.
 fn open_the_running_one() -> i32 {
     info!("Prostir runs already: its settings window opens");
-    match platform::local_api::Client::connect(ctl::WAIT) {
-        Ok(client) => ctl::open(&client, &local::wake_for_window),
-        Err(e) => {
-            eprintln!("prostir: Prostir runs already, and there is no session bus ({e:?})");
-            ctl::NOT_RUNNING
-        }
-    }
+    open_window()
 }
 
 /// Opens the sockets here; when systemd's socket holds the port, says so.
@@ -721,7 +727,7 @@ fn open_sockets(args: &Args, discovery: Option<u16>) -> Result<platform::sockets
         if platform::autostart::socket_waits() {
             e.context(
                 "Prostir already waits for the headset through systemd (prostir.socket): \
-                 `prostir open` opens it, `systemctl --user stop prostir.socket` stops it",
+                 `prostir` opens its window, `systemctl --user stop prostir.socket` stops it",
             )
         } else {
             // Another program (another user's Prostir, say): there is no tray to say
@@ -952,7 +958,7 @@ mod tests {
             &["--version"],
             &["serve", "-v"],
             &["serve", "--version"],
-            &["open", "--version"],
+            &["window", "--version"],
             &["ctl", "--version"],
             &["ctl", "-v"],
         ] {
@@ -962,7 +968,7 @@ mod tests {
             &[][..],
             &["serve"],
             &["ctl", "status"],
-            &["-m", "1920x1080"],
+            &["serve", "-m", "1920x1080"],
         ] {
             assert!(!asks(args), "{args:?}");
         }

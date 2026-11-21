@@ -73,9 +73,9 @@ pub enum Wake {
     Connection,
     /// One of the PC's own headsets asked for it: it connects in a moment.
     Headset,
-    /// Started by hand (`prostir open`, `systemctl start`): nothing was waiting.
+    /// Started by hand (`prostir`, `systemctl start`): nothing was waiting.
     Started,
-    /// `prostir open` asked the watcher for the settings window (SIGUSR1).
+    /// `prostir` asked the watcher for the settings window (SIGUSR1).
     Window,
     /// The button of the notice of a new headset: the pairing window opens.
     Pair,
@@ -349,7 +349,7 @@ fn pause_after(fails: u32) -> Duration {
 
 /// The sockets' watcher: holds `sockets` and starts the full program with `start`
 /// when a headset comes, until asked to quit. `window`: start it at once for the
-/// settings window (`prostir open` when nothing ran). Its exit code.
+/// settings window (`prostir` when nothing ran). Its exit code.
 #[allow(
     clippy::needless_pass_by_value,
     reason = "the watcher owns the sockets and how to start until it returns"

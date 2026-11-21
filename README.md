@@ -340,11 +340,11 @@ sudo firewall-cmd --add-port=47830/tcp --add-port=47831/udp --permanent \
   often not on Hyprland's `PATH`:
   ```lua
   -- hyprland.lua
-  hl.on("hyprland.start", function () hl.exec_cmd("~/.local/bin/prostir") end)
+  hl.on("hyprland.start", function () hl.exec_cmd("~/.local/bin/prostir serve") end)
   ```
   ```ini
   # hyprland.conf
-  exec-once = ~/.local/bin/prostir   # or just "prostir" for a package install
+  exec-once = ~/.local/bin/prostir serve   # or just "prostir serve" for a package install
   ```
 - **Permissions.** With `ecosystem:enforce_permissions` on, allow Prostir to capture
   the screen:
@@ -503,14 +503,17 @@ settings, turn the usage counter on or off, forget paired headsets, and quit.
 ### Command line
 
 ```
-prostir [serve] [--monitor WxH[@scale]]... [--codec h265|h264] [--bitrate MBPS] [--software]
-        [--keep-primary] [--linger SECONDS] [--port PORT] [--no-discovery] [--no-adb]
-prostir open
+prostir
+prostir serve [--monitor WxH[@scale]]... [--codec h265|h264] [--bitrate MBPS] [--software]
+              [--keep-primary] [--linger SECONDS] [--port PORT] [--no-discovery] [--no-adb]
 prostir ctl COMMAND [--json]
 ```
 
-`prostir` (or `prostir serve`) runs Prostir. `prostir open`, which the menu entry runs,
-opens the settings window and starts Prostir first if it is not running.
+`prostir`, which the menu entry runs, opens the settings window and starts Prostir in
+the background first if it is not running. `prostir serve` runs Prostir in the
+background (autostart, systemd and Hyprland's `exec-once` start it so). The window is
+a process of its own, so the background part never loads the window's libraries.
+`-v` or `--version` prints the version, with any command.
 
 `prostir ctl` asks the running Prostir, from a terminal, a script or a hot key (KDE's
 Shortcuts, Hyprland's `bind`): `prostir ctl recenter`, `prostir ctl profile Work`,
@@ -762,7 +765,7 @@ crates/layout/    where the monitors go: layout rules shared by the PC and the h
 crates/api/       the local API's types, shared by the PC program and its clients
 crates/lang/      translations as data (Fluent)
 crates/host/      the PC program: virtual outputs, encoders, sound, tray, discovery
-crates/settings/  the PC settings window (prostir-settings)
+crates/settings/  the PC settings window (a library of prostir: prostir window)
 crates/client/    the Quest app: OpenXR loop (app.rs), menu (ui.rs), layouts (layout.rs), …
 crates/testkit/   a fake headset for tests and for checking the PC program by hand
 scripts/  build-apk.sh, install.sh, package-release.sh, third-party-licenses.py

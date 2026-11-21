@@ -1,5 +1,5 @@
 //! A service in memory, for tests, pictures and trying the window without Prostir
-//! (`prostir-settings --mock`). It answers the requests the way the service of
+//! (`prostir window --mock`). It answers the requests the way the service of
 //! LOCAL-API.md does now: the answer carries the revision of the state that has the
 //! change, monitors asked for while no headset is connected are kept for the next
 //! one, and what the service does not do yet (pairing from the window until step

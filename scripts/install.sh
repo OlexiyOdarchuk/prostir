@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Installs the Prostir PC program for the current user, without root:
-#   ~/.local/bin/prostir and prostir-settings, the icon, the application menu
-#   entries and the systemd user units (Prostir's first start enables them).
+#   ~/.local/bin/prostir, the icon, the application menu entry and the systemd
+#   user units (Prostir's first start enables them).
 #
 #   ./install.sh                       install (or update: run it again)
 #   ./install.sh --autostart           start Prostir when you log in now, not at its first start
 #   ./install.sh --uninstall           remove everything this script installed
 #   ./install.sh --uninstall --purge   also remove settings and pairings (~/.config/prostir)
 #
-# In a source checkout it builds the programs first (cargo build --release).
+# In a source checkout it builds the program first (cargo build --release).
 set -euo pipefail
 
 usage() { sed -n '2,11s/^# \{0,1\}//p' "$0"; }
@@ -35,9 +35,12 @@ BIN="$HOME/.local/bin"
 DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
 CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
 ICON="$DATA/icons/hicolor/scalable/apps/prostir.svg"
-DESKTOP="$DATA/applications/prostir.desktop"
-SETTINGS_ID="io.github.OlexiyOdarchuk.Prostir.Settings"
-SETTINGS_DESKTOP="$DATA/applications/$SETTINGS_ID.desktop"
+APP_ID="io.github.OlexiyOdarchuk.Prostir"
+DESKTOP="$DATA/applications/$APP_ID.desktop"
+# What earlier versions installed: the menu entry of 0.1, the settings window's own
+# program and entry.
+OLD=("$DATA/applications/prostir.desktop" "$DATA/applications/$APP_ID.Settings.desktop"
+     "$BIN/prostir-settings")
 AUTOSTART="$CONFIG/autostart/prostir.desktop"
 UNITS="$DATA/systemd/user"
 DOCS="$DATA/doc/prostir"
@@ -83,8 +86,8 @@ user_systemd() {
 
 hyprland_lines() {
     echo "   On Hyprland, start it with the session by adding one line to your config:"
-    echo "     hyprland.lua:   hl.on(\"hyprland.start\", function () hl.exec_cmd(\"$BIN/prostir\") end)"
-    echo "     hyprland.conf:  exec-once = $BIN/prostir"
+    echo "     hyprland.lua:   hl.on(\"hyprland.start\", function () hl.exec_cmd(\"$BIN/prostir serve\") end)"
+    echo "     hyprland.conf:  exec-once = $BIN/prostir serve"
     echo "   With ecosystem:enforce_permissions on, also allow screen capture:"
     echo "     hyprland.lua:   hl.permission(\"$BIN/prostir\", \"screencopy\", \"allow\")"
     echo "     hyprland.conf:  permission = $BIN/prostir, screencopy, allow"
@@ -97,7 +100,7 @@ if (( uninstall )); then
     if user_systemd && [[ -f "$UNITS/prostir.socket" ]]; then
         systemctl --user disable --now prostir.socket 2>/dev/null || true
     fi
-    rm -f "$BIN/prostir" "$BIN/prostir-settings" "$ICON" "$DESKTOP" "$SETTINGS_DESKTOP" "$AUTOSTART"
+    rm -f "$BIN/prostir" "$ICON" "$DESKTOP" "$AUTOSTART" "${OLD[@]}"
     rm -f "$UNITS/prostir.socket" "$UNITS/prostir.service"
     if user_systemd; then systemctl --user daemon-reload || true; fi
     rm -rf "$DOCS"
@@ -120,22 +123,16 @@ if [[ -x "$ROOT/prostir" ]]; then
     built="$ROOT"
 else
     echo ">> building"
-    (cd "$ROOT" && cargo build --release --locked -p prostir-host --bin prostir \
-        -p prostir-settings --bin prostir-settings)
+    (cd "$ROOT" && cargo build --release --locked -p prostir-host --bin prostir)
     built="$ROOT/target/release"
 fi
 assets="$ROOT/packaging"
 
+rm -f "${OLD[@]}"
 install -Dm755 "$built/prostir" "$BIN/prostir"
 install -Dm644 "$assets/prostir.svg" "$ICON"
-install -Dm644 "$assets/prostir.desktop" "$DESKTOP"
-sed -i "s|^Exec=.*|Exec=$(sed_text "$(desktop_arg "$BIN/prostir") open")|" "$DESKTOP"
-# Archives made before the settings window existed have no prostir-settings.
-if [[ -x "$built/prostir-settings" ]]; then
-    install -Dm755 "$built/prostir-settings" "$BIN/prostir-settings"
-    install -Dm644 "$assets/$SETTINGS_ID.desktop" "$SETTINGS_DESKTOP"
-    sed -i "s|^Exec=.*|Exec=$(sed_text "$(desktop_arg "$BIN/prostir-settings")")|" "$SETTINGS_DESKTOP"
-fi
+install -Dm644 "$assets/$APP_ID.desktop" "$DESKTOP"
+sed -i "s|^Exec=.*|Exec=$(sed_text "$(desktop_arg "$BIN/prostir")")|" "$DESKTOP"
 # Archives made before Prostir could sleep until the headset comes have no units.
 if [[ -f "$assets/systemd/prostir.socket" ]]; then
     install -Dm644 "$assets/systemd/prostir.socket" "$UNITS/prostir.socket"
@@ -166,9 +163,11 @@ elif (( autostart )) && user_systemd && [[ -f "$UNITS/prostir.socket" ]]; then
     systemctl --user enable prostir.socket
     echo "   From the next login it starts when the headset comes. Turn that off in the tray: \"Start with the system\"."
 elif (( autostart )); then
-    install -Dm644 "$DESKTOP" "$AUTOSTART"
-    sed -i "s|^Exec=.*|Exec=$(sed_text "$(desktop_arg "$BIN/prostir") serve")|" "$AUTOSTART"
-    echo "X-KDE-autostart-phase=2" >> "$AUTOSTART"
+    mkdir -p "$(dirname "$AUTOSTART")"
+    printf '%s\n' "[Desktop Entry]" "Type=Application" "Name=Prostir" \
+        "Comment=Virtual monitors for Meta Quest" \
+        "Exec=$(desktop_arg "$BIN/prostir") serve" "Icon=prostir" "Terminal=false" \
+        "X-KDE-autostart-phase=2" > "$AUTOSTART"
     echo "   It starts when you log in. Turn that off in the tray: \"Start with the system\"."
 elif [[ -f "$AUTOSTART" ]] || { user_systemd && systemctl --user -q is-enabled prostir.socket 2>/dev/null; }; then
     echo "   It starts when you log in (tray: \"Start with the system\")."

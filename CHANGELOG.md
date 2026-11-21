@@ -112,7 +112,7 @@
   headset connects, asks for the PC or is plugged in by USB. Turning it on enables
   the socket and removes the autostart entry of 0.1. Packages install the units and a
   preset that enables the socket for new users.
-- Without systemd, and on Hyprland (`exec-once = prostir`), `prostir` sleeps in a
+- Without systemd, and on Hyprland (`exec-once = prostir serve`), `prostir serve` sleeps in a
   small watcher that wakes for nothing (about 1 MB of its own memory) and starts the
   rest when a headset comes. A Quest plugged in by USB is noticed without waking for
   other devices. When another program holds Prostir's port, a notification and
@@ -142,8 +142,12 @@
   taken off, put on, leaving), each with `--json` and exit codes for scripts.
 - The same on D-Bus for other programs and hot keys (`io.github.OlexiyOdarchuk.Prostir`
   on the session bus, see `LOCAL-API.md`).
-- The menu entry runs `prostir open`: it starts Prostir if it is not running and opens
-  the settings window; the tray has "Settings…" too. `prostir` alone works as before.
+- One program, `prostir`, with one menu entry: `prostir` opens the settings window and
+  starts Prostir in the background if it is not running; the tray has "Settings…" too.
+  `prostir serve` runs it in the background, as autostart and systemd start it: on
+  Hyprland, change `exec-once = prostir` to `exec-once = prostir serve`. The window is
+  a process of its own, so the background part never loads the window's libraries
+  and a window that crashes takes nothing else down.
 
 ### Sound
 

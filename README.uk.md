@@ -340,11 +340,11 @@ sudo firewall-cmd --add-port=47830/tcp --add-port=47831/udp --permanent \
   `PATH` Hyprland:
   ```lua
   -- hyprland.lua
-  hl.on("hyprland.start", function () hl.exec_cmd("~/.local/bin/prostir") end)
+  hl.on("hyprland.start", function () hl.exec_cmd("~/.local/bin/prostir serve") end)
   ```
   ```ini
   # hyprland.conf
-  exec-once = ~/.local/bin/prostir   # або просто "prostir", якщо ставили пакет
+  exec-once = ~/.local/bin/prostir serve   # або просто "prostir serve", якщо ставили пакет
   ```
 - **Дозволи.** Якщо ввімкнено `ecosystem:enforce_permissions`, дозвольте Prostir
   захоплювати екран:
@@ -495,14 +495,17 @@ Wi-Fi і дає найстабільнішу картинку. Для нього
 ### Командний рядок
 
 ```
-prostir [serve] [--monitor WxH[@scale]]... [--codec h265|h264] [--bitrate MBPS] [--software]
-        [--keep-primary] [--linger SECONDS] [--port PORT] [--no-discovery] [--no-adb]
-prostir open
+prostir
+prostir serve [--monitor WxH[@scale]]... [--codec h265|h264] [--bitrate MBPS] [--software]
+              [--keep-primary] [--linger SECONDS] [--port PORT] [--no-discovery] [--no-adb]
 prostir ctl КОМАНДА [--json]
 ```
 
-`prostir` (чи `prostir serve`) запускає Prostir. `prostir open`, який запускає значок у
-меню, відкриває вікно налаштувань, а якщо Prostir не працює, спершу запускає його.
+`prostir`, який запускає значок у меню, відкриває вікно налаштувань, а якщо Prostir не
+працює, спершу запускає його у фоні. `prostir serve` запускає Prostir у фоні (так його
+запускають автозапуск, systemd і `exec-once` у Hyprland). Вікно працює окремим
+процесом, тож фонова частина ніколи не завантажує бібліотек вікна. `-v` чи `--version`
+з будь-якою командою показує версію.
 
 `prostir ctl` звертається до Prostir, що працює, з термінала, скрипту чи гарячої
 клавіші (комбінації клавіш KDE, `bind` у Hyprland): `prostir ctl recenter`, `prostir
@@ -716,7 +719,7 @@ crates/layout/    де стоять монітори: правила розкл�
 crates/api/       типи локального API, спільні для програми на ПК і її клієнтів
 crates/lang/      переклади як дані (Fluent)
 crates/host/      програма для ПК: віртуальні виходи, кодери, звук, трей, пошук
-crates/settings/  вікно налаштувань на ПК (prostir-settings)
+crates/settings/  вікно налаштувань на ПК (бібліотека prostir: prostir window)
 crates/client/    застосунок для Quest: цикл OpenXR (app.rs), меню (ui.rs), розкладки (layout.rs), …
 crates/testkit/   фальшивий шолом для тестів і для перевірки програми на ПК вручну
 scripts/  build-apk.sh, install.sh, package-release.sh, third-party-licenses.py

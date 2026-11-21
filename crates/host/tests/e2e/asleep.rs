@@ -344,7 +344,7 @@ fn the_watcher_sleeps_until_a_headset_comes() {
     // Its own headset asks: answered, and the full program starts ahead.
     assert!(asks(to, &keys, "").is_some());
     pc.wait_log(SOON, "starting Prostir: Headset");
-    // `prostir open` while it starts (not on the bus yet): the watcher passes the wish
+    // `prostir` while it starts (not on the bus yet): the watcher passes the wish
     // for the window on, and the program takes it once it can.
     // SAFETY: a signal to the PC app's own process.
     unsafe { libc::kill(pc.pid() as libc::pid_t, libc::SIGUSR1) };
