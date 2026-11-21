@@ -6,13 +6,16 @@
 //! waits for a request's answer, the 30 s limit, a disconnect, and a profile that
 //! places its monitors by their numbers or, failing that, within a time limit.
 
+#![forbid(unsafe_code)]
+
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use prostir_proto::request::Outcome;
 use prostir_proto::state::ReqId;
 
-use crate::layout::{Placement, ScreenId};
+use crate::ids::DisplayKey;
+use crate::layout::Placement;
 use crate::ui::{AskState, AskView, Asked, Failure};
 
 /// A request without an answer for this long counts as failed (a late answer is let go).
@@ -171,12 +174,11 @@ impl Asks {
 pub struct ProfileSwitch {
     pub req: ReqId,
     pub places: Vec<Placement>,
-    /// What the places were laid out around and the rows they were in, as the
-    /// profile keeps them (see `profiles::Profile`).
-    pub center: Option<(glam::Vec3, f32)>,
-    pub radius: Option<f32>,
+    /// The frame the places are in (none: in the room) and the rows they were in, as
+    /// the profile keeps them (see `profiles::Profile`).
+    pub frame: Option<crate::profiles::ProfileFrame>,
     pub rows: Vec<Vec<usize>>,
-    pub ids: Option<Vec<ScreenId>>,
+    pub ids: Option<Vec<DisplayKey>>,
     /// Until when it waits for its monitors to stream, once the PC made them.
     pub until: Option<Instant>,
 }
@@ -185,9 +187,9 @@ pub struct ProfileSwitch {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Made {
     /// Each monitor at its place, now.
-    Places(Vec<(ScreenId, Placement)>),
-    /// The profile has no place for each (from before 0.2.0, a starting point,
-    /// cinema): laid out by its preset once they stream (see [`ProfileSwitch::stands`]).
+    Places(Vec<(DisplayKey, Placement)>),
+    /// The profile has no place for each (saved before they all had one): laid out by
+    /// the preset once they stream (see [`ProfileSwitch::stands`]).
     Wait,
 }
 
@@ -196,8 +198,7 @@ impl ProfileSwitch {
         Self {
             req,
             places,
-            center: None,
-            radius: None,
+            frame: None,
             rows: Vec::new(),
             ids: None,
             until: None,
@@ -206,7 +207,7 @@ impl ProfileSwitch {
 
     /// The PC answered with the monitors' numbers (`ids`, in the order of the
     /// profile's sizes), at `now`.
-    pub fn made(&mut self, ids: Vec<ScreenId>, now: Instant) -> Made {
+    pub fn made(&mut self, ids: Vec<DisplayKey>, now: Instant) -> Made {
         if self.places.len() == ids.len() {
             return Made::Places(ids.into_iter().zip(self.places.clone()).collect());
         }
@@ -218,7 +219,7 @@ impl ProfileSwitch {
     /// Whether to lay it out now: once every monitor it made has `settled` (streams,
     /// or failed and keeps its place), or once [`PROFILE_STANDS_WITHIN`] passed, with
     /// what streams then.
-    pub fn stands(&self, now: Instant, settled: impl Fn(ScreenId) -> bool) -> bool {
+    pub fn stands(&self, now: Instant, settled: impl Fn(DisplayKey) -> bool) -> bool {
         let Some(ids) = &self.ids else {
             return false;
         };
@@ -330,6 +331,10 @@ mod tests {
         ));
     }
 
+    fn key(n: u32) -> DisplayKey {
+        DisplayKey::new(crate::ids::PcId([1; 8]), prostir_proto::state::DisplayId(n))
+    }
+
     fn place(x: f32) -> Placement {
         Placement {
             position: glam::Vec3::new(x, 0.0, -1.0),
@@ -346,8 +351,8 @@ mod tests {
         let mut switch = ProfileSwitch::new(ReqId(4), vec![place(-1.0), place(1.0)]);
         assert!(!switch.stands(t, |_| true), "not made yet");
         assert_eq!(
-            switch.made(vec![107, 103], t),
-            Made::Places(vec![(107, place(-1.0)), (103, place(1.0))])
+            switch.made(vec![key(107), key(103)], t),
+            Made::Places(vec![(key(107), place(-1.0)), (key(103), place(1.0))])
         );
     }
 
@@ -357,8 +362,8 @@ mod tests {
     fn a_profile_without_places_stands_in_time() {
         let t = Instant::now();
         let mut switch = ProfileSwitch::new(ReqId(4), Vec::new());
-        assert_eq!(switch.made(vec![107, 103], t), Made::Wait);
-        let only_107 = |id: ScreenId| id == 107;
+        assert_eq!(switch.made(vec![key(107), key(103)], t), Made::Wait);
+        let only_107 = |id: DisplayKey| id == key(107);
         assert!(!switch.stands(t + Duration::from_secs(1), only_107));
         assert!(switch.stands(t + Duration::from_secs(1), |_| true));
         assert!(

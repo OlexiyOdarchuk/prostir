@@ -1,6 +1,8 @@
 //! The floating menu panel. It is drawn on the CPU into an RGBA image and only
 //! re-uploaded when something changes (hover, a click, news from the host).
 
+#![forbid(unsafe_code)]
+
 use std::collections::HashMap;
 
 use fontdue::{Font, FontSettings, Metrics};
@@ -8,9 +10,8 @@ use prostir_proto::Codec;
 use prostir_proto::state::{Encoding, ErrorCode, Limits};
 use tiny_skia::{FillRule, Paint, Path, PathBuilder, Pixmap, Rect, Stroke, Transform};
 
+use crate::ids::DisplayKey;
 use crate::lang::{Language, Moment, Texts};
-use crate::layout::ScreenId;
-use crate::profiles::Profile;
 use crate::settings::{Background, Curve, HandMode, Preset, Settings, Sky};
 use crate::store::UpdateHint;
 
@@ -42,7 +43,7 @@ pub struct EncodingChange {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MonitorEntry {
-    pub id: ScreenId,
+    pub id: DisplayKey,
     /// What the user reads for it (see [`display_label`]); never the id.
     pub label: String,
     pub width: u32,
@@ -129,10 +130,12 @@ pub struct UiState {
     /// Quest monitors, sorted by id.
     pub monitors: Vec<MonitorEntry>,
     /// The monitor picked on the map (its actions show under it).
-    pub selected: Option<ScreenId>,
+    pub selected: Option<DisplayKey>,
     /// The laptop screen on the map: centre and half size as seen, in radians.
     pub mirror_seen: Option<[f32; 4]>,
-    pub primary: Option<ScreenId>,
+    pub primary: Option<DisplayKey>,
+    /// The screen picked for cinema (see `layout::cinema_choice`).
+    pub cinema_screen: Option<DisplayKey>,
     pub mirror_wanted: bool,
     /// PC sound goes to the headset.
     pub audio_wanted: bool,
@@ -169,7 +172,7 @@ pub struct UiState {
     pub keyboard_available: bool,
     pub error: Option<String>,
     /// Monitor whose "×" was pressed once and now asks for confirmation.
-    pub confirm_remove: Option<ScreenId>,
+    pub confirm_remove: Option<DisplayKey>,
     /// A profile whose "Save current" was pressed once (press again to overwrite).
     pub confirm_save: Option<usize>,
     pub tab: Tab,
@@ -185,7 +188,8 @@ pub struct UiState {
     pub update: Option<(bool, String)>,
     /// Where this build of the headset app is updated (from its store).
     pub update_from: UpdateHint,
-    pub profiles: Vec<Profile>,
+    /// Which profile slots hold a saved profile (the others are empty).
+    pub saved_profiles: [bool; crate::profiles::SLOTS],
     /// The profile last switched to (until something is changed by hand).
     pub active_profile: Option<usize>,
     /// What the menu asked the PC for and has no answer to yet, or that failed lately:
@@ -197,8 +201,8 @@ pub struct UiState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Asked {
     AddMonitor,
-    Remove(ScreenId),
-    MakePrimary(ScreenId),
+    Remove(DisplayKey),
+    MakePrimary(DisplayKey),
     Mirror,
     Sound,
     Encoding,
@@ -345,11 +349,11 @@ pub enum Action {
         width: u32,
         height: u32,
     },
-    Remove(ScreenId),
-    MakePrimary(ScreenId),
+    Remove(DisplayKey),
+    MakePrimary(DisplayKey),
     /// Move a monitor left (-1) or right (+1) in the row.
     Move {
-        id: ScreenId,
+        id: DisplayKey,
         delta: i32,
     },
     SetMirror(bool),
@@ -363,7 +367,7 @@ pub enum Action {
     KeyboardWindow(bool),
     Cinema(bool),
     /// Which monitor (position in the row) cinema mode shows.
-    CinemaScreen(u8),
+    CinemaScreen(DisplayKey),
     ApplyProfile(usize),
     SaveProfile(usize),
     Tab(Tab),
@@ -406,9 +410,9 @@ pub enum Action {
     /// Save a picture of the monitor in front on the PC.
     Screenshot,
     /// Close a window panel (its window goes back to the monitors).
-    CloseWindow(ScreenId),
+    CloseWindow(DisplayKey),
     /// Pick a monitor on the map.
-    SelectMonitor(ScreenId),
+    SelectMonitor(DisplayKey),
     /// What the A button does: take the seams out of the arrangement.
     Tidy,
     /// Open the main menu (from the wrist menu).
@@ -2044,12 +2048,12 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
     );
     // The cinema screen can be picked before switching to cinema.
     if s.monitors.len() > 1 {
-        let sizes: Vec<(ScreenId, u32, u32)> = s
+        let sizes: Vec<(DisplayKey, u32, u32)> = s
             .monitors
             .iter()
             .map(|m| (m.id, m.width, m.height))
             .collect();
-        let shown = crate::layout::cinema_choice(&sizes, st.cinema_screen);
+        let shown = crate::layout::cinema_choice(&sizes, s.cinema_screen);
         let short = s.monitors.len() > 3;
         let labels: Vec<String> = s
             .monitors
@@ -2071,11 +2075,10 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
             s.monitors
                 .iter()
                 .zip(&labels)
-                .enumerate()
-                .map(|(i, (m, label))| {
+                .map(|(m, label)| {
                     (
                         label.as_str(),
-                        Action::CinemaScreen(i as u8),
+                        Action::CinemaScreen(m.id),
                         shown == Some(m.id),
                         true,
                     )
@@ -2463,25 +2466,24 @@ fn build_quick(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
     let connected = s.host.is_some();
     items.push(text(x, y + 14.0, 21.0, true, SECTION, l.t("profile")));
     y += 32.0;
-    let names = [
-        l.t("profile-work"),
-        l.t("profile-cinema"),
-        l.t("layout-lying"),
-    ];
     let cw = (w - 2.0 * 12.0) / 3.0;
-    for (i, name) in names.iter().enumerate() {
+    for (i, saved) in s.saved_profiles.iter().enumerate() {
         let r = rect(x + i as f32 * (cw + 12.0), y, cw, 72.0);
         let active = s.active_profile == Some(i);
-        let style = match (connected, active) {
+        let style = match (connected && *saved, active) {
             (false, _) => Style::Disabled,
             (true, true) => Style::Selected,
             (true, false) => Style::Normal,
         };
-        let action = (connected && !active).then_some(Action::ApplyProfile(i));
-        items.push(button(r, name, style, action));
+        let action = (connected && *saved && !active).then_some(Action::ApplyProfile(i));
+        let name = l.f("profile-n", &[("n", (i + 1).into())]);
+        items.push(button(r, &name, style, action));
         if let Some((note, failed)) = s.ask_note(Asked::Profile(i)) {
             let color = if failed { DANGER } else { MUTED };
             items.push(text(r.left(), r.bottom() + 22.0, 17.0, false, color, &note));
+        } else if !saved {
+            let empty = l.t("profile-empty");
+            items.push(text(r.left(), r.bottom() + 22.0, 17.0, false, MUTED, empty));
         }
     }
     y += 72.0 + 40.0;
@@ -2594,25 +2596,26 @@ fn save_as_profile(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f3
     let l = &s.texts;
     items.push(text(x, y, 21.0, true, SECTION, l.t("profile-save")));
     y += 18.0;
-    let names = [
-        l.t("profile-work"),
-        l.t("profile-cinema"),
-        l.t("layout-lying"),
-    ];
     let bw = (w - 2.0 * 10.0) / 3.0;
-    for (i, name) in names.iter().enumerate() {
+    // Something to save: the PC's monitors.
+    let can = s.host.is_some() && !s.monitors.is_empty();
+    for i in 0..s.saved_profiles.len() {
         let armed = s.confirm_save == Some(i);
-        let label = if armed { l.t("profile-replace") } else { name };
-        let style = match (s.host.is_some(), armed) {
+        let label = if armed {
+            l.t("profile-replace").to_owned()
+        } else {
+            l.f("profile-n", &[("n", (i + 1).into())])
+        };
+        let style = match (can, armed) {
             (false, _) => Style::Disabled,
             (true, true) => Style::Armed,
             (true, false) => Style::Normal,
         };
         items.push(button(
             rect(x + i as f32 * (bw + 10.0), y, bw, 48.0),
-            label,
+            &label,
             style,
-            s.host.is_some().then_some(Action::SaveProfile(i)),
+            can.then_some(Action::SaveProfile(i)),
         ));
     }
 }
@@ -3396,6 +3399,11 @@ fn fill(pixmap: &mut Pixmap, path: Option<Path>, [r, g, b, a]: [u8; 4]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Display `n` of the one PC of these tests.
+    fn k(n: u32) -> DisplayKey {
+        DisplayKey::new(crate::ids::PcId([7; 8]), prostir_proto::state::DisplayId(n))
+    }
     use crate::store::{NoStore, Store as _};
 
     /// What a PC with an H.265 decoder on the headset offers.
@@ -3473,7 +3481,7 @@ mod tests {
             date: "Wed, Nov 18".into(),
             confirm_forget: Some(1),
             windows: vec![MonitorEntry {
-                id: 110,
+                id: k(110),
                 label: "5".into(),
                 width: 1200,
                 height: 800,
@@ -3485,7 +3493,7 @@ mod tests {
             ip_input: None,
             monitors: vec![
                 MonitorEntry {
-                    id: 101,
+                    id: k(101),
                     label: "1".into(),
                     width: 2560,
                     height: 1440,
@@ -3493,7 +3501,7 @@ mod tests {
                     seen: Some([-1.0, 0.0, 0.5, 0.28]),
                 },
                 MonitorEntry {
-                    id: 102,
+                    id: k(102),
                     label: "2".into(),
                     width: 2560,
                     height: 1440,
@@ -3501,7 +3509,7 @@ mod tests {
                     seen: Some([0.0, 0.0, 0.5, 0.28]),
                 },
                 MonitorEntry {
-                    id: 103,
+                    id: k(103),
                     label: "4".into(),
                     width: 1440,
                     height: 2560,
@@ -3511,7 +3519,8 @@ mod tests {
             ],
             selected: None,
             mirror_seen: Some([0.0, -0.55, 0.35, 0.22]),
-            primary: Some(102),
+            primary: Some(k(102)),
+            cinema_screen: None,
             mirror_wanted: true,
             audio_wanted: true,
             mic_wanted: true,
@@ -3532,9 +3541,7 @@ mod tests {
             intro: false,
             update: None,
             update_from: NoStore.update_hint(),
-            profiles: (0..crate::profiles::SLOTS)
-                .map(Profile::default_for)
-                .collect(),
+            saved_profiles: [true, false, true],
             active_profile: None,
             asks: Vec::new(),
         }
@@ -3560,7 +3567,7 @@ mod tests {
         };
         let mut seen_labels = false;
         for tab in [Tab::Quick, Tab::Monitors, Tab::Settings(Section::Look)] {
-            for selected in [None, Some(101), Some(103)] {
+            for selected in [None, Some(k(101)), Some(k(103))] {
                 for cinema in [false, true] {
                     let mut s = sample_state();
                     s.tab = tab;
@@ -3568,7 +3575,7 @@ mod tests {
                     s.settings.cinema = cinema;
                     // The fourth one, off the map, shows as a small button.
                     s.monitors.push(MonitorEntry {
-                        id: 107,
+                        id: k(107),
                         label: "6".into(),
                         seen: None,
                         ..s.monitors[0].clone()
@@ -3720,7 +3727,7 @@ mod tests {
                 st.texts = lang.clone();
                 st.tab = tab;
                 states.push(st.clone());
-                st.confirm_remove = Some(103);
+                st.confirm_remove = Some(k(103));
                 st.settings.cinema = true;
                 st.settings.focus = true;
                 st.mic_wanted = false;
@@ -3738,8 +3745,8 @@ mod tests {
                 );
                 let every = [
                     Asked::AddMonitor,
-                    Asked::Remove(102),
-                    Asked::MakePrimary(103),
+                    Asked::Remove(k(102)),
+                    Asked::MakePrimary(k(103)),
                     Asked::Mirror,
                     Asked::Sound,
                     Asked::Encoding,
@@ -3791,7 +3798,7 @@ mod tests {
                 // Six monitors.
                 st.monitors = (0..6)
                     .map(|id| MonitorEntry {
-                        id,
+                        id: k(id),
                         label: (id + 1).to_string(),
                         width: 3440,
                         height: 1440,
@@ -3925,19 +3932,18 @@ mod tests {
     /// mapped the way the headset maps them, drawn with each monitor picked in turn.
     fn pick_each(
         panel: &mut Panel,
-        monitors: &[(ScreenId, u32, u32, f32, f32)],
+        monitors: &[(u32, u32, u32, f32, f32)],
         mirror: Option<(f32, f32)>,
-        primary: ScreenId,
+        primary: u32,
     ) {
         use crate::layout::{Desktop, Placement};
-        use crate::settings::Preset;
         use glam::{Quat, Vec3};
         /// The laptop screen's number in these tests.
-        const MIRROR_ID: ScreenId = 100;
+        const MIRROR_ID: u32 = 100;
         const METRES_PER_PX: f32 = 0.0003;
         let mirror = mirror.map(|(x, y)| (MIRROR_ID, 1920, 1080, x, y));
         let all: Vec<_> = monitors.iter().copied().chain(mirror).collect();
-        let placements: HashMap<ScreenId, Placement> = all
+        let placements: HashMap<u32, Placement> = all
             .iter()
             .map(|&(id, w, _, x, y)| {
                 let place = Placement {
@@ -3948,26 +3954,17 @@ mod tests {
                 (id, place)
             })
             .collect();
-        let sizes: Vec<(ScreenId, u32, u32)> =
-            all.iter().map(|&(id, w, h, ..)| (id, w, h)).collect();
+        let sizes: Vec<(u32, u32, u32)> = all.iter().map(|&(id, w, h, ..)| (id, w, h)).collect();
         let center = (Vec3::ZERO, 0.0);
-        let spots = Desktop::of(
-            &placements,
-            &sizes,
-            center,
-            Preset::Arc,
-            Some(primary),
-            None,
-        )
-        .spots();
+        let spots = Desktop::of(&placements, &sizes, center, 0.0, Some(primary), None).spots();
         let mut st = sample_state();
         st.tab = Tab::Monitors;
-        st.primary = Some(primary);
+        st.primary = Some(k(primary));
         st.mirror_seen = spots.get(&MIRROR_ID).copied();
         st.monitors = monitors
             .iter()
             .map(|&(id, width, height, ..)| MonitorEntry {
-                id,
+                id: k(id),
                 label: (id + 1).to_string(),
                 width,
                 height,
@@ -3975,7 +3972,7 @@ mod tests {
                 seen: spots.get(&id).copied(),
             })
             .collect();
-        for selected in std::iter::once(None).chain(monitors.iter().map(|m| Some(m.0))) {
+        for selected in std::iter::once(None).chain(monitors.iter().map(|m| Some(k(m.0)))) {
             st.selected = selected;
             panel.set_state(&st);
             // Every shape is still made, only next to no pixels are filled: fast.
@@ -4002,7 +3999,7 @@ mod tests {
             .enumerate()
             .map(|(id, &(w, h, x, y))| {
                 let centre = |at: i32, size: u32| (at + size as i32 / 2) as f32;
-                (id as ScreenId, w, h, centre(x, w), centre(y, h))
+                (id as u32, w, h, centre(x, w), centre(y, h))
             })
             .collect();
         let laptop = Some((192.0 + 960.0, 3840.0 + 540.0));
@@ -4039,7 +4036,7 @@ mod tests {
         for _ in 0..500 {
             // Centres (pixels) all within a few pixels, near each other, or far apart.
             let spread = [1, 2_000, 20_000, 2_000_000][rng.below(4) as usize];
-            let count = 1 + rng.below(6) as ScreenId;
+            let count = 1 + rng.below(6) as u32;
             let monitors: Vec<_> = (0..count)
                 .map(|id| {
                     let (w, h) = SIZES[rng.below(5) as usize];
@@ -4047,7 +4044,7 @@ mod tests {
                 })
                 .collect();
             let laptop = (rng.below(2) == 0).then(|| (rng.within(spread), rng.within(spread)));
-            let primary = rng.below(u64::from(count)) as ScreenId;
+            let primary = rng.below(u64::from(count)) as u32;
             pick_each(&mut panel, &monitors, laptop, primary);
         }
     }

@@ -1005,7 +1005,7 @@ never used.
 | `kind` | Command | Fields | What the headset does |
 |---:|---|---|---|
 | 1 | `Recenter` | | Brings everything in front of the user. |
-| 2 | `Profile` | `name:str(64)` | Switches to the profile of this name (`NO_SUCH_PROFILE`); answers once it is in place. |
+| 2 | `Profile` | `name:str(64)` | Switches to a profile: `name` is the profile's number, 1 to 3, as the headset menu shows it (`NO_SUCH_PROFILE`); answers once it is in place. |
 | 3 | `Cinema` | `on:bool` | Cinema mode. |
 | 4 | `FocusMode` | `on:bool` | "Focus" (changes `Prefs`). |
 | 5 | `Distance` | `steps:i8` | Closer (below 0) or further. |
@@ -1041,7 +1041,7 @@ version. The headset shows its own text for a code it knows, in its language, wi
 | 10 | `CAPTURE` | The picture of a display could not be taken. |
 | 11 | `SOUND` | Sound could not be routed. |
 | 12 | `NOT_ON_DISPLAYS` | The mouse is on none of the displays. |
-| 13 | `NO_SUCH_PROFILE` | The headset has no profile of that name. |
+| 13 | `NO_SUCH_PROFILE` | No profile saved in that slot. |
 | 14 | `BAD_ARGUMENT` | An argument out of range. |
 
 ## 6. Streams, sound and microphone

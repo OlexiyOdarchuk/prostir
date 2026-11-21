@@ -134,7 +134,10 @@ pub fn parse(args: &[String]) -> Result<(Ctl, bool), String> {
             takes = rest.len();
             let name = rest.join(" ");
             if name.is_empty() {
-                Err("expected a profile's name".to_owned())
+                Err(
+                    "expected the profile's number, 1 to 3, as the headset menu shows it"
+                        .to_owned(),
+                )
             } else {
                 ask(Request::Profile { name })
             }
@@ -319,7 +322,7 @@ prostir ctl COMMAND [--json]
   status                         what Prostir is doing
   watch                          what happens, a line each, until Ctrl+C
   recenter | lineup | showmouse | reset
-  profile NAME
+  profile N                      the profile's number, 1 to 3, as the headset menu shows it
   cinema | focus | follow | mic | nolimits  on|off
   closer [N] | farther [N]
   preset N

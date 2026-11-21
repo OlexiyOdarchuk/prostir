@@ -27,6 +27,7 @@ const OTHER_CODE: &[(&str, &str)] = &[
     ("decoder.rs", include_str!("../src/decoder.rs")),
     ("device.rs", include_str!("../src/device.rs")),
     ("egl.rs", include_str!("../src/egl.rs")),
+    ("ids.rs", include_str!("../src/ids.rs")),
     ("input.rs", include_str!("../src/input.rs")),
     ("layout.rs", include_str!("../src/layout.rs")),
     ("lib.rs", include_str!("../src/lib.rs")),

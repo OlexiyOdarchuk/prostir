@@ -105,8 +105,8 @@ intro-done = Зрозуміло
 ## Швидке
 
 profile = Профіль
-profile-work = Робота
-profile-cinema = Кіно
+profile-n = Профіль { $n }
+profile-empty = Порожній
 layout-lying = Лежачи
 quick-in-front = Перед собою
 quick-in-front-state = Повернути все до себе
@@ -315,7 +315,7 @@ failure-encoder = Кодувальник ПК не запустився
 failure-capture = Зображення не знято
 failure-sound = Звук не перемкнувся
 failure-not-on-displays = Миша не на моніторах
-failure-no-such-profile = Немає такого профілю
+failure-no-such-profile = У цьому слоті немає збереженого профілю
 failure-bad-argument = Неправильне значення
 
 ## Дата й 12-годинний годинник на долоні

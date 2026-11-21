@@ -3,10 +3,11 @@
 //! laptop's panel, a monitor whose cable is out) is never the one: showing it would
 //! show nothing.
 
-use prostir_proto::state::{Display, DisplayKind, DisplayState, Displays};
+#![forbid(unsafe_code)]
+
+use prostir_proto::state::{Display, DisplayId, DisplayKind, DisplayState, Displays};
 
 use crate::lang::Texts;
-use crate::layout::ScreenId;
 
 /// Connected now, so showing it shows something.
 fn connected(d: &Display) -> bool {
@@ -16,12 +17,12 @@ fn connected(d: &Display) -> bool {
 /// The display of the PC the headset shows for the switch's sake: a shown one that is
 /// connected, else a shown one that is not (its place is kept while the lid is
 /// closed).
-pub fn mirror(displays: &Displays) -> Option<ScreenId> {
+pub fn mirror(displays: &Displays) -> Option<DisplayId> {
     let shown = || displays.displays.iter().filter(|d| d.is_shown_physical());
     shown()
         .find(|d| connected(d))
         .or_else(|| shown().next())
-        .map(|d| d.id.0)
+        .map(|d| d.id)
 }
 
 /// The display of the PC the switch shows or hides, among those connected now: one
@@ -53,7 +54,7 @@ pub fn label(d: &Display, l: &Texts) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use prostir_proto::state::{DisplayId, Mode};
+    use prostir_proto::state::Mode;
 
     fn physical(id: u32, connector: &str, builtin: bool, shown: bool, here: bool) -> Display {
         Display {
@@ -117,8 +118,12 @@ mod tests {
             Some(1),
         );
         assert_eq!(switch(&shown).map(|d| d.id.0), Some(117));
-        assert_eq!(mirror(&shown), Some(117), "the connected one first");
-        assert_eq!(mirror(&hidden), Some(100), "its place kept");
+        assert_eq!(
+            mirror(&shown),
+            Some(DisplayId(117)),
+            "the connected one first"
+        );
+        assert_eq!(mirror(&hidden), Some(DisplayId(100)), "its place kept");
         assert_eq!(
             label(switch(&shown).unwrap(), &crate::lang::builtin("uk")),
             "Екран HDMI-A-1",

@@ -3,6 +3,8 @@
 //! headset's microphone switch is not among them: only the user changes it, in the
 //! headset (kind 9, which once set it, is retired and answered `UNSUPPORTED`).
 
+#![forbid(unsafe_code)]
+
 use prostir_proto::request::{Asked, Command};
 use prostir_proto::state::ErrorCode;
 
@@ -53,23 +55,15 @@ pub fn what_to_do(asked: &Asked<Command>) -> Does {
     }
 }
 
-/// The profile a command names: by its name in either language, or its number from 1.
+/// The profile slot a command names: by its number from 1, as the menu shows it, also
+/// with the menu's word before it (`2`, `Profile 2`, `Профіль 2`).
 pub fn profile_named(name: &str) -> Option<usize> {
-    let name = name.trim().to_lowercase();
-    let names = [
-        ("робота", "work"),
-        ("кіно", "cinema"),
-        ("лежачи", "lying down"),
-    ];
-    names
-        .iter()
-        .position(|(uk, en)| name == *uk || name == *en)
-        .or_else(|| {
-            name.parse::<usize>()
-                .ok()
-                .filter(|n| (1..=names.len()).contains(n))
-                .map(|n| n - 1)
-        })
+    name.split_whitespace()
+        .next_back()?
+        .parse::<usize>()
+        .ok()
+        .filter(|n| (1..=crate::profiles::SLOTS).contains(n))
+        .map(|n| n - 1)
 }
 
 #[cfg(test)]
@@ -109,12 +103,19 @@ mod tests {
     fn commands_are_the_menus_actions() {
         let does = |c: Command| what_to_do(&Asked::Known(c));
         assert_eq!(does(Command::LineUp), Does::Act(Action::Tidy));
-        assert_eq!(
+        for name in [" 2 ", "Profile 2", "Профіль 2"] {
+            assert_eq!(
+                does(Command::Profile { name: name.into() }),
+                Does::Profile(1),
+                "{name}"
+            );
+        }
+        assert!(matches!(
             does(Command::Profile {
-                name: " Cinema ".into()
+                name: "Cinema".into()
             }),
-            Does::Profile(1)
-        );
+            Does::Fail(ErrorCode::NO_SUCH_PROFILE, _)
+        ));
         assert_eq!(
             does(Command::Profile { name: "3".into() }),
             Does::Profile(2)

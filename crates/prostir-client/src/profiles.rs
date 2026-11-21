@@ -1,433 +1,735 @@
-//! Profiles: a whole setup (monitors, laptop screen, layout, background, mode)
-//! switched with one press. Three slots with sensible starting points; any of them
-//! can be overwritten with the current setup.
+//! Profiles: saved arrangements, switched to with one press. A profile keeps which
+//! monitors there are (their sizes and scales, the primary one, the PC's own displays
+//! shown) and where they stand, nothing more: cinema, the background, the curve and
+//! the preset are settings over whatever profile is on, and stay as they are when one
+//! is switched to. Three slots, empty until the setup as it stands is saved into one.
 
-use glam::{Quat, Vec3};
+#![forbid(unsafe_code)]
 
-use crate::layout::{self, Placement, ScreenId};
-use crate::settings::{Background, Preset, Settings};
+use glam::Vec3;
+use prostir_layout::space::Frame;
+use prostir_proto::state::Mode;
+
+use crate::ids::{DisplayKey, PcId};
+use crate::layout::{self, Arrangement, Key, Placement};
+use crate::persist::{self, LoadError, Skipped};
 
 pub const SLOTS: usize = 3;
 /// Monitors in a profile: more than any PC makes (it answers with its own limit).
-const MAX_SIZES: usize = 10;
+const MAX_MONITORS: usize = 10;
+
+/// The slots: a profile saved in each, or none.
+pub type Slots = [Option<Profile>; SLOTS];
+
+/// No profile saved in any slot.
+pub fn empty() -> Slots {
+    std::array::from_fn(|_| None)
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Profile {
-    /// Monitor sizes, left to right.
-    pub sizes: Vec<(u32, u32)>,
-    /// Index into `sizes`.
+    /// The monitors, left to right: their sizes and scales.
+    pub monitors: Vec<Mode>,
+    /// Index into `monitors`.
     pub primary: u8,
-    pub mirror: bool,
-    /// Layout, curve, background and cinema are applied; hands and focus stay as
-    /// they are (they are habits, not part of a setup).
-    pub settings: Settings,
-    /// The eye and the yaw `places` were laid out around, and the circle they stand
-    /// on (as the desk arrangement keeps them, see `layout::Arrangement`). Profiles
-    /// saved without them have places in the room as it was then.
-    pub center: Option<(Vec3, f32)>,
-    pub radius: Option<f32>,
-    /// Where each monitor stood, by its place in `sizes`: all of them or none (a
-    /// profile from before 0.2.0, or a starting point: the preset lays them out).
+    /// The displays of the PCs themselves that were shown (a laptop's panel, say).
+    pub shown: Vec<DisplayKey>,
+    /// Where each monitor stood, by its place in `monitors`: all of them or none (saved
+    /// before every monitor had a place: the preset lays them out). With a `frame`,
+    /// in the profile's own frame; without one, in the room.
     pub places: Vec<Placement>,
-    /// The rows the PC had, top to bottom and each left to right, by place in `sizes`
-    /// (the laptop screen is not among them): which monitors stay neighbours while
-    /// they are moved about (see `prostir_layout::rows`). Empty for a profile saved
-    /// without them.
+    /// The frame `places` are in, and the circle they stand on.
+    pub frame: Option<ProfileFrame>,
+    /// The rows the PC had, top to bottom and each left to right, by place in
+    /// `monitors` (the PC's own displays are not among them): which monitors stay
+    /// neighbours while they are moved about (see `prostir_layout::rows`). Only with
+    /// places.
     pub rows: Vec<Vec<usize>>,
 }
 
-impl Profile {
-    /// Slot 0: work, 1: cinema, 2: lying down.
-    pub fn default_for(slot: usize) -> Self {
-        let mut settings = Settings::default();
-        let (sizes, primary, mirror) = match slot {
-            1 => {
-                settings.cinema = true;
-                settings.background = Background::Black;
-                (vec![(3840, 2160)], 0, false)
-            }
-            2 => {
-                settings.preset = Preset::Overhead;
-                (vec![(2560, 1440), (2560, 1440)], 0, false)
-            }
-            _ => (vec![(2560, 1440); 3], 1, true),
-        };
-        Self {
-            sizes,
-            primary,
-            mirror,
-            settings,
-            center: None,
-            radius: None,
-            places: Vec::new(),
-            rows: Vec::new(),
-        }
-    }
+/// The frame a profile's places are in: the eye at the origin, straight ahead -Z,
+/// tilted up by `tilt` (lying down the arrangement is a band overhead, seen from
+/// below), and the circle around it they stand on.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProfileFrame {
+    /// Radians.
+    pub tilt: f32,
+    pub radius: f32,
+}
 
-    /// The setup as it stands: `monitors` (number, width, height) left to right, the
-    /// `primary` one, whether the laptop screen is wanted, `settings`, and the desk
-    /// arrangement `live` with the `rows` the PC has (by number). In cinema the desk
-    /// is the one `desk` keeps in memory, kept before the cinema view replaced it.
-    pub fn of(
-        monitors: &[(ScreenId, u32, u32)],
-        primary: Option<ScreenId>,
-        mirror: bool,
-        settings: Settings,
-        live: layout::Arrangement,
-        rows: &[Vec<ScreenId>],
-        desk: &layout::Desk,
+impl Profile {
+    /// The setup as it stands: `monitors` (number, size and scale) left to right, the
+    /// `primary` one, the PC's own displays `shown`, the arrangement `live` with the
+    /// `rows` the PC has (by number), seen from its center tilted up as it is. In
+    /// cinema `desk` is the desk arrangement kept in memory before the cinema view
+    /// replaced it, and that is what is saved. Only what the file can say is kept: as
+    /// many monitors as any PC makes, places that are places (else none), a center that
+    /// is one (else the places as they are in the room).
+    pub fn of<K: Key>(
+        monitors: &[(K, Mode)],
+        primary: Option<K>,
+        shown: Vec<DisplayKey>,
+        live: &Arrangement<K>,
+        desk: Option<&Arrangement<K>>,
+        rows: &[Vec<K>],
     ) -> Self {
-        let arrangement = if settings.cinema {
-            desk.arrangement().clone()
-        } else {
-            live
-        };
+        let monitors = monitors.get(..MAX_MONITORS).unwrap_or(monitors);
+        let arrangement = desk.unwrap_or(live);
+        let center = arrangement
+            .center
+            .filter(|(eye, yaw)| eye.is_finite() && yaw.is_finite());
+        let tilt = layout::upright(arrangement.tilt);
+        let frame = center.map(|(eye, yaw)| Frame::tilted(eye, yaw, tilt));
         let places: Option<Vec<Placement>> = monitors
             .iter()
-            .map(|m| arrangement.placements.get(&m.0).copied())
+            .map(|m| {
+                let p = *arrangement.placements.get(&m.0)?;
+                let p = frame.map_or(p, |f| f.unplace(p));
+                layout::placed_well(&p).then_some(p)
+            })
             .collect();
-        let index = |id: &ScreenId| monitors.iter().position(|m| m.0 == *id);
-        let rows: Vec<Vec<usize>> = rows
-            .iter()
-            .map(|r| r.iter().filter_map(index).collect::<Vec<usize>>())
-            .filter(|r| !r.is_empty())
-            .collect();
-        let placed = places.is_some();
-        Self {
-            primary: monitors
+        let index = |id: &K| monitors.iter().position(|m| m.0 == *id);
+        let rows = match places {
+            Some(_) => rows
                 .iter()
-                .position(|m| Some(m.0) == primary)
-                .unwrap_or(0) as u8,
-            sizes: monitors.iter().map(|m| (m.1, m.2)).collect(),
-            mirror,
-            settings,
-            center: arrangement.center.filter(|_| placed),
-            radius: arrangement
-                .radius
-                .filter(|_| placed && arrangement.center.is_some()),
-            places: places.unwrap_or_default(),
-            rows: if placed { rows } else { Vec::new() },
-        }
-    }
-
-    fn parse(text: &str) -> Option<Self> {
-        let mut sizes = Vec::new();
-        let mut primary = 0;
-        let mut mirror = false;
-        let mut places: Vec<(usize, Placement)> = Vec::new();
-        let (mut center, mut radius, mut rows) = (None, None, Vec::new());
-        for line in text.lines() {
-            if let Some(c) = layout::parse_center(line) {
-                center = Some(c);
-                continue;
-            }
-            match line.split_once(' ') {
-                Some(("place", v)) => {
-                    if let Some(p) = parse_place(v) {
-                        places.push(p);
-                    }
-                }
-                Some(("monitors", list)) => {
-                    for (i, m) in list.split_whitespace().enumerate() {
-                        let m = m
-                            .strip_prefix('*')
-                            .inspect(|_| primary = i as u8)
-                            .unwrap_or(m);
-                        let (w, h) = m.split_once('x')?;
-                        sizes.push((w.parse().ok()?, h.parse().ok()?));
-                    }
-                }
-                Some(("mirror", v)) => mirror = v == "on",
-                Some(("radius", v)) => {
-                    radius = v
-                        .trim()
-                        .parse::<f32>()
-                        .ok()
-                        .filter(|r| r.is_finite() && *r > 0.1);
-                }
-                Some(("rows", v)) => rows = parse_rows(v).unwrap_or_default(),
-                _ => {}
-            }
-        }
-        // A file edited by hand may list more than any PC makes.
-        sizes.truncate(MAX_SIZES);
-        if usize::from(primary) >= sizes.len() {
-            primary = 0;
-        }
-        // A place for every monitor, or none.
-        places.sort_by_key(|p| p.0);
-        places.dedup_by_key(|p| p.0);
-        let places: Vec<Placement> = if places.iter().map(|p| p.0).eq(0..sizes.len()) {
-            places.into_iter().map(|p| p.1).collect()
-        } else {
-            Vec::new()
+                .map(|r| r.iter().filter_map(index).collect::<Vec<usize>>())
+                .filter(|r| !r.is_empty())
+                .collect(),
+            None => Vec::new(),
         };
-        // Rows of these monitors, each once, or none.
-        let mut seen: Vec<usize> = rows.iter().flatten().copied().collect();
-        seen.sort_unstable();
-        let unique = seen.windows(2).all(|w| w[0] != w[1]);
-        if places.is_empty() || !unique || seen.last().is_some_and(|&i| i >= sizes.len()) {
-            rows.clear();
-        }
-        let center = center.filter(|_| !places.is_empty());
-        (!sizes.is_empty()).then(|| Self {
-            sizes,
-            primary,
-            mirror,
-            settings: Settings::parse(text),
-            center,
-            radius: radius.filter(|_| center.is_some()),
-            places,
+        let radius = arrangement
+            .radius
+            .filter(|r| r.is_finite() && *r > 0.1)
+            .unwrap_or(layout::RADIUS);
+        Self {
+            primary: primary
+                .and_then(|p| index(&p))
+                .and_then(|i| u8::try_from(i).ok())
+                .unwrap_or(0),
+            monitors: monitors
+                .iter()
+                .map(|m| Mode {
+                    w: m.1.w.max(1),
+                    h: m.1.h.max(1),
+                    scale: m.1.scale.max(1),
+                })
+                .collect(),
+            shown,
+            frame: center
+                .filter(|_| places.is_some())
+                .map(|_| ProfileFrame { tilt, radius }),
+            places: places.unwrap_or_default(),
             rows,
-        })
+        }
     }
 
     /// The profile's section of `profiles.txt` (after its `[slot]` line), added to
     /// `out`.
     fn write_text(&self, out: &mut String) {
         use std::fmt::Write as _;
-        out.push_str("monitors ");
-        for (i, (w, h)) in self.sizes.iter().enumerate() {
-            let space = if i > 0 { " " } else { "" };
+        out.push_str("monitors");
+        for (i, m) in self.monitors.iter().enumerate() {
             let star = if i == usize::from(self.primary) {
                 "*"
             } else {
                 ""
             };
-            let _ = write!(out, "{space}{star}{w}x{h}");
+            let _ = write!(out, " {star}{}x{}", m.w, m.h);
+            if m.scale != 100 {
+                let _ = write!(out, "@{}", m.scale);
+            }
         }
-        let mirror = if self.mirror { "on" } else { "off" };
-        let _ = writeln!(out, "\nmirror {mirror}");
+        out.push('\n');
+        for k in &self.shown {
+            let _ = writeln!(out, "shown {k}");
+        }
         for (i, p) in self.places.iter().enumerate() {
-            let (a, q) = (p.position, p.rotation);
-            let _ = writeln!(
-                out,
-                "place {i} {} {} {} {} {} {} {} {}",
-                a.x, a.y, a.z, q.x, q.y, q.z, q.w, p.width
-            );
+            let _ = write!(out, "place {i}");
+            layout::write_place(out, p, None);
         }
-        // Older readers skip these lines: they are no settings of theirs.
-        if !self.places.is_empty() {
-            if let Some((eye, yaw)) = self.center {
-                let _ = writeln!(out, "center {} {} {} {yaw}", eye.x, eye.y, eye.z);
-                if let Some(r) = self.radius {
-                    let _ = writeln!(out, "radius {r}");
+        if let Some(f) = self.frame.filter(|_| !self.places.is_empty()) {
+            let _ = writeln!(out, "frame {} {}", f.tilt, f.radius);
+        }
+        if !self.rows.is_empty() {
+            out.push_str("rows ");
+            for (n, row) in self.rows.iter().enumerate() {
+                if n > 0 {
+                    out.push_str(" / ");
+                }
+                for (k, i) in row.iter().enumerate() {
+                    let space = if k > 0 { " " } else { "" };
+                    let _ = write!(out, "{space}{i}");
                 }
             }
-            if !self.rows.is_empty() {
-                out.push_str("rows ");
-                for (n, row) in self.rows.iter().enumerate() {
-                    if n > 0 {
-                        out.push_str(" / ");
-                    }
-                    for (k, i) in row.iter().enumerate() {
-                        let space = if k > 0 { " " } else { "" };
-                        let _ = write!(out, "{space}{i}");
-                    }
-                }
-                out.push('\n');
-            }
+            out.push('\n');
         }
-        self.settings.write_text(out);
     }
 }
 
+/// PC `pc` was forgotten: no profile shows its displays any more. True when one did,
+/// and `profiles.txt` is to be written.
+pub fn forget_pc(profiles: &mut Slots, pc: PcId) -> bool {
+    let mut changed = false;
+    for p in profiles.iter_mut().flatten() {
+        let before = p.shown.len();
+        p.shown.retain(|k| k.pc != pc);
+        changed |= p.shown.len() != before;
+    }
+    changed
+}
+
+/// How a line of a profile's section was taken.
+enum Took {
+    Yes,
+    /// Not a line this version knows: passed over.
+    Unknown,
+    /// A line it knows, with a value it cannot read (or a second one): the profile is
+    /// not read.
+    Bad,
+}
+
+/// A profile's lines as they are read, before they are checked together.
+#[derive(Default)]
+struct Draft {
+    monitors: Option<(Vec<Mode>, u8)>,
+    shown: Vec<DisplayKey>,
+    places: Vec<(usize, Placement)>,
+    frame: Option<ProfileFrame>,
+    rows: Option<Vec<Vec<usize>>>,
+    /// A line it knows was not read: the profile is not read.
+    bad: bool,
+}
+
+impl Draft {
+    /// Takes one line of the section.
+    fn line(&mut self, line: &str) -> Took {
+        let (word, rest) = line.split_once(' ').unwrap_or((line, ""));
+        let read = match word {
+            "monitors" => {
+                self.monitors.is_none() && {
+                    self.monitors = parse_monitors(rest);
+                    self.monitors.is_some()
+                }
+            }
+            "shown" => DisplayKey::parse(rest)
+                .filter(|k| !self.shown.contains(k))
+                .map(|k| self.shown.push(k))
+                .is_some(),
+            "place" => rest
+                .split_once(' ')
+                .and_then(|(i, p)| {
+                    Some((i.parse::<usize>().ok()?, layout::parse_place(p, false)?.0))
+                })
+                .filter(|(i, _)| !self.places.iter().any(|p| p.0 == *i))
+                .map(|place| self.places.push(place))
+                .is_some(),
+            "frame" => {
+                self.frame.is_none() && {
+                    self.frame = parse_frame(rest);
+                    self.frame.is_some()
+                }
+            }
+            "rows" => {
+                self.rows.is_none() && {
+                    self.rows = parse_rows(rest);
+                    self.rows.is_some()
+                }
+            }
+            _ => return Took::Unknown,
+        };
+        if read { Took::Yes } else { Took::Bad }
+    }
+
+    /// The profile its lines make, if they make one: its monitors (rows of monitors it
+    /// has, each once), and a place for each or none. A frame without places, or rows
+    /// without them, say nothing and go.
+    fn profile(mut self) -> Option<Profile> {
+        let (monitors, primary) = self.monitors.filter(|_| !self.bad)?;
+        let n = monitors.len();
+        self.places.sort_by_key(|p| p.0);
+        if !self.places.iter().map(|p| p.0).eq(0..n) {
+            self.places.clear();
+        }
+        let rows = self
+            .rows
+            .filter(|_| !self.places.is_empty())
+            .unwrap_or_default();
+        let mut seen: Vec<usize> = rows.iter().flatten().copied().collect();
+        seen.sort_unstable();
+        if seen.windows(2).any(|w| w[0] == w[1]) || seen.last().is_some_and(|&i| i >= n) {
+            return None;
+        }
+        Some(Profile {
+            monitors,
+            primary,
+            shown: self.shown,
+            frame: self.frame.filter(|_| !self.places.is_empty()),
+            places: self.places.into_iter().map(|p| p.1).collect(),
+            rows,
+        })
+    }
+}
+
+/// `2560x1440 *2560x1440@150 1440x2560`: the monitors left to right, the primary one
+/// starred, a scale other than 100 % after `@`.
+fn parse_monitors(text: &str) -> Option<(Vec<Mode>, u8)> {
+    let mut monitors = Vec::new();
+    let mut primary = None;
+    for (i, m) in text.split(' ').enumerate() {
+        let m = match m.strip_prefix('*') {
+            Some(m) if primary.is_none() => {
+                primary = Some(u8::try_from(i).ok()?);
+                m
+            }
+            Some(_) => return None,
+            None => m,
+        };
+        let (size, scale) = match m.split_once('@') {
+            Some((size, scale)) => (size, scale.parse::<u16>().ok().filter(|s| *s > 0)?),
+            None => (m, 100),
+        };
+        let (w, h) = size.split_once('x')?;
+        monitors.push(Mode {
+            w: w.parse().ok().filter(|w| *w > 0)?,
+            h: h.parse().ok().filter(|h| *h > 0)?,
+            scale,
+        });
+    }
+    (monitors.len() <= MAX_MONITORS).then_some(())?;
+    Some((monitors, primary?))
+}
+
+/// `tilt radius`: a tilt between straight down and straight up, a circle.
+fn parse_frame(text: &str) -> Option<ProfileFrame> {
+    let (tilt, radius) = text.split_once(' ')?;
+    Some(ProfileFrame {
+        tilt: layout::parse_tilt(tilt)?,
+        radius: layout::parse_radius(radius)?,
+    })
+}
+
+/// `0 1 2 / 3 4`: rows of places in a profile's monitors.
+fn parse_rows(text: &str) -> Option<Vec<Vec<usize>>> {
+    text.split(" / ")
+        .map(|r| {
+            r.split(' ')
+                .map(|i| i.parse().ok())
+                .collect::<Option<Vec<usize>>>()
+        })
+        .collect()
+}
+
 /// A profile's monitors once the PC made them: `made` pairs the numbers the PC gave
-/// them with the profile's places, in the order of its sizes. Each stands around the
-/// user's center `now` (eye and yaw) as it stood around `center`, the one the profile
-/// was saved with, so whatever is worked out as seen from the eye (the rows the PC gets,
-/// "Line up", "In front", the magnet) sees the profile as it was; a profile saved
-/// without one has its monitors where they were in the room. And its `rows` (by place
-/// in its sizes) by the PC's numbers.
-pub fn standing(
-    made: &[(ScreenId, Placement)],
-    center: Option<(Vec3, f32)>,
+/// them with the profile's places, in the order of its monitors. In the profile's
+/// `frame`, each stands around the user's center `now` (eye and yaw), tilted as it
+/// was, as it stood around the center it was saved with, so whatever is worked out as
+/// seen from the eye (the rows the PC gets, "Line up", "In front", the magnet) sees
+/// the profile as it was; without a frame, where it was in the room. And its `rows`
+/// (by place in its monitors) by the PC's numbers.
+pub fn standing<K: Key>(
+    made: &[(K, Placement)],
+    frame: Option<ProfileFrame>,
     rows: &[Vec<usize>],
     now: (Vec3, f32),
-) -> (Vec<(ScreenId, Placement)>, Vec<Vec<ScreenId>>) {
-    let from = center.unwrap_or(now);
+) -> (Vec<(K, Placement)>, Vec<Vec<K>>) {
+    let around = frame.map(|f| Frame::tilted(now.0, now.1, f.tilt));
     let placed = made
         .iter()
-        .map(|(id, p)| (*id, layout::carried(p, from, now)))
+        .map(|(id, p)| {
+            let mut p = around.map_or(*p, |f| f.place(*p));
+            p.rotation = p.rotation.normalize();
+            (*id, p)
+        })
         .collect();
     let rows = rows
         .iter()
         .map(|r| r.iter().filter_map(|&i| made.get(i).map(|m| m.0)).collect())
-        .filter(|r: &Vec<ScreenId>| !r.is_empty())
+        .filter(|r: &Vec<K>| !r.is_empty())
         .collect();
     (placed, rows)
 }
 
-/// `0 1 2 / 3 4`: rows of places in a profile's sizes.
-fn parse_rows(v: &str) -> Option<Vec<Vec<usize>>> {
-    v.split('/')
-        .map(|r| r.split_whitespace().map(|i| i.parse().ok()).collect())
-        .filter(|r: &Option<Vec<usize>>| r.as_ref().is_none_or(|r| !r.is_empty()))
-        .collect()
-}
-
-/// `INDEX x y z qx qy qz qw width`.
-fn parse_place(v: &str) -> Option<(usize, Placement)> {
-    let mut words = v.split_whitespace();
-    let i = words.next()?.parse().ok()?;
-    let n: Vec<f32> = words.map(|w| w.parse().ok()).collect::<Option<_>>()?;
-    let [x, y, z, qx, qy, qz, qw, width] = n[..] else {
-        return None;
-    };
-    let p = Placement {
-        position: Vec3::new(x, y, z),
-        rotation: Quat::from_xyzw(qx, qy, qz, qw).normalize(),
-        width,
-    };
-    (p.position.is_finite() && p.rotation.is_finite() && width.is_finite() && width > 0.0)
-        .then_some((i, p))
-}
-
-/// The profiles `profiles.txt` holds: `[slot]` sections in one file; a slot it does
-/// not have keeps its starting point.
-pub fn parse(text: &str) -> [Profile; SLOTS] {
-    let mut out: [Profile; SLOTS] = std::array::from_fn(Profile::default_for);
-    for section in text.split("\n[").map(|s| s.trim_start_matches('[')) {
-        let Some((slot, body)) = section.split_once("]\n") else {
-            continue;
+/// The profiles `profiles.txt` holds, by slot:
+///
+/// ```text
+/// format 2
+///
+/// [0]
+/// monitors 2560x1440 *2560x1440@150 1440x2560
+/// shown 0123456789abcdef:100
+/// place 0 -1.1 0 -0.9 0 0.38 0 0.92 0.77
+/// place 1 0 0 -1.2 0 0 0 1 0.77
+/// place 2 1 0 -0.95 0 -0.36 0 0.93 0.43
+/// frame 0 1.3
+/// rows 0 1 2
+/// ```
+///
+/// A slot that is not there is empty. A file without the format line is not read at
+/// all. Within, a line this version does not know is passed over; a profile with a
+/// line it knows but cannot read (or a second `[slot]` of the same number) is not
+/// read, and the others are. What was passed over comes back counted.
+pub fn parse(text: &str) -> Result<(Slots, Skipped), LoadError> {
+    let mut out = empty();
+    let mut skipped = Skipped::default();
+    // The section being read: its slot and the line it starts on; `None` for lines
+    // that belong to no slot that is read.
+    let mut current: Option<(usize, usize, Draft)> = None;
+    let finish =
+        |section: Option<(usize, usize, Draft)>, out: &mut Slots, skipped: &mut Skipped| {
+            if let Some((slot, n, draft)) = section {
+                match (draft.profile(), out.get_mut(slot)) {
+                    (Some(profile), Some(o)) => *o = Some(profile),
+                    _ => skipped.line(n),
+                }
+            }
         };
-        if let (Ok(i), Some(p)) = (slot.parse::<usize>(), Profile::parse(body))
-            && i < SLOTS
-        {
-            out[i] = p;
+    for (n, line) in persist::body(text)? {
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(slot) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            finish(current.take(), &mut out, &mut skipped);
+            let slot = slot
+                .parse::<usize>()
+                .ok()
+                .filter(|i| out.get(*i).is_some_and(Option::is_none));
+            match slot {
+                Some(slot) => current = Some((slot, n, Draft::default())),
+                None => skipped.line(n),
+            }
+            continue;
+        }
+        match &mut current {
+            Some((_, _, draft)) => match draft.line(line) {
+                Took::Yes => {}
+                Took::Unknown => skipped.line(n),
+                Took::Bad => draft.bad = true,
+            },
+            None => skipped.line(n),
         }
     }
-    out
+    finish(current, &mut out, &mut skipped);
+    Ok((out, skipped))
 }
 
-/// The text of `profiles.txt`, added to `out` (a buffer kept between saves).
-pub fn write_text(out: &mut String, profiles: &[Profile; SLOTS]) {
+/// The text of `profiles.txt` (see [`parse`]), added to `out` (a buffer kept between
+/// saves).
+pub fn write_text(out: &mut String, profiles: &Slots) {
     use std::fmt::Write as _;
+    persist::write_format(out);
     for (i, p) in profiles.iter().enumerate() {
-        if i > 0 {
-            out.push('\n');
+        if let Some(p) = p {
+            let _ = writeln!(out, "\n[{i}]");
+            p.write_text(out);
         }
-        let _ = writeln!(out, "[{i}]");
-        p.write_text(out);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::Curve;
+    use glam::Quat;
+    use prostir_proto::state::DisplayId;
 
-    fn text_of(profiles: &[Profile; SLOTS]) -> String {
+    fn text_of(profiles: &Slots) -> String {
         let mut text = String::new();
         write_text(&mut text, profiles);
         text
     }
 
-    /// The text is the one the app wrote before the files' writer took it over: a
-    /// profile's lines, the settings after them, an empty line between sections.
+    /// `text` read, with nothing passed over.
+    fn read(text: &str) -> Slots {
+        let (slots, skipped) = parse(text).unwrap();
+        assert!(skipped.is_empty(), "{skipped:?} in {text:?}");
+        slots
+    }
+
+    fn place(x: f32) -> Placement {
+        Placement {
+            position: Vec3::new(x, 0.5, -1.25),
+            rotation: Quat::IDENTITY,
+            width: 1.2,
+        }
+    }
+
+    fn sample() -> Profile {
+        let laptop = DisplayKey::new(PcId([0xab; 8]), DisplayId(100));
+        Profile {
+            monitors: vec![
+                Mode::new(2560, 1440),
+                Mode {
+                    scale: 150,
+                    ..Mode::new(2560, 1440)
+                },
+                Mode::new(1440, 2560),
+            ],
+            primary: 1,
+            shown: vec![laptop],
+            places: vec![place(-1.0), place(0.0), place(1.0)],
+            frame: Some(ProfileFrame {
+                tilt: 0.0,
+                radius: 1.3,
+            }),
+            rows: vec![vec![0, 1], vec![2]],
+        }
+    }
+
+    /// The text of the file: the format line, then each saved slot after an empty
+    /// line; a slot never saved is not there.
     #[test]
-    fn the_text_as_before() {
-        let mut profiles: [Profile; SLOTS] = std::array::from_fn(Profile::default_for);
-        profiles[0].places = vec![
-            Placement {
-                position: Vec3::new(-1.0, 0.5, -1.25),
-                rotation: Quat::IDENTITY,
-                width: 1.2,
-            };
-            3
-        ];
-        profiles[0].center = Some((Vec3::new(0.0, 1.5, 0.0), 0.25));
-        profiles[0].radius = Some(1.3);
-        profiles[0].rows = vec![vec![0, 1], vec![2]];
-        let text = text_of(&profiles);
-        let settings = Settings::default().to_text();
-        let cinema = Profile::default_for(1).settings.to_text();
-        let lying = Profile::default_for(2).settings.to_text();
+    fn the_text_of_the_file() {
+        let mut profiles = empty();
+        assert_eq!(text_of(&profiles), "format 2\n");
+        profiles[1] = Some(sample());
         let place = "-1 0.5 -1.25 0 0 0 1 1.2";
         assert_eq!(
-            text,
+            text_of(&profiles),
             format!(
-                "[0]\nmonitors 2560x1440 *2560x1440 2560x1440\nmirror on\n\
-                 place 0 {place}\nplace 1 {place}\nplace 2 {place}\n\
-                 center 0 1.5 0 0.25\nradius 1.3\nrows 0 1 / 2\n{settings}\n\
-                 [1]\nmonitors *3840x2160\nmirror off\n{cinema}\n\
-                 [2]\nmonitors *2560x1440 2560x1440\nmirror off\n{lying}"
+                "format 2\n\n[1]\nmonitors 2560x1440 *2560x1440@150 1440x2560\n\
+                 shown abababababababab:100\n\
+                 place 0 {place}\nplace 1 0 0.5 -1.25 0 0 0 1 1.2\nplace 2 1 0.5 -1.25 0 0 0 1 1.2\n\
+                 frame 0 1.3\nrows 0 1 / 2\n"
             )
         );
     }
 
     #[test]
     fn roundtrip() {
-        let mut profiles: [Profile; SLOTS] = std::array::from_fn(Profile::default_for);
-        profiles[2].sizes = vec![(1920, 1080), (1440, 2560), (3440, 1440)];
-        profiles[2].primary = 2;
-        profiles[2].mirror = true;
-        profiles[2].settings.curve = Curve::Strong;
-        profiles[2].places = (0..3)
-            .map(|i| Placement {
-                position: Vec3::new(i as f32, 0.5, -1.0),
+        let mut profiles = empty();
+        profiles[0] = Some(sample());
+        profiles[2] = Some(Profile {
+            monitors: vec![Mode::new(1920, 1080)],
+            primary: 0,
+            shown: Vec::new(),
+            places: vec![Placement {
+                position: Vec3::new(0.0, 0.5, -1.0),
                 rotation: Quat::from_rotation_y(0.25),
                 width: 1.2,
-            })
-            .collect();
-        profiles[2].center = Some((Vec3::new(0.3, 1.2, -0.4), -0.7));
-        profiles[2].radius = Some(1.35);
-        profiles[2].rows = vec![vec![0, 1], vec![2]];
-        let back = parse(&text_of(&profiles));
-        assert_eq!(back[..2], profiles[..2]);
-        for (a, b) in back[2].places.iter().zip(&profiles[2].places) {
-            assert!(a.position.distance(b.position) < 1e-6 && (a.width - b.width).abs() < 1e-6);
+            }],
+            frame: Some(ProfileFrame {
+                tilt: layout::OVERHEAD_PITCH,
+                radius: 1.35,
+            }),
+            rows: Vec::new(),
+        });
+        let back = read(&text_of(&profiles));
+        assert_eq!(back[0], profiles[0]);
+        assert_eq!(back[1], None);
+        let (a, b) = (back[2].as_ref().unwrap(), profiles[2].as_ref().unwrap());
+        assert!(a.places[0].rotation.angle_between(b.places[0].rotation) < 1e-4);
+        assert_eq!(a.frame, b.frame);
+        // A profile saved before its monitors had places: none, no frame, no rows.
+        let mut unplaced = sample();
+        unplaced.places.clear();
+        unplaced.rows.clear();
+        unplaced.frame = None;
+        let text = text_of(&[Some(unplaced.clone()), None, None]);
+        assert!(!text.contains("frame"));
+        assert_eq!(read(&text)[0], Some(unplaced));
+        // Places without a frame: where they were in the room.
+        let mut in_room = sample();
+        in_room.frame = None;
+        let text = text_of(&[None, Some(in_room.clone()), None]);
+        assert_eq!(read(&text)[1], Some(in_room));
+    }
+
+    /// Files of 0.1 and of the builds before this format are not read at all. Within
+    /// one, a line this version does not know is passed over and the rest read as
+    /// without it; a profile with a line it knows but cannot read is not read, and
+    /// the others are; lines before any slot, a slot twice or out of range are passed
+    /// over too. A file of another system's line ends reads the same.
+    #[test]
+    fn what_is_not_read() {
+        let old = "[0]\nmonitors 2560x1440 *1440x2560\nmirror on\npreset wall\n";
+        assert_eq!(parse(old).err(), Some(LoadError::Format));
+        assert_eq!(parse("").err(), Some(LoadError::Format));
+        let place = "0 0 -1 0 0 0 1 1.2";
+        let two = format!("monitors 2560x1440 *2560x1440\nplace 0 {place}\nplace 1 {place}\n");
+        let good = format!("{two}frame 0 1.3\n");
+        let profile = read(&format!("format 2\n[0]\n{good}"))[0].clone().unwrap();
+        // Unknown lines: passed over, the profile read as without them.
+        for extra in ["preset wall\n", "mirror on\n", "lens 2\n"] {
+            let (slots, skipped) = parse(&format!("format 2\n[0]\n{good}{extra}")).unwrap();
+            assert_eq!(slots[0].as_ref(), Some(&profile), "{extra:?}");
+            assert_eq!((skipped.count, skipped.first), (1, Some(7)), "{extra:?}");
         }
-        assert_eq!(back[2].sizes, profiles[2].sizes);
-        assert_eq!(back[2].center, profiles[2].center);
-        assert_eq!(back[2].radius, profiles[2].radius);
-        assert_eq!(back[2].rows, profiles[2].rows);
+        let crlf = format!("format 2\n[0]\n{good}").replace('\n', "\r\n");
+        assert_eq!(read(crlf.trim_end())[0].as_ref(), Some(&profile));
+        // Places that are not all there: none, laid out by the preset.
+        let one = read(&format!(
+            "format 2\n[0]\nmonitors 2560x1440 *2560x1440\nplace 0 {place}\nframe 0 1.3\n"
+        ));
+        let one = one[0].as_ref().unwrap();
+        assert!(one.places.is_empty() && one.frame.is_none());
+        // A value it cannot read: that profile only.
+        let many = ["1920x1080"; 11].join(" ");
+        for bad in [
+            "monitors 2560x1440 2560x1440\n".to_owned(),
+            "monitors *2560x1440 *2560x1440\n".to_owned(),
+            format!("monitors *{many}\n"),
+            "monitors *2560x1440@0\n".to_owned(),
+            "monitors *0x1440\n".to_owned(),
+            "monitors *2560x1440\nshown 3\n".to_owned(),
+            format!("monitors 2560x1440 *2560x1440\nplace 0 {place}\nplace 0 {place}\n"),
+            format!("monitors *2560x1440\nplace x {place}\n"),
+            format!("{good}rows 0 2\n"),
+            format!("{good}rows 0 / 0 1\n"),
+            format!("{good}rows 0 x\n"),
+            format!("{good}frame 0 1.3\n"),
+            format!("{two}frame 2 1.3\n"),
+            "shown 0123456789abcdef:3\n".to_owned(),
+        ] {
+            let text = format!("format 2\n[0]\n{bad}\n[2]\n{good}");
+            let (slots, skipped) = parse(&text).unwrap();
+            assert_eq!(slots[0], None, "{bad:?}");
+            assert_eq!(slots[2].as_ref(), Some(&profile), "{bad:?}: the other one");
+            assert_eq!(skipped.first, Some(2), "{bad:?}");
+        }
+        // Lines before any slot, a slot twice or out of range: passed over.
+        let (slots, skipped) = parse(&format!(
+            "format 2\n{good}[0]\n{good}[0]\n{good}[3]\n{good}"
+        ))
+        .unwrap();
+        assert_eq!(slots[0].as_ref(), Some(&profile));
+        assert_eq!(skipped.first, Some(2));
+        assert!(skipped.count >= 3);
     }
 
-    /// A profile never asks for more monitors than any PC makes.
+    /// A PC forgotten leaves the profiles that showed its displays, and only its own.
     #[test]
-    fn too_many_monitors_are_cut() {
-        let list = vec!["1920x1080"; 20].join(" ");
-        let p = Profile::parse(&format!("monitors {list} *640x480\n")).unwrap();
-        assert_eq!(p.sizes.len(), MAX_SIZES);
-        assert_eq!(p.primary, 0, "the primary one was cut off");
+    fn a_forgotten_pc_leaves_the_profiles() {
+        let mut profiles = empty();
+        let mut p = sample();
+        let other = DisplayKey::new(PcId([1; 8]), DisplayId(100));
+        p.shown.push(other);
+        profiles[2] = Some(p);
+        assert!(forget_pc(&mut profiles, PcId([0xab; 8])));
+        assert_eq!(profiles[2].as_ref().unwrap().shown, [other]);
+        assert!(!forget_pc(&mut profiles, PcId([0xab; 8])));
     }
 
-    /// Profiles saved by 0.1 (no places) still load, laid out by their preset; a
-    /// profile missing a place has none.
+    /// Saved in its own frame, a profile comes back around wherever the user is
+    /// then as it stood around them when it was saved, tilted or not; in cinema the
+    /// desk arrangement is saved, not the cinema view.
     #[test]
-    fn old_profiles_load() {
-        let p = Profile::parse("monitors 2560x1440 *1440x2560\nmirror on\npreset wall\n").unwrap();
-        assert!(p.places.is_empty());
-        assert_eq!(p.settings.preset, Preset::Wall);
-        let p =
-            Profile::parse("monitors 2560x1440 2560x1440\nplace 0 0 0 -1 0 0 0 1 1.2\n").unwrap();
-        assert!(p.places.is_empty(), "one of two places");
-    }
-
-    /// Rows are of the profile's monitors, each once, and only with its places; the
-    /// circle only with the center.
-    #[test]
-    fn rows_and_radius_only_as_they_belong() {
-        let places = "place 0 0 0 -1 0 0 0 1 1.2\nplace 1 1 0 -1 0 0 0 1 1.2\n";
-        let parse = |rest: &str| {
-            Profile::parse(&format!("monitors 2560x1440 2560x1440\n{places}{rest}")).unwrap()
+    fn a_profile_stands_around_the_user_as_saved() {
+        let saved_at = (Vec3::new(0.2, 1.2, -0.1), 0.4);
+        let later = (Vec3::new(-0.5, 1.0, 0.3), -1.1);
+        let monitors = [(7_u32, Mode::new(2560, 1440)), (9, Mode::new(1440, 2560))];
+        let room = [(7, place(-0.4)), (9, place(0.6))];
+        let live = Arrangement {
+            placements: room.into_iter().collect(),
+            sizes: std::collections::HashMap::new(),
+            center: Some(saved_at),
+            radius: Some(1.4),
+            tilt: 0.0,
         };
-        assert_eq!(parse("rows 1 / 0\n").rows, vec![vec![1], vec![0]]);
-        assert!(parse("rows 0 2\n").rows.is_empty(), "a monitor it has not");
-        assert!(parse("rows 0 / 0 1\n").rows.is_empty(), "one twice");
-        assert!(parse("rows 0 x\n").rows.is_empty());
-        assert_eq!(parse("radius 1.3\n").radius, None, "no center");
-        assert_eq!(parse("center 0 1 0 0\nradius 1.3\n").radius, Some(1.3));
-        let p = Profile::parse("monitors 2560x1440\ncenter 0 1 0 0\nrows 0\n").unwrap();
-        assert!(p.center.is_none() && p.rows.is_empty(), "no places");
+        for tilt in [0.0, layout::OVERHEAD_PITCH] {
+            let p = Profile::of(
+                &monitors,
+                Some(9),
+                Vec::new(),
+                &Arrangement {
+                    tilt,
+                    ..live.clone()
+                },
+                None,
+                &[vec![7, 9]],
+            );
+            assert_eq!(p.primary, 1);
+            assert_eq!(p.frame, Some(ProfileFrame { tilt, radius: 1.4 }));
+            assert_eq!(p.rows, vec![vec![0, 1]]);
+            let made: Vec<(u32, Placement)> = [7, 9].into_iter().zip(p.places.clone()).collect();
+            let (back, rows) = standing(&made, p.frame, &p.rows, saved_at);
+            assert_eq!(rows, vec![vec![7, 9]]);
+            for ((_, b), (_, r)) in back.iter().zip(&room) {
+                assert!(b.position.distance(r.position) < 1e-5, "{tilt}");
+                assert!(b.rotation.angle_between(r.rotation) < 1e-4);
+            }
+            // Elsewhere: the same as seen from the eye.
+            let (moved, _) = standing(&made, p.frame, &p.rows, later);
+            let seen =
+                |q: &Placement, at: (Vec3, f32)| Frame::upright(at.0, at.1).unplace(*q).position;
+            for ((_, m), (_, r)) in moved.iter().zip(&room) {
+                assert!(seen(m, later).distance(seen(r, saved_at)) < 1e-5);
+            }
+        }
+        // Without a frame: where they were in the room, wherever the user is.
+        let made: Vec<(u32, Placement)> = room.to_vec();
+        let (back, _) = standing(&made, None, &[], later);
+        assert_eq!(back, made);
+        // In cinema: the desk.
+        let view = Arrangement {
+            placements: std::iter::once((7, place(0.0))).collect(),
+            ..live.clone()
+        };
+        let p = Profile::of(&monitors, None, Vec::new(), &view, Some(&live), &[]);
+        assert_eq!((p.places.len(), p.primary), (2, 0));
+        // Not every monitor placed: no places, no rows, no frame.
+        let p = Profile::of(&monitors, None, Vec::new(), &view, None, &[vec![7]]);
+        assert!(p.places.is_empty() && p.rows.is_empty() && p.frame.is_none());
     }
 
+    /// Whatever the setup (any number of monitors, places that went wrong, a center
+    /// that is not one), what is saved is read back whole: nothing passed over.
     #[test]
-    fn missing_file_gives_defaults() {
-        let p = parse("");
-        assert_eq!(p[0].sizes.len(), 3);
-        assert!(p[1].settings.cinema);
-        assert_eq!(p[2].settings.preset, Preset::Overhead);
+    fn any_profile_saved_reads_back() {
+        struct Rng(u64);
+        impl Rng {
+            fn next(&mut self) -> u64 {
+                self.0 = self
+                    .0
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                self.0 >> 33
+            }
+            fn float(&mut self) -> f32 {
+                match self.next() % 12 {
+                    0 => f32::NAN,
+                    1 => f32::INFINITY,
+                    _ => (self.next() % 4000) as f32 / 1000.0 - 2.0,
+                }
+            }
+        }
+        let mut rng = Rng(7);
+        for case in 0..500 {
+            let n = 1 + rng.next() as usize % 15;
+            let monitors: Vec<(u32, Mode)> = (0..n as u32)
+                .map(|i| {
+                    let w = 1 + rng.next() as u32 % 8000;
+                    let h = 1 + rng.next() as u32 % 8000;
+                    let scale = [100, 125, 150, 200][rng.next() as usize % 4];
+                    (i, Mode { w, h, scale })
+                })
+                .collect();
+            let mut placements = std::collections::HashMap::new();
+            for m in &monitors {
+                if rng.next().is_multiple_of(20) {
+                    continue;
+                }
+                let p = Placement {
+                    position: Vec3::new(rng.float(), rng.float(), rng.float()),
+                    rotation: Quat::from_rotation_y(rng.float()),
+                    width: rng.float().abs(),
+                };
+                placements.insert(m.0, p);
+            }
+            let live = Arrangement {
+                placements,
+                sizes: std::collections::HashMap::new(),
+                center: Some((Vec3::new(rng.float(), 1.0, 0.0), rng.float())),
+                radius: Some(rng.float()),
+                tilt: rng.float(),
+            };
+            let rows = vec![(0..n as u32).collect()];
+            let p = Profile::of(&monitors, Some(0), Vec::new(), &live, None, &rows);
+            assert!(p.monitors.len() <= MAX_MONITORS);
+            let text = text_of(&[Some(p.clone()), None, None]);
+            let (back, skipped) = parse(&text).unwrap();
+            assert!(skipped.is_empty(), "case {case}: {skipped:?}\n{text}");
+            let back = back[0].as_ref().unwrap();
+            assert_eq!(back.monitors, p.monitors, "case {case}");
+            assert_eq!(back.places.len(), p.places.len(), "case {case}");
+        }
     }
 }
