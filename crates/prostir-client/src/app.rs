@@ -27,9 +27,11 @@ use prostir_proto::state::{
 };
 use prostir_proto::{ClientMsg, Codec};
 
+use crate::audio::Gains;
 use crate::i18n::{Lang, Language};
 use crate::input::Controls;
 use crate::layout::{self, Cylinder, Grab, Held, Hit, Placement, Ray, ScreenId};
+use crate::mic::Mic;
 use crate::net::{Feedback, NetEvent};
 use crate::overlay::{self, Overlay, Sphere};
 use crate::pending::{self, Asks, Made, ProfileSwitch};
@@ -242,21 +244,14 @@ fn date_text(tm: &libc::tm, style: crate::settings::DateStyle, lang: Lang) -> St
     }
 }
 
-/// The menu's size factor (the "Large" menu setting), as `f32` bits.
-static MENU_SCALE: std::sync::atomic::AtomicU32 =
-    std::sync::atomic::AtomicU32::new(1.0f32.to_bits());
-
-fn set_menu_scale(large: bool) {
+/// The menu's width in the room, larger with the "Large" menu setting.
+fn panel_width(large: bool) -> f32 {
     let scale: f32 = if large { 1.3 } else { 1.0 };
-    MENU_SCALE.store(scale.to_bits(), Ordering::Relaxed);
+    PANEL_WIDTH * scale
 }
 
-fn panel_width() -> f32 {
-    PANEL_WIDTH * f32::from_bits(MENU_SCALE.load(Ordering::Relaxed))
-}
-
-fn panel_height() -> f32 {
-    panel_width() * ui::HEIGHT as f32 / ui::WIDTH as f32
+fn panel_height(large: bool) -> f32 {
+    panel_width(large) * ui::HEIGHT as f32 / ui::WIDTH as f32
 }
 
 /// One stream: the compositor surface it is decoded into and its decoder thread.
@@ -424,6 +419,10 @@ struct Scene {
     asks: Asks,
     /// The microphone permission the PC was last told.
     mic_permission: u8,
+    /// The microphone's switch and permission, shared with the network thread.
+    mic: Arc<Mic>,
+    /// Where the PC's sound comes from, for the audio thread.
+    gains: Arc<Gains>,
     /// An unknown PC waiting for "Pair" or "Not now" (survives the disconnect that
     /// follows the question).
     pair_offer: Option<(String, ui::OfferWhy)>,
@@ -1147,8 +1146,13 @@ impl Scene {
             .min_by(|a, b| a.1.t.total_cmp(&b.1.t));
         // Looking at the menu, not past it.
         let at_menu = self.panel_open
-            && layout::hit_surface(ray, &self.panel_place, panel_height(), None)
-                .is_some_and(|m| looked.as_ref().is_none_or(|l| m.t < l.1.t));
+            && layout::hit_surface(
+                ray,
+                &self.panel_place,
+                panel_height(self.settings.large_menu),
+                None,
+            )
+            .is_some_and(|m| looked.as_ref().is_none_or(|l| m.t < l.1.t));
         let Some((id, hit, p, c)) = looked.filter(|_| !at_menu) else {
             self.gaze_on = None;
             return;
@@ -1234,7 +1238,7 @@ impl Scene {
                 // Right of where the user looks is positive.
                 to.dot(self.head_right).atan2(to.dot(forward))
             });
-        crate::audio::place(angle);
+        self.gains.place(angle);
     }
 
     /// Shows `text` for a few seconds, below the line of sight.
@@ -1512,7 +1516,12 @@ impl Scene {
         if self.panel_open {
             consider(
                 Target::Panel,
-                layout::hit_surface(ray, &self.panel_place, panel_height(), None),
+                layout::hit_surface(
+                    ray,
+                    &self.panel_place,
+                    panel_height(self.settings.large_menu),
+                    None,
+                ),
             );
         }
         if self.settings.keyboard_window
@@ -1613,7 +1622,7 @@ impl Scene {
         self.panel_place = Placement {
             position,
             rotation: layout::facing(position, head),
-            width: panel_width(),
+            width: panel_width(self.settings.large_menu),
         };
         self.panel_open = true;
     }
@@ -1636,7 +1645,7 @@ impl Scene {
 
     /// What the headset says about itself when it opens a session.
     fn headset_state(&self) -> HeadsetState {
-        headset_state(&self.settings, self.worn, self.headset_battery)
+        headset_state(&self.settings, self.worn, self.headset_battery, &self.mic)
     }
 
     /// The microphone's switch or permission changed: the PC hears at once (it makes
@@ -1644,8 +1653,8 @@ impl Scene {
     /// starts with it.
     fn mic_changed(&mut self) {
         self.steering.set_headset(self.headset_state());
-        self.mic_permission = crate::mic::permission();
-        let part = mic_state(&self.settings);
+        self.mic_permission = self.mic.permission();
+        let part = mic_state(&self.settings, &self.mic);
         if self.feedback.is_some() {
             self.send(ClientMsg::UpState { part });
         }
@@ -1851,7 +1860,7 @@ impl Scene {
             mirror_wanted: self.mirror_wanted,
             audio_wanted: self.audio_wanted,
             mic_wanted: self.mic_wanted,
-            mic_denied: self.mic_wanted && crate::mic::denied(),
+            mic_denied: self.mic_wanted && self.mic.denied(),
             mirror_name: self.physical_name(),
             settings: self.settings,
             room_available: room,
@@ -2048,8 +2057,9 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     let settings_path = data_dir.join("settings.txt");
     let profiles_path = data_dir.join("profiles.txt");
     let settings = Settings::load(&settings_path);
-    set_menu_scale(settings.large_menu);
-    crate::mic::set_allowed(settings.mic);
+    // This start's own: a new start in the same process begins afresh.
+    let mic = Arc::new(Mic::new(settings.mic));
+    let gains = Arc::new(Gains::default());
 
     // Passthrough keeps the cameras busy and costs battery: only when "Room" is chosen.
     let mut passthrough = if exts.fb_passthrough {
@@ -2113,11 +2123,13 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     let external_dir = app.external_data_path().filter(|_| test.is_none());
     let mut custom_pano = custom_panorama_path(external_dir.as_deref()).is_some();
     let mut panel_was_open = false;
+    // The language the network thread was last told (it starts with the default).
+    let mut told_lang = Lang::default();
 
     let (net_tx, net_rx) = mpsc::channel();
     let steering = net::Steering::default();
     // What the first `Open` says, before the network thread can connect.
-    steering.set_headset(headset_state(&settings, true, crate::mic::battery()));
+    steering.set_headset(headset_state(&settings, true, crate::mic::battery(), &mic));
     // However this function ends, the network thread and its session end with it.
     struct StopNetwork(net::Steering);
     impl Drop for StopNetwork {
@@ -2138,6 +2150,10 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             only: fake_pc,
         },
         steering.clone(),
+        net::Sound {
+            gains: gains.clone(),
+            mic: mic.clone(),
+        },
     );
 
     // SAFETY: the VM pointer is valid for the life of the process.
@@ -2171,7 +2187,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         panel_place: Placement {
             position: Vec3::new(0.0, -0.12, -0.7),
             rotation: glam::Quat::IDENTITY,
-            width: panel_width(),
+            width: panel_width(settings.large_menu),
         },
         button_place: None,
         grabs: [None, None],
@@ -2183,7 +2199,9 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         unreachable: None,
         pc: PcState::default(),
         asks: Asks::default(),
-        mic_permission: crate::mic::permission(),
+        mic_permission: mic.permission(),
+        mic,
+        gains,
         steering,
         offline_since: Some(Instant::now()),
         feedback: None,
@@ -2574,7 +2592,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         scene.expire_asks();
         scene.adding_due();
         // The system may let the app record now, or not any more.
-        if crate::mic::permission() != scene.mic_permission {
+        if scene.mic.permission() != scene.mic_permission {
             scene.mic_changed();
         }
         // The headset's battery: on the palm menu (fresh when it appears, then every 15 s)
@@ -2662,9 +2680,9 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                 handle_action(&mut scene, action, &mut passthrough, &mut controls);
             }
         }
-        let panel_point = |hit: &Hit| {
-            let x = (hit.local.x / panel_width() + 0.5) * ui::WIDTH as f32;
-            let y = (0.5 - hit.local.y / panel_height()) * ui::HEIGHT as f32;
+        let panel_point = |hit: &Hit, large: bool| {
+            let x = (hit.local.x / panel_width(large) + 0.5) * ui::WIDTH as f32;
+            let y = (0.5 - hit.local.y / panel_height(large)) * ui::HEIGHT as f32;
             (x, y)
         };
 
@@ -2682,7 +2700,10 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             };
             let place = scene.panel_place;
             let l = place.rotation.inverse() * (tip - place.position);
-            let (half_w, half_h) = (panel_width() / 2.0, panel_height() / 2.0);
+            let (half_w, half_h) = (
+                panel_width(scene.settings.large_menu) / 2.0,
+                panel_height(scene.settings.large_menu) / 2.0,
+            );
             if let Some(anchor) = poke.drag {
                 if l.z > POKE_RELEASE {
                     *poke = Poke {
@@ -2710,8 +2731,8 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             let at = Vec2::new(l.x, l.y);
             poke_hover[h] = Some((at, l.z));
             let px = (
-                (l.x / panel_width() + 0.5) * ui::WIDTH as f32,
-                (0.5 - l.y / panel_height()) * ui::HEIGHT as f32,
+                (l.x / panel_width(scene.settings.large_menu) + 0.5) * ui::WIDTH as f32,
+                (0.5 - l.y / panel_height(scene.settings.large_menu)) * ui::HEIGHT as f32,
             );
             if poke.pressed && l.z > POKE_RELEASE {
                 poke.pressed = false;
@@ -2741,13 +2762,13 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
 
         let poke_px = poke_hover.iter().flatten().next().map(|(at, _)| {
             (
-                (at.x / panel_width() + 0.5) * ui::WIDTH as f32,
-                (0.5 - at.y / panel_height()) * ui::HEIGHT as f32,
+                (at.x / panel_width(scene.settings.large_menu) + 0.5) * ui::WIDTH as f32,
+                (0.5 - at.y / panel_height(scene.settings.large_menu)) * ui::HEIGHT as f32,
             )
         });
         let hover = poke_px.or_else(|| {
             [1, 0].into_iter().find_map(|h| match picks[h] {
-                Some((Target::Panel, hit)) => Some(panel_point(&hit)),
+                Some((Target::Panel, hit)) => Some(panel_point(&hit, scene.settings.large_menu)),
                 _ => None,
             })
         });
@@ -2800,7 +2821,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                         );
                     }
                     Some((Target::Panel, hit)) => {
-                        panel.hover(Some(panel_point(&hit)));
+                        panel.hover(Some(panel_point(&hit, scene.settings.large_menu)));
                         if let Some(action) = panel.hovered_action() {
                             if input.is_hand {
                                 // Decided when the pinch opens: a click, or a drag.
@@ -2976,7 +2997,12 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                 .entries()
                 .to_vec();
         }
-        crate::i18n::set_current(scene.lang());
+        // The network thread names a PC over USB in the menu's language.
+        let lang = scene.lang();
+        if lang != told_lang {
+            scene.steering.set_lang(lang);
+            told_lang = lang;
+        }
         panel_was_open = scene.panel_open;
         // A new toast: drawn once, placed where the user looks now.
         if let Some((text, _, place @ None)) = &mut scene.toast {
@@ -3404,8 +3430,8 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             panel_layer.quad(
                 &local,
                 posef(&scene.panel_place),
-                panel_width(),
-                panel_height(),
+                panel_width(scene.settings.large_menu),
+                panel_height(scene.settings.large_menu),
             )
         });
         let mut cursors: Vec<xr::sys::CompositionLayerQuad> = picks
@@ -3560,7 +3586,7 @@ fn handle_net_event(
             scene.sent_layout = None;
             scene.update_needed = None;
             // Whether the system lets the app record (the PC shows when it does not).
-            crate::mic::refresh_permission();
+            scene.mic.refresh_permission();
             // What changed since `Open` went (it carried the state of that moment).
             let now = scene.headset_state();
             if now.up != opened_with.up {
@@ -3850,8 +3876,13 @@ fn prefs_of(s: &Settings) -> Prefs {
 
 /// What the headset says about itself when it opens a session: what it can do, its
 /// settings, whether it is worn, its battery.
-fn headset_state(settings: &Settings, worn: bool, battery: Option<(u8, bool)>) -> HeadsetState {
-    let mic = mic_state(settings);
+fn headset_state(
+    settings: &Settings,
+    worn: bool,
+    battery: Option<(u8, bool)>,
+    mic: &Mic,
+) -> HeadsetState {
+    let mic = mic_state(settings, mic);
     HeadsetState {
         caps: Some(headset_caps()),
         prefs: Some(prefs_of(settings)),
@@ -3864,11 +3895,11 @@ fn headset_state(settings: &Settings, worn: bool, battery: Option<(u8, bool)>) -
 }
 
 /// The microphone's switch, and whether the system lets the app record.
-fn mic_state(settings: &Settings) -> state::UpState {
+fn mic_state(settings: &Settings, mic: &Mic) -> state::UpState {
     state::UpState {
         kind: state::UpKind::Mic,
         switch: settings.mic,
-        permission: crate::mic::permission(),
+        permission: mic.permission(),
     }
 }
 
@@ -4100,8 +4131,7 @@ fn handle_action(
         Action::LargeMenu(on) => {
             scene.settings.large_menu = on;
             scene.settings.save(settings_path);
-            set_menu_scale(on);
-            scene.panel_place.width = panel_width();
+            scene.panel_place.width = panel_width(on);
         }
         Action::RestEvery(minutes) => {
             scene.settings.rest_every = minutes;
@@ -4204,7 +4234,7 @@ fn handle_action(
             scene.mic_wanted = enabled;
             scene.settings.mic = enabled;
             scene.settings.save(&scene.settings_path);
-            crate::mic::set_allowed(enabled);
+            scene.mic.set_allowed(enabled);
             scene.mic_changed();
         }
         Action::SetAudio(enabled) => {
@@ -4306,7 +4336,7 @@ fn handle_action(
                 scene.confirm_save = Some((i, Instant::now()));
             }
         }
-        Action::AskMic => crate::mic::ask_again(),
+        Action::AskMic => scene.mic.ask_again(),
         Action::ForgetPc(i) => {
             let confirmed = scene
                 .confirm_forget

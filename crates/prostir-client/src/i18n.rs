@@ -1,23 +1,6 @@
 //! Interface language. Strings live next to the code that shows them, as
 //! `lang.t("український", "English")` pairs.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-
-static ENGLISH: AtomicBool = AtomicBool::new(false);
-
-/// The language in use, for code far from the menu (network thread, errors).
-pub fn current() -> Lang {
-    if ENGLISH.load(Ordering::Relaxed) {
-        Lang::En
-    } else {
-        Lang::Uk
-    }
-}
-
-pub fn set_current(lang: Lang) {
-    ENGLISH.store(lang == Lang::En, Ordering::Relaxed);
-}
-
 /// The headset's system language (Quest settings), e.g. `en-US`.
 pub fn system() -> Option<Lang> {
     let out = std::process::Command::new("getprop")

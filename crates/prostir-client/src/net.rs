@@ -19,6 +19,9 @@ use prostir_proto::state::{self, DisplayId, ErrorCode, Gen, HeadsetState, PcStat
 use prostir_proto::stats::{Gaps, Period};
 use prostir_proto::{ClientMsg, Codec, HeadsetGoodbye, HostMsg, PcGoodbye};
 
+use crate::audio::{Gains, Player};
+use crate::i18n::Lang;
+use crate::mic::{Mic, Recorder};
 use crate::outbox::{Lanes, Outbox};
 use crate::ui::OfferWhy;
 
@@ -146,7 +149,7 @@ pub enum NetEvent {
         name: Option<String>,
         feedback: Feedback,
         /// The PC's interface language.
-        language: Option<crate::i18n::Lang>,
+        language: Option<Lang>,
         opened_with: HeadsetState,
     },
     /// PCs currently seen on the network (sent when the list changes).
@@ -249,6 +252,20 @@ pub struct Discovery {
     pub only: Option<SocketAddr>,
 }
 
+/// What sessions play the PC's sound and record the microphone with: made once for
+/// each start of the app and shared with the frame loop.
+pub struct Sound {
+    /// Where the sound comes from (the frame loop places it).
+    pub gains: Arc<Gains>,
+    pub mic: Arc<Mic>,
+}
+
+/// This headset, as its sessions need it.
+struct Headset {
+    identity: Identity,
+    sound: Sound,
+}
+
 /// Lets the menu choose which PC to use and take part in pairing.
 #[derive(Clone, Default)]
 pub struct Steering(Arc<(Mutex<Steer>, Condvar)>);
@@ -278,6 +295,8 @@ struct Steer {
     quit: bool,
     /// What the headset says about itself when it opens a session (`Open`).
     headset: HeadsetState,
+    /// The menu's language, for what this thread names (a PC over USB).
+    lang: Lang,
 }
 
 type PeerKey = [u8; 32];
@@ -358,6 +377,15 @@ impl Steering {
 
     fn headset(&self) -> HeadsetState {
         self.lock().headset.clone()
+    }
+
+    /// The menu's language changed.
+    pub fn set_lang(&self, lang: Lang) {
+        self.lock().lang = lang;
+    }
+
+    fn lang(&self) -> Lang {
+        self.lock().lang
     }
 
     /// A PC was forgotten in the menu: the next connection reads the trust file again.
@@ -482,7 +510,7 @@ impl Steering {
     }
 }
 
-pub fn spawn(events: Sender<NetEvent>, discovery: Discovery, steering: Steering) {
+pub fn spawn(events: Sender<NetEvent>, discovery: Discovery, steering: Steering, sound: Sound) {
     std::thread::Builder::new()
         .name("net".into())
         .spawn(move || {
@@ -500,6 +528,7 @@ pub fn spawn(events: Sender<NetEvent>, discovery: Discovery, steering: Steering)
                 }
             };
             info!("headset key {}", secure::fingerprint(&identity.public));
+            let me = Headset { identity, sound };
             let mut trusted = TrustStore::load(&discovery.trust_file);
             let mut finder = Finder::default();
             let mut round = 0u32;
@@ -535,7 +564,7 @@ pub fn spawn(events: Sender<NetEvent>, discovery: Discovery, steering: Steering)
                         &events,
                         name,
                         &steering,
-                        &identity,
+                        &me,
                         &mut trusted,
                         &mut ended,
                     );
@@ -964,12 +993,13 @@ fn run_session(
     events: &Sender<NetEvent>,
     name: Option<String>,
     steering: &Steering,
-    identity: &Identity,
+    me: &Headset,
     trusted: &mut TrustStore,
     ended: &mut Ended,
 ) -> std::io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     let addr = stream.peer_addr()?;
+    let identity = &me.identity;
     let Link {
         mut sender,
         mut receiver,
@@ -986,7 +1016,7 @@ fn run_session(
     let _close = CloseOnExit(closer.clone());
     let host = name.clone().unwrap_or_else(|| {
         if addr.ip().is_loopback() {
-            crate::i18n::current().t("ПК (USB)", "PC (USB)").into()
+            steering.lang().t("ПК (USB)", "PC (USB)").into()
         } else {
             addr.ip().to_string()
         }
@@ -996,7 +1026,7 @@ fn run_session(
     let app = prostir_proto::app_version(env!("CARGO_PKG_VERSION"));
     handshake::send_hello(&mut *sender, &app)?;
     let language = match handshake::read_answer(&mut *receiver)? {
-        Answer::Welcome { language, .. } => crate::i18n::Lang::from_code(&language),
+        Answer::Welcome { language, .. } => Lang::from_code(&language),
         Answer::Incompatible { protocol, app } => {
             let _ = events.send(NetEvent::Incompatible {
                 pc_newer: prostir_proto::peer_is_newer(protocol, &app),
@@ -1084,10 +1114,11 @@ fn run_session(
 
     let mut streams: HashMap<DisplayId, StreamSlot> = HashMap::new();
     // Started on the first sound slice, stopped with the session.
-    let mut player: Option<crate::audio::Player> = None;
+    let mut player: Option<Player> = None;
     // Runs only while a PC app records from the headset microphone and the user's
     // microphone switch on the headset is on.
-    let mut recorder: Option<crate::mic::Recorder> = None;
+    let mut recorder: Option<Recorder> = None;
+    let sound = &me.sound;
     // Pauses between messages: with sound on, anything over ~10 ms is something
     // (a frame being written, Wi-Fi) holding the rest up.
     let mut gaps = Gaps::default();
@@ -1135,9 +1166,9 @@ fn run_session(
         // The microphone streams while a PC program records from it (`UpWanted`) and
         // the user's switch on the headset is on.
         let record =
-            pc.up_wanted.get(&state::UpKind::Mic).is_some_and(|u| u.on) && crate::mic::allowed();
+            pc.up_wanted.get(&state::UpKind::Mic).is_some_and(|u| u.on) && sound.mic.allowed();
         if record != recorder.is_some() {
-            recorder = record.then(|| crate::mic::Recorder::start(feedback.clone()));
+            recorder = record.then(|| Recorder::start(sound.mic.clone(), feedback.clone()));
         }
         let Some(msg) = msg else {
             continue;
@@ -1249,7 +1280,7 @@ fn run_session(
             }
             HostMsg::Audio { pcm } => {
                 player
-                    .get_or_insert_with(crate::audio::Player::spawn)
+                    .get_or_insert_with(|| Player::spawn(sound.gains.clone()))
                     .push(pcm);
             }
             HostMsg::Command { req, asked } => {

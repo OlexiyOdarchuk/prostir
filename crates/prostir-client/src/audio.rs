@@ -20,31 +20,48 @@ const MAX_QUEUED: usize = 6;
 const FRAME_BYTES: usize = 2 * AUDIO_CHANNELS as usize;
 
 /// Left and right gains (as `f32` bits) for placing the sound towards a monitor;
-/// 1 and 1 leave it as it is.
-static GAINS: [AtomicU32; 2] = [AtomicU32::new(0x3f80_0000), AtomicU32::new(0x3f80_0000)];
+/// 1 and 1 leave it as it is. One per start of the app: the frame loop sets them,
+/// the audio thread of each session plays with them.
+#[derive(Debug)]
+pub struct Gains([AtomicU32; 2]);
 
-/// Places the sound at `angle` radians right of where the user looks (0: straight
-/// ahead, ±π: behind), or plain stereo with `None`. Equal-power balance, a little
-/// quieter from behind; changes are ramped in the audio thread.
-pub fn place(angle: Option<f32>) {
-    let (left, right) = match angle {
-        None => (1.0, 1.0),
-        Some(a) => {
-            // Towards the side, keeping some of the other ear (never hard-panned).
-            let pan = (a.sin() * 0.8).clamp(-1.0, 1.0);
-            let behind = if a.cos() < 0.0 { 0.8 } else { 1.0 };
-            let l = ((1.0 - pan) / 2.0).sqrt() * std::f32::consts::SQRT_2 * behind;
-            let r = ((1.0 + pan) / 2.0).sqrt() * std::f32::consts::SQRT_2 * behind;
-            (l.min(1.0), r.min(1.0))
-        }
-    };
-    GAINS[0].store(f32::to_bits(left), Ordering::Relaxed);
-    GAINS[1].store(f32::to_bits(right), Ordering::Relaxed);
+impl Default for Gains {
+    fn default() -> Self {
+        Self([
+            AtomicU32::new(1.0f32.to_bits()),
+            AtomicU32::new(1.0f32.to_bits()),
+        ])
+    }
+}
+
+impl Gains {
+    /// Places the sound at `angle` radians right of where the user looks (0: straight
+    /// ahead, ±π: behind), or plain stereo with `None`. Equal-power balance, a little
+    /// quieter from behind; changes are ramped in the audio thread.
+    pub fn place(&self, angle: Option<f32>) {
+        let (left, right) = match angle {
+            None => (1.0, 1.0),
+            Some(a) => {
+                // Towards the side, keeping some of the other ear (never hard-panned).
+                let pan = (a.sin() * 0.8).clamp(-1.0, 1.0);
+                let behind = if a.cos() < 0.0 { 0.8 } else { 1.0 };
+                let l = ((1.0 - pan) / 2.0).sqrt() * std::f32::consts::SQRT_2 * behind;
+                let r = ((1.0 + pan) / 2.0).sqrt() * std::f32::consts::SQRT_2 * behind;
+                (l.min(1.0), r.min(1.0))
+            }
+        };
+        self.0[0].store(f32::to_bits(left), Ordering::Relaxed);
+        self.0[1].store(f32::to_bits(right), Ordering::Relaxed);
+    }
+
+    fn get(&self) -> [f32; 2] {
+        [0, 1].map(|i| f32::from_bits(self.0[i].load(Ordering::Relaxed)))
+    }
 }
 
 /// Applies the gains to interleaved stereo s16 `pcm`, ramping from `current`.
-fn apply_gains(pcm: &mut [u8], current: &mut [f32; 2]) {
-    let target = [0, 1].map(|i| f32::from_bits(GAINS[i].load(Ordering::Relaxed)));
+fn apply_gains(pcm: &mut [u8], current: &mut [f32; 2], gains: &Gains) {
+    let target = gains.get();
     if *current == [1.0, 1.0] && target == [1.0, 1.0] {
         return;
     }
@@ -72,7 +89,8 @@ pub struct Player {
 }
 
 impl Player {
-    pub fn spawn() -> Self {
+    /// Starts the audio thread, which places the sound with `gains`.
+    pub fn spawn(gains: Arc<Gains>) -> Self {
         let (tx, rx) = mpsc::sync_channel(32);
         let behind = Arc::new(AtomicU32::new(0));
         let counted = behind.clone();
@@ -84,7 +102,7 @@ impl Player {
                 let mut failures = 0;
                 while failures < 5 {
                     match Stream::open() {
-                        Ok(stream) => match play(&stream, &rx, &counted) {
+                        Ok(stream) => match play(&stream, &rx, &counted, &gains) {
                             Ended::Closed => return,
                             Ended::Failed => failures = 0,
                         },
@@ -229,7 +247,7 @@ impl Report {
     }
 }
 
-fn play(stream: &Stream, rx: &Receiver<Vec<u8>>, behind: &AtomicU32) -> Ended {
+fn play(stream: &Stream, rx: &Receiver<Vec<u8>>, behind: &AtomicU32, target: &Gains) -> Ended {
     let mut queue: VecDeque<Vec<u8>> = VecDeque::new();
     let mut gains = [1.0f32; 2];
     let mut report = Report {
@@ -253,7 +271,7 @@ fn play(stream: &Stream, rx: &Receiver<Vec<u8>>, behind: &AtomicU32) -> Ended {
             report.late += 1;
         }
         while let Some(mut pcm) = queue.pop_front() {
-            apply_gains(&mut pcm, &mut gains);
+            apply_gains(&mut pcm, &mut gains, target);
             if let Err(e) = stream.write(&pcm) {
                 warn!("sound output: AAudio error {e}");
                 return Ended::Failed;
