@@ -244,6 +244,9 @@ pub struct Discovery {
     pub host_file: Option<PathBuf>,
     /// Address of the last host that worked over the network, tried before discovery.
     pub last_host_file: PathBuf,
+    /// The selftest's fake PC: connect to this address and nothing else (no USB, no
+    /// `host.txt`, no last host, no listening for PCs, no probing the network).
+    pub only: Option<SocketAddr>,
 }
 
 /// Lets the menu choose which PC to use and take part in pairing.
@@ -483,9 +486,12 @@ pub fn spawn(events: Sender<NetEvent>, discovery: Discovery, steering: Steering)
     std::thread::Builder::new()
         .name("net".into())
         .spawn(move || {
-            let beacon = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, prostir_proto::DISCOVERY_PORT))
-                .inspect_err(|e| warn!("discovery socket: {e}"))
-                .ok();
+            let beacon = match discovery.only {
+                Some(_) => None,
+                None => UdpSocket::bind((Ipv4Addr::UNSPECIFIED, prostir_proto::DISCOVERY_PORT))
+                    .inspect_err(|e| warn!("discovery socket: {e}"))
+                    .ok(),
+            };
             let identity = match Identity::load_or_create(&discovery.identity_file) {
                 Ok(id) => id,
                 Err(e) => {
@@ -677,6 +683,9 @@ fn connect(
     events: &Sender<NetEvent>,
     round: u32,
 ) -> Option<TcpStream> {
+    if let Some(only) = discovery.only {
+        return try_connect(only);
+    }
     let (choice, picking) = {
         let s = steering.lock();
         (s.choice, s.picking)

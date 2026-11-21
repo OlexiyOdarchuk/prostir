@@ -36,7 +36,8 @@ cargo_flags=(--locked -p prostir-client --target aarch64-linux-android)
 # the APK). Builds from this repository leave both out.
 if [[ "${PROSTIR_STORE:-}" == 1 ]]; then
     : "${PROSTIR_PLATFORM_SDK:?set PROSTIR_PLATFORM_SDK to the unpacked Meta Platform SDK}"
-    cargo_flags+=(--features store)
+    # Without the selftest (and its fake PC) the default feature brings.
+    cargo_flags+=(--no-default-features --features store)
 fi
 [[ "$PROFILE" == release ]] && cargo_flags+=(--release)
 (cd "$ROOT" && cargo build "${cargo_flags[@]}")
@@ -103,6 +104,12 @@ fi
 rm -rf "$OUT/assets" && mkdir -p "$OUT/assets/licenses"
 python3 "$ROOT/scripts/third-party-licenses.py" --openxr-aar "$AAR" -o "$OUT/THIRD-PARTY-LICENSES.txt"
 cp "$ROOT/LICENSE" "$ROOT/LICENSE-EXCEPTION.md" "$OUT/THIRD-PARTY-LICENSES.txt" "$OUT/assets/licenses/"
+# The selftest's clips (made by scripts/selftest-clips.sh) go into every build but the
+# store's, which then answers a selftest with exit=2.
+if [[ "${PROSTIR_STORE:-}" != 1 ]]; then
+    mkdir -p "$OUT/assets/selftest"
+    cp "$ROOT"/crates/prostir-client/assets/selftest/*.h26[45] "$OUT/assets/selftest/"
+fi
 
 echo ">> packaging with $(basename "$BUILD_TOOLS") / $(basename "$PLATFORM")"
 rm -rf "$OUT/res" && mkdir -p "$OUT/res"

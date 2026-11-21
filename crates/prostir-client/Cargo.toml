@@ -10,9 +10,15 @@ rust-version.workspace = true
 description = "Prostir client for Meta Quest 3 and 3S: virtual monitors as OpenXR compositor layers"
 
 [features]
+default = ["selftest"]
 # Meta Horizon Store build: the store's entitlement check through the Meta Platform
-# SDK, loaded at run time (scripts/build-apk.sh with PROSTIR_STORE=1).
+# SDK, loaded at run time (scripts/build-apk.sh with PROSTIR_STORE=1, which also
+# turns the selftest off). With `store` the selftest is never built, whatever else is
+# on.
 store = []
+# The selftest against a fake PC in the app's own process (scripts/selftest-headset.sh):
+# every build but the store's.
+selftest = ["dep:prostir-testkit"]
 
 [lib]
 name = "prostir"
@@ -39,8 +45,12 @@ anyhow.workspace = true
 android_logger = "0.15"
 glow = "0.18"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+# The fake PC the selftest runs against, in the app's own process.
+prostir-testkit = { workspace = true, optional = true }
 
 [dev-dependencies]
+# The shipped selftest clips are checked against the fake PC that plays them.
+prostir-testkit.workspace = true
 tiny-skia = { version = "0.12", features = ["png-format"] }
 # The plural forms of counts are checked against Fluent's.
 prostir-lang.workspace = true

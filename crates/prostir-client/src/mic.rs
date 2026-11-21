@@ -184,14 +184,17 @@ fn ensure_permission(stop: &AtomicBool) -> bool {
     false
 }
 
+/// Runs `f` with the app's context: the Application that `ndk_context` holds
+/// (android-activity puts it there), not the activity. Enough for system services and
+/// permissions; what needs the Activity itself takes it from the `AndroidApp`.
 pub(crate) fn with_activity<T>(
     f: impl FnOnce(&mut jni::JNIEnv<'_>, &JObject<'_>) -> jni::errors::Result<T>,
 ) -> Option<T> {
     let ctx = ndk_context::android_context();
-    // SAFETY: the VM and activity come from the running NativeActivity.
+    // SAFETY: the VM of the running NativeActivity.
     let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }.ok()?;
     let mut env = vm.attach_current_thread_permanently().ok()?;
-    // SAFETY: the activity object stays alive while the app runs.
+    // SAFETY: a global reference to the Application, kept for the life of the process.
     let activity = unsafe { JObject::from_raw(ctx.context().cast()) };
     let result = f(&mut env, &activity);
     if result.is_err() {
