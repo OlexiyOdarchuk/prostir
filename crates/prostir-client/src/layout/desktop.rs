@@ -1,6 +1,6 @@
 //! The PC's desktop made of the rows the monitors are seen in (what `Arrange` carries).
 
-use std::cell::RefCell;
+use std::cell::{Ref, RefCell};
 use std::collections::HashMap;
 
 use glam::Vec3;
@@ -109,6 +109,8 @@ impl<K: Key> Desktop<K> {
 /// What a [`Desktop`] is made of.
 #[derive(Debug, Clone, PartialEq)]
 struct DesktopInputs<K> {
+    /// None made yet: nothing is the same as this.
+    made: bool,
     placed: Vec<(K, Placement, u32, u32)>,
     center: (Vec3, f32),
     tilt: f32,
@@ -116,14 +118,81 @@ struct DesktopInputs<K> {
     sent: Option<Desktop<K>>,
 }
 
+impl<K: Key> DesktopInputs<K> {
+    /// The desktop made of these is the one [`Desktop::of`] would make of those, looked
+    /// at in place (nothing is allocated).
+    fn same(
+        &self,
+        placements: &HashMap<K, Placement>,
+        monitors: &[(K, u32, u32)],
+        center: (Vec3, f32),
+        tilt: f32,
+        primary: Option<K>,
+        sent: Option<&Desktop<K>>,
+    ) -> bool {
+        let mut known = self.placed.iter();
+        let placed = monitors
+            .iter()
+            .filter_map(|&(id, w, h)| Some((id, *placements.get(&id)?, w, h)))
+            .all(|m| known.next() == Some(&m));
+        self.made
+            && placed
+            && known.next().is_none()
+            && self.center == center
+            && self.tilt == tilt
+            && self.primary == primary
+            && self.sent.as_ref() == sent
+    }
+
+    /// Now these, in the memory kept from before.
+    fn keep(
+        &mut self,
+        placements: &HashMap<K, Placement>,
+        monitors: &[(K, u32, u32)],
+        center: (Vec3, f32),
+        tilt: f32,
+        primary: Option<K>,
+        sent: Option<&Desktop<K>>,
+    ) {
+        self.made = true;
+        self.placed.clear();
+        self.placed.extend(
+            monitors
+                .iter()
+                .filter_map(|&(id, w, h)| Some((id, *placements.get(&id)?, w, h))),
+        );
+        self.center = center;
+        self.tilt = tilt;
+        self.primary = primary;
+        match (&mut self.sent, sent) {
+            (Some(kept), Some(sent)) => kept.clone_from(sent),
+            (kept, sent) => *kept = sent.cloned(),
+        }
+    }
+}
+
 /// [`Desktop::of`], made again only when what it is made of changes: the headset asks
-/// for it every frame, and planning takes about a millisecond for six monitors.
+/// for it every frame, and planning takes about a millisecond for six monitors. While
+/// nothing changes, asking allocates nothing.
 #[derive(Debug)]
-pub struct DesktopMemo<K>(RefCell<Option<(DesktopInputs<K>, Desktop<K>)>>);
+pub struct DesktopMemo<K>(RefCell<(DesktopInputs<K>, Desktop<K>)>);
 
 impl<K> Default for DesktopMemo<K> {
     fn default() -> Self {
-        Self(RefCell::new(None))
+        Self(RefCell::new((
+            DesktopInputs {
+                made: false,
+                placed: Vec::new(),
+                center: (Vec3::ZERO, 0.0),
+                tilt: 0.0,
+                primary: None,
+                sent: None,
+            },
+            Desktop {
+                rows: Vec::new(),
+                plan: Vec::new(),
+            },
+        )))
     }
 }
 
@@ -138,23 +207,32 @@ impl<K: Key> DesktopMemo<K> {
         primary: Option<K>,
         sent: Option<&Desktop<K>>,
     ) -> Desktop<K> {
-        let inputs = DesktopInputs {
-            placed: monitors
-                .iter()
-                .filter_map(|&(id, w, h)| Some((id, *placements.get(&id)?, w, h)))
-                .collect(),
-            center,
-            tilt,
-            primary,
-            sent: sent.cloned(),
-        };
-        if let Some((known, desktop)) = &*self.0.borrow()
-            && *known == inputs
-        {
-            return desktop.clone();
+        self.get_ref(placements, monitors, center, tilt, primary, sent)
+            .clone()
+    }
+
+    /// [`Desktop::of`] these, as kept: a copy is made only when it changed.
+    pub fn get_ref(
+        &self,
+        placements: &HashMap<K, Placement>,
+        monitors: &[(K, u32, u32)],
+        center: (Vec3, f32),
+        tilt: f32,
+        primary: Option<K>,
+        sent: Option<&Desktop<K>>,
+    ) -> Ref<'_, Desktop<K>> {
+        let same = self
+            .0
+            .borrow()
+            .0
+            .same(placements, monitors, center, tilt, primary, sent);
+        if !same {
+            let desktop = Desktop::of(placements, monitors, center, tilt, primary, sent);
+            let mut memo = self.0.borrow_mut();
+            memo.0
+                .keep(placements, monitors, center, tilt, primary, sent);
+            memo.1 = desktop;
         }
-        let desktop = Desktop::of(placements, monitors, center, tilt, primary, sent);
-        *self.0.borrow_mut() = Some((inputs, desktop.clone()));
-        desktop
+        Ref::map(self.0.borrow(), |m| &m.1)
     }
 }
