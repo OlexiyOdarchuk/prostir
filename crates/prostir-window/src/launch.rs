@@ -120,19 +120,60 @@ pub fn start_prostir() -> io::Result<Started> {
 mod tests {
     use super::*;
 
+    /// A /proc of its own in a folder: `self` is process 100, and each process is a
+    /// folder with its name (`comm`) and its file (`exe`, a link that need not lead
+    /// anywhere).
+    fn fake_proc(name: &str, processes: &[(u32, &str, &str)]) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("prostir-proc-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for (pid, comm, exe) in processes {
+            let dir = root.join(pid.to_string());
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("comm"), format!("{comm}\n")).unwrap();
+            std::os::unix::fs::symlink(exe, dir.join("exe")).unwrap();
+        }
+        std::os::unix::fs::symlink("100", root.join("self")).unwrap();
+        root
+    }
+
+    /// Another Prostir counts by its name and its file, on a /proc of the test's own
+    /// (the real one has whatever else runs on the machine, other tests among it).
     #[test]
     fn finds_a_process_by_its_name_from_another_file() {
-        let me = std::fs::read_to_string("/proc/self/comm").unwrap();
-        let exe = std::fs::read_link("/proc/self/exe").unwrap();
-        let proc = Path::new("/proc");
-        assert!(running_in(
-            proc,
-            me.trim_end(),
-            Path::new("/elsewhere/prostir")
-        ));
-        assert!(!running_in(proc, me.trim_end(), &exe));
+        let me = Path::new("/usr/bin/prostir");
+        let proc = fake_proc(
+            "other",
+            &[
+                (100, "prostir", "/usr/bin/prostir"),
+                (200, "prostir", "/opt/old/prostir"),
+                (300, "other", "/usr/bin/other"),
+            ],
+        );
+        assert!(running_in(&proc, "prostir", me), "200 runs another file");
+        assert!(!running_in(&proc, "other", Path::new("/usr/bin/other")));
+        assert!(!running_in(&proc, "nothing", me));
+        std::fs::remove_dir_all(&proc).unwrap();
+
+        // Its own file, replaced by an update while it runs: the same program.
+        let proc = fake_proc(
+            "same",
+            &[
+                (100, "prostir", "/usr/bin/prostir"),
+                (200, "prostir", "/usr/bin/prostir (deleted)"),
+                (300, "other", "/opt/old/prostir"),
+            ],
+        );
+        assert!(!running_in(&proc, "prostir", me));
         assert!(!running_in(
-            proc,
+            &proc,
+            "prostir",
+            Path::new("/usr/bin/prostir (deleted)")
+        ));
+        std::fs::remove_dir_all(&proc).unwrap();
+
+        // The real /proc is read at all.
+        assert!(!running_in(
+            Path::new("/proc"),
             "no-such-program-here",
             Path::new("/elsewhere")
         ));
