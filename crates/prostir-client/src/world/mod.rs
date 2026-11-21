@@ -147,6 +147,8 @@ pub struct World {
     pc: Option<PcId>,
     /// In a session with it.
     connected: bool,
+    /// Cinema: one screen shown, the desk arrangement kept aside (see `set_cinema`).
+    cinema: bool,
     /// The PC's displays as its list last said (none outside a session).
     listed: HashMap<DisplayKey, Listed>,
     /// The PC said its list in this session.
@@ -221,7 +223,7 @@ pub struct World {
     /// The palm menu, while the palm is turned to the face.
     wrist: Option<Placement>,
 
-    /// What each hand holds, and the monitor resized with both.
+    /// What the hands hold (two at most), and the monitor resized with both.
     held: [Option<Thing>; 2],
     resizing: Option<DisplayKey>,
 
@@ -252,6 +254,7 @@ impl World {
         let mut world = Self {
             pc: None,
             connected: false,
+            cinema: s.cinema,
             listed: HashMap::new(),
             has_list: false,
             order: Vec::new(),
@@ -295,7 +298,7 @@ impl World {
             waiting: Vec::new(),
             saves: Dirty::default(),
         };
-        if !s.cinema {
+        if !world.cinema {
             let saved = world.desk.arrangement().clone();
             world.adopt_desk(saved);
         }
@@ -464,7 +467,7 @@ impl World {
         }
         self.relist();
         if !self.gone.is_empty() {
-            self.save_layout(s);
+            self.save_layout();
         }
         // A monitor of a profile being switched to that could not start.
         self.profile_streams(s, now);
@@ -515,7 +518,7 @@ impl World {
         };
         let size = self.streams.get(&id).copied();
         if let (Kind::Monitor, Some(size)) = (kind, size)
-            && !s.cinema
+            && !self.cinema
         {
             self.fit_to_stream(id, size);
         }
@@ -586,9 +589,9 @@ impl World {
         self.adding.as_ref()
     }
 
-    /// What hand `hand` holds.
-    pub fn held(&self, hand: usize) -> Option<Thing> {
-        self.held.get(hand).copied().flatten()
+    /// A hand holds `thing`.
+    pub fn holds(&self, thing: Thing) -> bool {
+        self.held.contains(&Some(thing))
     }
 
     /// A hand holds something.
@@ -624,6 +627,11 @@ impl World {
             .flatten()
     }
 
+    /// The runtime draws curved layers.
+    pub fn curve_supported(&self) -> bool {
+        self.curve_supported
+    }
+
     pub fn curve_radius(&self, s: &Settings) -> Option<f32> {
         self.curve_factor(s).map(|f| f * self.radius)
     }
@@ -648,8 +656,8 @@ impl World {
     /// the desktop's arrangement matches: the mouse leaves a monitor where the next
     /// one is, sideways, up or down. Only an arrangement that held for
     /// [`ARRANGE_AFTER`], and only when it changed (see [`World::take_arrange`]).
-    fn send_layout(&mut self, s: &Settings, now: Instant) {
-        let Some(pc) = self.pc.filter(|_| !s.cinema && self.connected) else {
+    fn send_layout(&mut self, now: Instant) {
+        let Some(pc) = self.pc.filter(|_| !self.cinema && self.connected) else {
             return;
         };
         // Wait until every monitor the PC has is placed: a partial picture would make
@@ -718,24 +726,11 @@ impl World {
 
     /// Keeps the desktop's arrangement in step once nothing is being moved: no monitor
     /// in a hand, none resized, no profile being switched to.
-    pub fn settle(&mut self, s: &Settings, now: Instant) {
+    pub fn settle(&mut self, now: Instant) {
         let carried = self.held.iter().flatten().any(|t| t.display().is_some());
         if !carried && self.resizing.is_none() && !self.switching() {
-            self.send_layout(s, now);
+            self.send_layout(now);
         }
-    }
-
-    /// The PC desktop for the monitors and the laptop screen as they stand now, seen
-    /// from where the arrangement faces.
-    pub fn desktop(&self) -> Desktop<DisplayKey> {
-        self.desktop_memo.get(
-            &self.placements,
-            &self.sizes,
-            self.center,
-            self.tilt,
-            self.primary,
-            self.sent_layout.as_ref(),
-        )
     }
 
     /// The monitors on the map: the desktop the PC gets (see `layout::Desktop`).
@@ -755,11 +750,8 @@ impl World {
     /// The rows the PC's desktop is laid out by, by id: those last sent, or those a
     /// profile switched to was saved with until its desktop is sent (see `rows_from`).
     /// Their neighbours stay neighbours until clearly moved apart (`rows::rows_of`).
-    fn sent_rows(&self) -> Vec<Vec<DisplayKey>> {
-        self.sent_layout
-            .as_ref()
-            .map(|d| d.rows.clone())
-            .unwrap_or_default()
+    fn sent_rows(&self) -> &[Vec<DisplayKey>] {
+        self.sent_layout.as_ref().map_or(&[], |d| &d.rows)
     }
 
     /// A profile switched to is another arrangement: its rows are those it was saved
@@ -808,7 +800,7 @@ impl World {
     /// saved, so the arrangement waiting for its PC is not lost. What the hands held
     /// is let go.
     pub fn arrange_all(&mut self, s: &Settings, now: Instant) {
-        if s.cinema {
+        if self.cinema {
             // The view takes the place of the monitors here, which it does not show (the
             // desk keeps theirs).
             let view = self.around_user(layout::cinema(&self.lineup, self.desk.cinema()));
@@ -833,8 +825,8 @@ impl World {
         ));
         self.placements.extend(laid);
         self.held = [None, None];
-        self.save_layout(s);
-        self.send_layout(s, now);
+        self.save_layout();
+        self.send_layout(now);
     }
 
     /// Another preset was chosen (`s` says which): the arrangement's tilt is its, and
@@ -847,7 +839,7 @@ impl World {
     /// Another curve was chosen: flat, the laptop screen hangs tilted, curved it
     /// continues the cylinder.
     pub fn curve_chosen(&mut self, s: &Settings) {
-        if !s.cinema {
+        if !self.cinema {
             self.place_mirror(s);
         }
     }
@@ -857,7 +849,7 @@ impl World {
     /// stay where they are. The laptop screen goes under the primary monitor. `gaze`:
     /// where the head looks.
     fn place_missing(&mut self, s: &Settings, gaze: Vec3, now: Instant) {
-        if s.cinema || self.switching() {
+        if self.cinema || self.switching() {
             return;
         }
         if self.lineup.is_empty() {
@@ -896,7 +888,7 @@ impl World {
             placed = true;
         }
         if placed {
-            self.save_layout(s);
+            self.save_layout();
         }
     }
 
@@ -910,7 +902,7 @@ impl World {
             self.center,
             self.tilt,
             gaze,
-            &self.sent_rows(),
+            self.sent_rows(),
             self.radius,
         )
     }
@@ -948,7 +940,7 @@ impl World {
     /// pass. In cinema mode `placements` is the cinema view, which is not kept: the
     /// desk layout stays as the user left it. Window panels are placed afresh when
     /// they appear, so they are not kept.
-    pub fn save_layout(&mut self, s: &Settings) {
+    pub fn save_layout(&mut self) {
         let listed = &self.listed;
         let kept = self.desk.keep(
             self.placements
@@ -957,7 +949,7 @@ impl World {
                 .map(|(id, p)| (*id, *p)),
             &self.placed_for,
             (self.center, self.radius, self.tilt),
-            s.cinema,
+            self.cinema,
         );
         if kept {
             self.saves.mark(File::Desk);
@@ -1011,26 +1003,30 @@ impl World {
         self.placed_for.insert(id, size);
     }
 
-    /// Turns cinema mode on or off; `s`: the settings as they are before (cinema the
-    /// other way), which the app changes after. The one place that switches it: the
+    /// Turns cinema mode on or off (`s`: the settings, for the preset it lays out
+    /// with). The one place that switches it: the
     /// desk layout is kept before the cinema view replaces it (follow mode may have
     /// moved it), and comes back after from memory (not from its file, which may not
     /// be written yet), window panels staying where they are.
     pub fn set_cinema(&mut self, s: &Settings, on: bool, gaze: Vec3, now: Instant) {
-        if on == s.cinema {
+        if on == self.cinema {
             return;
         }
-        let mut s = *s;
         if on {
-            self.save_layout(&s);
-            s.cinema = true;
-            self.arrange_all(&s, now);
+            self.save_layout();
+            self.cinema = true;
+            self.arrange_all(s, now);
             return;
         }
-        s.cinema = false;
+        self.cinema = false;
         let saved = self.desk.arrangement().clone();
         self.adopt_desk(saved);
-        self.place_missing(&s, gaze, now);
+        self.place_missing(s, gaze, now);
+    }
+
+    /// Cinema shows its one screen, the desk arrangement waiting under it.
+    pub fn cinema(&self) -> bool {
+        self.cinema
     }
 
     /// Cinema shows `screen` from now on (and now, in cinema).
@@ -1038,7 +1034,7 @@ impl World {
         if self.desk.pick_cinema(Some(screen)) {
             self.saves.mark(File::Desk);
         }
-        if s.cinema {
+        if self.cinema {
             self.arrange_all(s, now);
         }
     }
@@ -1047,7 +1043,7 @@ impl World {
     /// built once every monitor the PC has is here, so the chosen screen is among
     /// them. A view that exists, moved by hand perhaps, is left alone.
     fn build_cinema_view_if_due(&mut self, s: &Settings, now: Instant) {
-        let due = s.cinema
+        let due = self.cinema
             && !self.order.is_empty()
             && self.order.iter().all(|id| self.streams.contains_key(id))
             && !self.order.iter().any(|id| self.placements.contains_key(id));
@@ -1083,12 +1079,7 @@ impl World {
     /// their scales (`scale` of each, as the PC says), the primary, the PC's own
     /// displays `shown`, and where they stand (in cinema, the desk arrangement as kept
     /// before it).
-    pub fn profile(
-        &self,
-        s: &Settings,
-        shown: Vec<DisplayKey>,
-        scale: impl Fn(DisplayKey) -> u16,
-    ) -> Profile {
+    pub fn profile(&self, shown: Vec<DisplayKey>, scale: impl Fn(DisplayKey) -> u16) -> Profile {
         let live = layout::Arrangement {
             placements: self.placements.clone(),
             sizes: HashMap::new(),
@@ -1115,8 +1106,8 @@ impl World {
             self.primary,
             shown,
             &live,
-            s.cinema.then(|| self.desk.arrangement()),
-            &self.sent_rows(),
+            self.cinema.then(|| self.desk.arrangement()),
+            self.sent_rows(),
         )
     }
 
@@ -1147,7 +1138,7 @@ impl World {
         let (frame, rows) = (switch.frame, switch.rows.clone());
         let radius = frame.map_or(layout::RADIUS, |f| f.radius);
         match switch.made(ids, now) {
-            Made::Places(made) if s.cinema => {
+            Made::Places(made) if self.cinema => {
                 self.switch = None;
                 let mut desk = self.desk.arrangement().clone();
                 let at = desk.center.unwrap_or(self.center);
@@ -1178,7 +1169,7 @@ impl World {
                 }
                 self.switch = None;
                 self.rows_from(rows);
-                self.save_layout(s);
+                self.save_layout();
                 self.place_missing(s, gaze, now);
             }
             Made::Wait => self.profile_streams(s, now),
@@ -1230,11 +1221,10 @@ impl World {
         &mut self,
         req: Option<ReqId>,
         size: (u32, u32),
-        s: &Settings,
         gaze: Vec3,
         now: Instant,
     ) {
-        self.adding = req.filter(|_| !s.cinema).and_then(|req| {
+        self.adding = req.filter(|_| !self.cinema).and_then(|req| {
             Some(Adding {
                 req,
                 pc: self.pc?,
@@ -1321,7 +1311,7 @@ impl World {
         self.center = (new_pos, center_yaw + step_turn);
         if turn.abs() < 0.02 && shift.length() < 0.02 {
             self.following = false;
-            self.save_layout(s);
+            self.save_layout();
         }
     }
 
@@ -1330,7 +1320,7 @@ impl World {
     pub fn follow_chosen(&mut self, s: &Settings) {
         self.follow_hold = false;
         if !s.follow {
-            self.save_layout(s);
+            self.save_layout();
         }
     }
 
@@ -1340,7 +1330,7 @@ impl World {
     pub fn recenter(&mut self, s: &Settings, (head, forward): (Vec3, Vec3), now: Instant) {
         let flat = Vec3::new(forward.x, 0.0, forward.z).normalize_or(-Vec3::Z);
         let yaw = (-flat.x).atan2(-flat.z);
-        if s.cinema || self.placements.is_empty() {
+        if self.cinema || self.placements.is_empty() {
             self.center = (head, yaw);
             self.arrange_all(s, now);
             return;
@@ -1354,13 +1344,13 @@ impl World {
             *p = layout::carried(p, (old_pos, ahead), (head, yaw));
         }
         self.center = (head, yaw);
-        self.save_layout(s);
-        self.send_layout(s, now);
+        self.save_layout();
+        self.send_layout(now);
     }
 
     /// Brings the monitors closer (`steps` below 0) or further, a step at a time, as
     /// they stand around the user: each keeps its size, the arrangement its shape.
-    pub fn closer(&mut self, steps: i8, s: &Settings, now: Instant) {
+    pub fn closer(&mut self, steps: i8, now: Instant) {
         const STEP: f32 = 1.15;
         let (center, _) = self.center;
         let wanted = self.radius * STEP.powi(i32::from(steps));
@@ -1371,8 +1361,8 @@ impl World {
             }
         }
         self.radius *= k;
-        self.save_layout(s);
-        self.send_layout(s, now);
+        self.save_layout();
+        self.send_layout(now);
     }
 
     /// The A button: lines up what the user arranged by hand, row by row (see
@@ -1380,7 +1370,7 @@ impl World {
     /// place and the way it stands, tilted back or overhead too. Cinema rebuilds its
     /// own view. What the hands held is let go.
     pub fn tidy_up(&mut self, s: &Settings, now: Instant) {
-        if s.cinema || self.placements.is_empty() {
+        if self.cinema || self.placements.is_empty() {
             self.arrange_all(s, now);
             return;
         }
@@ -1391,19 +1381,19 @@ impl World {
             self.center,
             self.tilt,
             self.primary,
-            &self.sent_rows(),
+            self.sent_rows(),
             lid,
         );
         // Window panels (and anything not laid out) stay as they are.
         self.placements.extend(lined);
         self.held = [None, None];
-        self.save_layout(s);
-        self.send_layout(s, now);
+        self.save_layout();
+        self.send_layout(now);
     }
 
     /// Swaps the places of monitor `id` and its neighbour `delta` along in the order;
     /// the others stay. Each takes the other's place at the size of its own pixels.
-    pub fn swap(&mut self, id: DisplayKey, delta: i32, s: &Settings) {
+    pub fn swap(&mut self, id: DisplayKey, delta: i32) {
         let Some(i) = self.lineup.iter().position(|m| m.0 == id) else {
             return;
         };
@@ -1419,7 +1409,7 @@ impl World {
             let (sa, sb) = ((aw, ah), (bw, bh));
             self.placements.insert(id, layout::refit(b, sb, sa));
             self.placements.insert(other, layout::refit(a, sa, sb));
-            self.save_layout(s);
+            self.save_layout();
         }
     }
 
@@ -1429,7 +1419,7 @@ impl World {
     /// hand, and the rest of the arrangement (monitors and the laptop screen, not
     /// window panels) goes along as one piece: moved, turned and scaled with it.
     fn carry_all(&mut self, s: &Settings, id: DisplayKey, before: &Placement, after: &Placement) {
-        if !s.move_all || s.cinema || self.is_window(id) || !self.streams.contains_key(&id) {
+        if !s.move_all || self.cinema || self.is_window(id) || !self.streams.contains_key(&id) {
             return;
         }
         let turn = after.rotation * before.rotation.inverse();
@@ -1459,7 +1449,7 @@ impl World {
         self.moving
             .extend(self.held.iter().flatten().filter_map(|t| t.display()));
         let carrying = s.move_all
-            && !s.cinema
+            && !self.cinema
             && self
                 .moving
                 .iter()
@@ -1477,7 +1467,7 @@ impl World {
     pub fn stick_of(&self, s: &Settings, id: DisplayKey) -> Option<layout::Stick<DisplayKey>> {
         // Lying down the monitors are a tilted band the presets keep exact; window
         // panels float on their own.
-        if s.cinema
+        if self.cinema
             || !s.magnet
             || s.move_all
             || self.tilt != 0.0
@@ -1504,10 +1494,15 @@ impl World {
         }
     }
 
-    /// Hand `hand` takes `thing`, where it is drawn: a monitor still easing towards
-    /// its place goes on from there (its place becomes the drawn one), so it does not
-    /// jump under the hand. Where it is taken at; `None` for what cannot be taken.
-    pub fn hold(&mut self, hand: usize, thing: Thing) -> Option<Placement> {
+    /// A hand takes `thing`, where it is drawn: a monitor still easing towards its
+    /// place goes on from there (its place becomes the drawn one), so it does not jump
+    /// under the hand. Where it is taken at; `None` for what cannot be taken, for what
+    /// a hand holds already, and while both hands hold something.
+    pub fn hold(&mut self, thing: Thing) -> Option<Placement> {
+        if self.holds(thing) {
+            return None;
+        }
+        let free = self.held.iter().position(Option::is_none)?;
         let at = match thing {
             Thing::Display(id) => {
                 let target = self.placements.get_mut(&id)?;
@@ -1518,7 +1513,7 @@ impl World {
             }
             _ => self.place(thing)?,
         };
-        *self.held.get_mut(hand)? = Some(thing);
+        *self.held.get_mut(free)? = Some(thing);
         Some(at)
     }
 
@@ -1527,7 +1522,7 @@ impl World {
     /// parallel to it, and with "move all together" the rest goes along. `head`: where
     /// the head is.
     pub fn drag(&mut self, s: &Settings, thing: Thing, mut p: Placement, head: Vec3) {
-        let wall = s.preset == Preset::Wall && !s.cinema;
+        let wall = s.preset == Preset::Wall && !self.cinema;
         if thing == Thing::Keyboard {
             // It follows the hand but stays flat, like the desk.
             p.rotation = lying_flat(p.position, head);
@@ -1554,14 +1549,16 @@ impl World {
         }
     }
 
-    /// Hand `hand` let go of `thing`. A monitor put somewhere new stays there until the
+    /// A hand let go of `thing`. A monitor put somewhere new stays there until the
     /// head comes back near where it was (the menu and the keyboard do not count);
     /// let go next to another monitor, it sticks to it, edge to edge (true then), and
     /// the desktop's arrangement follows what the eyes see. Resizing ends too. In
     /// cinema nothing is kept.
-    pub fn let_go(&mut self, hand: usize, thing: Thing, s: &Settings, now: Instant) -> bool {
-        if let Some(h) = self.held.get_mut(hand) {
-            *h = None;
+    pub fn let_go(&mut self, thing: Thing, s: &Settings, now: Instant) -> bool {
+        for h in &mut self.held {
+            if *h == Some(thing) {
+                *h = None;
+            }
         }
         self.follow_hold = s.follow
             && thing
@@ -1575,14 +1572,14 @@ impl World {
                     self.saves.mark(File::Keyboard);
                 }
             }
-            Thing::Menu if !s.cinema => self.save_layout(s),
-            Thing::Display(id) if !s.cinema => {
+            Thing::Menu if !self.cinema => self.save_layout(),
+            Thing::Display(id) if !self.cinema => {
                 if let Some(st) = self.stick_of(s, id) {
                     self.placements.insert(id, st.placement);
                     stuck = true;
                 }
-                self.save_layout(s);
-                self.send_layout(s, now);
+                self.save_layout();
+                self.send_layout(now);
             }
             Thing::Menu
             | Thing::Display(_)
@@ -1617,17 +1614,17 @@ impl World {
     }
 
     /// The second hand let go: resizing ends, and the arrangement is kept.
-    pub fn resize_end(&mut self, s: &Settings) {
+    pub fn resize_end(&mut self) {
         self.resizing = None;
-        self.save_layout(s);
+        self.save_layout();
     }
 
     /// The hands are not the app's any more (the system menu over it): what they held
     /// is let go, and the arrangement is kept.
-    pub fn cancel_holds(&mut self, s: &Settings) {
+    pub fn cancel_holds(&mut self) {
         self.held = [None, None];
         self.resizing = None;
-        self.save_layout(s);
+        self.save_layout();
     }
 
     // ---- The person's things ----

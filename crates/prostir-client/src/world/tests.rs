@@ -143,7 +143,7 @@ impl Sim {
     fn frame(&mut self, dt: f32) {
         self.world.place_button(&self.s);
         self.world.animate(&self.s, dt);
-        self.world.settle(&self.s, self.now);
+        self.world.settle(self.now);
         if let Some(rows) = self.world.take_arrange() {
             self.arranged.push(rows);
         }
@@ -253,7 +253,7 @@ fn connecting_puts_monitors_where_the_file_says() {
 
     // In a hand, a monitor goes up and down for two seconds: nothing is told.
     sim.arranged.clear();
-    let start = sim.world.hold(0, Thing::Display(k(2))).unwrap();
+    let start = sim.world.hold(Thing::Display(k(2))).unwrap();
     for i in 0..200 {
         let mut p = sim.world.place(Thing::Display(k(2))).unwrap();
         p.position.y = start.position.y + 0.6 * ((i as f32) * 0.05).sin();
@@ -265,7 +265,7 @@ fn connecting_puts_monitors_where_the_file_says() {
     let mut p = sim.world.place(Thing::Display(k(2))).unwrap();
     p.position.y = start.position.y + 0.9;
     sim.world.drag(&sim.s, Thing::Display(k(2)), p, sim.head.0);
-    sim.world.let_go(0, Thing::Display(k(2)), &sim.s, sim.now);
+    sim.world.let_go(Thing::Display(k(2)), &sim.s, sim.now);
     sim.after(700);
     assert!(sim.arranged.is_empty());
     sim.after(200);
@@ -280,7 +280,7 @@ fn connecting_puts_monitors_where_the_file_says() {
 fn a_new_monitor_takes_its_placeholders_place() {
     let mut sim = Sim::at_desk();
     sim.world
-        .adding_started(Some(ReqId(5)), QHD, &sim.s, sim.head.1, sim.now);
+        .adding_started(Some(ReqId(5)), QHD, sim.head.1, sim.now);
     let shown = *sim.world.adding().unwrap();
     assert_eq!(
         shown.thing(),
@@ -308,7 +308,7 @@ fn a_new_monitor_takes_its_placeholders_place() {
 
     // Display 5 never streams: its placeholder waits 15 s, then goes.
     sim.world
-        .adding_started(Some(ReqId(6)), QHD, &sim.s, sim.head.1, sim.now);
+        .adding_started(Some(ReqId(6)), QHD, sim.head.1, sim.now);
     sim.world.adding_made(ReqId(6), Some(k(5)));
     list.push(starting(monitor(5, QHD)));
     sim.list(list.clone());
@@ -321,7 +321,7 @@ fn a_new_monitor_takes_its_placeholders_place() {
 
     // Display 6 could not start: the menu says why, and its placeholder goes.
     sim.world
-        .adding_started(Some(ReqId(7)), QHD, &sim.s, sim.head.1, sim.now);
+        .adding_started(Some(ReqId(7)), QHD, sim.head.1, sim.now);
     list.push(failed(monitor(6, QHD)));
     sim.list(list);
     sim.world.adding_due(sim.now, true);
@@ -332,7 +332,7 @@ fn a_new_monitor_takes_its_placeholders_place() {
 
     // Asked, and the request failed before the PC made it (nothing waits for it).
     sim.world
-        .adding_started(Some(ReqId(8)), QHD, &sim.s, sim.head.1, sim.now);
+        .adding_started(Some(ReqId(8)), QHD, sim.head.1, sim.now);
     sim.world.adding_due(sim.now, true);
     assert!(sim.world.adding().is_some(), "waits for its answer");
     sim.world.adding_due(sim.now, false);
@@ -356,32 +356,32 @@ fn cinema_leaves_the_desk_as_it_was() {
     // Arranged by hand before cinema.
     let mut p = sim.place(k(3));
     p.position += Vec3::new(0.1, 0.2, 0.0);
-    sim.world.hold(0, Thing::Display(k(3)));
+    sim.world.hold(Thing::Display(k(3)));
     sim.world.drag(&sim.s, Thing::Display(k(3)), p, sim.head.0);
-    sim.world.let_go(0, Thing::Display(k(3)), &sim.s, sim.now);
+    sim.world.let_go(Thing::Display(k(3)), &sim.s, sim.now);
     sim.settled();
     let desk = sim.places();
-    let profile_at_desk = sim.world.profile(&sim.s, Vec::new(), |_| 100);
+    let profile_at_desk = sim.world.profile(Vec::new(), |_| 100);
 
     cinema(&mut sim, true);
     sim.settled();
     assert_eq!(sim.world.placements.len(), 1, "one screen");
     let (&screen, _) = sim.world.placements.iter().next().unwrap();
     // Moved by hand, through the system menu, and resized with both hands.
-    sim.world.hold(0, Thing::Display(screen));
+    sim.world.hold(Thing::Display(screen));
     let mut p = sim.place(screen);
     p.position += Vec3::new(0.4, 0.3, 0.5);
     sim.world
         .drag(&sim.s, Thing::Display(screen), p, sim.head.0);
-    sim.world.cancel_holds(&sim.s);
-    sim.world.hold(0, Thing::Display(screen));
+    sim.world.cancel_holds();
+    sim.world.hold(Thing::Display(screen));
     sim.world.resize_start(screen);
     sim.world.resize(&sim.s, 1.0);
-    sim.world.resize_end(&sim.s);
-    sim.world.let_go(0, Thing::Display(screen), &sim.s, sim.now);
+    sim.world.resize_end();
+    sim.world.let_go(Thing::Display(screen), &sim.s, sim.now);
     sim.settled();
     // Saved as a profile in cinema: the desk.
-    let profile_in_cinema = sim.world.profile(&sim.s, Vec::new(), |_| 100);
+    let profile_in_cinema = sim.world.profile(Vec::new(), |_| 100);
     assert_eq!(profile_in_cinema.places.len(), 3);
     for (a, b) in profile_in_cinema.places.iter().zip(&profile_at_desk.places) {
         assert!(near(a, b), "the desk, not the cinema view");
@@ -392,12 +392,12 @@ fn cinema_leaves_the_desk_as_it_was() {
     // All in one pass: on, moved, off.
     cinema(&mut sim, true);
     let (&screen, _) = sim.world.placements.iter().next().unwrap();
-    sim.world.hold(1, Thing::Display(screen));
+    sim.world.hold(Thing::Display(screen));
     let mut p = sim.place(screen);
     p.position.x -= 0.7;
     sim.world
         .drag(&sim.s, Thing::Display(screen), p, sim.head.0);
-    sim.world.let_go(1, Thing::Display(screen), &sim.s, sim.now);
+    sim.world.let_go(Thing::Display(screen), &sim.s, sim.now);
     cinema(&mut sim, false);
     assert!(same_places(&sim.places(), &desk), "in one pass too");
     assert!(same_places(
@@ -412,7 +412,7 @@ fn cinema_leaves_the_desk_as_it_was() {
 fn the_system_menu_lets_a_drag_go() {
     let mut sim = Sim::at_desk();
     sim.world.take_saves();
-    sim.world.hold(0, Thing::Display(k(1)));
+    sim.world.hold(Thing::Display(k(1)));
     for _ in 0..10 {
         let mut p = sim.place(k(1));
         p.position.y += 0.01;
@@ -424,8 +424,8 @@ fn the_system_menu_lets_a_drag_go() {
         "nothing kept while it moves"
     );
     let there = sim.place(k(1));
-    sim.world.cancel_holds(&sim.s);
-    assert!(!sim.world.holding() && sim.world.held(0).is_none());
+    sim.world.cancel_holds();
+    assert!(!sim.world.holding() && !sim.world.holds(Thing::Display(k(1))));
     let mut saves = sim.world.take_saves();
     assert_eq!(
         saves.take().collect::<Vec<_>>(),
@@ -498,11 +498,11 @@ fn a_profile_places_its_monitors_by_their_numbers() {
     // Two of them moved about, and the setup saved.
     let mut p = sim.place(k(1));
     p.position += Vec3::new(-0.2, 0.3, 0.1);
-    sim.world.hold(0, Thing::Display(k(1)));
+    sim.world.hold(Thing::Display(k(1)));
     sim.world.drag(&sim.s, Thing::Display(k(1)), p, sim.head.0);
-    sim.world.let_go(0, Thing::Display(k(1)), &sim.s, sim.now);
+    sim.world.let_go(Thing::Display(k(1)), &sim.s, sim.now);
     sim.settled();
-    let saved = sim.world.profile(&sim.s, Vec::new(), |_| 100);
+    let saved = sim.world.profile(Vec::new(), |_| 100);
     let at_save = sim.places();
     // The profile's monitors go left to right, as the PC has them.
     let order: Vec<DisplayKey> = sim.world.monitors().iter().map(|m| m.0).collect();
@@ -566,7 +566,7 @@ fn a_ray_hits_a_monitor_where_it_is_drawn() {
     // drawn on its way.
     let (one, other) = (sim.world.monitors()[0].0, sim.world.monitors()[1].0);
     let (a, b) = (sim.place(one), sim.place(other));
-    sim.world.swap(one, 1, &sim.s);
+    sim.world.swap(one, 1);
     assert!(near(&sim.place(one), &b) && near(&sim.place(other), &a));
     sim.after(11);
     let drawn = sim.drawn(one);
@@ -648,7 +648,7 @@ fn of_two_as_near_the_first_is_hit() {
     // A placeholder right in front of a monitor.
     let mut sim = Sim::at_desk();
     sim.world
-        .adding_started(Some(ReqId(9)), QHD, &sim.s, sim.head.1, sim.now);
+        .adding_started(Some(ReqId(9)), QHD, sim.head.1, sim.now);
     let mut adding = *sim.world.adding().unwrap();
     let m = sim.place(k(2));
     adding.place = Placement {
@@ -691,10 +691,10 @@ fn two_pcs_with_one_number_have_two_places() {
     assert!(near(&sim.place(k(1)), &first), "the first PC's kept");
     let mut p = sim.place(theirs);
     p.position.x += 0.8;
-    sim.world.hold(0, Thing::Display(theirs));
+    sim.world.hold(Thing::Display(theirs));
     sim.world
         .drag(&sim.s, Thing::Display(theirs), p, sim.head.0);
-    sim.world.let_go(0, Thing::Display(theirs), &sim.s, sim.now);
+    sim.world.let_go(Thing::Display(theirs), &sim.s, sim.now);
     assert!(near(&sim.place(theirs), &p));
     assert!(near(&sim.place(k(1)), &first), "not moved with it");
     let kept = &sim.world.desk().arrangement().placements;
@@ -710,7 +710,7 @@ fn two_pcs_with_one_number_have_two_places() {
 #[test]
 fn a_drag_is_drawn_in_the_same_pass() {
     let mut sim = Sim::at_desk();
-    sim.world.hold(0, Thing::Display(k(2)));
+    sim.world.hold(Thing::Display(k(2)));
     let mut p = sim.place(k(2));
     p.position += Vec3::new(0.0, 0.25, 0.1);
     p.rotation = layout::facing(p.position, sim.head.0);
@@ -722,15 +722,15 @@ fn a_drag_is_drawn_in_the_same_pass() {
     );
     let order = sim.world.order_drawing(sim.head.0, |_| false);
     assert_eq!(order.last().map(|o| o.1), Some(k(2)), "over the others");
-    sim.world.let_go(0, Thing::Display(k(2)), &sim.s, sim.now);
+    sim.world.let_go(Thing::Display(k(2)), &sim.s, sim.now);
 
     // Swapped, and taken on the way.
     sim.settled();
-    sim.world.swap(k(1), 1, &sim.s);
+    sim.world.swap(k(1), 1);
     sim.after(30);
     let drawn = sim.drawn(k(1));
     assert!(!near(&drawn, &sim.place(k(1))), "still on its way");
-    let at = sim.world.hold(0, Thing::Display(k(1))).unwrap();
+    let at = sim.world.hold(Thing::Display(k(1))).unwrap();
     assert!(near(&at, &drawn), "taken where it is drawn");
     assert!(near(&sim.place(k(1)), &drawn), "and goes on from there");
     sim.after(11);
@@ -741,19 +741,19 @@ fn a_drag_is_drawn_in_the_same_pass() {
 #[test]
 fn laying_out_lets_go() {
     let mut sim = Sim::at_desk();
-    sim.world.hold(0, Thing::Display(k(1)));
-    sim.world.hold(1, Thing::Menu);
+    sim.world.hold(Thing::Display(k(1)));
+    sim.world.hold(Thing::Menu);
     sim.world.tidy_up(&sim.s, sim.now);
     assert!(!sim.world.holding());
-    sim.world.hold(1, Thing::Display(k(3)));
+    sim.world.hold(Thing::Display(k(3)));
     sim.world.arrange_all(&sim.s, sim.now);
     assert!(!sim.world.holding());
     // A monitor gone from the list is let go; the other hand keeps the menu.
-    sim.world.hold(0, Thing::Display(k(3)));
-    sim.world.hold(1, Thing::Menu);
+    sim.world.hold(Thing::Display(k(3)));
+    sim.world.hold(Thing::Menu);
     sim.list(vec![monitor(1, QHD), monitor(2, QHD)]);
-    assert_eq!(sim.world.held(0), None);
-    assert_eq!(sim.world.held(1), Some(Thing::Menu));
+    assert!(!sim.world.holds(Thing::Display(k(3))));
+    assert!(sim.world.holds(Thing::Menu));
 }
 
 /// The keyboard window lies flat wherever a hand takes it; on a wall a monitor stays
@@ -763,7 +763,7 @@ fn dragging_keeps_the_rules() {
     let mut sim = Sim::at_desk();
     let head = sim.head.0;
     let keyboard = sim.world.keyboard_here(sim.head);
-    sim.world.hold(0, Thing::Keyboard);
+    sim.world.hold(Thing::Keyboard);
     let mut p = keyboard;
     p.position += Vec3::new(0.2, 0.1, 0.0);
     p.rotation = Quat::IDENTITY;
@@ -771,16 +771,16 @@ fn dragging_keeps_the_rules() {
     let now = sim.world.keyboard().unwrap();
     assert!(now.rotation.dot(lying_flat(now.position, head)).abs() > 1.0 - 1e-6);
     sim.world.take_saves();
-    sim.world.let_go(0, Thing::Keyboard, &sim.s, sim.now);
+    sim.world.let_go(Thing::Keyboard, &sim.s, sim.now);
     assert!(sim.world.take_saves().has(File::Keyboard));
 
     sim.s.move_all = true;
     let others = (sim.place(k(1)), sim.place(k(3)));
     let mut p = sim.place(k(2));
     p.position.y += 0.3;
-    sim.world.hold(0, Thing::Display(k(2)));
+    sim.world.hold(Thing::Display(k(2)));
     sim.world.drag(&sim.s, Thing::Display(k(2)), p, head);
     assert!((sim.place(k(1)).position.y - others.0.position.y - 0.3).abs() < 1e-5);
     assert!((sim.place(k(3)).position.y - others.1.position.y - 0.3).abs() < 1e-5);
-    sim.world.let_go(0, Thing::Display(k(2)), &sim.s, sim.now);
+    sim.world.let_go(Thing::Display(k(2)), &sim.s, sim.now);
 }

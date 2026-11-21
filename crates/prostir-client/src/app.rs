@@ -335,7 +335,6 @@ struct Scene {
     /// The headset is on the head (the session is visible); streaming pauses otherwise.
     worn: bool,
     settings: Settings,
-    curve_supported: bool,
     panel_open: bool,
     grabs: [Option<Grab>; 2],
     host: Option<String>,
@@ -484,8 +483,8 @@ impl Scene {
         if let Some(rows) = self.world.take_arrange() {
             self.send(ClientMsg::Arrange { rows });
         }
-        for (hand, grab) in self.grabs.iter_mut().enumerate() {
-            if grab.is_some_and(|g| self.world.held(hand) != Some(g.id)) {
+        for grab in &mut self.grabs {
+            if grab.is_some_and(|g| !self.world.holds(g.id)) {
                 *grab = None;
             }
         }
@@ -509,9 +508,8 @@ impl Scene {
             .filter(|d| d.is_shown_physical())
             .filter_map(|d| self.key(d.id))
             .collect();
-        self.world.profile(&self.settings, shown, |k| {
-            self.display(k).map_or(100, |d| d.mode.scale)
-        })
+        self.world
+            .profile(shown, |k| self.display(k).map_or(100, |d| d.mode.scale))
     }
 
     /// The placeholder of a monitor being added goes once its picture is there, it
@@ -769,7 +767,7 @@ impl Scene {
         reason = "until step 7.7 passes the time in and moves the threads to the shell"
     )]
     fn closer(&mut self, steps: i8) {
-        self.world.closer(steps, &self.settings, Instant::now());
+        self.world.closer(steps, Instant::now());
         self.world_done();
     }
 
@@ -1095,7 +1093,7 @@ impl Scene {
             room_available: room,
             panorama_available: panorama,
             custom_available: custom,
-            curve_available: self.curve_supported,
+            curve_available: self.world.curve_supported(),
             keyboard_available: keyboard,
             error: self
                 .error
@@ -1461,7 +1459,6 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         scaling: None,
         worn: true,
         settings,
-        curve_supported: exts.khr_composition_layer_cylinder,
         panel_open: false,
         grabs: [None, None],
         host: None,
@@ -1620,7 +1617,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                         // A drag cannot go on under the system menu.
                         scene.grabs = [None, None];
                         scene.scaling = None;
-                        scene.world.cancel_holds(&scene.settings);
+                        scene.world.cancel_holds();
                     }
                     focused = now_focused;
                     // Taking the headset off hides the app (and puts the headset to
@@ -2203,7 +2200,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
 
             if end_grab && scene.scaling.is_some_and(|s| s.hand == hand) {
                 scene.scaling = None;
-                scene.world.resize_end(&scene.settings);
+                scene.world.resize_end();
             }
             if end_grab && let Some(released) = scene.grabs[hand].take() {
                 // Letting go with the first hand ends resizing too.
@@ -2211,7 +2208,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                 // Let go next to another monitor: it sticks to it, edge to edge.
                 if scene
                     .world
-                    .let_go(hand, released.id, &scene.settings, Instant::now())
+                    .let_go(released.id, &scene.settings, Instant::now())
                 {
                     controls.pulse(&session, hand);
                 }
@@ -2236,7 +2233,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                     Some(Target {
                         thing: thing @ (Thing::Menu | Thing::Keyboard),
                         hit,
-                    }) if other != Some(thing) => take(&mut scene.world, hand, thing, hit),
+                    }) if other != Some(thing) => take(&mut scene.world, thing, hit),
                     // The other hand already holds it: resize with both.
                     Some(Target {
                         thing: Thing::Display(id),
@@ -2258,7 +2255,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                     Some(Target {
                         thing: thing @ Thing::Display(_),
                         hit,
-                    }) => take(&mut scene.world, hand, thing, hit),
+                    }) => take(&mut scene.world, thing, hit),
                     _ => None,
                 }
                 .map(|g| {
@@ -2588,7 +2585,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         // Far monitors first so nearer (and grabbed) ones draw on top.
         scene.world.animate(&scene.settings, dt);
         // Keep the desktop's arrangement in step once nothing is being moved.
-        scene.world.settle(&scene.settings, Instant::now());
+        scene.world.settle(Instant::now());
         scene.world_done();
         let asks = &scene.asks;
         // Gone from view as soon as asked to go; back if the PC does not remove it. Far
@@ -2803,11 +2800,11 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     Ok(())
 }
 
-/// Hand `hand` takes `thing`, pointed at with `hit`, where it is drawn: a monitor
-/// easing to its place goes on from there, under the hand (see `World::hold`).
-fn take(world: &mut World, hand: usize, thing: Thing, hit: Hit) -> Option<Grab> {
+/// A hand takes `thing`, pointed at with `hit`, where it is drawn: a monitor easing
+/// to its place goes on from there, under the hand (see `World::hold`).
+fn take(world: &mut World, thing: Thing, hit: Hit) -> Option<Grab> {
     world
-        .hold(hand, thing)
+        .hold(thing)
         .map(|at| Grab::start(thing, hit.t, hit.local, &at))
 }
 
@@ -3269,13 +3266,9 @@ fn handle_action(
             );
             // Shown at once where it will appear; the monitor takes that place once
             // its picture comes (not in cinema, where new monitors are not placed).
-            scene.world.adding_started(
-                req,
-                (width, height),
-                &scene.settings,
-                scene.head.1,
-                Instant::now(),
-            );
+            scene
+                .world
+                .adding_started(req, (width, height), scene.head.1, Instant::now());
         }
         Action::Remove(id) => {
             let confirmed = scene
@@ -3449,7 +3442,7 @@ fn handle_action(
         }
         // Swaps the places of a monitor and its neighbour in the order; the others
         // stay.
-        Action::Move { id, delta } => scene.world.swap(id, delta, &scene.settings),
+        Action::Move { id, delta } => scene.world.swap(id, delta),
         Action::SetMic(enabled) => {
             scene.mic_wanted = enabled;
             scene.settings.mic = enabled;
