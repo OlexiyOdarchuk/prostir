@@ -141,6 +141,7 @@ impl Sim {
 
     /// One frame of `dt` seconds, at the time it is now.
     fn frame(&mut self, dt: f32) {
+        self.world.follow_head(&self.s, dt, self.head);
         self.world.place_button(&self.s);
         self.world.animate(&self.s, dt);
         self.world.settle(self.now);
@@ -853,6 +854,185 @@ fn moving_all_from_the_way_nothing_jumps() {
             (now.position - was.position - Vec3::new(0.0, 0.1, 0.0)).length() < 1e-4,
             "{k} moved with it, and only that"
         );
+    }
+}
+
+/// Where the head looks, `yaw` radians from straight ahead (positive to the left, as
+/// the arrangement's center counts it).
+fn looking(yaw: f32) -> (Vec3, Vec3) {
+    (Vec3::ZERO, Quat::from_rotation_y(yaw) * -Vec3::Z)
+}
+
+/// The way the arrangement faces, seen from the head.
+fn facing(sim: &Sim) -> f32 {
+    layout::facing_yaw(&sim.places(), sim.head.0).unwrap()
+}
+
+/// Following the head: turned well away, the arrangement glides after it and is kept
+/// once in front again; a small turn leaves it. A monitor let go with the head turned
+/// stays there until the head comes back near where the arrangement faces.
+#[test]
+fn following_the_head() {
+    let mut sim = Sim::at_desk();
+    sim.s.follow = true;
+    let was = facing(&sim);
+    sim.head = looking(0.2);
+    sim.settled();
+    assert!((facing(&sim) - was).abs() < 1e-4, "a small turn leaves it");
+    sim.world.take_saves();
+    sim.head = looking(1.0);
+    sim.settled();
+    assert!((facing(&sim) - 1.0).abs() < 0.03, "in front again");
+    assert!(sim.world.take_saves().has(File::Desk), "kept where it came");
+
+    // Let go with the head turned away: it waits for the head to come back first.
+    sim.head = looking(1.0);
+    let id = sim.world.monitors()[0].0;
+    sim.world.hold(Thing::Display(id), &sim.s);
+    sim.head = looking(2.0);
+    sim.world.let_go(Thing::Display(id), &sim.s, sim.now);
+    let stays = facing(&sim);
+    sim.settled();
+    assert!((facing(&sim) - stays).abs() < 1e-4, "waits for the head");
+    sim.head = looking(1.0);
+    sim.settled();
+    sim.head = looking(2.0);
+    sim.settled();
+    assert!(
+        (facing(&sim) - 2.0).abs() < 0.03,
+        "back, and following again"
+    );
+}
+
+/// Closer and further a step at a time, each keeping its size and the arrangement its
+/// shape; in front: the arrangement turned and carried to the head as it stood.
+#[test]
+fn closer_further_and_in_front() {
+    let mut sim = Sim::at_desk();
+    let before = sim.places();
+    sim.world.closer(-1, sim.now);
+    for (k, p) in &before {
+        let q = sim.place(*k);
+        assert!((q.position.length() - p.position.length() / 1.15).abs() < 1e-4);
+        assert!((q.width - p.width).abs() < 1e-6, "its size kept");
+    }
+    sim.world.closer(1, sim.now);
+    assert!(same_places(&sim.places(), &before), "and back");
+
+    // Turned and moved: in front again, the shape as it was.
+    sim.head = (
+        Vec3::new(0.3, 0.1, -0.2),
+        Quat::from_rotation_y(1.2) * -Vec3::Z,
+    );
+    sim.world.recenter(&sim.s, sim.head, sim.now);
+    assert!((facing(&sim) - 1.2).abs() < 1e-3, "in front of the head");
+    let ids: Vec<DisplayKey> = before.keys().copied().collect();
+    for a in &ids {
+        for b in &ids {
+            let was = before[a].position.distance(before[b].position);
+            let now = sim.place(*a).position.distance(sim.place(*b).position);
+            assert!((was - now).abs() < 1e-4, "the shape kept");
+        }
+    }
+}
+
+/// A profile switched to in cinema: its places become the desk arrangement under the
+/// cinema view, and they show once cinema ends.
+#[test]
+fn a_profile_switched_to_in_cinema() {
+    let mut sim = Sim::at_desk();
+    let mut p = sim.place(k(1));
+    p.position += Vec3::new(0.0, 0.3, 0.0);
+    sim.world.hold(Thing::Display(k(1)), &sim.s);
+    sim.world.drag(&sim.s, Thing::Display(k(1)), p, sim.head.0);
+    sim.world.let_go(Thing::Display(k(1)), &sim.s, sim.now);
+    sim.settled();
+    let saved = sim.world.profile(Vec::new(), |_| 100);
+    let at_save = sim.places();
+    let order: Vec<DisplayKey> = sim.world.monitors().iter().map(|m| m.0).collect();
+    sim.world.arrange_all(&sim.s, sim.now);
+    sim.settled();
+
+    cinema(&mut sim, true);
+    sim.world.switch_to(Some(ProfileSwitch {
+        frame: saved.frame,
+        rows: saved.rows,
+        ..ProfileSwitch::new(ReqId(3), saved.places)
+    }));
+    sim.list(vec![monitor(11, QHD), monitor(12, QHD), monitor(13, QHD)]);
+    sim.world
+        .profile_made(vec![k(11), k(12), k(13)], &sim.s, sim.head.1, sim.now);
+    for n in 11..=13 {
+        sim.stream(n, QHD);
+    }
+    sim.settled();
+    assert_eq!(sim.world.placements.len(), 1, "still the cinema view");
+    let desk = &sim.world.desk().arrangement().placements;
+    for (new, old) in [11, 12, 13].into_iter().zip(&order) {
+        assert!(near(&desk[&k(new)], &at_save[old]), "kept for the desk");
+    }
+    cinema(&mut sim, false);
+    for (new, old) in [11, 12, 13].into_iter().zip(&order) {
+        assert!(
+            near(&sim.place(k(new)), &at_save[old]),
+            "{new} shown where {old} was"
+        );
+    }
+}
+
+/// A PC forgotten: the places of its displays go, from the desk arrangement too, and
+/// so does cinema's pick of one of them; another PC's stay.
+#[test]
+fn forgetting_a_pc_forgets_its_places() {
+    let mut sim = Sim::at_desk();
+    let theirs = DisplayKey::new(OTHER_PC, DisplayId(1));
+    let p = sim.place(k(1));
+    sim.world.placements.insert(theirs, p);
+    sim.world.save_layout();
+    sim.world.pick_cinema(k(2), &sim.s, sim.now);
+    sim.world.take_saves();
+    sim.world.forget_pc(PC);
+    assert!(sim.world.take_saves().has(File::Desk));
+    assert_eq!(
+        sim.world.placements.keys().copied().collect::<Vec<_>>(),
+        [theirs]
+    );
+    let desk = sim.world.desk();
+    assert_eq!(
+        desk.arrangement()
+            .placements
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        [theirs]
+    );
+    assert_eq!(desk.cinema(), None);
+}
+
+/// Let go almost against a neighbour, a monitor sticks to it, edge to edge where it
+/// was (true: the hand feels it); with the magnet off it stays where it was let go.
+#[test]
+fn the_magnet_on_letting_go() {
+    for magnet in [true, false] {
+        let mut sim = Sim::at_desk();
+        sim.s.magnet = magnet;
+        let id = sim.world.monitors().last().unwrap().0;
+        let was = sim.place(id);
+        let mut p = was;
+        p.position += p.rotation * Vec3::new(0.04, 0.0, 0.0);
+        sim.world.hold(Thing::Display(id), &sim.s);
+        sim.world.drag(&sim.s, Thing::Display(id), p, sim.head.0);
+        let stuck = sim.world.let_go(Thing::Display(id), &sim.s, sim.now);
+        assert_eq!(stuck, magnet);
+        let now = sim.place(id);
+        if magnet {
+            assert!(
+                now.position.distance(was.position) < 1e-3,
+                "back against it"
+            );
+        } else {
+            assert!(near(&now, &p), "where it was let go");
+        }
     }
 }
 
