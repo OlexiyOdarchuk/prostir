@@ -31,7 +31,7 @@ use log::warn;
 
 use super::{File, LoadError};
 use crate::layout::{self, Desk, Placement};
-use crate::profiles::{self, Profile};
+use crate::profiles::{self, Slots};
 use crate::settings::Settings;
 
 /// How long a start waits for the `persist` thread of an earlier start, still
@@ -105,9 +105,7 @@ pub fn write_now(dir: &Path, file: File, text: &str) -> io::Result<()> {
 pub struct Loaded {
     pub settings: Settings,
     pub desk: Desk,
-    pub profiles: [Profile; profiles::SLOTS],
-    /// `profiles.txt` is there: a profile was saved before.
-    pub profiles_saved: bool,
+    pub profiles: Slots,
     pub keyboard: Option<Placement>,
 }
 
@@ -122,8 +120,8 @@ impl Loaded {
                 .map(|t| Settings::parse(&t))
                 .unwrap_or_default(),
             desk: readable(dir, File::Desk, Desk::parse).unwrap_or_default(),
-            profiles: profiles::parse(&text(File::Profiles).unwrap_or_default()),
-            profiles_saved: dir.join(File::Profiles.name()).exists(),
+            profiles: readable(dir, File::Profiles, profiles::parse)
+                .unwrap_or_else(profiles::empty),
             keyboard: readable(dir, File::Keyboard, layout::parse_keyboard),
         }
     }
@@ -748,13 +746,22 @@ mod tests {
         let (empty, mut saver) = start_after(&dir, Duration::ZERO);
         assert_eq!(empty.settings, Settings::default());
         assert!(empty.desk.arrangement().placements.is_empty());
-        assert!(!empty.profiles_saved && empty.keyboard.is_none());
+        assert!(empty.profiles.iter().all(Option::is_none) && empty.keyboard.is_none());
         let settings = Settings {
             mic: false,
             ..Settings::default()
         };
         saver.save(File::Settings, |out| settings.write_text(out));
-        let profiles: [Profile; profiles::SLOTS] = std::array::from_fn(Profile::default_for);
+        let mut profiles = profiles::empty();
+        profiles[1] = Some(profiles::Profile {
+            monitors: vec![prostir_proto::state::Mode::new(2560, 1440)],
+            primary: 0,
+            shown: Vec::new(),
+            places: Vec::new(),
+            tilt: 0.0,
+            radius: layout::RADIUS,
+            rows: Vec::new(),
+        });
         saver.save(File::Profiles, |out| profiles::write_text(out, &profiles));
         let place = Placement {
             position: glam::Vec3::new(0.0, 1.0, -0.5),
@@ -775,11 +782,10 @@ mod tests {
         drop(saver);
         let (back, _saver) = start_after(&dir, Duration::ZERO);
         assert_eq!(back.settings, settings);
-        assert!(back.profiles_saved);
         assert_eq!(back.profiles, profiles);
         assert_eq!(back.keyboard, Some(place));
         assert_eq!(back.desk.arrangement().placements[&three], place);
-        for file in [File::Desk, File::Keyboard] {
+        for file in [File::Desk, File::Profiles, File::Keyboard] {
             assert!(!dir.join(format!("{}.old", file.name())).exists(), "read");
         }
         let _ = std::fs::remove_dir_all(&dir);
@@ -804,7 +810,7 @@ mod tests {
             b"format 2\n3 0 1.6 -1.2 0 0 0 1 0.8\n",
         ];
         for (n, text) in not_read.iter().enumerate() {
-            for file in [File::Desk, File::Keyboard] {
+            for file in [File::Desk, File::Profiles, File::Keyboard] {
                 std::fs::write(dir.join(file.name()), text).unwrap();
             }
             let (loaded, saver) = start_after(&dir, Duration::ZERO);
@@ -812,13 +818,15 @@ mod tests {
             assert!(loaded.desk.arrangement().placements.is_empty(), "case {n}");
             assert!(loaded.desk.arrangement().center.is_none(), "case {n}");
             assert!(loaded.keyboard.is_none(), "case {n}");
-            for file in [File::Desk, File::Keyboard] {
+            assert!(loaded.profiles.iter().all(Option::is_none), "case {n}");
+            for file in [File::Desk, File::Profiles, File::Keyboard] {
                 assert!(!dir.join(file.name()).exists(), "case {n}: moved");
                 let old = std::fs::read(dir.join(format!("{}.old", file.name()))).unwrap();
                 assert_eq!(old, *text, "case {n}: whole");
             }
         }
         // Files of this version are read, and the `*.old` ones stay as they are.
+        std::fs::write(dir.join(File::Profiles.name()), "format 2\n").unwrap();
         std::fs::write(dir.join(File::Desk.name()), desk).unwrap();
         std::fs::write(dir.join(File::Keyboard.name()), keyboard).unwrap();
         let (loaded, saver) = start_after(&dir, Duration::ZERO);
@@ -836,6 +844,10 @@ mod tests {
             desk
         );
         assert!(dir.join("layout.txt.old").exists());
+        assert!(
+            dir.join(File::Profiles.name()).exists(),
+            "read, not set aside"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

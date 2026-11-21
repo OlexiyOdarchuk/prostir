@@ -53,23 +53,13 @@ pub fn what_to_do(asked: &Asked<Command>) -> Does {
     }
 }
 
-/// The profile a command names: by its name in either language, or its number from 1.
+/// The profile slot a command names: by its number from 1, as the menu shows it.
 pub fn profile_named(name: &str) -> Option<usize> {
-    let name = name.trim().to_lowercase();
-    let names = [
-        ("робота", "work"),
-        ("кіно", "cinema"),
-        ("лежачи", "lying down"),
-    ];
-    names
-        .iter()
-        .position(|(uk, en)| name == *uk || name == *en)
-        .or_else(|| {
-            name.parse::<usize>()
-                .ok()
-                .filter(|n| (1..=names.len()).contains(n))
-                .map(|n| n - 1)
-        })
+    name.trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|n| (1..=crate::profiles::SLOTS).contains(n))
+        .map(|n| n - 1)
 }
 
 #[cfg(test)]
@@ -110,11 +100,15 @@ mod tests {
         let does = |c: Command| what_to_do(&Asked::Known(c));
         assert_eq!(does(Command::LineUp), Does::Act(Action::Tidy));
         assert_eq!(
-            does(Command::Profile {
-                name: " Cinema ".into()
-            }),
+            does(Command::Profile { name: " 2 ".into() }),
             Does::Profile(1)
         );
+        assert!(matches!(
+            does(Command::Profile {
+                name: "Cinema".into()
+            }),
+            Does::Fail(ErrorCode::NO_SUCH_PROFILE, _)
+        ));
         assert_eq!(
             does(Command::Profile { name: "3".into() }),
             Does::Profile(2)

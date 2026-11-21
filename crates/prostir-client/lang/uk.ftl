@@ -105,8 +105,8 @@ intro-done = Зрозуміло
 ## Швидке
 
 profile = Профіль
-profile-work = Робота
-profile-cinema = Кіно
+profile-n = Профіль { $n }
+profile-empty = Порожній
 layout-lying = Лежачи
 quick-in-front = Перед собою
 quick-in-front-state = Повернути все до себе

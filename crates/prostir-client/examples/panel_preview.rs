@@ -183,9 +183,7 @@ fn main() {
             Ok("controls") => Tab::Settings(Section::Controls),
             _ => Tab::Quick,
         },
-        profiles: (0..prostir::profiles::SLOTS)
-            .map(prostir::profiles::Profile::default_for)
-            .collect(),
+        saved_profiles: [true, false, false],
         active_profile: Some(0),
         asks: Vec::new(),
         texts,

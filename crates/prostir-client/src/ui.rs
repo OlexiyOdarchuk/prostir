@@ -10,7 +10,6 @@ use tiny_skia::{FillRule, Paint, Path, PathBuilder, Pixmap, Rect, Stroke, Transf
 
 use crate::ids::DisplayKey;
 use crate::lang::{Language, Moment, Texts};
-use crate::profiles::Profile;
 use crate::settings::{Background, Curve, HandMode, Preset, Settings, Sky};
 use crate::store::UpdateHint;
 
@@ -185,7 +184,8 @@ pub struct UiState {
     pub update: Option<(bool, String)>,
     /// Where this build of the headset app is updated (from its store).
     pub update_from: UpdateHint,
-    pub profiles: Vec<Profile>,
+    /// Which profile slots hold a saved profile (the others are empty).
+    pub saved_profiles: [bool; crate::profiles::SLOTS],
     /// The profile last switched to (until something is changed by hand).
     pub active_profile: Option<usize>,
     /// What the menu asked the PC for and has no answer to yet, or that failed lately:
@@ -2463,25 +2463,24 @@ fn build_quick(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
     let connected = s.host.is_some();
     items.push(text(x, y + 14.0, 21.0, true, SECTION, l.t("profile")));
     y += 32.0;
-    let names = [
-        l.t("profile-work"),
-        l.t("profile-cinema"),
-        l.t("layout-lying"),
-    ];
     let cw = (w - 2.0 * 12.0) / 3.0;
-    for (i, name) in names.iter().enumerate() {
+    for (i, saved) in s.saved_profiles.iter().enumerate() {
         let r = rect(x + i as f32 * (cw + 12.0), y, cw, 72.0);
         let active = s.active_profile == Some(i);
-        let style = match (connected, active) {
+        let style = match (connected && *saved, active) {
             (false, _) => Style::Disabled,
             (true, true) => Style::Selected,
             (true, false) => Style::Normal,
         };
-        let action = (connected && !active).then_some(Action::ApplyProfile(i));
-        items.push(button(r, name, style, action));
+        let action = (connected && *saved && !active).then_some(Action::ApplyProfile(i));
+        let name = l.f("profile-n", &[("n", (i + 1).into())]);
+        items.push(button(r, &name, style, action));
         if let Some((note, failed)) = s.ask_note(Asked::Profile(i)) {
             let color = if failed { DANGER } else { MUTED };
             items.push(text(r.left(), r.bottom() + 22.0, 17.0, false, color, &note));
+        } else if !saved {
+            let empty = l.t("profile-empty");
+            items.push(text(r.left(), r.bottom() + 22.0, 17.0, false, MUTED, empty));
         }
     }
     y += 72.0 + 40.0;
@@ -2594,25 +2593,26 @@ fn save_as_profile(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f3
     let l = &s.texts;
     items.push(text(x, y, 21.0, true, SECTION, l.t("profile-save")));
     y += 18.0;
-    let names = [
-        l.t("profile-work"),
-        l.t("profile-cinema"),
-        l.t("layout-lying"),
-    ];
     let bw = (w - 2.0 * 10.0) / 3.0;
-    for (i, name) in names.iter().enumerate() {
+    // Something to save: the PC's monitors.
+    let can = s.host.is_some() && !s.monitors.is_empty();
+    for i in 0..s.saved_profiles.len() {
         let armed = s.confirm_save == Some(i);
-        let label = if armed { l.t("profile-replace") } else { name };
-        let style = match (s.host.is_some(), armed) {
+        let label = if armed {
+            l.t("profile-replace").to_owned()
+        } else {
+            l.f("profile-n", &[("n", (i + 1).into())])
+        };
+        let style = match (can, armed) {
             (false, _) => Style::Disabled,
             (true, true) => Style::Armed,
             (true, false) => Style::Normal,
         };
         items.push(button(
             rect(x + i as f32 * (bw + 10.0), y, bw, 48.0),
-            label,
+            &label,
             style,
-            s.host.is_some().then_some(Action::SaveProfile(i)),
+            can.then_some(Action::SaveProfile(i)),
         ));
     }
 }
@@ -3537,9 +3537,7 @@ mod tests {
             intro: false,
             update: None,
             update_from: NoStore.update_hint(),
-            profiles: (0..crate::profiles::SLOTS)
-                .map(Profile::default_for)
-                .collect(),
+            saved_profiles: [true, false, true],
             active_profile: None,
             asks: Vec::new(),
         }

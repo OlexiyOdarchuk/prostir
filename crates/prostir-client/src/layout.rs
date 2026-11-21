@@ -416,6 +416,15 @@ pub fn frame(center: (Vec3, f32), preset: Preset) -> Frame {
     }
 }
 
+/// How far up [`frame`] is tilted for `preset`, in radians.
+pub fn tilt(preset: Preset) -> f32 {
+    if preset == Preset::Overhead {
+        OVERHEAD_PITCH
+    } else {
+        0.0
+    }
+}
+
 /// Every one of `monitors` (id, pixel size) that has a placement.
 fn placed<K: Key>(
     placements: &HashMap<K, Placement>,
@@ -1013,6 +1022,16 @@ impl Desk {
         saved.center = Some(center);
         saved.radius = Some(radius);
         true
+    }
+
+    /// Forgets the places of the displays `gone`; true when it had one of them, and
+    /// `layout.txt` is to be written.
+    pub fn forget(&mut self, gone: &[DisplayKey]) -> bool {
+        let saved = &mut self.saved;
+        let before = saved.placements.len();
+        saved.placements.retain(|k, _| !gone.contains(k));
+        saved.sizes.retain(|k, _| !gone.contains(k));
+        saved.placements.len() != before
     }
 
     /// The text of `layout.txt` (see [`Desk::parse`]), added to `out` (a buffer kept
@@ -1930,19 +1949,8 @@ mod tests {
             "lined up",
         );
         // Saved in a profile, another profile, and back: the places by their order.
-        let mut profile = crate::profiles::Profile::default_for(0);
-        profile.sizes = four.iter().map(|x| (x.1, x.2)).collect();
-        profile.places = four.iter().map(|x| p[&x.0]).collect();
-        let text = {
-            let mut all = std::array::from_fn(crate::profiles::Profile::default_for);
-            all[0] = profile;
-            reread_profiles(&all)
-        };
-        let back: HashMap<u32, Placement> = four
-            .iter()
-            .map(|x| x.0)
-            .zip(text[0].places.clone())
-            .collect();
+        let profile = saved_profile(four, Some(0), &p, center, &desktop.rows);
+        let (back, _) = switched_to(&profile, four, center);
         same(&back, "profile and back");
     }
 
@@ -2332,12 +2340,17 @@ mod tests {
     }
 
     /// `profiles` written to their file and read back.
-    fn reread_profiles(
-        profiles: &[crate::profiles::Profile; crate::profiles::SLOTS],
-    ) -> [crate::profiles::Profile; crate::profiles::SLOTS] {
+    fn reread_profiles(profiles: &crate::profiles::Slots) -> crate::profiles::Slots {
         let mut text = String::new();
         crate::profiles::write_text(&mut text, profiles);
-        crate::profiles::parse(&text)
+        crate::profiles::parse(&text).unwrap()
+    }
+
+    /// `m` (number, width, height) as a profile takes the monitors: at 100 %.
+    fn modes<K: Copy>(m: &[(K, u32, u32)]) -> Vec<(K, prostir_proto::state::Mode)> {
+        m.iter()
+            .map(|&(k, w, h)| (k, prostir_proto::state::Mode::new(w, h)))
+            .collect()
     }
 
     /// The cinema view never replaces the desk arrangement: leaving cinema finds the
@@ -2392,11 +2405,7 @@ mod tests {
         }
         assert!(!desk.keep(view.clone(), &sizes, (center, RADIUS), true));
         // Saved as a profile while in cinema.
-        let monitors = [(k(0), 2560, 1440), (k(1), 1920, 1080)];
-        let settings = crate::settings::Settings {
-            cinema: true,
-            ..crate::settings::Settings::default()
-        };
+        let monitors = modes(&[(k(0), 2560, 1440), (k(1), 1920, 1080)]);
         let live = Arrangement {
             placements: view,
             sizes: sizes.clone(),
@@ -2406,11 +2415,11 @@ mod tests {
         let profile = crate::profiles::Profile::of(
             &monitors,
             Some(k(0)),
-            false,
-            settings,
-            live,
+            Vec::new(),
+            &live,
+            Some(desk.arrangement()),
+            0.0,
             &[],
-            desk.arrangement(),
         );
         assert_eq!(profile.places.len(), 2);
         // Cinema off: what `Scene::adopt_desk` takes.
@@ -2769,19 +2778,12 @@ mod tests {
             center: Some(center),
             radius: Some(RADIUS),
         };
-        let profile = crate::profiles::Profile::of(
-            m,
-            primary,
-            false,
-            crate::settings::Settings::default(),
-            live,
-            rows,
-            &Arrangement::default(),
-        );
-        let mut all = std::array::from_fn(crate::profiles::Profile::default_for);
-        all[0] = profile;
+        let profile =
+            crate::profiles::Profile::of(&modes(m), primary, Vec::new(), &live, None, 0.0, rows);
+        let mut all = crate::profiles::empty();
+        all[0] = Some(profile);
         let [back, ..] = reread_profiles(&all);
-        back
+        back.unwrap()
     }
 
     /// `profile` switched to with the user's center at `now`, the PC giving its
@@ -2797,7 +2799,7 @@ mod tests {
             .map(|x| x.0)
             .zip(profile.places.iter().copied())
             .collect();
-        let (placed, rows) = crate::profiles::standing(&made, profile.center, &profile.rows, now);
+        let (placed, rows) = crate::profiles::standing(&made, profile.tilt, &profile.rows, now);
         (placed.into_iter().collect(), Desktop::history(rows))
     }
 
@@ -2920,22 +2922,6 @@ mod tests {
         }
     }
 
-    /// A profile saved before profiles kept their center comes back where it was in
-    /// the room, as it did, and its rows start afresh.
-    #[test]
-    fn a_profile_without_its_center_stays_in_the_room() {
-        let three = [(0, 2560, 1440), (1, 2560, 1440), (2, 2560, 1440)];
-        let p = arrange(Preset::Arc, &three, Some(1), None, None);
-        let made: Vec<(u32, Placement)> = three.iter().map(|x| (x.0, p[&x.0])).collect();
-        let now = (Vec3::new(0.3, 1.1, 0.2), 0.9);
-        let (placed, rows) = crate::profiles::standing(&made, None, &[], now);
-        for ((_, place), (_, back)) in made.iter().zip(&placed) {
-            assert!(back.position.distance(place.position) < 1e-5);
-            assert!(back.rotation.angle_between(place.rotation) < 1e-4);
-        }
-        assert!(Desktop::history(rows).is_none());
-    }
-
     /// In cinema the profile keeps the desk arrangement saved before it (with its
     /// center and circle), not the cinema view; otherwise the arrangement as it stands.
     #[test]
@@ -2957,58 +2943,31 @@ mod tests {
             radius: Some(RADIUS),
         };
         let rows = vec![vec![0, 1, 2]];
-        let mut settings = crate::settings::Settings {
-            cinema: true,
-            ..Default::default()
+        let m = modes(&three);
+        let of = |live: &Arrangement<u32>, desk: Option<&Arrangement<u32>>| {
+            crate::profiles::Profile::of(&m, Some(1), Vec::new(), live, desk, 0.0, &rows)
         };
-        let profile = crate::profiles::Profile::of(
-            &three,
-            Some(1),
-            false,
-            settings,
-            live(&view),
-            &rows,
-            &desk,
-        );
+        let profile = of(&live(&view), Some(&desk));
         assert_eq!(profile.places.len(), 3);
+        let frame = Frame::upright(desk_center.0, desk_center.1);
         for (x, p) in three.iter().zip(&profile.places) {
-            let saved = at_desk[&x.0];
+            let saved = frame.unplace(at_desk[&x.0]);
             assert!(
-                p.position.distance(saved.position) < 1e-6
-                    && p.rotation.abs_diff_eq(saved.rotation, 1e-6),
+                p.position.distance(saved.position) < 1e-5
+                    && p.rotation.abs_diff_eq(saved.rotation, 1e-5),
                 "{}",
                 x.0
             );
         }
-        assert_eq!(profile.center, Some(desk_center));
-        assert_eq!(profile.radius, Some(1.3));
+        assert_eq!(profile.radius, 1.3);
         assert_eq!(profile.rows, vec![vec![0, 1, 2]]);
         // Not in cinema: as it stands.
-        settings.cinema = false;
-        let profile = crate::profiles::Profile::of(
-            &three,
-            Some(1),
-            false,
-            settings,
-            live(&at_desk),
-            &rows,
-            &desk,
-        );
-        assert_eq!(profile.center, Some((Vec3::ZERO, 0.0)));
-        assert_eq!(profile.radius, Some(RADIUS));
-        // Not every monitor placed: no places, no center, no rows.
-        settings.cinema = false;
-        let profile = crate::profiles::Profile::of(
-            &three,
-            Some(1),
-            false,
-            settings,
-            live(&view),
-            &rows,
-            &desk,
-        );
-        assert!(profile.places.is_empty() && profile.center.is_none());
-        assert!(profile.rows.is_empty());
+        let profile = of(&live(&at_desk), None);
+        assert_eq!(profile.radius, RADIUS);
+        assert!(profile.places[1].position.distance(at_desk[&1].position) < 1e-5);
+        // Not every monitor placed: no places, no rows.
+        let profile = of(&live(&view), None);
+        assert!(profile.places.is_empty() && profile.rows.is_empty());
     }
 
     /// The rows of a profile switched to are its own. The PC gives a monitor of the same

@@ -120,8 +120,8 @@ intro-done = Got it
 ## Quick
 
 profile = Profile
-profile-work = Work
-profile-cinema = Cinema
+profile-n = Profile { $n }
+profile-empty = Empty
 layout-lying = Lying down
 quick-in-front = In front of me
 quick-in-front-state = Turn everything to me

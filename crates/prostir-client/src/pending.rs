@@ -172,10 +172,10 @@ impl Asks {
 pub struct ProfileSwitch {
     pub req: ReqId,
     pub places: Vec<Placement>,
-    /// What the places were laid out around and the rows they were in, as the
-    /// profile keeps them (see `profiles::Profile`).
-    pub center: Option<(glam::Vec3, f32)>,
-    pub radius: Option<f32>,
+    /// The tilt of the frame the places are in, the circle they stand on and the rows
+    /// they were in, as the profile keeps them (see `profiles::Profile`).
+    pub tilt: f32,
+    pub radius: f32,
     pub rows: Vec<Vec<usize>>,
     pub ids: Option<Vec<DisplayKey>>,
     /// Until when it waits for its monitors to stream, once the PC made them.
@@ -187,8 +187,8 @@ pub struct ProfileSwitch {
 pub enum Made {
     /// Each monitor at its place, now.
     Places(Vec<(DisplayKey, Placement)>),
-    /// The profile has no place for each (from before 0.2.0, a starting point,
-    /// cinema): laid out by its preset once they stream (see [`ProfileSwitch::stands`]).
+    /// The profile has no place for each (saved before they all had one): laid out by
+    /// the preset once they stream (see [`ProfileSwitch::stands`]).
     Wait,
 }
 
@@ -197,8 +197,8 @@ impl ProfileSwitch {
         Self {
             req,
             places,
-            center: None,
-            radius: None,
+            tilt: 0.0,
+            radius: crate::layout::RADIUS,
             rows: Vec::new(),
             ids: None,
             until: None,

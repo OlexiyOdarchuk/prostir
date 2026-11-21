@@ -500,9 +500,7 @@ struct Scene {
     clock: ClockFace,
     /// Which languages the Language page shows, when there are many.
     language_page: u8,
-    profiles: [Profile; profiles::SLOTS],
-    /// A profile was saved, now or at an earlier start.
-    profiles_saved: bool,
+    profiles: profiles::Slots,
     /// The profile last switched to, until something is changed by hand.
     active_profile: Option<usize>,
     /// A profile being switched to, until its monitors stand where it says.
@@ -552,14 +550,15 @@ impl Scene {
         self.pc_id.is_some_and(|pc| pc != k.pc)
     }
 
+    /// Display `id` as its PC's list says (`None`: not listed, or another PC's).
+    fn display(&self, id: DisplayKey) -> Option<&state::Display> {
+        self.pc.displays.as_ref()?.get(self.on_pc(id)?)
+    }
+
     /// What display `id` is, as its PC's list says (`None`: not listed, or another
     /// PC's).
     fn kind(&self, id: DisplayKey) -> Option<&DisplayKind> {
-        self.pc
-            .displays
-            .as_ref()?
-            .get(self.on_pc(id)?)
-            .map(|d| &d.kind)
+        self.display(id).map(|d| &d.kind)
     }
 
     /// The PC can move the mouse (for following the gaze).
@@ -742,23 +741,40 @@ impl Scene {
         self.appear.retain(|id, _| monitors.contains_key(id));
     }
 
-    /// The setup as it is now: monitors left to right, the primary, the laptop screen,
-    /// layout and look, and the desk arrangement (in cinema, as saved before it).
+    /// The setup as it is now (see `Profile::of`): the monitors left to right with
+    /// their scales, the primary, the PC's own displays shown, and where they stand (in
+    /// cinema, the desk arrangement as kept before it).
     fn current_profile(&self) -> Profile {
         let live = layout::Arrangement {
             placements: self.placements.clone(),
-            sizes: self.placed_for.clone(),
+            sizes: HashMap::new(),
             center: Some(self.center),
             radius: Some(self.radius),
         };
+        let monitors: Vec<(DisplayKey, Mode)> = self
+            .quest_sizes()
+            .into_iter()
+            .map(|(k, w, h)| {
+                let scale = self.display(k).map_or(100, |d| d.mode.scale);
+                (k, Mode { w, h, scale })
+            })
+            .collect();
+        let shown = self
+            .pc
+            .displays
+            .iter()
+            .flat_map(|d| &d.displays)
+            .filter(|d| d.is_shown_physical())
+            .filter_map(|d| self.key(d.id))
+            .collect();
         Profile::of(
-            &self.quest_sizes(),
+            &monitors,
             self.primary,
-            self.mirror_wanted,
-            self.settings,
-            live,
+            shown,
+            &live,
+            self.settings.cinema.then(|| self.desk.arrangement()),
+            layout::tilt(self.settings.preset),
             &self.sent_rows(),
-            self.desk.arrangement(),
         )
     }
 
@@ -886,9 +902,10 @@ impl Scene {
         self.profile_switch.is_some()
     }
 
-    /// The PC made a profile's monitors (`ids`, in the order of its sizes): they take
-    /// the profile's places, or, for a profile without places (from before 0.2.0, a
-    /// starting point, cinema), the layout of its preset once all of them stream.
+    /// The PC made a profile's monitors (`ids`, in the order of its monitors): they
+    /// take the profile's places, or, for a profile without places, the layout of the
+    /// preset once all of them stream. In cinema the profile's places become the desk
+    /// arrangement under the cinema view, shown once cinema ends.
     #[expect(
         clippy::disallowed_methods,
         reason = "until step 7.7 passes the time in and moves the threads to the shell"
@@ -897,23 +914,32 @@ impl Scene {
         let Some(switch) = &mut self.profile_switch else {
             return;
         };
-        if self.settings.cinema {
-            switch.places.clear();
-        }
-        let (center, radius, rows) = (switch.center, switch.radius, switch.rows.clone());
+        let (tilt, radius, rows) = (switch.tilt, switch.radius, switch.rows.clone());
         match switch.made(ids, Instant::now()) {
+            Made::Places(made) if self.settings.cinema => {
+                self.profile_switch = None;
+                let mut desk = self.desk.arrangement().clone();
+                let at = desk.center.unwrap_or(self.center);
+                let (placed, rows) = profiles::standing(&made, tilt, &rows, at);
+                for (id, p) in placed {
+                    desk.placements.insert(id, p);
+                    desk.sizes.remove(&id);
+                }
+                self.desk
+                    .keep(desk.placements, &desk.sizes, (at, radius), false);
+                self.saves.mark(persist::File::Desk);
+                self.rows_from(rows);
+            }
             Made::Places(made) => {
                 // Seen from the user's eye now as they were from the eye they were
-                // saved around. Worked out here, once the monitors are made: leaving
-                // cinema for the profile, or following the head meanwhile, moves the
-                // center.
-                let (placed, rows) = profiles::standing(&made, center, &rows, self.center);
+                // saved around. Worked out here, once the monitors are made: following
+                // the head meanwhile moves the center.
+                let (placed, rows) = profiles::standing(&made, tilt, &rows, self.center);
                 for (id, p) in placed {
                     self.placements.insert(id, p);
                     self.placed_for.remove(&id);
                 }
-                // A profile saved without its circle stands on the usual one.
-                self.radius = radius.unwrap_or(layout::RADIUS);
+                self.radius = radius;
                 self.profile_switch = None;
                 self.rows_from(rows);
                 self.save_layout();
@@ -1194,11 +1220,7 @@ impl Scene {
     /// overhead (seen from below, right over the head, left and right would make no
     /// sense), as the desktop does it.
     fn map_view(&self) -> (Vec3, glam::Quat) {
-        let tilt = if self.settings.preset == crate::settings::Preset::Overhead {
-            layout::OVERHEAD_PITCH
-        } else {
-            0.0
-        };
+        let tilt = layout::tilt(self.settings.preset);
         (
             self.view_eye.unwrap_or(self.center.0),
             glam::Quat::from_rotation_x(-tilt) * glam::Quat::from_rotation_y(-self.center.1),
@@ -2117,7 +2139,7 @@ impl Scene {
             intro: !self.settings.intro_seen,
             update: self.update_needed.clone(),
             update_from,
-            profiles: self.profiles.to_vec(),
+            saved_profiles: self.profiles.each_ref().map(Option::is_some),
             active_profile: self.active_profile,
             asks: self.ask_views(),
         }
@@ -2300,7 +2322,6 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         mut settings,
         desk,
         profiles: saved_profiles,
-        profiles_saved,
         keyboard: keyboard_place,
     } = loaded;
     // This start's own: a new start in the same process begins afresh.
@@ -2519,7 +2540,6 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         clock: ClockFace::default(),
         language_page: 0,
         profiles: saved_profiles,
-        profiles_saved,
         active_profile: None,
         profile_switch: None,
         adding: None,
@@ -4146,6 +4166,10 @@ fn displays_changed(scene: &mut Scene, before: Option<&state::Displays>) {
         },
         state::Display::is_shown_physical,
     );
+    // Gone from the desk arrangement too, which cinema keeps aside.
+    if scene.desk.forget(&gone) {
+        scene.saves.mark(persist::File::Desk);
+    }
     for id in &gone {
         scene.placements.remove(id);
         scene.monitors.remove(id);
@@ -4299,6 +4323,9 @@ fn take_command(
             handle_action(scene, action, passthrough, controls);
             Outcome::Done
         }
+        Does::Profile(i) if scene.profiles.get(i).is_none_or(Option::is_none) => {
+            Outcome::failed(ErrorCode::NO_SUCH_PROFILE, &(i + 1).to_string())
+        }
         Does::Profile(i) => {
             let before = scene.asks.last();
             handle_action(scene, Action::ApplyProfile(i), passthrough, controls);
@@ -4363,10 +4390,6 @@ fn handle_action(
             | Action::Move { .. }
             | Action::SetMirror(_)
             | Action::Preset(_)
-            | Action::Curve(_)
-            | Action::Background(_)
-            | Action::Cinema(_)
-            | Action::CinemaScreen(_)
     ) {
         scene.active_profile = None;
     }
@@ -4630,63 +4653,57 @@ fn handle_action(
             set_passthrough(scene, passthrough);
         }
         Action::ApplyProfile(i) => {
-            // Never saved yet: the setup the user built by hand becomes "Work", so
-            // switching away and back returns to it instead of the starting template.
-            if !scene.profiles_saved && !scene.quest_sizes().is_empty() {
-                scene.profiles[0] = scene.current_profile();
-                scene.profiles_saved = true;
-                scene.saves.mark(persist::File::Profiles);
-            }
-            let p = scene.profiles[i].clone();
-            let shown_physical = scene
-                .physical_id()
-                .filter(|_| p.mirror)
-                .and_then(|k| scene.on_pc(k))
-                .into_iter()
+            // An empty slot has nothing to switch to.
+            let Some(p) = scene.profiles.get(i).cloned().flatten() else {
+                return;
+            };
+            // The PC's own displays the profile showed that this PC has.
+            let shown_physical: Vec<DisplayId> = p
+                .shown
+                .iter()
+                .filter(|k| scene.display(**k).is_some_and(state::Display::is_physical))
+                .map(|k| k.id)
                 .collect();
-            scene.mirror_wanted = p.mirror;
+            scene.mirror_wanted = !shown_physical.is_empty();
             let req = scene.request(
                 Request::SetDisplays {
-                    modes: p.sizes.iter().map(|&(w, h)| Mode::new(w, h)).collect(),
+                    modes: p.monitors.clone(),
                     primary: Some(Primary::Index { index: p.primary }),
                     shown_physical,
                 },
                 ui::Asked::Profile(i),
             );
-            // Placed once the PC answers with its monitors' numbers.
-            scene.profile_switch = req.map(|req| {
-                if p.settings.cinema {
-                    return ProfileSwitch::new(req, Vec::new());
-                }
-                ProfileSwitch {
-                    center: p.center,
-                    radius: p.radius,
-                    rows: p.rows.clone(),
-                    ..ProfileSwitch::new(req, p.places.clone())
-                }
+            // Placed once the PC answers with its monitors' numbers. Cinema, the
+            // background, the curve and the preset are not the profile's: they stay.
+            scene.profile_switch = req.map(|req| ProfileSwitch {
+                tilt: p.tilt,
+                radius: p.radius,
+                rows: p.rows,
+                ..ProfileSwitch::new(req, p.places)
             });
-            let s = &mut scene.settings;
-            s.preset = p.settings.preset;
-            s.curve = p.settings.curve;
-            s.background = p.settings.background;
-            s.cinema_screen = p.settings.cinema_screen;
-            scene.set_cinema(p.settings.cinema);
-            scene.saves.mark(persist::File::Settings);
-            set_passthrough(scene, passthrough);
             scene.active_profile = Some(i);
             // The monitors changing is the answer: the menu gets out of the way.
             scene.panel_open = false;
         }
         Action::SaveProfile(i) => {
-            let confirmed = scene
-                .confirm_save
-                .is_some_and(|(c, at)| c == i && at.elapsed() < CONFIRM_FOR);
+            // Nothing to save without monitors; a profile there is replaced on the
+            // second press.
+            if scene.quest_sizes().is_empty() {
+                return;
+            }
+            let replaces = scene.profiles.get(i).is_some_and(Option::is_some);
+            let confirmed = !replaces
+                || scene
+                    .confirm_save
+                    .is_some_and(|(c, at)| c == i && at.elapsed() < CONFIRM_FOR);
             if confirmed {
                 scene.confirm_save = None;
-                scene.profiles[i] = scene.current_profile();
-                scene.profiles_saved = true;
-                scene.saves.mark(persist::File::Profiles);
-                scene.active_profile = Some(i);
+                let profile = scene.current_profile();
+                if let Some(slot) = scene.profiles.get_mut(i) {
+                    *slot = Some(profile);
+                    scene.saves.mark(persist::File::Profiles);
+                    scene.active_profile = Some(i);
+                }
             } else {
                 scene.confirm_save = Some((i, Instant::now()));
             }
