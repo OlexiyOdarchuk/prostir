@@ -38,6 +38,6 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch
         with:
-          toolchain: stable
+          toolchain: 1.100.0
       - name: Third-party licenses
         run: python3 scripts/third-party-licenses.py -o "$RUNNER_TEMP/THIRD-PARTY-LICENSES.txt"

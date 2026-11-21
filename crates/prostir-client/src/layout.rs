@@ -2021,7 +2021,7 @@ mod tests {
                         "{back}°: {id} moved"
                     );
                 }
-                let mut hand = tilted.clone();
+                let mut hand = tilted;
                 let axis = turn * (yaw * Vec3::Y);
                 let left = turn * (yaw * Vec3::NEG_X);
                 hand.get_mut(&0).unwrap().position += left * 0.03;

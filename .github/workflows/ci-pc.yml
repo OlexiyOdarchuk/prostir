@@ -62,7 +62,7 @@ jobs:
             gstreamer1.0-plugins-ugly dbus-daemon
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch
         with:
-          toolchain: stable
+          toolchain: 1.100.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo fmt -p prostir -p prostir-proto -p prostir-layout -p prostir-api -p prostir-testkit -p prostir-lang -p prostir-window --check
