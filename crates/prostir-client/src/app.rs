@@ -2523,10 +2523,15 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                 event => handle_net_event(&mut scene, &session, &vm, event),
             }
         }
+        // Only the newest battery reading matters (several wait after a pause).
+        let mut newest = None;
         while let Some(event) = system_thread.try_recv() {
             match event {
-                SystemEvent::Battery(battery) => scene.battery_read(battery),
+                SystemEvent::Battery(reading) => newest = Some(reading),
             }
+        }
+        if let Some(reading) = newest {
+            scene.battery_read(reading);
         }
 
         // Panorama: generated or decoded off the main thread, uploaded once per choice.
