@@ -1496,20 +1496,37 @@ impl World {
 
     /// A hand takes `thing`, where it is drawn: a monitor still easing towards its
     /// place goes on from there (its place becomes the drawn one), so it does not jump
-    /// under the hand. Where it is taken at; `None` for what cannot be taken, for what
-    /// a hand holds already, and while both hands hold something.
-    pub fn hold(&mut self, thing: Thing) -> Option<Placement> {
+    /// under the hand. With "move all together" the same goes for every monitor that
+    /// goes along with it (see `moving_now`), or they would jump to where they were
+    /// going. Where it is taken at; `None` for what cannot be taken, for what a hand
+    /// holds already, and while both hands hold something.
+    pub fn hold(&mut self, thing: Thing, s: &Settings) -> Option<Placement> {
         if self.holds(thing) {
             return None;
         }
         let free = self.held.iter().position(Option::is_none)?;
         let at = match thing {
             Thing::Display(id) => {
+                let carries = s.move_all
+                    && !self.cinema
+                    && self.streams.contains_key(&id)
+                    && !self.is_window(id);
                 let target = self.placements.get_mut(&id)?;
                 if let Some(drawn) = self.shown.get(&id) {
                     *target = *drawn;
                 }
-                *target
+                let at = *target;
+                if carries {
+                    let (listed, shown) = (&self.listed, &self.shown);
+                    for (other, p) in &mut self.placements {
+                        if !window(listed, *other)
+                            && let Some(drawn) = shown.get(other)
+                        {
+                            *p = *drawn;
+                        }
+                    }
+                }
+                at
             }
             _ => self.place(thing)?,
         };

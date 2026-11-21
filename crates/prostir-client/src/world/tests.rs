@@ -253,7 +253,7 @@ fn connecting_puts_monitors_where_the_file_says() {
 
     // In a hand, a monitor goes up and down for two seconds: nothing is told.
     sim.arranged.clear();
-    let start = sim.world.hold(Thing::Display(k(2))).unwrap();
+    let start = sim.world.hold(Thing::Display(k(2)), &sim.s).unwrap();
     for i in 0..200 {
         let mut p = sim.world.place(Thing::Display(k(2))).unwrap();
         p.position.y = start.position.y + 0.6 * ((i as f32) * 0.05).sin();
@@ -356,7 +356,7 @@ fn cinema_leaves_the_desk_as_it_was() {
     // Arranged by hand before cinema.
     let mut p = sim.place(k(3));
     p.position += Vec3::new(0.1, 0.2, 0.0);
-    sim.world.hold(Thing::Display(k(3)));
+    sim.world.hold(Thing::Display(k(3)), &sim.s);
     sim.world.drag(&sim.s, Thing::Display(k(3)), p, sim.head.0);
     sim.world.let_go(Thing::Display(k(3)), &sim.s, sim.now);
     sim.settled();
@@ -368,13 +368,13 @@ fn cinema_leaves_the_desk_as_it_was() {
     assert_eq!(sim.world.placements.len(), 1, "one screen");
     let (&screen, _) = sim.world.placements.iter().next().unwrap();
     // Moved by hand, through the system menu, and resized with both hands.
-    sim.world.hold(Thing::Display(screen));
+    sim.world.hold(Thing::Display(screen), &sim.s);
     let mut p = sim.place(screen);
     p.position += Vec3::new(0.4, 0.3, 0.5);
     sim.world
         .drag(&sim.s, Thing::Display(screen), p, sim.head.0);
     sim.world.cancel_holds();
-    sim.world.hold(Thing::Display(screen));
+    sim.world.hold(Thing::Display(screen), &sim.s);
     sim.world.resize_start(screen);
     sim.world.resize(&sim.s, 1.0);
     sim.world.resize_end();
@@ -392,7 +392,7 @@ fn cinema_leaves_the_desk_as_it_was() {
     // All in one pass: on, moved, off.
     cinema(&mut sim, true);
     let (&screen, _) = sim.world.placements.iter().next().unwrap();
-    sim.world.hold(Thing::Display(screen));
+    sim.world.hold(Thing::Display(screen), &sim.s);
     let mut p = sim.place(screen);
     p.position.x -= 0.7;
     sim.world
@@ -412,7 +412,7 @@ fn cinema_leaves_the_desk_as_it_was() {
 fn the_system_menu_lets_a_drag_go() {
     let mut sim = Sim::at_desk();
     sim.world.take_saves();
-    sim.world.hold(Thing::Display(k(1)));
+    sim.world.hold(Thing::Display(k(1)), &sim.s);
     for _ in 0..10 {
         let mut p = sim.place(k(1));
         p.position.y += 0.01;
@@ -498,7 +498,7 @@ fn a_profile_places_its_monitors_by_their_numbers() {
     // Two of them moved about, and the setup saved.
     let mut p = sim.place(k(1));
     p.position += Vec3::new(-0.2, 0.3, 0.1);
-    sim.world.hold(Thing::Display(k(1)));
+    sim.world.hold(Thing::Display(k(1)), &sim.s);
     sim.world.drag(&sim.s, Thing::Display(k(1)), p, sim.head.0);
     sim.world.let_go(Thing::Display(k(1)), &sim.s, sim.now);
     sim.settled();
@@ -691,7 +691,7 @@ fn two_pcs_with_one_number_have_two_places() {
     assert!(near(&sim.place(k(1)), &first), "the first PC's kept");
     let mut p = sim.place(theirs);
     p.position.x += 0.8;
-    sim.world.hold(Thing::Display(theirs));
+    sim.world.hold(Thing::Display(theirs), &sim.s);
     sim.world
         .drag(&sim.s, Thing::Display(theirs), p, sim.head.0);
     sim.world.let_go(Thing::Display(theirs), &sim.s, sim.now);
@@ -710,7 +710,7 @@ fn two_pcs_with_one_number_have_two_places() {
 #[test]
 fn a_drag_is_drawn_in_the_same_pass() {
     let mut sim = Sim::at_desk();
-    sim.world.hold(Thing::Display(k(2)));
+    sim.world.hold(Thing::Display(k(2)), &sim.s);
     let mut p = sim.place(k(2));
     p.position += Vec3::new(0.0, 0.25, 0.1);
     p.rotation = layout::facing(p.position, sim.head.0);
@@ -730,27 +730,64 @@ fn a_drag_is_drawn_in_the_same_pass() {
     sim.after(30);
     let drawn = sim.drawn(k(1));
     assert!(!near(&drawn, &sim.place(k(1))), "still on its way");
-    let at = sim.world.hold(Thing::Display(k(1))).unwrap();
+    let at = sim.world.hold(Thing::Display(k(1)), &sim.s).unwrap();
     assert!(near(&at, &drawn), "taken where it is drawn");
     assert!(near(&sim.place(k(1)), &drawn), "and goes on from there");
     sim.after(11);
     assert!(near(&sim.drawn(k(1)), &drawn), "it does not jump");
 }
 
+/// With "move all together", a monitor taken on its way takes the others along from
+/// where they are drawn too: none of them jumps to where it was going.
+#[test]
+fn moving_all_from_the_way_nothing_jumps() {
+    let mut sim = Sim::at_desk();
+    sim.s.move_all = true;
+    let (one, other) = (sim.world.monitors()[0].0, sim.world.monitors()[1].0);
+    sim.world.swap(one, 1);
+    sim.after(30);
+    let drawn: HashMap<DisplayKey, Placement> = sim
+        .world
+        .monitors()
+        .iter()
+        .map(|m| (m.0, sim.drawn(m.0)))
+        .collect();
+    assert!(!near(&drawn[&other], &sim.place(other)), "on its way too");
+    sim.world.hold(Thing::Display(one), &sim.s);
+    for (k, p) in &drawn {
+        assert!(
+            near(&sim.place(*k), p),
+            "{k}: goes on from where it is drawn"
+        );
+    }
+    // Moved a little: all go along, from where they were seen.
+    let mut p = sim.place(one);
+    p.position.y += 0.1;
+    sim.world.drag(&sim.s, Thing::Display(one), p, sim.head.0);
+    sim.world.animate(&sim.s, 0.011);
+    for (k, was) in &drawn {
+        let now = sim.drawn(*k);
+        assert!(
+            (now.position - was.position - Vec3::new(0.0, 0.1, 0.0)).length() < 1e-4,
+            "{k} moved with it, and only that"
+        );
+    }
+}
+
 /// Laid out anew, what the hands held is let go (the app's grabs follow it).
 #[test]
 fn laying_out_lets_go() {
     let mut sim = Sim::at_desk();
-    sim.world.hold(Thing::Display(k(1)));
-    sim.world.hold(Thing::Menu);
+    sim.world.hold(Thing::Display(k(1)), &sim.s);
+    sim.world.hold(Thing::Menu, &sim.s);
     sim.world.tidy_up(&sim.s, sim.now);
     assert!(!sim.world.holding());
-    sim.world.hold(Thing::Display(k(3)));
+    sim.world.hold(Thing::Display(k(3)), &sim.s);
     sim.world.arrange_all(&sim.s, sim.now);
     assert!(!sim.world.holding());
     // A monitor gone from the list is let go; the other hand keeps the menu.
-    sim.world.hold(Thing::Display(k(3)));
-    sim.world.hold(Thing::Menu);
+    sim.world.hold(Thing::Display(k(3)), &sim.s);
+    sim.world.hold(Thing::Menu, &sim.s);
     sim.list(vec![monitor(1, QHD), monitor(2, QHD)]);
     assert!(!sim.world.holds(Thing::Display(k(3))));
     assert!(sim.world.holds(Thing::Menu));
@@ -763,7 +800,7 @@ fn dragging_keeps_the_rules() {
     let mut sim = Sim::at_desk();
     let head = sim.head.0;
     let keyboard = sim.world.keyboard_here(sim.head);
-    sim.world.hold(Thing::Keyboard);
+    sim.world.hold(Thing::Keyboard, &sim.s);
     let mut p = keyboard;
     p.position += Vec3::new(0.2, 0.1, 0.0);
     p.rotation = Quat::IDENTITY;
@@ -778,7 +815,7 @@ fn dragging_keeps_the_rules() {
     let others = (sim.place(k(1)), sim.place(k(3)));
     let mut p = sim.place(k(2));
     p.position.y += 0.3;
-    sim.world.hold(Thing::Display(k(2)));
+    sim.world.hold(Thing::Display(k(2)), &sim.s);
     sim.world.drag(&sim.s, Thing::Display(k(2)), p, head);
     assert!((sim.place(k(1)).position.y - others.0.position.y - 0.3).abs() < 1e-5);
     assert!((sim.place(k(3)).position.y - others.1.position.y - 0.3).abs() < 1e-5);

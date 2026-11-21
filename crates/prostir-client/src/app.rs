@@ -2233,7 +2233,9 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                     Some(Target {
                         thing: thing @ (Thing::Menu | Thing::Keyboard),
                         hit,
-                    }) if other != Some(thing) => take(&mut scene.world, thing, hit),
+                    }) if other != Some(thing) => {
+                        take(&mut scene.world, thing, hit, &scene.settings)
+                    }
                     // The other hand already holds it: resize with both.
                     Some(Target {
                         thing: Thing::Display(id),
@@ -2255,7 +2257,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                     Some(Target {
                         thing: thing @ Thing::Display(_),
                         hit,
-                    }) => take(&mut scene.world, thing, hit),
+                    }) => take(&mut scene.world, thing, hit, &scene.settings),
                     _ => None,
                 }
                 .map(|g| {
@@ -2802,9 +2804,9 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
 
 /// A hand takes `thing`, pointed at with `hit`, where it is drawn: a monitor easing
 /// to its place goes on from there, under the hand (see `World::hold`).
-fn take(world: &mut World, thing: Thing, hit: Hit) -> Option<Grab> {
+fn take(world: &mut World, thing: Thing, hit: Hit, s: &Settings) -> Option<Grab> {
     world
-        .hold(thing)
+        .hold(thing, s)
         .map(|at| Grab::start(thing, hit.t, hit.local, &at))
 }
 
