@@ -413,6 +413,11 @@ impl Pc {
     /// environment (as the menu, a terminal or an old autostart line starts it): what
     /// it did, once it ended (within 30 s, else it is killed and the test fails).
     pub fn again(&self, args: &[&str]) -> Ctl {
+        self.again_with(args, &[])
+    }
+
+    /// [`Pc::again`] with `env` set besides (an autostart's variables, say).
+    pub fn again_with(&self, args: &[&str], env: &[(&str, &str)]) -> Ctl {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_prostir"));
         cmd.args(args)
             .stdin(Stdio::null())
@@ -424,6 +429,7 @@ impl Pc {
                 None => cmd.env_remove(k),
             };
         }
+        cmd.envs(env.iter().copied());
         let mut child = cmd.spawn().expect("start the PC app again");
         let until = Instant::now() + Duration::from_secs(30);
         while child.try_wait().unwrap().is_none() {
@@ -495,6 +501,8 @@ impl Pc {
             .env_remove("WAYLAND_DISPLAY")
             .env_remove("DISPLAY")
             .env_remove("HYPRLAND_INSTANCE_SIGNATURE")
+            // Not autostarted, even where the tests' terminal was.
+            .env_remove("DESKTOP_AUTOSTART_ID")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());

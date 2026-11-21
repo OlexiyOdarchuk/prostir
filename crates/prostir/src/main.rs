@@ -16,6 +16,7 @@ mod i18n;
 mod layout;
 mod listen;
 mod local;
+mod login;
 mod outbox;
 mod pacing;
 mod pairing;
@@ -584,6 +585,8 @@ fn asks_version(cli: &Cli) -> bool {
 }
 
 fn main() -> Result<()> {
+    // How it was started, before anything changes the environment.
+    let signs = login::Signs::take();
     // This program's file, found now: a package update may replace it while it runs.
     let _ = prostir_window::launch::this_program();
     let cli = Cli::read();
@@ -593,12 +596,24 @@ fn main() -> Result<()> {
     }
     let quiet = || init_log("warn");
     let code = match cli.command {
-        None if cli.old_options => serve(cli.serve, Why::OldOptions)?,
         None => {
-            quiet();
-            open_window()
+            // An autostart entry of 0.1 (`Exec=prostir`) runs `prostir serve` from the
+            // next login on.
+            let moved = platform::autostart::migrate();
+            match signs.login() {
+                _ if cli.old_options => serve(cli.serve, Why::OldOptions, moved)?,
+                // 0.1's autostart at this login: the background part, not the window.
+                Some(by) => serve(cli.serve, Why::Login(by), moved)?,
+                None => {
+                    quiet();
+                    open_window()
+                }
+            }
         }
-        Some(Sub::Serve(args)) => serve(args, Why::Asked)?,
+        Some(Sub::Serve(args)) => {
+            let moved = platform::autostart::migrate();
+            serve(args, Why::Asked, moved)?
+        }
         Some(Sub::Window { mock }) => match prostir_window::run(mock) {
             Ok(()) => 0,
             Err(e) => {
@@ -653,18 +668,44 @@ enum Why {
     Asked,
     /// `serve`'s options without a command, as 0.1 took them (`prostir -m 2560x1440`).
     OldOptions,
+    /// A bare `prostir` started with the session, as 0.1's autostart started it.
+    Login(login::Login),
 }
 
-/// `prostir serve`: waits for the headset and serves it. Its exit code.
-fn serve(args: Args, why: Why) -> Result<i32> {
+/// `prostir serve`: waits for the headset and serves it; `moved`: an autostart entry
+/// of 0.1 was changed to `prostir serve` just now. Its exit code.
+fn serve(args: Args, why: Why, moved: bool) -> Result<i32> {
     // Before any thread starts: it clears the variables that passed them.
     let passed = platform::sockets::take()?;
     init_log("info");
-    if why == Why::OldOptions {
-        warn!(
+    if moved {
+        info!("the autostart entry of 0.1 runs `prostir serve` from now on");
+    }
+    match why {
+        Why::Asked => {}
+        Why::OldOptions => warn!(
             "options without a command are 0.1's way: this runs as `prostir serve` with them; \
              write `prostir serve ...`, a later version takes them only so"
-        );
+        ),
+        Why::Login(by) => {
+            info!(
+                "a bare `prostir` started with the session ({by:?}), as 0.1's autostart \
+                 starts it: this runs as `prostir serve`, without the window"
+            );
+            // Hyprland's config is the person's own: what to change is only said.
+            if by == login::Login::Hyprland {
+                platform::dialogs::notify(
+                    i18n::t(
+                        "Prostir у конфігу Hyprland",
+                        "Prostir in the Hyprland config",
+                    ),
+                    i18n::t(
+                        "Замініть exec-once = prostir на exec-once = prostir serve: сам prostir тепер відкриває вікно налаштувань.",
+                        "Change exec-once = prostir to exec-once = prostir serve: a bare prostir now opens the settings window.",
+                    ),
+                );
+            }
+        }
     }
     let discovery = (!args.no_discovery).then_some(args.discovery_port);
     match passed {

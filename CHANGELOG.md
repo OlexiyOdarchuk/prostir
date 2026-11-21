@@ -149,6 +149,10 @@
   a process of its own, so the background part never loads its graphics libraries (EGL, X11)
   and a window that crashes takes nothing else down. 0.1's options without a command
   (`prostir -m 2560x1440`) still run it in the background, with a warning in the log.
+  A bare `prostir` that the session starts (0.1's autostart entry, or Hyprland's
+  `exec-once` right after login) also runs in the background, not the window; the
+  autostart entry is changed to `prostir serve`, and on Hyprland a notification says to
+  change the line. `install.sh` changes the entry too and points out such lines.
 
 ### Sound
 

@@ -706,6 +706,11 @@ pub mod autostart {
 
     pub fn quit_until_login() {}
 
+    /// No XDG entry of 0.1 in memory to change.
+    pub fn migrate() -> bool {
+        false
+    }
+
     pub fn start_service() -> bool {
         false
     }

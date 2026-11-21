@@ -189,6 +189,18 @@ impl Places {
             Err(e) => warn!("cannot remove {}: {e}", path.display()),
         }
     }
+
+    /// See [`migrate`].
+    fn migrate(&self) -> bool {
+        let Some(path) = self.entry() else {
+            return false;
+        };
+        let old = std::fs::read_to_string(&path).is_ok_and(|text| without_serve(&text));
+        if old {
+            self.write_entry();
+        }
+        old
+    }
 }
 
 /// Where the user's systemd looks for units, the user's own first.
@@ -251,6 +263,22 @@ pub fn first_start() {
             ),
         );
     }
+}
+
+/// An XDG entry of 0.1 (`Exec=prostir`, which now opens the window) runs `prostir
+/// serve` from now on, wherever it is (also where systemd's socket will take over: the
+/// first start removes it then, and until then it says that autostart was on). Whether
+/// one was changed. Called first thing on a bare `prostir` and on `prostir serve`.
+pub fn migrate() -> bool {
+    Places::here().migrate()
+}
+
+/// Whether a desktop entry starts the program without `serve` (0.1's).
+fn without_serve(entry: &str) -> bool {
+    entry
+        .lines()
+        .filter_map(|l| l.strip_prefix("Exec="))
+        .any(|exec| !exec.split_whitespace().any(|word| word == "serve"))
 }
 
 /// On each start: an XDG entry names this install's program again (a Nix store path
@@ -388,6 +416,36 @@ mod tests {
             asked.ends_with("--user disable prostir.socket\n"),
             "{asked}"
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// An entry of 0.1 (a bare `prostir`, which now opens the window) runs `prostir
+    /// serve` from now on, with this program's path; one that does already is left.
+    #[test]
+    fn an_entry_of_0_1_runs_serve() {
+        assert!(without_serve("[Desktop Entry]\nExec=prostir\n"));
+        assert!(without_serve(
+            "[Desktop Entry]\nExec=/usr/bin/prostir --linger 5\n"
+        ));
+        assert!(!without_serve(
+            "[Desktop Entry]\nExec=/usr/bin/prostir serve\n"
+        ));
+        assert!(!without_serve(
+            "[Desktop Entry]\nExec=\"/a b/prostir\" serve --stay\n"
+        ));
+        let (p, dir) = places("migrate", true, true);
+        assert!(!p.migrate(), "no entry");
+        let entry = p.entry().unwrap();
+        std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        std::fs::write(&entry, "[Desktop Entry]\nType=Application\nExec=prostir\n").unwrap();
+        assert!(p.migrate());
+        let text = std::fs::read_to_string(&entry).unwrap();
+        assert!(
+            text.contains("\nExec=\"/opt/my apps/prostir\" serve\n"),
+            "{text}"
+        );
+        assert!(!p.migrate(), "once");
+        assert!(!dir.join("asked").exists(), "systemctl left alone");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

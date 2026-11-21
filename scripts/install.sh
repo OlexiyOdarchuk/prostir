@@ -153,6 +153,24 @@ case ":$PATH:" in
        echo "   Use the full path above, or add $BIN to PATH in your shell profile." ;;
 esac
 
+# Up to 0.1 a bare `prostir` started the background part; now it opens the window. An
+# autostart entry of then runs `prostir serve` from now on.
+if [[ -f "$AUTOSTART" ]] && ! grep -qE '^Exec=.* serve( |$)' "$AUTOSTART"; then
+    sed -i "s|^Exec=.*|Exec=$(sed_text "$(desktop_arg "$BIN/prostir") serve")|" "$AUTOSTART"
+    echo "   The autostart entry now runs \"prostir serve\" ($AUTOSTART)."
+fi
+# Hyprland's config is the user's own: what to change is only said.
+HYPR="$CONFIG/hypr"
+if [[ -d "$HYPR" ]]; then
+    old_lines="$(grep -rnE --include='*.conf' --include='*.lua' \
+        '(exec-once *=.*|exec_cmd\(["'\''])[^"'\''#]*prostir *(["'\'']|$)' "$HYPR" 2>/dev/null || true)"
+    if [[ -n "$old_lines" ]]; then
+        echo "   Your Hyprland config starts \"prostir\" without \"serve\", which now opens the window at login:"
+        printf '     %s\n' "${old_lines//$'\n'/$'\n'     }"
+        echo "   Change it to \"prostir serve\"."
+    fi
+fi
+
 if [[ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]]; then
     # Hyprland ignores XDG autostart files unless it runs under uwsm, so print the
     # config lines instead of writing one.

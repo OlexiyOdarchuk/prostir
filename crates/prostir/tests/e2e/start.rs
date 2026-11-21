@@ -113,3 +113,49 @@ fn serve_options_without_a_command_are_serve() {
     assert!(again.err.contains("Prostir runs already"), "{again:?}");
     pc.wait_log_after(SOON, WINDOW, before);
 }
+
+/// A bare `prostir` started with the session (0.1's autostart line, which an update
+/// left) runs as `prostir serve`, not as the window's `prostir`: an autostart's id from
+/// the session manager, or Hyprland's `exec-once` right after Hyprland started, which
+/// also says what to change. Prostir already running, serve opens its window, as ever.
+#[test]
+fn a_bare_prostir_at_login_is_serve() {
+    let dir = TestDir::new("bare-at-login");
+    dir.save_monitors(TWO_MONITORS);
+    let mut pc = Pc::start(&dir, &Options::default());
+    if pc.bus.is_none() {
+        return;
+    }
+    let before = pc.count_log(WINDOW);
+    let again = pc.again_with(&[], &[("DESKTOP_AUTOSTART_ID", "10d8f2c1a3")]);
+    assert_eq!(again.code, 0, "{again:?}");
+    assert!(
+        again.err.contains("started with the session (Autostart)"),
+        "{again:?}"
+    );
+    assert!(again.err.contains("Prostir runs already"), "{again:?}");
+    pc.wait_log_after(SOON, WINDOW, before);
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let hyprland = |started: u64| format!("4520b30d498daca8079365bdb909a8de_{started}_1981813508");
+    let before = pc.count_log(WINDOW);
+    let again = pc.again_with(&[], &[("HYPRLAND_INSTANCE_SIGNATURE", &hyprland(now))]);
+    assert_eq!(again.code, 0, "{again:?}");
+    assert!(
+        again.err.contains("started with the session (Hyprland)"),
+        "{again:?}"
+    );
+    assert!(again.err.contains("exec-once = prostir serve"), "{again:?}");
+    pc.wait_log_after(SOON, WINDOW, before);
+
+    // Long after Hyprland started: by hand, the window's `prostir`.
+    let again = pc.again_with(
+        &[],
+        &[("HYPRLAND_INSTANCE_SIGNATURE", &hyprland(now - 600))],
+    );
+    assert_eq!(again.code, 0, "{again:?}");
+    assert!(!again.err.contains("started with the session"), "{again:?}");
+}
