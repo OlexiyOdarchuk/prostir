@@ -220,7 +220,7 @@ fn record(input: &Input, up: u8, feedback: &Feedback, stop: &AtomicBool) -> bool
 /// (android-activity puts it there), not the activity. Enough for system services and
 /// checking permissions; what needs the Activity itself (asking for one) takes it from
 /// the `AndroidApp`.
-pub(crate) fn with_activity<T>(
+pub(crate) fn with_app_context<T>(
     f: impl FnOnce(&mut jni::Env<'_>, &JObject<'_>) -> jni::errors::Result<T>,
 ) -> Option<T> {
     let ctx = ndk_context::android_context();
@@ -240,11 +240,11 @@ pub(crate) fn with_activity<T>(
 }
 
 fn has_permission() -> bool {
-    with_activity(|env, activity| {
+    with_app_context(|env, context| {
         let name = env.new_string(PERMISSION)?;
         let granted = env
             .call_method(
-                activity,
+                context,
                 jni_str!("checkSelfPermission"),
                 jni_sig!("(Ljava/lang/String;)I"),
                 &[JValue::Object(&name)],

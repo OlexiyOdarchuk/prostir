@@ -4026,7 +4026,7 @@ fn mic_state(settings: &Settings, mic: &Mic) -> state::UpState {
 }
 
 /// What this headset can do, for the PC: the displays it shows, the codecs it decodes
-/// and how large (Quest 3: H.264 up to 4K, HEVC up to 8K), how many streams and
+/// and how large (for now fixed: H.264 up to 4K, HEVC up to 8K), how many streams and
 /// compositor layers at once; and its model, as the system names it.
 fn headset_caps(model: &str) -> HeadsetCaps {
     let decoder = |codec: Codec, max_w, max_h| state::Decoder {

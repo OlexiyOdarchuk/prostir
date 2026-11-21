@@ -17,7 +17,7 @@ use jni::strings::JNIStr;
 use jni::{jni_sig, jni_str};
 use log::warn;
 
-use crate::mic::with_activity;
+use crate::mic::with_app_context;
 
 /// How often the battery is read, and while the palm menu shows it.
 const BATTERY_EVERY: Duration = Duration::from_secs(60);
@@ -133,7 +133,7 @@ pub fn join_within(name: &str, thread: JoinHandle<()>, limit: Duration) {
 /// What the headset is, as the system names it (`Build.MANUFACTURER` and
 /// `Build.MODEL`, see [`crate::device::model_name`]); empty when it does not say.
 pub fn model() -> String {
-    let said = with_activity(|env, _| {
+    let said = with_app_context(|env, _| {
         let mut field = |name: &JNIStr| -> jni::errors::Result<String> {
             let value = env
                 .get_static_field(
@@ -155,11 +155,11 @@ pub fn model() -> String {
 
 /// The headset's battery: percent and whether it is charging (`BatteryManager`).
 pub fn battery() -> Option<(u8, bool)> {
-    with_activity(|env, activity| {
+    with_app_context(|env, context| {
         let name = env.new_string("batterymanager")?;
         let manager = env
             .call_method(
-                activity,
+                context,
                 jni_str!("getSystemService"),
                 jni_sig!("(Ljava/lang/String;)Ljava/lang/Object;"),
                 &[JValue::Object(&name)],

@@ -19,6 +19,8 @@ pub fn model_name(manufacturer: &str, model: &str) -> String {
     } else {
         format!("{manufacturer} {model}")
     };
+    // Shown on the PC: no control characters from the system's strings.
+    let name: String = name.chars().filter(|c| !c.is_control()).collect();
     let mut name = clip(&name, MAX_SHORT);
     name.truncate(name.trim_end().len());
     name
@@ -36,6 +38,7 @@ mod tests {
         assert_eq!(model_name(" maker ", " "), "maker");
         assert_eq!(model_name("", "Model 3"), "Model 3");
         assert_eq!(model_name("", ""), "");
+        assert_eq!(model_name("Ma\u{1b}ker", "Model\n3\t"), "Maker Model3");
     }
 
     #[test]
