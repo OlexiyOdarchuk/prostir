@@ -173,6 +173,10 @@ impl Default for Settings {
 }
 
 impl Settings {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the core's own file access, until step 7.3 hands it to persist"
+    )]
     pub fn load(path: &Path) -> Self {
         std::fs::read_to_string(path)
             .map(|text| Self::parse(&text))
@@ -262,6 +266,10 @@ impl Settings {
         s
     }
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the core's own file access, until step 7.3 hands it to persist"
+    )]
     pub fn save(&self, path: &Path) {
         if let Err(e) = prostir_proto::secure::write_atomic(path, self.to_text().as_bytes()) {
             log::warn!("cannot save settings to {}: {e}", path.display());
@@ -337,6 +345,10 @@ impl Settings {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "tests make the folders the code under test reads and writes in"
+)]
 mod tests {
     use super::*;
 

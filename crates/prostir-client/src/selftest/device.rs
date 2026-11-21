@@ -8,6 +8,11 @@
 //! times) and, at set moments, asks for what a person would do in the menu
 //! ([`Act`]), while the fake PC breaks things on purpose.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the selftest is part of the shell: it measures time, starts its fake PC and writes its report"
+)]
+
 use std::collections::BTreeMap;
 use std::ffi::{CStr, CString};
 use std::path::{Path, PathBuf};
@@ -16,8 +21,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use android_activity::AndroidApp;
-use jni::JNIEnv;
 use jni::objects::{JObject, JString, JValue};
+use jni::{Env, jni_sig, jni_str};
 use log::{info, warn};
 use openxr as xr;
 use prostir_proto::state::{DisplayId, Gen, HeadsetCaps};
@@ -242,19 +247,20 @@ pub struct Selftest {
 /// not the Application `ndk_context` holds), in a local frame of its own.
 fn with_activity<T>(
     app: &AndroidApp,
-    f: impl FnOnce(&mut JNIEnv<'_>, &JObject<'_>) -> jni::errors::Result<T>,
+    f: impl FnOnce(&mut Env<'_>, &JObject<'_>) -> jni::errors::Result<T>,
 ) -> Option<T> {
     // SAFETY: the VM of the running NativeActivity.
-    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) }.ok()?;
-    let mut env = vm.attach_current_thread_permanently().ok()?;
-    // SAFETY: the activity's object, valid while the activity runs (this start).
-    let activity = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
-    let result = env.with_local_frame(16, |env| f(env, &activity));
-    if result.is_err() {
-        let _ = env.exception_describe();
-        let _ = env.exception_clear();
-    }
-    result.ok()
+    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) };
+    // A Java exception on the way is caught and cleared, and comes back as the error.
+    vm.attach_current_thread(|env| {
+        let raw: jni::sys::jobject = app.activity_as_ptr().cast();
+        // SAFETY: the activity's object, valid while the activity runs (this start);
+        // the cast only borrows it, it never deletes it.
+        let activity = unsafe { env.as_cast_raw::<JObject<'static>>(&raw) }?;
+        f(env, &activity)
+    })
+    .inspect_err(|e| warn!("selftest: a call into Android failed: {e}"))
+    .ok()
 }
 
 /// The `selftest` extra of the intent that started the activity, if there is one
@@ -262,12 +268,19 @@ fn with_activity<T>(
 fn intent_extra(app: &AndroidApp) -> Option<String> {
     with_activity(app, |env, activity| {
         let intent = env
-            .call_method(activity, "getIntent", "()Landroid/content/Intent;", &[])?
+            .call_method(
+                activity,
+                jni_str!("getIntent"),
+                jni_sig!("()Landroid/content/Intent;"),
+                &[],
+            )?
             .l()?;
         if intent.is_null() {
             return Ok(None);
         }
-        let flags = env.call_method(&intent, "getFlags", "()I", &[])?.i()?;
+        let flags = env
+            .call_method(&intent, jni_str!("getFlags"), jni_sig!("()I"), &[])?
+            .i()?;
         if flags & FROM_HISTORY != 0 {
             return Ok(None);
         }
@@ -275,17 +288,16 @@ fn intent_extra(app: &AndroidApp) -> Option<String> {
         let value = env
             .call_method(
                 &intent,
-                "getStringExtra",
-                "(Ljava/lang/String;)Ljava/lang/String;",
+                jni_str!("getStringExtra"),
+                jni_sig!("(Ljava/lang/String;)Ljava/lang/String;"),
                 &[JValue::Object(&key)],
             )?
             .l()?;
         if value.is_null() {
             return Ok(None);
         }
-        let value = JString::from(value);
-        let text: String = env.get_string(&value)?.into();
-        Ok(Some(text))
+        let value = env.cast_local::<JString<'_>>(value)?;
+        Ok(Some(value.try_to_string(env)?))
     })
     .flatten()
 }
@@ -297,8 +309,8 @@ fn volume_steps(app: &AndroidApp) -> Option<i32> {
         let manager = env
             .call_method(
                 activity,
-                "getSystemService",
-                "(Ljava/lang/String;)Ljava/lang/Object;",
+                jni_str!("getSystemService"),
+                jni_sig!("(Ljava/lang/String;)Ljava/lang/Object;"),
                 &[JValue::Object(&name)],
             )?
             .l()?;
@@ -306,7 +318,12 @@ fn volume_steps(app: &AndroidApp) -> Option<i32> {
             return Ok(None);
         }
         let steps = env
-            .call_method(&manager, "getStreamMaxVolume", "(I)I", &[JValue::Int(3)])?
+            .call_method(
+                &manager,
+                jni_str!("getStreamMaxVolume"),
+                jni_sig!("(I)I"),
+                &[JValue::Int(3)],
+            )?
             .i()?;
         Ok(Some(steps))
     })
@@ -400,7 +417,7 @@ fn ms(d: Duration) -> f64 {
 }
 
 fn battery() -> String {
-    crate::mic::battery().map_or_else(|| "none".into(), |(p, _)| p.to_string())
+    crate::system::battery().map_or_else(|| "none".into(), |(p, _)| p.to_string())
 }
 
 impl Selftest {

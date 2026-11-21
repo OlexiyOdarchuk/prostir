@@ -4,6 +4,7 @@
 
 use prostir::i18n::Lang;
 use prostir::settings::Settings;
+use prostir::store::{NoStore, Store as _};
 use prostir::ui::{MonitorEntry, OfferWhy, PairingView, Panel, Place, Section, Tab, UiState};
 
 fn questmon_pairing(mode: &str) -> PairingView {
@@ -25,6 +26,11 @@ fn main() {
     let hover = match (args.next(), args.next()) {
         (Some(x), Some(y)) => Some((x.parse().unwrap(), y.parse().unwrap())),
         _ => None,
+    };
+    let lang = if std::env::var("LANG_UI").as_deref() == Ok("en") {
+        Lang::En
+    } else {
+        Lang::Uk
     };
     let state = UiState {
         mic_denied: std::env::var("MIC_DENIED").is_ok(),
@@ -165,11 +171,8 @@ fn main() {
             .collect(),
         active_profile: Some(0),
         asks: Vec::new(),
-        lang: if std::env::var("LANG_UI").as_deref() == Ok("en") {
-            Lang::En
-        } else {
-            Lang::Uk
-        },
+        lang,
+        update_from: NoStore.update_hint(lang),
     };
     // TOAST="text": a toast instead.
     if let Ok(message) = std::env::var("TOAST") {

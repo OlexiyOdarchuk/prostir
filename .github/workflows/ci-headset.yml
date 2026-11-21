@@ -70,3 +70,14 @@ jobs:
           export CC_aarch64_linux_android="$TC/aarch64-linux-android32-clang"
           export AR_aarch64_linux_android="$TC/llvm-ar"
           cargo clippy -p prostir-client --target aarch64-linux-android --locked -- -D warnings
+          # The store build: its own store, and no selftest.
+          cargo clippy -p prostir-client --target aarch64-linux-android --locked \
+            --no-default-features --features store -- -D warnings
+      # The app and android-activity share one jni: a second version would be a
+      # second set of JNI bindings in one app.
+      - name: One jni for the headset
+        run: |
+          if cargo tree -d -e normal --target aarch64-linux-android -p prostir-client --locked | grep '^jni v'; then
+            echo "more than one version of jni" >&2
+            exit 1
+          fi

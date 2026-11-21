@@ -1,5 +1,11 @@
 //! Renders the built-in panoramas to PNGs:
 //! cargo run --release -p prostir-client --example sky_preview -- DIR
+
+#![expect(
+    clippy::disallowed_methods,
+    reason = "a desktop tool, not the core: it times how long each panorama takes"
+)]
+
 use prostir::background::{self, Sky};
 
 fn main() {

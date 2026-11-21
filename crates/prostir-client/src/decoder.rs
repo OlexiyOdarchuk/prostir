@@ -1,5 +1,10 @@
 //! Hardware decoding with MediaCodec straight into the compositor's surface.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the decoder threads are part of the shell"
+)]
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,25 +33,27 @@ pub struct Stream {
     pub generation: Gen,
 }
 
-/// Decodes `frames` into `window` until the channel closes or `stop` is set.
-#[allow(clippy::too_many_arguments)]
-pub fn spawn(
-    stream: Stream,
-    codec: Codec,
-    width: u32,
-    height: u32,
-    window: NativeWindow,
-    frames: Frames,
-    feedback: Feedback,
-    stop: Arc<AtomicBool>,
-) -> JoinHandle<()> {
-    let id = stream.id.0;
+/// One stream for a decoder thread: what it decodes and where the pictures go.
+pub struct DecoderJob {
+    pub stream: Stream,
+    pub codec: Codec,
+    pub width: u32,
+    pub height: u32,
+    /// The compositor's surface the pictures are decoded into.
+    pub window: NativeWindow,
+    pub frames: Frames,
+    pub feedback: Feedback,
+    /// Set when the monitor goes: the decoder stops before its surface does.
+    pub stop: Arc<AtomicBool>,
+}
+
+/// Decodes the job's frames into its window until the channel closes or `stop` is set.
+pub fn spawn(job: DecoderJob) -> JoinHandle<()> {
+    let id = job.stream.id.0;
     std::thread::Builder::new()
         .name(format!("decoder-{id}"))
         .spawn(move || {
-            if let Err(e) = run(
-                stream, codec, width, height, &window, &frames, &feedback, &stop,
-            ) {
+            if let Err(e) = run(&job) {
                 error!("decoder {id}: {e:#}");
             }
             info!("decoder {id} stopped");
@@ -54,17 +61,17 @@ pub fn spawn(
         .expect("spawn decoder thread")
 }
 
-#[allow(clippy::too_many_arguments)]
-fn run(
-    stream: Stream,
-    codec: Codec,
-    width: u32,
-    height: u32,
-    window: &NativeWindow,
-    frames: &Frames,
-    feedback: &Feedback,
-    stop: &AtomicBool,
-) -> Result<()> {
+fn run(job: &DecoderJob) -> Result<()> {
+    let DecoderJob {
+        stream,
+        codec,
+        width,
+        height,
+        ref window,
+        ref frames,
+        ref feedback,
+        ref stop,
+    } = *job;
     let mut timing = Timing {
         stream: Some(stream),
         feedback: Some(feedback.clone()),

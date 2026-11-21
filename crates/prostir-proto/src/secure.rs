@@ -11,6 +11,7 @@
 use std::fmt::Write as _;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -71,13 +72,29 @@ fn write_private(path: &Path, text: &str) -> io::Result<()> {
     write_atomic(path, text.as_bytes())
 }
 
-/// Replaces a file in one step: written next to it, synced, then renamed over it. A
-/// crash or a full disk mid-write leaves the old file, never a cut-off one. The file
-/// is readable by its owner only (keys, trusted devices, settings).
+/// Numbers the temporary files of this process: two writes of one file at the same
+/// time (two threads, or one an earlier start of the app in the same process left
+/// running) never share a temporary file.
+static TEMPORARY: AtomicU64 = AtomicU64::new(0);
+
+/// Replaces a file in one step: written next to it, to a temporary file of its own
+/// (`<file>.tmp.<process>.<number>`), synced, then renamed over it. A crash or a full
+/// disk mid-write leaves the old file, never a cut-off one. The file is readable by
+/// its owner only (keys, trusted devices, settings).
 pub fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
     let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
+    let n = TEMPORARY.fetch_add(1, Ordering::Relaxed);
+    let _ = write!(tmp, ".tmp.{}.{n}", std::process::id());
     let tmp = PathBuf::from(tmp);
+    let written = write_synced(&tmp, data).and_then(|()| std::fs::rename(&tmp, path));
+    if written.is_err() {
+        // A write that failed leaves nothing behind.
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
+}
+
+fn write_synced(path: &Path, data: &[u8]) -> io::Result<()> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -85,11 +102,50 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut f = options.open(&tmp)?;
+    let mut f = options.open(path)?;
     f.write_all(data)?;
-    f.sync_all()?;
-    drop(f);
-    std::fs::rename(&tmp, path)
+    f.sync_all()
+}
+
+/// Removes the temporary files that writes of `path` cut short (a crash or power cut
+/// between writing and renaming) left next to it: `<file>.tmp.<process>.<number>` of
+/// [`write_atomic`], and `<file>.tmp` of older versions. Those of this process stay:
+/// a write of it may be under way (a thread an earlier start in the same process left
+/// running), and none of them can be left over from a crash. Call it at a start,
+/// before the first write of `path`.
+pub fn remove_leftovers(path: &Path) {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else {
+        return;
+    };
+    let dir = if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let own = std::process::id().to_string();
+    for entry in entries.flatten() {
+        let file = entry.file_name();
+        let leftover = file
+            .to_str()
+            .and_then(|f| f.strip_prefix(name))
+            .and_then(|rest| rest.strip_prefix(".tmp"))
+            .is_some_and(|rest| match rest.strip_prefix('.') {
+                None => rest.is_empty(),
+                Some(numbers) => numbers.split_once('.').is_some_and(|(process, number)| {
+                    digits(process) && digits(number) && process != own
+                }),
+            });
+        if leftover {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+fn digits(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
 }
 
 pub fn to_hex(bytes: &[u8]) -> String {
@@ -388,6 +444,72 @@ mod tests {
         std::fs::remove_file(&key).unwrap();
         let made = Identity::load_or_create(&key).unwrap();
         assert_eq!(Identity::load_or_create(&key).unwrap().public, made.public);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Each write has a temporary file of its own, and none stays behind; leftovers of
+    /// writes cut short, old style and new, are removed, and nothing else.
+    #[test]
+    fn temporary_files() {
+        let dir = std::env::temp_dir().join(format!("prostir-atomic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.txt");
+        let names = || {
+            let mut names: Vec<String> = std::fs::read_dir(&dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().into_string().unwrap())
+                .collect();
+            names.sort();
+            names
+        };
+        std::thread::scope(|s| {
+            for i in 0..8 {
+                let path = &path;
+                s.spawn(move || write_atomic(path, format!("{i}\n").as_bytes()).unwrap());
+            }
+        });
+        assert_eq!(names(), ["settings.txt"]);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.ends_with('\n') && text.len() == 2, "{text:?}");
+        // A directory in the way: the write fails, and leaves no temporary file.
+        std::fs::create_dir(dir.join("busy")).unwrap();
+        assert!(write_atomic(&dir.join("busy"), b"x").is_err());
+        assert_eq!(names(), ["busy", "settings.txt"]);
+        std::fs::remove_dir(dir.join("busy")).unwrap();
+
+        for leftover in [
+            "settings.txt.tmp",
+            "settings.txt.tmp.12.0",
+            "settings.txt.tmp.7.3",
+        ] {
+            std::fs::write(dir.join(leftover), "half a fi").unwrap();
+        }
+        // This process's own may be a write under way.
+        let own = format!("settings.txt.tmp.{}.5", std::process::id());
+        for kept in [
+            "settings.txt.tmpx",
+            "settings.txt.tmp.12",
+            "settings.txt.tmp.x.1",
+            "settings.txt.tmp.12.0.bak",
+            "other.txt.tmp",
+            "settings.txt.old",
+            &own,
+        ] {
+            std::fs::write(dir.join(kept), "").unwrap();
+        }
+        remove_leftovers(&path);
+        let mut kept = vec![
+            "other.txt.tmp".to_owned(),
+            "settings.txt".into(),
+            "settings.txt.old".into(),
+            "settings.txt.tmp.12".into(),
+            "settings.txt.tmp.12.0.bak".into(),
+            "settings.txt.tmp.x.1".into(),
+            "settings.txt.tmpx".into(),
+            own,
+        ];
+        kept.sort();
+        assert_eq!(names(), kept);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

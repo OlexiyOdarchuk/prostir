@@ -1,11 +1,19 @@
 //! Headset microphone to the PC: captured with AAudio only while a PC app is
 //! recording, in 10 ms slices, as an up stream (`UpStart`, `Up`, `UpEnd`).
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the microphone thread is part of the shell"
+)]
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
+use android_activity::AndroidApp;
 use jni::objects::{JObject, JValue};
+use jni::sys::jobject;
+use jni::{jni_sig, jni_str};
 use log::{info, warn};
 use ndk_sys as ffi;
 use prostir_proto::state::{UpFormat, UpKind, permission};
@@ -16,77 +24,129 @@ use crate::net::Feedback;
 const PERMISSION: &str = "android.permission.RECORD_AUDIO";
 /// 10 ms per slice.
 const FRAMES: usize = AUDIO_RATE as usize / 100;
-/// The number of the next recording's up stream: each one gets its own, so the end of
-/// an old one, still on its way when the microphone is switched off and on quickly,
-/// cannot end the new one on the PC.
-static NEXT_UP: AtomicU8 = AtomicU8::new(0);
-
-/// Whether the system lets the app record, as last found (see
-/// `prostir_proto::state::permission`): the PC shows when it does not.
-static ALLOWED_BY_SYSTEM: AtomicU8 = AtomicU8::new(permission::UNKNOWN);
-
-pub fn permission() -> u8 {
-    ALLOWED_BY_SYSTEM.load(Ordering::Relaxed)
+/// The microphone of one start of the app: the user's switch, what the system allows,
+/// the numbers of its up streams. Made at the start and shared: the menu flips the
+/// switch, the network thread records while a PC app asks. A new start in the same
+/// process makes its own.
+#[derive(Debug)]
+pub struct Mic {
+    /// The number of the next recording's up stream: each one gets its own, so the
+    /// end of an old one, still on its way when the microphone is switched off and on
+    /// quickly, cannot end the new one on the PC.
+    next_up: AtomicU8,
+    /// Whether the system lets the app record, as last found (see
+    /// `prostir_proto::state::permission`): the PC shows when it does not.
+    allowed_by_system: AtomicU8,
+    /// The user's microphone switch, from the headset's own settings. Recording
+    /// happens only while this is on, whatever the PC asks.
+    allowed: AtomicBool,
+    /// Access to the microphone was refused: no more system prompts each time a PC
+    /// app starts recording, and the menu says where to allow it.
+    denied: AtomicBool,
+    /// The running activity, which shows the system's prompt.
+    app: AndroidApp,
 }
 
-/// Looks whether the system lets the app record now (one call into Android).
-pub fn refresh_permission() {
-    let now = if has_permission() {
-        permission::GRANTED
-    } else if DENIED.load(Ordering::Relaxed) {
-        permission::DENIED
-    } else {
-        permission::UNKNOWN
-    };
-    ALLOWED_BY_SYSTEM.store(now, Ordering::Relaxed);
+impl Mic {
+    /// With the user's switch as the settings have it.
+    pub fn new(allowed: bool, app: AndroidApp) -> Self {
+        Self {
+            next_up: AtomicU8::new(0),
+            allowed_by_system: AtomicU8::new(permission::UNKNOWN),
+            allowed: AtomicBool::new(allowed),
+            denied: AtomicBool::new(false),
+            app,
+        }
+    }
+
+    pub fn permission(&self) -> u8 {
+        self.allowed_by_system.load(Ordering::Relaxed)
+    }
+
+    /// Looks whether the system lets the app record now (one call into Android).
+    pub fn refresh_permission(&self) {
+        let now = if has_permission() {
+            permission::GRANTED
+        } else if self.denied.load(Ordering::Relaxed) {
+            permission::DENIED
+        } else {
+            permission::UNKNOWN
+        };
+        self.allowed_by_system.store(now, Ordering::Relaxed);
+    }
+
+    pub fn set_allowed(&self, allowed: bool) {
+        // Switched on again by hand: the system may ask for access once more.
+        if allowed && !self.allowed.load(Ordering::Relaxed) {
+            self.denied.store(false, Ordering::Relaxed);
+        }
+        self.allowed.store(allowed, Ordering::Relaxed);
+    }
+
+    pub fn denied(&self) -> bool {
+        self.denied.load(Ordering::Relaxed)
+    }
+
+    /// The user pressed "Ask again": show the system prompt now.
+    pub fn ask_again(&self) {
+        self.denied.store(false, Ordering::Relaxed);
+        if !has_permission() {
+            request_permission(&self.app);
+        }
+    }
+
+    pub fn allowed(&self) -> bool {
+        self.allowed.load(Ordering::Relaxed)
+    }
+
+    /// Asks for the microphone permission once (the headset shows a system dialog)
+    /// and waits up to a minute for the answer.
+    fn ensure_permission(&self, stop: &AtomicBool) -> bool {
+        if has_permission() {
+            self.denied.store(false, Ordering::Relaxed);
+            self.allowed_by_system
+                .store(permission::GRANTED, Ordering::Relaxed);
+            return true;
+        }
+        if self.denied.load(Ordering::Relaxed) {
+            self.allowed_by_system
+                .store(permission::DENIED, Ordering::Relaxed);
+            return false;
+        }
+        self.allowed_by_system
+            .store(permission::ASKING, Ordering::Relaxed);
+        request_permission(&self.app);
+        let until = Instant::now() + Duration::from_secs(60);
+        while Instant::now() < until && !stop.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(500));
+            if has_permission() {
+                self.allowed_by_system
+                    .store(permission::GRANTED, Ordering::Relaxed);
+                return true;
+            }
+        }
+        warn!("no microphone permission");
+        self.allowed_by_system
+            .store(permission::DENIED, Ordering::Relaxed);
+        self.denied.store(true, Ordering::Relaxed);
+        false
+    }
 }
 
 /// Records until dropped.
-/// The user's microphone switch, from the headset's own settings. Recording happens
-/// only while this is on, whatever the PC asks.
-static ALLOWED: AtomicBool = AtomicBool::new(true);
-
-pub fn set_allowed(allowed: bool) {
-    // Switched on again by hand: the system may ask for access once more.
-    if allowed && !ALLOWED.load(Ordering::Relaxed) {
-        DENIED.store(false, Ordering::Relaxed);
-    }
-    ALLOWED.store(allowed, Ordering::Relaxed);
-}
-
-/// Access to the microphone was refused: no more system prompts each time a PC app
-/// starts recording, and the menu says where to allow it.
-static DENIED: AtomicBool = AtomicBool::new(false);
-
-pub fn denied() -> bool {
-    DENIED.load(Ordering::Relaxed)
-}
-
-/// The user pressed "Ask again": show the system prompt now.
-pub fn ask_again() {
-    DENIED.store(false, Ordering::Relaxed);
-    if !has_permission() {
-        request_permission();
-    }
-}
-
-pub fn allowed() -> bool {
-    ALLOWED.load(Ordering::Relaxed)
-}
-
 pub struct Recorder {
     stop: Arc<AtomicBool>,
 }
 
 impl Recorder {
-    pub fn start(feedback: Feedback) -> Self {
+    pub fn start(mic: Arc<Mic>, feedback: Feedback) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
-        let up = NEXT_UP.fetch_add(1, Ordering::Relaxed);
+        let up = mic.next_up.fetch_add(1, Ordering::Relaxed);
         let _ = std::thread::Builder::new()
             .name("mic".into())
             .spawn(move || {
-                if !ensure_permission(&flag) {
+                if !mic.ensure_permission(&flag) {
                     return;
                 }
                 let start = ClientMsg::UpStart {
@@ -156,62 +216,37 @@ fn record(input: &Input, up: u8, feedback: &Feedback, stop: &AtomicBool) -> bool
     true
 }
 
-/// Asks for the microphone permission once (the headset shows a system dialog) and
-/// waits up to a minute for the answer.
-fn ensure_permission(stop: &AtomicBool) -> bool {
-    if has_permission() {
-        DENIED.store(false, Ordering::Relaxed);
-        ALLOWED_BY_SYSTEM.store(permission::GRANTED, Ordering::Relaxed);
-        return true;
-    }
-    if DENIED.load(Ordering::Relaxed) {
-        ALLOWED_BY_SYSTEM.store(permission::DENIED, Ordering::Relaxed);
-        return false;
-    }
-    ALLOWED_BY_SYSTEM.store(permission::ASKING, Ordering::Relaxed);
-    request_permission();
-    let until = Instant::now() + Duration::from_secs(60);
-    while Instant::now() < until && !stop.load(Ordering::Relaxed) {
-        std::thread::sleep(Duration::from_millis(500));
-        if has_permission() {
-            ALLOWED_BY_SYSTEM.store(permission::GRANTED, Ordering::Relaxed);
-            return true;
-        }
-    }
-    warn!("no microphone permission");
-    ALLOWED_BY_SYSTEM.store(permission::DENIED, Ordering::Relaxed);
-    DENIED.store(true, Ordering::Relaxed);
-    false
-}
-
 /// Runs `f` with the app's context: the Application that `ndk_context` holds
 /// (android-activity puts it there), not the activity. Enough for system services and
-/// permissions; what needs the Activity itself takes it from the `AndroidApp`.
-pub(crate) fn with_activity<T>(
-    f: impl FnOnce(&mut jni::JNIEnv<'_>, &JObject<'_>) -> jni::errors::Result<T>,
+/// checking permissions; what needs the Activity itself (asking for one) takes it from
+/// the `AndroidApp`.
+pub(crate) fn with_app_context<T>(
+    f: impl FnOnce(&mut jni::Env<'_>, &JObject<'_>) -> jni::errors::Result<T>,
 ) -> Option<T> {
     let ctx = ndk_context::android_context();
     // SAFETY: the VM of the running NativeActivity.
-    let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }.ok()?;
-    let mut env = vm.attach_current_thread_permanently().ok()?;
-    // SAFETY: a global reference to the Application, kept for the life of the process.
-    let activity = unsafe { JObject::from_raw(ctx.context().cast()) };
-    let result = f(&mut env, &activity);
-    if result.is_err() {
-        let _ = env.exception_describe();
-        let _ = env.exception_clear();
-    }
-    result.ok()
+    let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) };
+    // In a local frame of its own; a Java exception on the way is caught and cleared,
+    // and comes back as the error.
+    vm.attach_current_thread(|env| {
+        let raw: jobject = ctx.context().cast();
+        // SAFETY: a global reference to the Application, kept for the life of the
+        // process; the cast only borrows it, it never deletes it.
+        let context = unsafe { env.as_cast_raw::<JObject<'static>>(&raw) }?;
+        f(env, &context)
+    })
+    .inspect_err(|e| warn!("a call into Android failed: {e}"))
+    .ok()
 }
 
 fn has_permission() -> bool {
-    with_activity(|env, activity| {
+    with_app_context(|env, context| {
         let name = env.new_string(PERMISSION)?;
         let granted = env
             .call_method(
-                activity,
-                "checkSelfPermission",
-                "(Ljava/lang/String;)I",
+                context,
+                jni_str!("checkSelfPermission"),
+                jni_sig!("(Ljava/lang/String;)I"),
                 &[JValue::Object(&name)],
             )?
             .i()?;
@@ -220,18 +255,34 @@ fn has_permission() -> bool {
     .unwrap_or(false)
 }
 
-fn request_permission() {
-    with_activity(|env, activity| {
-        let name = env.new_string(PERMISSION)?;
-        let list = env.new_object_array(1, "java/lang/String", &name)?;
-        env.call_method(
-            activity,
-            "requestPermissions",
-            "([Ljava/lang/String;I)V",
-            &[JValue::Object(&list), JValue::Int(1)],
-        )?;
-        Ok(())
-    });
+/// Shows the system's prompt for the microphone. Only an Activity has
+/// `requestPermissions` (the Application has not: asked there, the prompt never came),
+/// and it is asked on the Java main thread, as Android expects; the answer is seen
+/// later through [`has_permission`].
+fn request_permission(app: &AndroidApp) {
+    let on_main = app.clone();
+    app.run_on_java_main_thread(Box::new(move || {
+        // SAFETY: the VM of the running NativeActivity.
+        let vm = unsafe { jni::JavaVM::from_raw(on_main.vm_as_ptr().cast()) };
+        let asked = vm.attach_current_thread(|env| -> jni::errors::Result<()> {
+            let raw: jobject = on_main.activity_as_ptr().cast();
+            // SAFETY: the activity's object, valid while the activity runs; the cast
+            // only borrows it, it never deletes it.
+            let activity = unsafe { env.as_cast_raw::<JObject<'static>>(&raw) }?;
+            let name = env.new_string(PERMISSION)?;
+            let list = env.new_object_array(1, jni_str!("java/lang/String"), &name)?;
+            env.call_method(
+                &*activity,
+                jni_str!("requestPermissions"),
+                jni_sig!("([Ljava/lang/String;I)V"),
+                &[JValue::Object(&list), JValue::Int(1)],
+            )?;
+            Ok(())
+        });
+        if let Err(e) = asked {
+            warn!("cannot ask for the microphone: {e}");
+        }
+    }));
 }
 
 /// An AAudio input stream (through `ndk-sys`, like the player).
@@ -290,30 +341,4 @@ impl Drop for Input {
 
 fn check(result: i32) -> Result<(), i32> {
     if result < 0 { Err(result) } else { Ok(()) }
-}
-
-/// The headset's battery: percent and whether it is charging (`BatteryManager`).
-pub fn battery() -> Option<(u8, bool)> {
-    with_activity(|env, activity| {
-        let name = env.new_string("batterymanager")?;
-        let manager = env
-            .call_method(
-                activity,
-                "getSystemService",
-                "(Ljava/lang/String;)Ljava/lang/Object;",
-                &[JValue::Object(&name)],
-            )?
-            .l()?;
-        // BatteryManager.BATTERY_PROPERTY_CAPACITY
-        let percent = env
-            .call_method(&manager, "getIntProperty", "(I)I", &[JValue::Int(4)])?
-            .i()?;
-        // BATTERY_PROPERTY_STATUS: 2 is charging (isCharging also says yes when full
-        // and plugged in).
-        let status = env
-            .call_method(&manager, "getIntProperty", "(I)I", &[JValue::Int(6)])?
-            .i()?;
-        let charging = status == 2;
-        Ok((percent.clamp(0, 100) as u8, charging))
-    })
 }

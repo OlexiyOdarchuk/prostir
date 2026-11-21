@@ -1,5 +1,5 @@
 //! Meta Horizon Store builds only (feature `store`): the entitlement check the store
-//! requires within 10 seconds of launch.
+//! requires within 10 seconds of launch, and where its builds are updated.
 //!
 //! The Meta Platform SDK is loaded at run time with `dlopen` from the APK's own
 //! libraries (`libovrplatformloader.so`, added by `build-apk.sh` for store builds), so
@@ -8,6 +8,48 @@
 use std::ffi::{CString, c_char, c_void};
 
 use log::{info, warn};
+
+use super::{Store, StoreCheck, UpdateHint};
+use crate::i18n::Lang;
+
+/// The Meta Horizon Store: the app is checked to be the user's at launch, and updated
+/// from the headset's library.
+pub struct MetaStore {
+    /// `None` when the check could not even start: that counts as not owned.
+    check: Option<Entitlement>,
+}
+
+impl MetaStore {
+    /// Starts the check.
+    pub fn start(app: &android_activity::AndroidApp) -> Self {
+        Self {
+            check: Entitlement::start(app),
+        }
+    }
+}
+
+impl Store for MetaStore {
+    fn poll(&mut self, l: Lang) -> StoreCheck {
+        match self.check.as_mut().map_or(Some(false), Entitlement::poll) {
+            None => StoreCheck::Waiting,
+            Some(true) => StoreCheck::Owned,
+            Some(false) => StoreCheck::NotOwned(l.t(
+                "Не вдалося підтвердити, що Prostir отримано з Meta Horizon Store",
+                "Could not confirm Prostir came from the Meta Horizon Store",
+            )),
+        }
+    }
+
+    fn update_hint(&self, l: Lang) -> UpdateHint {
+        UpdateHint {
+            how: l.t(
+                "Оновіть Prostir у бібліотеці шолома:",
+                "Update Prostir in the headset's library:",
+            ),
+            place: "Meta Horizon Store",
+        }
+    }
+}
 
 /// Prostir's application id on the Meta Horizon Developer Dashboard.
 const APP_ID: &str = match option_env!("PROSTIR_HORIZON_APP_ID") {
@@ -25,7 +67,7 @@ type IsError = unsafe extern "C" fn(*const c_void) -> bool;
 type Free = unsafe extern "C" fn(*mut c_void);
 
 /// The running check: poll it every frame until it answers.
-pub struct Entitlement {
+struct Entitlement {
     pop: Pop,
     get_type: GetType,
     is_error: IsError,
@@ -47,7 +89,7 @@ fn symbol<T>(lib: *mut c_void, name: &str) -> Option<T> {
 impl Entitlement {
     /// Initializes the platform and asks whether the user owns the app. `None` means
     /// the check could not even start: treat it as a failure.
-    pub fn start(app: &android_activity::AndroidApp) -> Option<Self> {
+    fn start(app: &android_activity::AndroidApp) -> Option<Self> {
         let name = CString::new("libovrplatformloader.so").ok()?;
         // SAFETY: plain dlopen; the handle is kept for the life of the process.
         let lib = unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_NOW) };
@@ -67,12 +109,16 @@ impl Entitlement {
         // The SDK wants the Activity. `ndk_context` holds the Application (that is
         // what android-activity puts there), so the activity comes from the app.
         // SAFETY: the VM comes from the running NativeActivity.
-        let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) }.ok()?;
-        let env = vm.attach_current_thread_permanently().ok()?;
+        let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) };
         let app_id = CString::new(APP_ID).ok()?;
-        // SAFETY: valid app id, the running activity's object and JNIEnv for this
-        // thread.
-        let result = unsafe { init(app_id.as_ptr(), app.activity_as_ptr(), env.get_raw().cast()) };
+        let result = vm
+            .attach_current_thread(|env| -> jni::errors::Result<i32> {
+                // SAFETY: valid app id, the running activity's object and the JNIEnv
+                // of this thread.
+                Ok(unsafe { init(app_id.as_ptr(), app.activity_as_ptr(), env.get_raw().cast()) })
+            })
+            .inspect_err(|e| warn!("store: {e}"))
+            .ok()?;
         if result != 0 {
             warn!("store: platform initialization failed ({result})");
             return None;
@@ -84,7 +130,7 @@ impl Entitlement {
     }
 
     /// `Some(true)` once the user is entitled, `Some(false)` if not.
-    pub fn poll(&mut self) -> Option<bool> {
+    fn poll(&mut self) -> Option<bool> {
         while self.answer.is_none() {
             // SAFETY: the SDK owns the message until it is freed below.
             let msg = unsafe { (self.pop)() };

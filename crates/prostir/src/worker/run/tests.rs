@@ -18,12 +18,18 @@ struct Stub {
     calls: Calls,
     gate: Arc<(Mutex<bool>, Condvar)>,
     outputs: Arc<Mutex<Outputs>>,
+    /// The scale the desktop lists its outputs at: the one an output is made with,
+    /// until a test gives another, as a person in the desktop's settings.
+    scale: DeskScale,
 }
+
+type DeskScale = Arc<Mutex<Option<u16>>>;
 
 struct StubOutput {
     key: OutputKey,
     calls: Calls,
     outputs: Arc<Mutex<Outputs>>,
+    scale: DeskScale,
 }
 
 impl Drop for StubOutput {
@@ -39,6 +45,15 @@ impl Drop for StubOutput {
 impl Output for StubOutput {
     fn key(&self) -> &OutputKey {
         &self.key
+    }
+    fn desk_scale(&self) -> Option<u16> {
+        *self.scale.lock().unwrap()
+    }
+    fn scale_taken(&self, percent: u16) {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("scale taken {percent}"));
     }
     fn health(&self) -> OutputHealth {
         OutputHealth::Live
@@ -86,10 +101,12 @@ impl Desktop for Stub {
             is_virtual: true,
         };
         self.outputs.lock().unwrap().insert(key.clone(), geometry);
+        *self.scale.lock().unwrap() = Some(spec.scale);
         Ok(Box::new(StubOutput {
             key,
             calls: self.calls.clone(),
             outputs: self.outputs.clone(),
+            scale: self.scale.clone(),
         }))
     }
     fn show(&mut self, key: &OutputKey) -> Result<Box<dyn Output>> {
@@ -174,6 +191,7 @@ fn the_newest_wanted_state_wins_and_the_desktop_is_placed_once() {
         calls: calls.clone(),
         gate: gate.clone(),
         outputs: Arc::default(),
+        scale: Arc::default(),
     };
     let (events, received) = crate::events::channel();
     let inbox: Arc<Inbox<Wanted, Job>> = Arc::default();
@@ -299,6 +317,7 @@ fn the_headsets_plan_is_recognised() {
 /// A worker of a stub desktop that never waits, on a thread of its own.
 struct Harness {
     calls: Calls,
+    scale: DeskScale,
     inbox: Arc<Inbox<Wanted, Job>>,
     received: std::sync::mpsc::Receiver<Event>,
     thread: std::thread::JoinHandle<()>,
@@ -307,6 +326,7 @@ struct Harness {
 impl Harness {
     fn start() -> Self {
         let calls = Calls::default();
+        let scale = DeskScale::default();
         let stub = Stub {
             caps: DesktopCaps {
                 name: "stub",
@@ -322,6 +342,7 @@ impl Harness {
             calls: calls.clone(),
             gate: Arc::new((Mutex::new(false), Condvar::new())),
             outputs: Arc::default(),
+            scale: scale.clone(),
         };
         let (events, received) = crate::events::channel();
         let inbox: Arc<Inbox<Wanted, Job>> = Arc::default();
@@ -336,6 +357,7 @@ impl Harness {
         let thread = std::thread::spawn(move || worker.run());
         Self {
             calls,
+            scale,
             inbox,
             received,
             thread,
@@ -346,6 +368,17 @@ impl Harness {
     /// answered meanwhile.
     fn settle(&self, wanted: Wanted) -> Vec<(JobId, bool)> {
         let upto = self.inbox.want(wanted);
+        self.until(upto)
+    }
+
+    /// One look after the outputs (as the control loop asks each second), waited for.
+    fn tick(&self) {
+        let upto = self.inbox.ask(Job::Tick);
+        self.until(upto);
+    }
+
+    /// Waits until the worker took everything up to `upto`: the jobs it answered.
+    fn until(&self, upto: u64) -> Vec<(JobId, bool)> {
         let mut jobs = Vec::new();
         loop {
             match self.received.recv_timeout(Duration::from_secs(5)).unwrap() {
@@ -361,6 +394,20 @@ impl Harness {
         self.thread.join().unwrap();
         self.calls.lock().unwrap().clone()
     }
+}
+
+/// A scale given in the desktop's settings before the worker first looked is still
+/// taken: the output was listed at its own scale as it was made.
+#[test]
+fn a_scale_given_before_the_first_look_is_taken() {
+    let harness = Harness::start();
+    harness.settle(wanted(&[(1, 1, 640)]));
+    *harness.scale.lock().unwrap() = Some(150);
+    // Taken when seen on two looks in a row.
+    harness.tick();
+    harness.tick();
+    let calls = harness.end();
+    assert!(calls.iter().any(|c| c == "scale taken 150"), "{calls:?}");
 }
 
 /// A number given again (a monitor removed, another added at once) is made only

@@ -1,11 +1,17 @@
 //! Finds the PC host, keeps the TCP connection alive and fans frames out to decoders.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the network thread is part of the shell: its sockets, files and clock are its own"
+)]
+
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpStream, UdpSocket};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use log::{info, warn};
@@ -19,6 +25,9 @@ use prostir_proto::state::{self, DisplayId, ErrorCode, Gen, HeadsetState, PcStat
 use prostir_proto::stats::{Gaps, Period};
 use prostir_proto::{ClientMsg, Codec, HeadsetGoodbye, HostMsg, PcGoodbye};
 
+use crate::audio::{Gains, Player};
+use crate::i18n::Lang;
+use crate::mic::{Mic, Recorder};
 use crate::outbox::{Lanes, Outbox};
 use crate::ui::OfferWhy;
 
@@ -146,7 +155,7 @@ pub enum NetEvent {
         name: Option<String>,
         feedback: Feedback,
         /// The PC's interface language.
-        language: Option<crate::i18n::Lang>,
+        language: Option<Lang>,
         opened_with: HeadsetState,
     },
     /// PCs currently seen on the network (sent when the list changes).
@@ -247,6 +256,24 @@ pub struct Discovery {
     /// The selftest's fake PC: connect to this address and nothing else (no USB, no
     /// `host.txt`, no last host, no listening for PCs, no probing the network).
     pub only: Option<SocketAddr>,
+    /// This headset's name for pairing (its model, as the system names it).
+    pub name: String,
+}
+
+/// What sessions play the PC's sound and record the microphone with: made once for
+/// each start of the app and shared with the frame loop.
+pub struct Sound {
+    /// Where the sound comes from (the frame loop places it).
+    pub gains: Arc<Gains>,
+    pub mic: Arc<Mic>,
+}
+
+/// This headset, as its sessions need it.
+struct Headset {
+    identity: Identity,
+    /// What the PC calls it when they pair.
+    name: String,
+    sound: Sound,
 }
 
 /// Lets the menu choose which PC to use and take part in pairing.
@@ -278,6 +305,8 @@ struct Steer {
     quit: bool,
     /// What the headset says about itself when it opens a session (`Open`).
     headset: HeadsetState,
+    /// The menu's language, for what this thread names (a PC over USB).
+    lang: Lang,
 }
 
 type PeerKey = [u8; 32];
@@ -360,6 +389,15 @@ impl Steering {
         self.lock().headset.clone()
     }
 
+    /// The menu's language changed.
+    pub fn set_lang(&self, lang: Lang) {
+        self.lock().lang = lang;
+    }
+
+    fn lang(&self) -> Lang {
+        self.lock().lang
+    }
+
     /// A PC was forgotten in the menu: the next connection reads the trust file again.
     pub fn trust_changed(&self) {
         self.lock().trust_changed = true;
@@ -395,6 +433,18 @@ impl Steering {
 
     fn quitting(&self) -> bool {
         self.lock().quit
+    }
+
+    /// Waits `d`, or less once the app is closing.
+    fn rest(&self, d: Duration) {
+        let until = Instant::now() + d;
+        let mut s = self.lock();
+        while !s.quit {
+            let Some(left) = until.checked_duration_since(Instant::now()) else {
+                return;
+            };
+            s = self.0.1.wait_timeout(s, left).unwrap().0;
+        }
     }
 
     /// The user's answer to "Pair with this PC?".
@@ -482,16 +532,21 @@ impl Steering {
     }
 }
 
-pub fn spawn(events: Sender<NetEvent>, discovery: Discovery, steering: Steering) {
+/// Starts the network thread; it ends soon after [`Steering::shut_down`].
+pub fn spawn(
+    events: Sender<NetEvent>,
+    discovery: Discovery,
+    steering: Steering,
+    sound: Sound,
+) -> JoinHandle<()> {
     std::thread::Builder::new()
         .name("net".into())
         .spawn(move || {
-            let beacon = match discovery.only {
-                Some(_) => None,
-                None => UdpSocket::bind((Ipv4Addr::UNSPECIFIED, prostir_proto::DISCOVERY_PORT))
-                    .inspect_err(|e| warn!("discovery socket: {e}"))
-                    .ok(),
-            };
+            // The socket PCs announce themselves to. A network thread of an earlier
+            // start that has not stopped yet may still hold it: tried again each round
+            // until this one has it.
+            let mut beacon = None;
+            let mut beacon_told = false;
             let identity = match Identity::load_or_create(&discovery.identity_file) {
                 Ok(id) => id,
                 Err(e) => {
@@ -500,6 +555,11 @@ pub fn spawn(events: Sender<NetEvent>, discovery: Discovery, steering: Steering)
                 }
             };
             info!("headset key {}", secure::fingerprint(&identity.public));
+            let me = Headset {
+                identity,
+                name: discovery.name.clone(),
+                sound,
+            };
             let mut trusted = TrustStore::load(&discovery.trust_file);
             let mut finder = Finder::default();
             let mut round = 0u32;
@@ -514,6 +574,21 @@ pub fn spawn(events: Sender<NetEvent>, discovery: Discovery, steering: Steering)
                     trusted = TrustStore::load(&discovery.trust_file);
                 }
                 round += 1;
+                if beacon.is_none() && discovery.only.is_none() {
+                    match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, prostir_proto::DISCOVERY_PORT)) {
+                        Ok(socket) => {
+                            if beacon_told {
+                                info!("discovery socket open");
+                            }
+                            beacon = Some(socket);
+                        }
+                        Err(e) if !beacon_told => {
+                            warn!("discovery socket: {e}; trying again each round");
+                            beacon_told = true;
+                        }
+                        Err(_) => {}
+                    }
+                }
                 if let Some(stream) = connect(
                     beacon.as_ref(),
                     &discovery,
@@ -535,7 +610,7 @@ pub fn spawn(events: Sender<NetEvent>, discovery: Discovery, steering: Steering)
                         &events,
                         name,
                         &steering,
-                        &identity,
+                        &me,
                         &mut trusted,
                         &mut ended,
                     );
@@ -573,13 +648,13 @@ pub fn spawn(events: Sender<NetEvent>, discovery: Discovery, steering: Steering)
                         .refused
                         .is_some_and(|t| t.elapsed() < Duration::from_secs(3))
                     {
-                        std::thread::sleep(Duration::from_secs(10));
+                        steering.rest(Duration::from_secs(10));
                     }
                 }
-                std::thread::sleep(Duration::from_millis(300));
+                steering.rest(Duration::from_millis(300));
             }
         })
-        .expect("spawn net thread");
+        .expect("spawn net thread")
 }
 
 /// What steering needs of a connection that is being opened.
@@ -639,14 +714,29 @@ struct Finder {
 }
 
 impl Finder {
-    /// Listens for beacons for a moment and reports changes to the menu.
-    fn listen(&mut self, beacon: &UdpSocket, events: &Sender<NetEvent>) {
+    /// Listens for beacons for a moment and reports changes to the menu. Looks every
+    /// 100 ms whether the app is closing, and stops then.
+    fn listen(&mut self, beacon: &UdpSocket, events: &Sender<NetEvent>, steering: &Steering) {
         let until = Instant::now() + Duration::from_millis(1200);
         let mut buf = [0u8; 512];
         while let Some(left) = until.checked_duration_since(Instant::now()) {
-            let _ = beacon.set_read_timeout(Some(left.max(Duration::from_millis(1))));
-            let Ok((n, from)) = beacon.recv_from(&mut buf) else {
-                break;
+            if steering.quitting() {
+                return;
+            }
+            let slice = left.clamp(Duration::from_millis(1), Duration::from_millis(100));
+            let _ = beacon.set_read_timeout(Some(slice));
+            let (n, from) = match beacon.recv_from(&mut buf) {
+                Ok(got) => got,
+                // Nothing in this slice: the next one.
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    continue;
+                }
+                Err(_) => break,
             };
             if let Some((port, name)) = prostir_proto::decode_beacon(&buf[..n]) {
                 self.seen
@@ -699,6 +789,10 @@ fn connect(
     {
         return Some(stream);
     }
+    // Each attempt takes a moment: none starts once the app is closing.
+    if steering.quitting() {
+        return None;
+    }
     if let Some(addr) = choice {
         if let Some(stream) = try_connect(addr) {
             return Some(stream);
@@ -706,9 +800,9 @@ fn connect(
         blocked(finder, events, addr);
     }
     if let Some(beacon) = beacon {
-        finder.listen(beacon, events);
+        finder.listen(beacon, events, steering);
     }
-    if picking || choice.is_some() {
+    if picking || choice.is_some() || steering.quitting() {
         // The user is choosing (or their choice is unreachable): only listen.
         return None;
     }
@@ -720,8 +814,14 @@ fn connect(
     {
         return Some(stream);
     }
+    if steering.quitting() {
+        return None;
+    }
     if let Some(stream) = read_addr(&discovery.last_host_file).and_then(try_connect) {
         return Some(stream);
+    }
+    if steering.quitting() {
+        return None;
     }
     // Exactly one PC around: just use it. Several: wait for a pick in the menu.
     match finder.reported.as_slice() {
@@ -737,7 +837,11 @@ fn connect(
         _ => return None,
     }
     // Some networks drop broadcasts: now and then probe the local /24.
-    if round % 5 == 1 { scan_subnet() } else { None }
+    if round % 5 == 1 && !steering.quitting() {
+        scan_subnet()
+    } else {
+        None
+    }
 }
 
 /// The headset's own IPv4 address on the network the default route uses.
@@ -789,6 +893,8 @@ struct Session<'a> {
     events: &'a Sender<NetEvent>,
     steering: &'a Steering,
     identity: &'a Identity,
+    /// What the PC calls this headset (`PairBegin`).
+    name: &'a str,
     peer: &'a PeerInfo,
     host: &'a str,
 }
@@ -855,7 +961,7 @@ impl Session<'_> {
             // the user to type what it shows.
             self.feedback.send(ClientMsg::PairBegin {
                 headset_shows: !pc_shows,
-                name: "Meta Quest".into(),
+                name: self.name.to_owned(),
             })?;
             let code = if pc_shows {
                 let _ = self.events.send(NetEvent::Pairing {
@@ -964,12 +1070,13 @@ fn run_session(
     events: &Sender<NetEvent>,
     name: Option<String>,
     steering: &Steering,
-    identity: &Identity,
+    me: &Headset,
     trusted: &mut TrustStore,
     ended: &mut Ended,
 ) -> std::io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     let addr = stream.peer_addr()?;
+    let identity = &me.identity;
     let Link {
         mut sender,
         mut receiver,
@@ -986,7 +1093,7 @@ fn run_session(
     let _close = CloseOnExit(closer.clone());
     let host = name.clone().unwrap_or_else(|| {
         if addr.ip().is_loopback() {
-            crate::i18n::current().t("ПК (USB)", "PC (USB)").into()
+            steering.lang().t("ПК (USB)", "PC (USB)").into()
         } else {
             addr.ip().to_string()
         }
@@ -996,14 +1103,14 @@ fn run_session(
     let app = prostir_proto::app_version(env!("CARGO_PKG_VERSION"));
     handshake::send_hello(&mut *sender, &app)?;
     let language = match handshake::read_answer(&mut *receiver)? {
-        Answer::Welcome { language, .. } => crate::i18n::Lang::from_code(&language),
+        Answer::Welcome { language, .. } => Lang::from_code(&language),
         Answer::Incompatible { protocol, app } => {
             let _ = events.send(NetEvent::Incompatible {
                 pc_newer: prostir_proto::peer_is_newer(protocol, &app),
                 pc_app: app,
             });
             // Nothing changes until one side is updated: try again only now and then.
-            std::thread::sleep(Duration::from_secs(10));
+            steering.rest(Duration::from_secs(10));
             return Ok(());
         }
     };
@@ -1028,6 +1135,7 @@ fn run_session(
             events,
             steering,
             identity,
+            name: &me.name,
             peer: &peer,
             host: &host,
         };
@@ -1084,10 +1192,11 @@ fn run_session(
 
     let mut streams: HashMap<DisplayId, StreamSlot> = HashMap::new();
     // Started on the first sound slice, stopped with the session.
-    let mut player: Option<crate::audio::Player> = None;
+    let mut player: Option<Player> = None;
     // Runs only while a PC app records from the headset microphone and the user's
     // microphone switch on the headset is on.
-    let mut recorder: Option<crate::mic::Recorder> = None;
+    let mut recorder: Option<Recorder> = None;
+    let sound = &me.sound;
     // Pauses between messages: with sound on, anything over ~10 ms is something
     // (a frame being written, Wi-Fi) holding the rest up.
     let mut gaps = Gaps::default();
@@ -1118,26 +1227,32 @@ fn run_session(
             gaps.restart();
             media_bytes = 0;
         }
-        // A part of the PC's state: kept, checked, and told to the app.
-        let msg = match pc.apply(msg.clone()) {
-            Ok(None) => {
-                tell_part(events, &msg);
-                if let HostMsg::Sound { part } = &msg
-                    && !part.to_headset
-                {
-                    player = None;
+        // A part of the PC's state: kept, checked, and told to the app. Pictures and
+        // sound, most of what comes, are never parts: they go on as they are, not
+        // copied.
+        let msg = if matches!(msg, HostMsg::Frame { .. } | HostMsg::Audio { .. }) {
+            Some(msg)
+        } else {
+            match pc.apply(msg.clone()) {
+                Ok(None) => {
+                    tell_part(events, &msg);
+                    if let HostMsg::Sound { part } = &msg
+                        && !part.to_headset
+                    {
+                        player = None;
+                    }
+                    None
                 }
-                None
+                Ok(Some(msg)) => Some(msg),
+                Err(e) => break Err(e.into()),
             }
-            Ok(Some(msg)) => Some(msg),
-            Err(e) => break Err(e.into()),
         };
         // The microphone streams while a PC program records from it (`UpWanted`) and
         // the user's switch on the headset is on.
         let record =
-            pc.up_wanted.get(&state::UpKind::Mic).is_some_and(|u| u.on) && crate::mic::allowed();
+            pc.up_wanted.get(&state::UpKind::Mic).is_some_and(|u| u.on) && sound.mic.allowed();
         if record != recorder.is_some() {
-            recorder = record.then(|| crate::mic::Recorder::start(feedback.clone()));
+            recorder = record.then(|| Recorder::start(sound.mic.clone(), feedback.clone()));
         }
         let Some(msg) = msg else {
             continue;
@@ -1249,7 +1364,7 @@ fn run_session(
             }
             HostMsg::Audio { pcm } => {
                 player
-                    .get_or_insert_with(crate::audio::Player::spawn)
+                    .get_or_insert_with(|| Player::spawn(sound.gains.clone()))
                     .push(pcm);
             }
             HostMsg::Command { req, asked } => {

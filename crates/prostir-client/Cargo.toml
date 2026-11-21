@@ -39,7 +39,8 @@ android-activity = { version = "0.6", features = ["native-activity"] }
 ndk = { version = "0.9", features = ["media", "api-level-29"] }
 ndk-context = "0.1"
 ndk-sys = { version = "0.6", features = ["audio"] }
-jni = "0.21"
+# The same jni as android-activity's: one in the app (CI checks).
+jni = "0.22"
 khronos-egl = { version = "6", features = ["static", "no-pkg-config"] }
 anyhow.workspace = true
 android_logger = "0.15"

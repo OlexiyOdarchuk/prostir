@@ -282,6 +282,10 @@ fn parse_place(v: &str) -> Option<(usize, Placement)> {
 }
 
 /// `[slot]` sections in one file.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the core's own file access, until step 7.3 hands it to persist"
+)]
 pub fn load(path: &Path) -> [Profile; SLOTS] {
     let text = std::fs::read_to_string(path).unwrap_or_default();
     let mut out: [Profile; SLOTS] = std::array::from_fn(Profile::default_for);
@@ -298,6 +302,10 @@ pub fn load(path: &Path) -> [Profile; SLOTS] {
     out
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the core's own file access, until step 7.3 hands it to persist"
+)]
 pub fn save(path: &Path, profiles: &[Profile; SLOTS]) {
     let text: String = profiles
         .iter()
@@ -311,6 +319,10 @@ pub fn save(path: &Path, profiles: &[Profile; SLOTS]) {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "tests make the folders the code under test reads and writes in"
+)]
 mod tests {
     use super::*;
     use crate::settings::Curve;

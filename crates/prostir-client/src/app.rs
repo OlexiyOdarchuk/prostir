@@ -27,9 +27,11 @@ use prostir_proto::state::{
 };
 use prostir_proto::{ClientMsg, Codec};
 
+use crate::audio::Gains;
 use crate::i18n::{Lang, Language};
 use crate::input::Controls;
 use crate::layout::{self, Cylinder, Grab, Held, Hit, Placement, Ray, ScreenId};
+use crate::mic::Mic;
 use crate::net::{Feedback, NetEvent};
 use crate::overlay::{self, Overlay, Sphere};
 use crate::pending::{self, Asks, Made, ProfileSwitch};
@@ -37,6 +39,8 @@ use crate::profiles::{self, Profile};
 #[cfg(all(feature = "selftest", not(feature = "store")))]
 use crate::selftest::device::{self as selftest, Act, Selftest};
 use crate::settings::{Background, HandMode, Settings};
+use crate::store::{StoreCheck, UpdateHint};
+use crate::system::SystemEvent;
 use crate::ui::{self, Action, MonitorEntry, Panel, Tab, UiState};
 use crate::xrutil::{self, Gfx, ImageLayer, as_layer, pose, posef, vec3};
 use crate::{background, decoder, egl, net, passthrough, physical};
@@ -56,6 +60,8 @@ const TOAST_WIDTH: f32 = 0.46;
 const TOAST_FOR: Duration = Duration::from_secs(4);
 const ERROR_SHOWN_FOR: Duration = Duration::from_secs(8);
 const CONFIRM_FOR: Duration = Duration::from_secs(4);
+/// How long the app, closing, waits for the network thread to end.
+const NET_STOPS_WITHIN: Duration = Duration::from_secs(1);
 /// How long a pinch must be held on a monitor before it starts dragging it.
 const HOLD_TO_DRAG: Duration = Duration::from_millis(300);
 
@@ -122,6 +128,10 @@ const AFTER_TOUCH: Duration = Duration::from_millis(600);
 #[allow(
     clippy::needless_pass_by_value,
     reason = "the signature android-activity calls"
+)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "until step 7.7 passes the time in and moves the threads to the shell"
 )]
 pub fn android_main(app: AndroidApp) {
     android_logger::init_once(
@@ -242,21 +252,14 @@ fn date_text(tm: &libc::tm, style: crate::settings::DateStyle, lang: Lang) -> St
     }
 }
 
-/// The menu's size factor (the "Large" menu setting), as `f32` bits.
-static MENU_SCALE: std::sync::atomic::AtomicU32 =
-    std::sync::atomic::AtomicU32::new(1.0f32.to_bits());
-
-fn set_menu_scale(large: bool) {
+/// The menu's width in the room, larger with the "Large" menu setting.
+fn panel_width(large: bool) -> f32 {
     let scale: f32 = if large { 1.3 } else { 1.0 };
-    MENU_SCALE.store(scale.to_bits(), Ordering::Relaxed);
+    PANEL_WIDTH * scale
 }
 
-fn panel_width() -> f32 {
-    PANEL_WIDTH * f32::from_bits(MENU_SCALE.load(Ordering::Relaxed))
-}
-
-fn panel_height() -> f32 {
-    panel_width() * ui::HEIGHT as f32 / ui::WIDTH as f32
+fn panel_height(large: bool) -> f32 {
+    panel_width(large) * ui::HEIGHT as f32 / ui::WIDTH as f32
 }
 
 /// One stream: the compositor surface it is decoded into and its decoder thread.
@@ -323,6 +326,10 @@ fn wrist_menu_height() -> f32 {
 /// fingers), while an open palm is turned to the face. It takes a quarter of a second
 /// of that to appear, so hands passing by (typing, reaching) do not bring it up.
 /// `since`: when the palm started facing the face.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "until step 7.7 passes the time in and moves the threads to the shell"
+)]
 fn palm_menu_place(
     joints: Option<&[(Vec3, f32); 26]>,
     right_hand: bool,
@@ -424,6 +431,10 @@ struct Scene {
     asks: Asks,
     /// The microphone permission the PC was last told.
     mic_permission: u8,
+    /// The microphone's switch and permission, shared with the network thread.
+    mic: Arc<Mic>,
+    /// Where the PC's sound comes from, for the audio thread.
+    gains: Arc<Gains>,
     /// An unknown PC waiting for "Pair" or "Not now" (survives the disconnect that
     /// follows the question).
     pair_offer: Option<(String, ui::OfferWhy)>,
@@ -455,6 +466,8 @@ struct Scene {
     selected: Option<ScreenId>,
     /// The headset's battery (percent, charging), read once a minute.
     headset_battery: Option<(u8, bool)>,
+    /// The headset's model as the system names it, for `HeadsetCaps`.
+    model: String,
     /// The monitor the sound comes from, as the PC says.
     sound_from: Option<ScreenId>,
     /// The display rate setting changed: apply it.
@@ -591,6 +604,10 @@ impl Scene {
     /// Tells the PC how the monitors stand around the user (rows, left to right), so
     /// KDE's arrangement matches: the mouse leaves a monitor where the next one is,
     /// sideways, up or down. Only sent when it changed.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "until step 7.7 passes the time in and moves the threads to the shell"
+    )]
     fn send_layout(&mut self) {
         if self.settings.cinema || self.feedback.is_none() {
             return;
@@ -782,6 +799,10 @@ impl Scene {
 
     /// The placeholder of a monitor being added goes once its picture is there, it
     /// failed, the connection ended, or it waited too long.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "until step 7.7 passes the time in and moves the threads to the shell"
+    )]
     fn adding_due(&mut self) {
         let Some(a) = &self.adding else {
             return;
@@ -845,6 +866,10 @@ impl Scene {
     /// The PC made a profile's monitors (`ids`, in the order of its sizes): they take
     /// the profile's places, or, for a profile without places (from before 0.2.0, a
     /// starting point, cinema), the layout of its preset once all of them stream.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "until step 7.7 passes the time in and moves the threads to the shell"
+    )]
     fn profile_made(&mut self, ids: Vec<ScreenId>) {
         let Some(switch) = &mut self.profile_switch else {
             return;
@@ -878,6 +903,10 @@ impl Scene {
     /// A profile laid out by its preset, once every monitor it made streams (or could
     /// not start: it keeps its place in the list), or once it waited long enough
     /// (`pending::PROFILE_STANDS_WITHIN`), with what streams then.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "until step 7.7 passes the time in and moves the threads to the shell"
+    )]
     fn profile_streams(&mut self) {
         let settled = |id: ScreenId| {
             self.monitors.contains_key(&id)
@@ -1123,6 +1152,10 @@ impl Scene {
 
     /// Mouse follows the gaze: after resting on another monitor for a moment, the
     /// mouse goes to where the user looks on it.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "until step 7.7 passes the time in and moves the threads to the shell"
+    )]
     fn follow_gaze(&mut self) {
         let busy =
             self.wrist.is_some() || self.grabs.iter().any(Option::is_some) || self.settings.cinema;
@@ -1147,8 +1180,13 @@ impl Scene {
             .min_by(|a, b| a.1.t.total_cmp(&b.1.t));
         // Looking at the menu, not past it.
         let at_menu = self.panel_open
-            && layout::hit_surface(ray, &self.panel_place, panel_height(), None)
-                .is_some_and(|m| looked.as_ref().is_none_or(|l| m.t < l.1.t));
+            && layout::hit_surface(
+                ray,
+                &self.panel_place,
+                panel_height(self.settings.large_menu),
+                None,
+            )
+            .is_some_and(|m| looked.as_ref().is_none_or(|l| m.t < l.1.t));
         let Some((id, hit, p, c)) = looked.filter(|_| !at_menu) else {
             self.gaze_on = None;
             return;
@@ -1183,6 +1221,10 @@ impl Scene {
     /// Rest reminders: after so many minutes of wearing, a short message. Every 20
     /// minutes it is the 20-20-20 rule (look 6 m away for 20 seconds); hourly, a break.
     /// Taking the headset off for 5 minutes counts as a rest.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "until step 7.7 passes the time in and moves the threads to the shell"
+    )]
     fn remind_rest(&mut self, dt: f32) {
         let every = u64::from(self.settings.rest_every) * 60;
         if every == 0 {
@@ -1234,10 +1276,14 @@ impl Scene {
                 // Right of where the user looks is positive.
                 to.dot(self.head_right).atan2(to.dot(forward))
             });
-        crate::audio::place(angle);
+        self.gains.place(angle);
     }
 
     /// Shows `text` for a few seconds, below the line of sight.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "until step 7.7 passes the time in and moves the threads to the shell"
+    )]
     fn show_toast(&mut self, text: String) {
         // Not the text: it can be a PC notification (a message, a code).
         info!("toast shown");
@@ -1512,7 +1558,12 @@ impl Scene {
         if self.panel_open {
             consider(
                 Target::Panel,
-                layout::hit_surface(ray, &self.panel_place, panel_height(), None),
+                layout::hit_surface(
+                    ray,
+                    &self.panel_place,
+                    panel_height(self.settings.large_menu),
+                    None,
+                ),
             );
         }
         if self.settings.keyboard_window
@@ -1613,7 +1664,7 @@ impl Scene {
         self.panel_place = Placement {
             position,
             rotation: layout::facing(position, head),
-            width: panel_width(),
+            width: panel_width(self.settings.large_menu),
         };
         self.panel_open = true;
     }
@@ -1629,6 +1680,20 @@ impl Scene {
         }
     }
 
+    /// The battery was read (once a minute, more often on the palm menu): the menu
+    /// shows it, the PC's tray hears it, and the next `Open` says it.
+    fn battery_read(&mut self, battery: Option<(u8, bool)>) {
+        self.headset_battery = battery;
+        self.steering.set_headset(self.headset_state());
+        if let Some((percent, charging)) = battery
+            && self.feedback.is_some()
+        {
+            self.send(ClientMsg::Battery {
+                part: Battery { percent, charging },
+            });
+        }
+    }
+
     /// The headset's settings the PC acts on.
     fn prefs(&self) -> Prefs {
         prefs_of(&self.settings)
@@ -1636,7 +1701,13 @@ impl Scene {
 
     /// What the headset says about itself when it opens a session.
     fn headset_state(&self) -> HeadsetState {
-        headset_state(&self.settings, self.worn, self.headset_battery)
+        headset_state(
+            &self.settings,
+            self.worn,
+            self.headset_battery,
+            &self.mic,
+            &self.model,
+        )
     }
 
     /// The microphone's switch or permission changed: the PC hears at once (it makes
@@ -1644,8 +1715,8 @@ impl Scene {
     /// starts with it.
     fn mic_changed(&mut self) {
         self.steering.set_headset(self.headset_state());
-        self.mic_permission = crate::mic::permission();
-        let part = mic_state(&self.settings);
+        self.mic_permission = self.mic.permission();
+        let part = mic_state(&self.settings, &self.mic);
         if self.feedback.is_some() {
             self.send(ClientMsg::UpState { part });
         }
@@ -1665,6 +1736,10 @@ impl Scene {
     /// number, and the control shows how it stands meanwhile. Without a connection
     /// nothing is sent (and nothing kept to send later: repeating "add a monitor"
     /// after reconnecting could add two).
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "until step 7.7 passes the time in and moves the threads to the shell"
+    )]
     fn request(&mut self, asked: Request, what: ui::Asked) -> Option<ReqId> {
         if self.feedback.is_none() {
             self.ask_failed(what, ui::Failure::NotConnected, String::new());
@@ -1695,6 +1770,10 @@ impl Scene {
 
     /// Request `req` was answered: which control asked it, `None` for one this side
     /// does not wait for (answered after it gave up on it).
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "until step 7.7 passes the time in and moves the threads to the shell"
+    )]
     fn answered(&mut self, req: ReqId, outcome: &Outcome) -> Option<ui::Asked> {
         let answered = self.asks.answered(req, outcome, Instant::now());
         // A command of the PC that waited for this answer gets it, with the same code.
@@ -1724,6 +1803,10 @@ impl Scene {
     /// Request of control `what` failed: the control says why. A control the menu
     /// does not show while it works (a profile closes the menu, the palm menu finds the
     /// mouse) says it with a short message.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "until step 7.7 passes the time in and moves the threads to the shell"
+    )]
     fn ask_failed(&mut self, what: ui::Asked, why: ui::Failure, detail: String) {
         self.tell_failure(what, why, &detail);
         self.asks.failed(what, why, detail, Instant::now());
@@ -1743,6 +1826,10 @@ impl Scene {
     /// Requests without an answer for 30 s count as failed (a late answer is let go),
     /// and failures are shown for a while; a profile switch waited for long enough is
     /// laid out with what streams.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "until step 7.7 passes the time in and moves the threads to the shell"
+    )]
     fn expire_asks(&mut self) {
         for (req, what) in self.asks.expire(Instant::now()) {
             if self.profile_switch.as_ref().is_some_and(|s| s.req == req) {
@@ -1795,12 +1882,28 @@ impl Scene {
         }
     }
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "until step 7.7 passes the time in and moves the threads to the shell"
+    )]
     fn show_error(&mut self, text: String) {
         warn!("{text}");
         self.error = Some((text, Instant::now()));
     }
 
-    fn ui_state(&self, room: bool, keyboard: bool, panorama: bool, custom: bool) -> UiState {
+    /// What the menu shows; `update_from`: where this build is updated (its store's).
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "until step 7.7 passes the time in and moves the threads to the shell"
+    )]
+    fn ui_state(
+        &self,
+        room: bool,
+        keyboard: bool,
+        panorama: bool,
+        custom: bool,
+        update_from: UpdateHint,
+    ) -> UiState {
         let spots = self.map_spots();
         UiState {
             host: self.host.clone(),
@@ -1851,7 +1954,7 @@ impl Scene {
             mirror_wanted: self.mirror_wanted,
             audio_wanted: self.audio_wanted,
             mic_wanted: self.mic_wanted,
-            mic_denied: self.mic_wanted && crate::mic::denied(),
+            mic_denied: self.mic_wanted && self.mic.denied(),
             mirror_name: self.physical_name(),
             settings: self.settings,
             room_available: room,
@@ -1888,6 +1991,7 @@ impl Scene {
             lang: self.lang(),
             intro: !self.settings.intro_seen,
             update: self.update_needed.clone(),
+            update_from,
             profiles: self.profiles.to_vec(),
             active_profile: self.active_profile,
             asks: self.ask_views(),
@@ -1926,6 +2030,10 @@ fn tab_from_code(code: u8) -> Tab {
     }
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "looked for when the menu opens, in the frame, until step 7.7 moves it out"
+)]
 fn custom_panorama_path(dir: Option<&Path>) -> Option<PathBuf> {
     let d = dir?;
     ["background.jpg", "background.jpeg", "background.png"]
@@ -1968,6 +2076,10 @@ fn load_panorama(choice: Background, dir: Option<&Path>) -> Panorama {
 }
 
 /// The app; with `test`, the selftest's run of it (see `selftest::device`).
+#[expect(
+    clippy::disallowed_methods,
+    reason = "until step 7.7 passes the time in and moves the threads to the shell"
+)]
 fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     // SAFETY: pointers come straight from the running NativeActivity.
     let platform = unsafe { xr::AndroidPlatformInfo::new(app.vm_as_ptr(), app.activity_as_ptr()) };
@@ -2014,9 +2126,13 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     );
     let system = instance.system(xr::FormFactor::HEAD_MOUNTED_DISPLAY)?;
     let _ = instance.graphics_requirements::<Gfx>(system)?;
+    // As the system names the headset: only shown (the PC's list of headsets,
+    // pairing) and logged.
+    let model = crate::system::model();
+    info!("headset: {model:?}");
     if let Some(t) = test.as_deref_mut() {
         t.runtime(app, &instance, system, &available);
-        t.headset_caps(&headset_caps());
+        t.headset_caps(&headset_caps(&model));
     }
 
     let egl = egl::EglContext::new()?;
@@ -2045,11 +2161,23 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     if test.as_deref().is_some_and(Selftest::over) {
         return Ok(());
     }
+    // A write cut short leaves its temporary file; the real one is whole.
+    for name in [
+        "settings.txt",
+        "layout.txt",
+        "profiles.txt",
+        "keyboard.txt",
+        "identity",
+        "paired_hosts",
+    ] {
+        prostir_proto::secure::remove_leftovers(&data_dir.join(name));
+    }
     let settings_path = data_dir.join("settings.txt");
     let profiles_path = data_dir.join("profiles.txt");
     let settings = Settings::load(&settings_path);
-    set_menu_scale(settings.large_menu);
-    crate::mic::set_allowed(settings.mic);
+    // This start's own: a new start in the same process begins afresh.
+    let mic = Arc::new(Mic::new(settings.mic, app.clone()));
+    let gains = Arc::new(Gains::default());
 
     // Passthrough keeps the cameras busy and costs battery: only when "Room" is chosen.
     let mut passthrough = if exts.fb_passthrough {
@@ -2081,8 +2209,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     let mut button_hovered = false;
     // The left hand's menu gesture as last seen, to act once per gesture.
     let mut menu_gesture_held = false;
-    // When the battery was last read, and whether the palm menu showed last frame.
-    let mut last_battery: Option<Instant> = None;
+    // Whether the palm menu showed last frame (it shows the battery).
     let mut palm_was_shown = false;
     button_layer.upload(&gl, &ui::menu_button_image(BUTTON_PX, false))?;
     let mut panel = Panel::new();
@@ -2113,22 +2240,33 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     let external_dir = app.external_data_path().filter(|_| test.is_none());
     let mut custom_pano = custom_panorama_path(external_dir.as_deref()).is_some();
     let mut panel_was_open = false;
+    // The language the network thread was last told (it starts with the default).
+    let mut told_lang = Lang::default();
+
+    // The battery once now, for the first `Open`; from here on the system thread reads
+    // it, away from the frame.
+    let battery = crate::system::battery();
+    let system_thread = crate::system::System::start();
 
     let (net_tx, net_rx) = mpsc::channel();
     let steering = net::Steering::default();
     // What the first `Open` says, before the network thread can connect.
-    steering.set_headset(headset_state(&settings, true, crate::mic::battery()));
-    // However this function ends, the network thread and its session end with it.
-    struct StopNetwork(net::Steering);
+    steering.set_headset(headset_state(&settings, true, battery, &mic, &model));
+    // However this function ends, the network thread and its session end with it, and
+    // the thread is waited for (up to a second): a new start in the same process must
+    // not find this one's still connected to the PC.
+    struct StopNetwork(net::Steering, Option<JoinHandle<()>>);
     impl Drop for StopNetwork {
         fn drop(&mut self) {
             self.0.shut_down();
+            if let Some(thread) = self.1.take() {
+                crate::system::join_within("net", thread, NET_STOPS_WITHIN);
+            }
         }
     }
-    let _stop_network = StopNetwork(steering.clone());
     // A selftest connects to its fake PC and nothing else, never to a real PC.
     debug_assert!(test.is_none() || fake_pc.is_some());
-    net::spawn(
+    let network = net::spawn(
         net_tx,
         net::Discovery {
             identity_file: data_dir.join("identity"),
@@ -2136,12 +2274,18 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             host_file: external_dir.as_ref().map(|p| p.join("host.txt")),
             last_host_file: data_dir.join("last_host"),
             only: fake_pc,
+            name: model.clone(),
         },
         steering.clone(),
+        net::Sound {
+            gains: gains.clone(),
+            mic: mic.clone(),
+        },
     );
+    let _stop_network = StopNetwork(steering.clone(), Some(network));
 
     // SAFETY: the VM pointer is valid for the life of the process.
-    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) }?;
+    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) };
     let _wifi_lock = xrutil::acquire_low_latency_wifi(app, &vm)
         .inspect(|_| info!("Wi-Fi low-latency mode on"))
         .inspect_err(|e| warn!("Wi-Fi low-latency lock unavailable: {e:#}"))
@@ -2171,7 +2315,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         panel_place: Placement {
             position: Vec3::new(0.0, -0.12, -0.7),
             rotation: glam::Quat::IDENTITY,
-            width: panel_width(),
+            width: panel_width(settings.large_menu),
         },
         button_place: None,
         grabs: [None, None],
@@ -2183,7 +2327,9 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         unreachable: None,
         pc: PcState::default(),
         asks: Asks::default(),
-        mic_permission: crate::mic::permission(),
+        mic_permission: mic.permission(),
+        mic,
+        gains,
         steering,
         offline_since: Some(Instant::now()),
         feedback: None,
@@ -2200,7 +2346,8 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         attach_for: None,
         wrist: None,
         selected: None,
-        headset_battery: crate::mic::battery(),
+        headset_battery: battery,
+        model,
         sound_from: None,
         refresh_due: false,
         worn_for: Duration::ZERO,
@@ -2246,11 +2393,11 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     let mut pokes = [Poke::default(); 2];
     // Touches that just happened: (where, when), drawn as a ring spreading out.
     let mut rings: Vec<(Vec3, Instant)> = Vec::new();
-    // Store builds: the store requires checking the user owns the app at launch.
-    #[cfg(feature = "store")]
-    let mut entitlement = crate::store::Entitlement::start(app);
-    #[cfg(feature = "store")]
-    let mut not_entitled_since: Option<Instant> = entitlement.is_none().then(Instant::now);
+    // Where this build comes from. A store build checks the user owns the app, as its
+    // store requires at launch; a build from GitHub has nothing to check.
+    let mut store = crate::store::of_this_build(app);
+    // Since when the store says the app is not the user's: it closes after saying so.
+    let mut not_owned_since: Option<Instant> = None;
     let mut session_running = false;
     // The input is the app's: false while the system menu is open over it (the app
     // keeps drawing, but shows no hands or rays of its own and takes no input).
@@ -2280,34 +2427,20 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         if destroy {
             break;
         }
-        #[cfg(feature = "store")]
-        {
-            if entitlement
-                .as_mut()
-                .and_then(crate::store::Entitlement::poll)
-                == Some(false)
-                && not_entitled_since.is_none()
-            {
-                not_entitled_since = Some(Instant::now());
+        if let StoreCheck::NotOwned(what) = store.poll(scene.lang()) {
+            let since = *not_owned_since.get_or_insert_with(Instant::now);
+            if scene.error.as_ref().is_none_or(|(t, _)| t != what) {
+                scene.show_error(what.into());
+                // In front of the user, wherever the menu was last.
+                let (head, forward) = scene.head;
+                let hands = scene.hands_in_view;
+                scene.open_panel(head, forward, hands);
+                // The 6 s count from when the message is up, not from the failure.
+                not_owned_since = Some(Instant::now());
             }
-            if let Some(since) = not_entitled_since {
-                let what = scene.lang().t(
-                    "Не вдалося підтвердити, що Prostir отримано з Meta Horizon Store",
-                    "Could not confirm Prostir came from the Meta Horizon Store",
-                );
-                if scene.error.as_ref().is_none_or(|(t, _)| t != what) {
-                    scene.show_error(what.into());
-                    // In front of the user, wherever the menu was last.
-                    let (head, forward) = scene.head;
-                    let hands = scene.hands_in_view;
-                    scene.open_panel(head, forward, hands);
-                    // The 6 s count from when the message is up, not from the failure.
-                    not_entitled_since = Some(Instant::now());
-                }
-                // Long enough to read, then close as the store expects.
-                if since.elapsed() > Duration::from_secs(6) {
-                    break;
-                }
+            // Long enough to read, then close as the store expects.
+            if since.elapsed() > Duration::from_secs(6) {
+                break;
             }
         }
         if input_waiting {
@@ -2393,6 +2526,16 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                 }
                 event => handle_net_event(&mut scene, &session, &vm, event),
             }
+        }
+        // Only the newest battery reading matters (several wait after a pause).
+        let mut newest = None;
+        while let Some(event) = system_thread.try_recv() {
+            match event {
+                SystemEvent::Battery(reading) => newest = Some(reading),
+            }
+        }
+        if let Some(reading) = newest {
+            scene.battery_read(reading);
         }
 
         // Panorama: generated or decoded off the main thread, uploaded once per choice.
@@ -2574,27 +2717,14 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         scene.expire_asks();
         scene.adding_due();
         // The system may let the app record now, or not any more.
-        if crate::mic::permission() != scene.mic_permission {
+        if scene.mic.permission() != scene.mic_permission {
             scene.mic_changed();
         }
-        // The headset's battery: on the palm menu (fresh when it appears, then every 15 s)
-        // and for the PC's tray (once a minute).
-        let palm_opened = scene.wrist.is_some() && !palm_was_shown;
-        palm_was_shown = scene.wrist.is_some();
-        let every = if scene.wrist.is_some() { 15 } else { 60 };
-        if palm_opened
-            || last_battery.is_none_or(|t: Instant| t.elapsed() >= Duration::from_secs(every))
-        {
-            last_battery = Some(Instant::now());
-            scene.headset_battery = crate::mic::battery();
-            scene.steering.set_headset(scene.headset_state());
-            if let Some((percent, charging)) = scene.headset_battery
-                && scene.feedback.is_some()
-            {
-                scene.send(ClientMsg::Battery {
-                    part: Battery { percent, charging },
-                });
-            }
+        // The palm menu shows the battery: the system thread reads it afresh when the
+        // menu appears, and more often while it shows.
+        if scene.wrist.is_some() != palm_was_shown {
+            palm_was_shown = scene.wrist.is_some();
+            system_thread.palm_menu(palm_was_shown);
         }
 
         // Pointing, clicking and dragging.
@@ -2654,6 +2784,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                     .is_some_and(passthrough::Passthrough::window_supported),
                 exts.khr_composition_layer_equirect2,
                 custom_pano,
+                store.update_hint(scene.lang()),
             );
             wrist_panel.set_state(&ui_state);
             wrist_panel.hover(wrist_hover);
@@ -2662,9 +2793,9 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                 handle_action(&mut scene, action, &mut passthrough, &mut controls);
             }
         }
-        let panel_point = |hit: &Hit| {
-            let x = (hit.local.x / panel_width() + 0.5) * ui::WIDTH as f32;
-            let y = (0.5 - hit.local.y / panel_height()) * ui::HEIGHT as f32;
+        let panel_point = |hit: &Hit, large: bool| {
+            let x = (hit.local.x / panel_width(large) + 0.5) * ui::WIDTH as f32;
+            let y = (0.5 - hit.local.y / panel_height(large)) * ui::HEIGHT as f32;
             (x, y)
         };
 
@@ -2682,7 +2813,10 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             };
             let place = scene.panel_place;
             let l = place.rotation.inverse() * (tip - place.position);
-            let (half_w, half_h) = (panel_width() / 2.0, panel_height() / 2.0);
+            let (half_w, half_h) = (
+                panel_width(scene.settings.large_menu) / 2.0,
+                panel_height(scene.settings.large_menu) / 2.0,
+            );
             if let Some(anchor) = poke.drag {
                 if l.z > POKE_RELEASE {
                     *poke = Poke {
@@ -2710,8 +2844,8 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             let at = Vec2::new(l.x, l.y);
             poke_hover[h] = Some((at, l.z));
             let px = (
-                (l.x / panel_width() + 0.5) * ui::WIDTH as f32,
-                (0.5 - l.y / panel_height()) * ui::HEIGHT as f32,
+                (l.x / panel_width(scene.settings.large_menu) + 0.5) * ui::WIDTH as f32,
+                (0.5 - l.y / panel_height(scene.settings.large_menu)) * ui::HEIGHT as f32,
             );
             if poke.pressed && l.z > POKE_RELEASE {
                 poke.pressed = false;
@@ -2741,13 +2875,13 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
 
         let poke_px = poke_hover.iter().flatten().next().map(|(at, _)| {
             (
-                (at.x / panel_width() + 0.5) * ui::WIDTH as f32,
-                (0.5 - at.y / panel_height()) * ui::HEIGHT as f32,
+                (at.x / panel_width(scene.settings.large_menu) + 0.5) * ui::WIDTH as f32,
+                (0.5 - at.y / panel_height(scene.settings.large_menu)) * ui::HEIGHT as f32,
             )
         });
         let hover = poke_px.or_else(|| {
             [1, 0].into_iter().find_map(|h| match picks[h] {
-                Some((Target::Panel, hit)) => Some(panel_point(&hit)),
+                Some((Target::Panel, hit)) => Some(panel_point(&hit, scene.settings.large_menu)),
                 _ => None,
             })
         });
@@ -2800,7 +2934,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                         );
                     }
                     Some((Target::Panel, hit)) => {
-                        panel.hover(Some(panel_point(&hit)));
+                        panel.hover(Some(panel_point(&hit, scene.settings.large_menu)));
                         if let Some(action) = panel.hovered_action() {
                             if input.is_hand {
                                 // Decided when the pinch opens: a click, or a drag.
@@ -2972,11 +3106,19 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             // The user may have copied a picture onto the headset meanwhile.
             custom_pano = custom_panorama_path(external_dir.as_deref()).is_some();
             // And paired with another PC.
-            scene.paired = prostir_proto::secure::TrustStore::load(&scene.trust_file)
-                .entries()
-                .to_vec();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "the trusted PCs are read here until step 7.6 gives them to the network thread"
+            )]
+            let paired = prostir_proto::secure::TrustStore::load(&scene.trust_file);
+            scene.paired = paired.entries().to_vec();
         }
-        crate::i18n::set_current(scene.lang());
+        // The network thread names a PC over USB in the menu's language.
+        let lang = scene.lang();
+        if lang != told_lang {
+            scene.steering.set_lang(lang);
+            told_lang = lang;
+        }
         panel_was_open = scene.panel_open;
         // A new toast: drawn once, placed where the user looks now.
         if let Some((text, _, place @ None)) = &mut scene.toast {
@@ -3033,6 +3175,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                     .is_some_and(passthrough::Passthrough::window_supported),
                 exts.khr_composition_layer_equirect2,
                 custom_pano,
+                store.update_hint(scene.lang()),
             );
             panel.set_state(&ui_state);
             let drawing = test.is_some().then(Instant::now);
@@ -3404,8 +3547,8 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             panel_layer.quad(
                 &local,
                 posef(&scene.panel_place),
-                panel_width(),
-                panel_height(),
+                panel_width(scene.settings.large_menu),
+                panel_height(scene.settings.large_menu),
             )
         });
         let mut cursors: Vec<xr::sys::CompositionLayerQuad> = picks
@@ -3528,6 +3671,10 @@ fn disconnect_text(l: Lang, why: net::Disconnect) -> Option<&'static str> {
     })
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "until step 7.7 passes the time in and moves the threads to the shell"
+)]
 fn handle_net_event(
     scene: &mut Scene,
     session: &xr::Session<Gfx>,
@@ -3560,7 +3707,7 @@ fn handle_net_event(
             scene.sent_layout = None;
             scene.update_needed = None;
             // Whether the system lets the app record (the PC shows when it does not).
-            crate::mic::refresh_permission();
+            scene.mic.refresh_permission();
             // What changed since `Open` went (it carried the state of that moment).
             let now = scene.headset_state();
             if now.up != opened_with.up {
@@ -3679,7 +3826,7 @@ fn handle_net_event(
             match xrutil::create_surface_swapchain(session, vm, width, height) {
                 Ok((swapchain, window)) => {
                     let stop = Arc::new(AtomicBool::new(false));
-                    let decoder = decoder::spawn(
+                    let decoder = decoder::spawn(decoder::DecoderJob {
                         stream,
                         codec,
                         width,
@@ -3687,8 +3834,8 @@ fn handle_net_event(
                         window,
                         frames,
                         feedback,
-                        stop.clone(),
-                    );
+                        stop: stop.clone(),
+                    });
                     scene.monitors.insert(
                         id,
                         Monitor {
@@ -3849,11 +3996,17 @@ fn prefs_of(s: &Settings) -> Prefs {
 }
 
 /// What the headset says about itself when it opens a session: what it can do, its
-/// settings, whether it is worn, its battery.
-fn headset_state(settings: &Settings, worn: bool, battery: Option<(u8, bool)>) -> HeadsetState {
-    let mic = mic_state(settings);
+/// settings, whether it is worn, its battery; `model` as the system names it.
+fn headset_state(
+    settings: &Settings,
+    worn: bool,
+    battery: Option<(u8, bool)>,
+    mic: &Mic,
+    model: &str,
+) -> HeadsetState {
+    let mic = mic_state(settings, mic);
     HeadsetState {
-        caps: Some(headset_caps()),
+        caps: Some(headset_caps(model)),
         prefs: Some(prefs_of(settings)),
         presence: Some(Presence { worn }),
         battery: battery.map(|(percent, charging)| Battery { percent, charging }),
@@ -3864,18 +4017,18 @@ fn headset_state(settings: &Settings, worn: bool, battery: Option<(u8, bool)>) -
 }
 
 /// The microphone's switch, and whether the system lets the app record.
-fn mic_state(settings: &Settings) -> state::UpState {
+fn mic_state(settings: &Settings, mic: &Mic) -> state::UpState {
     state::UpState {
         kind: state::UpKind::Mic,
         switch: settings.mic,
-        permission: crate::mic::permission(),
+        permission: mic.permission(),
     }
 }
 
 /// What this headset can do, for the PC: the displays it shows, the codecs it decodes
-/// and how large (Quest 3: H.264 up to 4K, HEVC up to 8K), how many streams and
-/// compositor layers at once.
-fn headset_caps() -> HeadsetCaps {
+/// and how large (for now fixed: H.264 up to 4K, HEVC up to 8K), how many streams and
+/// compositor layers at once; and its model, as the system names it.
+fn headset_caps(model: &str) -> HeadsetCaps {
     let decoder = |codec: Codec, max_w, max_h| state::Decoder {
         codec: prostir_proto::wire::encode(&codec).map_or(0, |b| b[0]),
         max_w,
@@ -3894,7 +4047,7 @@ fn headset_caps() -> HeadsetCaps {
         ],
         streams_max: 16,
         layers_max: 16,
-        model: "Meta Quest".into(),
+        model: model.to_owned(),
     }
 }
 
@@ -3959,6 +4112,10 @@ fn set_passthrough(scene: &mut Scene, passthrough: &mut Option<passthrough::Pass
     }
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "until step 7.7 passes the time in and moves the threads to the shell"
+)]
 fn handle_action(
     scene: &mut Scene,
     action: Action,
@@ -4100,8 +4257,7 @@ fn handle_action(
         Action::LargeMenu(on) => {
             scene.settings.large_menu = on;
             scene.settings.save(settings_path);
-            set_menu_scale(on);
-            scene.panel_place.width = panel_width();
+            scene.panel_place.width = panel_width(on);
         }
         Action::RestEvery(minutes) => {
             scene.settings.rest_every = minutes;
@@ -4204,7 +4360,7 @@ fn handle_action(
             scene.mic_wanted = enabled;
             scene.settings.mic = enabled;
             scene.settings.save(&scene.settings_path);
-            crate::mic::set_allowed(enabled);
+            scene.mic.set_allowed(enabled);
             scene.mic_changed();
         }
         Action::SetAudio(enabled) => {
@@ -4306,7 +4462,7 @@ fn handle_action(
                 scene.confirm_save = Some((i, Instant::now()));
             }
         }
-        Action::AskMic => crate::mic::ask_again(),
+        Action::AskMic => scene.mic.ask_again(),
         Action::ForgetPc(i) => {
             let confirmed = scene
                 .confirm_forget
@@ -4315,6 +4471,10 @@ fn handle_action(
                 scene.confirm_forget = Some((i, Instant::now()));
             } else if let Some((key, name)) = scene.paired.get(i).cloned() {
                 scene.confirm_forget = None;
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "the trusted PCs are read here until step 7.6 gives them to the network thread"
+                )]
                 let mut store = prostir_proto::secure::TrustStore::load(&scene.trust_file);
                 match store.remove(&key) {
                     Ok(()) => {

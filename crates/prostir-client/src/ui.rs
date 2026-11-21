@@ -12,6 +12,7 @@ use crate::i18n::{Lang, Language};
 use crate::layout::ScreenId;
 use crate::profiles::Profile;
 use crate::settings::{Background, Curve, HandMode, Preset, Settings, Sky};
+use crate::store::UpdateHint;
 
 pub const WIDTH: u32 = 1280;
 pub const HEIGHT: u32 = 960;
@@ -176,6 +177,8 @@ pub struct UiState {
     pub intro: bool,
     /// The PC speaks another protocol: (the PC is newer, the PC app's version).
     pub update: Option<(bool, String)>,
+    /// Where this build of the headset app is updated (from its store).
+    pub update_from: UpdateHint,
     pub profiles: Vec<Profile>,
     /// The profile last switched to (until something is changed by hand).
     pub active_profile: Option<usize>,
@@ -950,7 +953,15 @@ impl Panel {
             return items;
         }
         if let Some((pc_newer, pc_app)) = &s.update {
-            build_update(l, &mut items, lx, w - 2.0 * lx, *pc_newer, pc_app);
+            build_update(
+                l,
+                &mut items,
+                lx,
+                w - 2.0 * lx,
+                *pc_newer,
+                pc_app,
+                s.update_from,
+            );
             return items;
         }
         if s.intro && s.host.is_some() {
@@ -2339,8 +2350,17 @@ fn build_pair_offer(l: Lang, items: &mut Vec<Item>, x: f32, w: f32, host: &str, 
     ));
 }
 
-/// The headset and the PC cannot talk: which one to update, and where.
-fn build_update(l: Lang, items: &mut Vec<Item>, x: f32, w: f32, pc_newer: bool, pc_app: &str) {
+/// The headset and the PC cannot talk: which one to update, and where (`headset`:
+/// where this build of the headset app is updated).
+fn build_update(
+    l: Lang,
+    items: &mut Vec<Item>,
+    x: f32,
+    w: f32,
+    pc_newer: bool,
+    pc_app: &str,
+    headset: UpdateHint,
+) {
     let ours = prostir_proto::app_version(env!("CARGO_PKG_VERSION"));
     let mut y = 180.0;
     let title = if pc_newer {
@@ -2373,19 +2393,8 @@ fn build_update(l: Lang, items: &mut Vec<Item>, x: f32, w: f32, pc_newer: bool, 
     ));
     y += 50.0;
     items.push(Item::Box(rect(x, y, w, 130.0), [255, 255, 255, 12]));
-    let (how, where_) = if pc_newer && cfg!(feature = "store") {
-        (
-            l.t(
-                "Оновіть Prostir у бібліотеці шолома:",
-                "Update Prostir in the headset's library:",
-            ),
-            "Meta Horizon Store",
-        )
-    } else if pc_newer {
-        (
-            l.t("Встановіть новий APK з", "Install the new APK from"),
-            "github.com/OlexiyOdarchuk/prostir/releases",
-        )
+    let (how, where_) = if pc_newer {
+        (headset.how, headset.place)
     } else {
         (
             l.t(
@@ -3590,6 +3599,7 @@ fn fill(pixmap: &mut Pixmap, path: Option<Path>, [r, g, b, a]: [u8; 4]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::{NoStore, Store as _};
 
     /// What a PC with an H.265 decoder on the headset offers.
     pub fn sample_limits() -> Limits {
@@ -3697,6 +3707,7 @@ mod tests {
             lang: Lang::Uk,
             intro: false,
             update: None,
+            update_from: NoStore.update_hint(Lang::Uk),
             profiles: (0..crate::profiles::SLOTS)
                 .map(Profile::default_for)
                 .collect(),

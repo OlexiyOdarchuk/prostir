@@ -78,6 +78,12 @@ impl Worker {
         match made.1 {
             Ok(output) => {
                 let key = output.key().clone();
+                // Listed at its own scale as it was made: seen at that one already, so
+                // a scale the person gives before the next look is theirs, and taken.
+                let own = match &slot.made {
+                    Made::Monitor { spec, .. } => output.desk_scale() == Some(spec.percent()),
+                    _ => false,
+                };
                 slot.output = Some(output);
                 slot.failed = None;
                 slot.rest_until = None;
@@ -85,7 +91,7 @@ impl Worker {
                 slot.size_guard = SizeGuard::default();
                 // Made anew: seen at its scale again before another is taken.
                 slot.scale_seen = None;
-                slot.seen_own = false;
+                slot.seen_own = own;
                 if !slot.is_physical() {
                     self.wallpapers_due = true;
                 }
