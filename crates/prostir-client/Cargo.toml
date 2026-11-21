@@ -39,8 +39,12 @@ anyhow.workspace = true
 android_logger = "0.15"
 glow = "0.18"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+# The fake PC the selftest runs against, in the app's own process.
+prostir-testkit.workspace = true
 
 [dev-dependencies]
+# The shipped selftest clips are checked against the fake PC that plays them.
+prostir-testkit.workspace = true
 tiny-skia = { version = "0.12", features = ["png-format"] }
 # The plural forms of counts are checked against Fluent's.
 prostir-lang.workspace = true

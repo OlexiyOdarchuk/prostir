@@ -16,9 +16,12 @@ pub mod outbox;
 pub mod pending;
 pub mod physical;
 pub mod profiles;
+pub mod selftest;
 pub mod settings;
 pub mod ui;
 
+#[cfg(target_os = "android")]
+mod alloc_count;
 #[cfg(target_os = "android")]
 mod app;
 #[cfg(target_os = "android")]

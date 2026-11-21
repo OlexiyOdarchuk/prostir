@@ -34,6 +34,7 @@ use crate::net::{Feedback, NetEvent};
 use crate::overlay::{self, Overlay, Sphere};
 use crate::pending::{self, Asks, Made, ProfileSwitch};
 use crate::profiles::{self, Profile};
+use crate::selftest::device::{self as selftest, Act, Selftest};
 use crate::settings::{Background, HandMode, Settings};
 use crate::ui::{self, Action, MonitorEntry, Panel, Tab, UiState};
 use crate::xrutil::{self, Gfx, ImageLayer, as_layer, pose, posef, vec3};
@@ -129,8 +130,26 @@ pub fn android_main(app: AndroidApp) {
             })
             .with_tag("prostir"),
     );
-    if let Err(e) = run(&app) {
+    crate::alloc_count::set_main_thread();
+    let start = selftest::count_run();
+    let mut test = Selftest::requested(start);
+    let result = run(&app, test.as_mut());
+    if let Err(e) = &result {
         error!("{e:#}");
+    }
+    if let Some(test) = test {
+        let external = app.external_data_path();
+        let (stay, code) = test.finish(external.as_deref(), result.as_ref().err());
+        // The activity finishes once this returns; without `relaunch=1` the process
+        // goes too, so the next start is a new one.
+        if !stay {
+            let _ = std::thread::Builder::new()
+                .name("selftest-exit".into())
+                .spawn(move || {
+                    std::thread::sleep(Duration::from_millis(500));
+                    std::process::exit(code);
+                });
+        }
     }
 }
 
@@ -1944,7 +1963,8 @@ fn load_panorama(choice: Background, dir: Option<&Path>) -> Panorama {
     )
 }
 
-fn run(app: &AndroidApp) -> Result<()> {
+/// The app; with `test`, the selftest's run of it (see `selftest::device`).
+fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     // SAFETY: pointers come straight from the running NativeActivity.
     let platform = unsafe { xr::AndroidPlatformInfo::new(app.vm_as_ptr(), app.activity_as_ptr()) };
     // SAFETY: libopenxr_loader.so is the Khronos loader bundled in the APK.
@@ -1990,6 +2010,10 @@ fn run(app: &AndroidApp) -> Result<()> {
     );
     let system = instance.system(xr::FormFactor::HEAD_MOUNTED_DISPLAY)?;
     let _ = instance.graphics_requirements::<Gfx>(system)?;
+    if let Some(t) = test.as_deref_mut() {
+        t.runtime(&instance, system, &available);
+        t.headset_caps(&headset_caps());
+    }
 
     let egl = egl::EglContext::new()?;
     // SAFETY: the EGL handles stay alive (owned by `egl`) for the whole session.
@@ -2008,6 +2032,15 @@ fn run(app: &AndroidApp) -> Result<()> {
     let data_dir: PathBuf = app
         .internal_data_path()
         .unwrap_or_else(|| PathBuf::from("/data/local/tmp"));
+    // The selftest keeps its own data, and its fake PC is the only PC it connects to.
+    let data_dir = match test.as_deref_mut() {
+        Some(t) => t.data_dir(&data_dir),
+        None => data_dir,
+    };
+    let fake_pc = test.as_deref_mut().and_then(|t| t.start_pc(app, &data_dir));
+    if test.as_deref().is_some_and(Selftest::over) {
+        return Ok(());
+    }
     let settings_path = data_dir.join("settings.txt");
     let profiles_path = data_dir.join("profiles.txt");
     let settings = Settings::load(&settings_path);
@@ -2072,7 +2105,8 @@ fn run(app: &AndroidApp) -> Result<()> {
     // The panorama shown and the background it was made for.
     let mut pano_layer: Option<(Background, ImageLayer)> = None;
     let mut pano_job: Option<(Background, JoinHandle<Panorama>)> = None;
-    let external_dir = app.external_data_path();
+    // The selftest reads nothing of the person's there (`host.txt`, a panorama).
+    let external_dir = app.external_data_path().filter(|_| test.is_none());
     let mut custom_pano = custom_panorama_path(external_dir.as_deref()).is_some();
     let mut panel_was_open = false;
 
@@ -2095,6 +2129,7 @@ fn run(app: &AndroidApp) -> Result<()> {
             trust_file: data_dir.join("paired_hosts"),
             host_file: external_dir.as_ref().map(|p| p.join("host.txt")),
             last_host_file: data_dir.join("last_host"),
+            only: fake_pc,
         },
         steering.clone(),
     );
@@ -2214,6 +2249,9 @@ fn run(app: &AndroidApp) -> Result<()> {
     let mut focused = false;
     let mut last_time: Option<xr::Time> = None;
     let mut event_storage = xr::EventDataBuffer::new();
+    // What the selftest asked for, done in the next frame drawn.
+    let mut selftest_act = Act::Nothing;
+    let mut allocations = crate::alloc_count::Tally::default();
 
     'main: loop {
         let mut destroy = false;
@@ -2271,6 +2309,9 @@ fn run(app: &AndroidApp) -> Result<()> {
             match event {
                 xr::Event::SessionStateChanged(e) => {
                     info!("session state: {:?}", e.state());
+                    if let Some(t) = test.as_deref_mut() {
+                        t.session_state(e.state());
+                    }
                     let now_focused = e.state() == xr::SessionState::FOCUSED;
                     if focused && !now_focused {
                         // A drag cannot go on under the system menu.
@@ -2306,6 +2347,14 @@ fn run(app: &AndroidApp) -> Result<()> {
                             if exts.fb_display_refresh_rate {
                                 set_refresh_rate(&session, scene.settings.battery_saver);
                             }
+                            if let Some(t) = test.as_deref_mut()
+                                && exts.fb_display_refresh_rate
+                            {
+                                t.refresh(
+                                    session.enumerate_display_refresh_rates().ok(),
+                                    session.get_display_refresh_rate().ok(),
+                                );
+                            }
                         }
                         xr::SessionState::STOPPING => {
                             session.end()?;
@@ -2321,6 +2370,9 @@ fn run(app: &AndroidApp) -> Result<()> {
         }
 
         while let Ok(event) = net_rx.try_recv() {
+            if let Some(t) = test.as_deref_mut() {
+                t.net_event(&event);
+            }
             match event {
                 NetEvent::Command { req, asked } => {
                     take_command(&mut scene, req, &asked, &mut passthrough, &mut controls);
@@ -2355,17 +2407,28 @@ fn run(app: &AndroidApp) -> Result<()> {
             }
         }
 
+        if let Some(t) = test.as_deref_mut() {
+            match t.step() {
+                Act::Finish => break 'main,
+                Act::Nothing => {}
+                act => selftest_act = act,
+            }
+        }
+
         if !session_running {
             continue;
         }
 
         let state = frame_waiter.wait()?;
+        let frame_start = test.as_deref().map(Selftest::frame_start);
         frame_stream.begin()?;
         let time = state.predicted_display_time;
         if !state.should_render {
             frame_stream.end(time, xr::EnvironmentBlendMode::OPAQUE, &[])?;
             continue;
         }
+        // How long the menu took to draw in this frame, for the selftest.
+        let mut menu_drawn: Option<Duration> = None;
         let dt = last_time
             .map_or(0.0f32, |t| (time.as_nanos() - t.as_nanos()) as f32 * 1e-9)
             .clamp(0.0, 0.1);
@@ -2458,6 +2521,40 @@ fn run(app: &AndroidApp) -> Result<()> {
         }
         if controls.align_pressed(&session) {
             scene.tidy_up();
+        }
+        // What the selftest asks for, as the menu would do it.
+        match std::mem::replace(&mut selftest_act, Act::Nothing) {
+            Act::MoveMonitor => {
+                if let Some(&(id, _, _)) = scene.quest_sizes().first() {
+                    let took = Instant::now();
+                    let action = Action::Move { id, delta: 1 };
+                    handle_action(&mut scene, action, &mut passthrough, &mut controls);
+                    if let Some(t) = test.as_deref_mut() {
+                        t.saved(took.elapsed());
+                    }
+                }
+            }
+            Act::OpenMenu => scene.open_panel(head, forward, hands_in_view),
+            Act::SwitchTab => {
+                let tab = match scene.tab {
+                    Tab::Monitors => Tab::Quick,
+                    _ => Tab::Monitors,
+                };
+                let took = Instant::now();
+                handle_action(
+                    &mut scene,
+                    Action::Tab(tab),
+                    &mut passthrough,
+                    &mut controls,
+                );
+                if let Some(t) = test.as_deref_mut() {
+                    t.saved(took.elapsed());
+                }
+            }
+            Act::CloseMenu => {
+                handle_action(&mut scene, Action::Close, &mut passthrough, &mut controls);
+            }
+            Act::Nothing | Act::Finish => {}
         }
         scene.place_button();
         scene.expire_asks();
@@ -2924,7 +3021,9 @@ fn run(app: &AndroidApp) -> Result<()> {
                 custom_pano,
             );
             panel.set_state(&ui_state);
+            let drawing = test.is_some().then(Instant::now);
             if let Some(pixels) = panel.render_if_dirty() {
+                menu_drawn = drawing.map(|t| t.elapsed());
                 panel_layer.upload(&gl, pixels)?;
             }
         }
@@ -3355,6 +3454,7 @@ fn run(app: &AndroidApp) -> Result<()> {
         layers.extend(wrist_quad.iter().map(as_layer));
         layers.extend(hands_layer.iter().map(as_layer));
         layers.extend(cursors.iter().map(as_layer));
+        let layers_wanted = layers.len();
         // The compositor supports 16 layers at most.
         layers.truncate(16);
         match frame_stream.end(time, xr::EnvironmentBlendMode::OPAQUE, &layers) {
@@ -3368,6 +3468,16 @@ fn run(app: &AndroidApp) -> Result<()> {
             }
             other => other?,
         }
+        if let (Some(t), Some(start)) = (test.as_deref_mut(), &frame_start) {
+            t.frame_end(
+                start,
+                time.as_nanos(),
+                Duration::from_nanos(state.predicted_display_period.as_nanos().max(0) as u64),
+                menu_drawn,
+                layers_wanted,
+            );
+        }
+        allocations.frame();
     }
 
     info!("exiting");

@@ -321,8 +321,12 @@ impl Timing {
                 seq,
             });
         }
-        self.wait.add(queued - received);
-        self.decode.add(queued.elapsed());
+        let (wait, decode) = (queued - received, queued.elapsed());
+        self.wait.add(wait);
+        self.decode.add(decode);
+        if let Some(stream) = self.stream {
+            crate::selftest::decoded(stream.id.0, wait, decode);
+        }
     }
 
     fn report(&mut self) {

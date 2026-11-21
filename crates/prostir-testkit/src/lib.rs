@@ -3,10 +3,13 @@
 //!
 //! Used by the PC app's end-to-end tests (`crates/prostir/tests/e2e`, against a PC app built
 //! with the fake desktop) and by `prostir-probe`, which checks a real PC by hand.
+//!
+//! And a fake PC ([`pc`]), for the headset: its selftest, and tests of its code.
 
 pub mod find;
 mod headset;
 pub mod nal;
+pub mod pc;
 
 pub use headset::{
     Arrival, ConnectError, FIRST_VOLUME, FakeHeadset, Keys, Stream, View, quest_step,

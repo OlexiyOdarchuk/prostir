@@ -364,6 +364,10 @@ cargo build --release -p prostir
 # Quest: потрібні Android SDK з NDK і build-tools та ціль Rust
 rustup target add aarch64-linux-android
 ./scripts/build-apk.sh --install   # збирає build/prostir.apk і ставить через adb
+# Застосунок перевіряє себе в шоломі проти фальшивого ПК (не в збірці для магазину):
+# числа рядками ключ=значення, код виходу 0, коли все пройшло (збірка preview, якщо
+# вона стоїть; більше в --help)
+./scripts/selftest-headset.sh
 ```
 
 ## Користування
@@ -721,8 +725,9 @@ crates/prostir-lang/     переклади як дані (Fluent)
 crates/prostir/          програма для ПК: віртуальні виходи, кодери, звук, трей, пошук
 crates/prostir-window/   вікно налаштувань на ПК (бібліотека prostir: prostir window)
 crates/prostir-client/   застосунок для Quest: цикл OpenXR (app.rs), меню (ui.rs), розкладки (layout.rs), …
-crates/prostir-testkit/  фальшивий шолом для тестів і для перевірки програми на ПК вручну
-scripts/  build-apk.sh, install.sh, package-release.sh, third-party-licenses.py
+crates/prostir-testkit/  фальшивий шолом і фальшивий ПК для тестів і для перевірки програм вручну
+scripts/  build-apk.sh, install.sh, package-release.sh, third-party-licenses.py,
+          selftest-headset.sh, selftest-clips.sh
 docs/     сайт (prostir.ishawyha.dev) і картинки для цього README
 ```
 

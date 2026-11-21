@@ -7,7 +7,7 @@ authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
-description = "A fake Prostir headset for tests and for checking the PC app by hand"
+description = "A fake Prostir headset and a fake PC, for tests and for checking the apps by hand"
 # Development tool only: not part of any release.
 publish = false
 
@@ -19,6 +19,7 @@ path = "src/bin/probe.rs"
 [dependencies]
 prostir-proto.workspace = true
 anyhow.workspace = true
+log.workspace = true
 # CLOCK_MONOTONIC, which the fake desktop stamps its sound with.
 libc.workspace = true
 

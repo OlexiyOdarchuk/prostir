@@ -3639,6 +3639,7 @@ dependencies = [
  "prostir-lang",
  "prostir-layout",
  "prostir-proto",
+ "prostir-testkit",
  "tiny-skia",
 ]
 
@@ -3676,6 +3677,7 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "libc",
+ "log",
  "prostir-proto",
 ]
 

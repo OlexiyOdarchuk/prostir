@@ -364,6 +364,10 @@ cargo build --release -p prostir
 # Quest: needs the Android SDK with the NDK and build-tools, and the Rust target
 rustup target add aarch64-linux-android
 ./scripts/build-apk.sh --install   # builds build/prostir.apk and installs it with adb
+# The app checks itself on the headset against a fake PC (not in store builds):
+# numbers as key=value lines, exit code 0 when everything passed (the preview build
+# when it is installed; --help says more)
+./scripts/selftest-headset.sh
 ```
 
 ## Use
@@ -767,8 +771,9 @@ crates/prostir-lang/     translations as data (Fluent)
 crates/prostir/          the PC program: virtual outputs, encoders, sound, tray, discovery
 crates/prostir-window/   the PC settings window (a library of prostir: prostir window)
 crates/prostir-client/   the Quest app: OpenXR loop (app.rs), menu (ui.rs), layouts (layout.rs), …
-crates/prostir-testkit/  a fake headset for tests and for checking the PC program by hand
-scripts/  build-apk.sh, install.sh, package-release.sh, third-party-licenses.py
+crates/prostir-testkit/  a fake headset and a fake PC, for tests and for checking the programs by hand
+scripts/  build-apk.sh, install.sh, package-release.sh, third-party-licenses.py,
+          selftest-headset.sh, selftest-clips.sh
 docs/     the website (prostir.ishawyha.dev) and the pictures for this README
 ```
 

@@ -103,6 +103,12 @@ fi
 rm -rf "$OUT/assets" && mkdir -p "$OUT/assets/licenses"
 python3 "$ROOT/scripts/third-party-licenses.py" --openxr-aar "$AAR" -o "$OUT/THIRD-PARTY-LICENSES.txt"
 cp "$ROOT/LICENSE" "$ROOT/LICENSE-EXCEPTION.md" "$OUT/THIRD-PARTY-LICENSES.txt" "$OUT/assets/licenses/"
+# The selftest's clips (made by scripts/selftest-clips.sh) go into every build but the
+# store's, which then answers a selftest with exit=2.
+if [[ "${PROSTIR_STORE:-}" != 1 ]]; then
+    mkdir -p "$OUT/assets/selftest"
+    cp "$ROOT"/crates/prostir-client/assets/selftest/*.h26[45] "$OUT/assets/selftest/"
+fi
 
 echo ">> packaging with $(basename "$BUILD_TOOLS") / $(basename "$PLATFORM")"
 rm -rf "$OUT/res" && mkdir -p "$OUT/res"
