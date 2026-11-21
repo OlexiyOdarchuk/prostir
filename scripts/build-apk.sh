@@ -128,7 +128,8 @@ fi
 # attributes (aapt2 dates its own entries 1980).
 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$ROOT" log -1 --format=%ct 2>/dev/null || date +%s)}"
 find "$STAGE" -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} +
-(cd "$STAGE" && zip -q -X -r "$OUT/unaligned.apk" lib)
+# In sorted order, not the order the file system lists them in.
+(cd "$STAGE" && find lib | LC_ALL=C sort | zip -q -X -@ "$OUT/unaligned.apk")
 "$BUILD_TOOLS/zipalign" -f -p 4 "$OUT/unaligned.apk" "$OUT/aligned.apk"
 
 # Signing key, first found wins:

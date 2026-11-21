@@ -34,7 +34,9 @@ cp packaging/prostir.svg packaging/io.github.OlexiyOdarchuk.Prostir.desktop "$DI
 cp -r packaging/systemd packaging/udev "$DIST/$NAME/packaging/"
 cp scripts/install.sh LICENSE LICENSE-EXCEPTION.md build/THIRD-PARTY-LICENSES.txt \
     README.md README.uk.md CHANGELOG.md "$DIST/$NAME/"
+# The modes too: the same whatever the umask of the machine that made the files.
 tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$SOURCE_DATE_EPOCH" \
+    --mode=u+rw,go-w,a+rX \
     -C "$DIST" -cf - "$NAME" | gzip -9n > "$DIST/$NAME.tar.gz"
 rm -rf "$DIST/$NAME"
 
