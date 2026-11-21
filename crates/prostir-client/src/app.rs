@@ -4016,8 +4016,11 @@ fn handle_net_event(
                     .key(id)
                     .map(|k| (k, Vec2::new(f(u), f(v)), Instant::now()));
             }
-            (Some(ui::Asked::Profile(_)), Outcome::Ids { ids }) => {
+            (Some(ui::Asked::Profile(slot)), Outcome::Ids { ids }) => {
                 if scene.profile_switch.as_ref().is_some_and(|s| s.req == req) {
+                    // Switched to: the PC made its monitors (which it shows comes with
+                    // its list of displays).
+                    scene.active_profile = Some(slot);
                     let keys = ids.into_iter().filter_map(|id| scene.key(id)).collect();
                     scene.profile_made(keys);
                 }
@@ -4704,7 +4707,6 @@ fn handle_action(
                 .filter(|k| scene.display(**k).is_some_and(state::Display::is_physical))
                 .map(|k| k.id)
                 .collect();
-            scene.mirror_wanted = !shown_physical.is_empty();
             let req = scene.request(
                 Request::SetDisplays {
                     modes: p.monitors.clone(),
@@ -4720,7 +4722,6 @@ fn handle_action(
                 rows: p.rows,
                 ..ProfileSwitch::new(req, p.places)
             });
-            scene.active_profile = Some(i);
             // The monitors changing is the answer: the menu gets out of the way.
             scene.panel_open = false;
         }
@@ -4764,10 +4765,12 @@ fn handle_action(
                 match store.remove(&key) {
                     Ok(()) => {
                         info!("forgot PC {name:?}");
-                        scene.forget_pc(PcId::of(&key));
+                        let pc = PcId::of(&key);
+                        scene.forget_pc(pc);
                         scene.steering.trust_changed();
-                        // Connected to it: leave, and do not come back on our own.
-                        if scene.host.as_deref() == Some(name.as_str()) {
+                        // Connected to it (by its key, not its name: two PCs may share
+                        // one): leave, and do not come back on our own.
+                        if scene.pc_id == Some(pc) && scene.feedback.is_some() {
                             scene.steering.forget_current();
                         }
                     }
