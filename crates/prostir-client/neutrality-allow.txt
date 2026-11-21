@@ -1,0 +1,26 @@
+# Where the headset's crate may name a desktop of the PC, a sound system, a headset
+# or a store (plan step 7, 13.1): one line each, `<path> <word>: <why>`, the path from
+# this folder, the word as the check looks for it (whole word, any case). A new line
+# here is a new exception, and the review of its step says why.
+#
+# The names of headsets and stores (Meta, Quest, Oculus, Horizon) stay in more
+# places until the platform is split (step 7.8a); their lines come with it.
+
+src/background.rs sway: the verb (curtains fold and sway), not the desktop
+tests/texts.rs kde: the list of names the texts must not use
+tests/texts.rs plasma: the list of names the texts must not use
+tests/texts.rs kwin: the list of names the texts must not use
+tests/texts.rs kscreen: the list of names the texts must not use
+tests/texts.rs hyprland: the list of names the texts must not use
+tests/texts.rs gnome: the list of names the texts must not use
+tests/texts.rs mutter: the list of names the texts must not use
+tests/texts.rs sway: the list of names the texts must not use
+tests/texts.rs pipewire: the list of names the texts must not use
+tests/texts.rs pulseaudio: the list of names the texts must not use
+tests/texts.rs meta: the list of names the texts must not use
+tests/texts.rs oculus: the list of names the texts must not use
+tests/texts.rs quest: the list of names the texts must not use
+tests/texts.rs horizon: the list of names the texts must not use
+tests/texts.rs pico: the list of names the texts must not use
+tests/texts.rs vive: the list of names the texts must not use
+tests/texts.rs htc: the list of names the texts must not use

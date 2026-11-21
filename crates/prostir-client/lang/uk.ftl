@@ -40,7 +40,7 @@ battery-charging = { $percent } % · заряджається
 ## До ПК: привітання і знайдені ПК
 
 welcome-title = Prostir показує монітори вашого ПК
-welcome-pc-app = Prostir для ПК: { $site }
+welcome-pc-app = Які ПК підходять: { $site }
 welcome-install = Встановіть Prostir на ПК
 welcome-start = Запустіть його
 welcome-start-note = У треї з'явиться іконка Prostir.

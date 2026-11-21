@@ -51,8 +51,8 @@ battery-charging = { $percent } % · charging
 ## Before a PC: the welcome and the PCs found
 
 welcome-title = Prostir shows your PC's monitors
-# $site (String): Prostir's site, prostir.ishawyha.dev
-welcome-pc-app = Prostir for the PC: { $site }
+# $site (String): Prostir's site, where the PCs it runs on are listed
+welcome-pc-app = Which PCs work: { $site }
 welcome-install = Install Prostir on the PC
 welcome-start = Start it
 welcome-start-note = The Prostir icon appears in the tray.
