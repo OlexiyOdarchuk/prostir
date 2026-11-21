@@ -4,8 +4,8 @@
 use prostir_proto::state::{MAX_SHORT, clip};
 
 /// The headset's name from its maker and model as the system gives them
-/// (`Build.MANUFACTURER`, `Build.MODEL`): "Oculus Quest 3", or the model alone when
-/// it already names its maker ("Pico 4" from "Pico"). Short enough for the protocol;
+/// (`Build.MANUFACTURER`, `Build.MODEL`): "Maker Model 3", or the model alone when it
+/// already names its maker ("Maker 4" from "Maker"). Short enough for the protocol;
 /// empty when the system said nothing.
 pub fn model_name(manufacturer: &str, model: &str) -> String {
     let (manufacturer, model) = (manufacturer.trim(), model.trim());
@@ -30,11 +30,11 @@ mod tests {
 
     #[test]
     fn maker_and_model() {
-        assert_eq!(model_name("Oculus", "Quest 3"), "Oculus Quest 3");
-        assert_eq!(model_name("Pico", "Pico 4"), "Pico 4");
-        assert_eq!(model_name("HTC", "htc Vive Focus 3"), "htc Vive Focus 3");
-        assert_eq!(model_name(" samsung ", " "), "samsung");
-        assert_eq!(model_name("", "Quest 3"), "Quest 3");
+        assert_eq!(model_name("Maker", "Model 3"), "Maker Model 3");
+        assert_eq!(model_name("Maker", "Maker 4"), "Maker 4");
+        assert_eq!(model_name("MAKER", "maker View 2"), "maker View 2");
+        assert_eq!(model_name(" maker ", " "), "maker");
+        assert_eq!(model_name("", "Model 3"), "Model 3");
         assert_eq!(model_name("", ""), "");
     }
 

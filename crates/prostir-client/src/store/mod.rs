@@ -1,8 +1,8 @@
 //! Where this build of the app comes from, as an interface: whether the person owns
 //! it (checked at launch, where the store asks for that) and where a newer version
-//! comes from. A build from a store has that store's (`MetaStore` for the Meta
-//! Horizon Store, feature `store`); one from GitHub or for development has
-//! [`NoStore`]. Another store is another implementation.
+//! comes from. A build for a store has that store's implementation (feature
+//! `store`); one from GitHub or for development has [`NoStore`]. Another store is
+//! another implementation.
 
 use crate::i18n::Lang;
 
@@ -52,8 +52,8 @@ impl Store for NoStore {
     }
 }
 
-/// The store of this build, its check started (the Meta Horizon Store wants it within
-/// 10 s of launch).
+/// The store of this build, its check started (a store may want it within seconds of
+/// launch).
 #[cfg(target_os = "android")]
 pub fn of_this_build(app: &android_activity::AndroidApp) -> Box<dyn Store> {
     #[cfg(feature = "store")]

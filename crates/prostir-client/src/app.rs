@@ -2319,9 +2319,8 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     let mut pokes = [Poke::default(); 2];
     // Touches that just happened: (where, when), drawn as a ring spreading out.
     let mut rings: Vec<(Vec3, Instant)> = Vec::new();
-    // Where this build comes from. A store build checks the user owns the app (the
-    // Meta Horizon Store requires it at launch); a build from GitHub has nothing to
-    // check.
+    // Where this build comes from. A store build checks the user owns the app, as its
+    // store requires at launch; a build from GitHub has nothing to check.
     let mut store = crate::store::of_this_build(app);
     // Since when the store says the app is not the user's: it closes after saying so.
     let mut not_owned_since: Option<Instant> = None;
