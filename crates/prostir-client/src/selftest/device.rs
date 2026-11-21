@@ -253,9 +253,10 @@ fn with_activity<T>(
     let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) };
     // A Java exception on the way is caught and cleared, and comes back as the error.
     vm.attach_current_thread(|env| {
+        let raw: jni::sys::jobject = app.activity_as_ptr().cast();
         // SAFETY: the activity's object, valid while the activity runs (this start);
-        // `JObject` only wraps it, it never deletes it.
-        let activity = unsafe { JObject::from_raw(env, app.activity_as_ptr().cast()) };
+        // the cast only borrows it, it never deletes it.
+        let activity = unsafe { env.as_cast_raw::<JObject<'static>>(&raw) }?;
         f(env, &activity)
     })
     .inspect_err(|e| warn!("selftest: a call into Android failed: {e}"))

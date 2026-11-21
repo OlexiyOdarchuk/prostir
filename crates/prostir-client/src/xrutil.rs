@@ -108,29 +108,35 @@ pub fn create_surface_swapchain(
         array_size: 0,
         mip_count: 0,
     };
-    let mut handle = xr::sys::Swapchain::NULL;
-    let mut surface = ptr::null_mut();
-    // SAFETY: valid session and create info; out-pointers live on the stack.
-    let result = unsafe {
-        (ext.create_swapchain_android_surface)(
-            session.as_raw(),
-            &raw const info,
-            &raw mut handle,
-            &raw mut surface,
-        )
-    };
-    if result != xr::sys::Result::SUCCESS {
-        bail!("xrCreateSwapchainAndroidSurfaceKHR failed: {result:?}");
-    }
-    // SAFETY: the handle was just created for this session and is owned by the wrapper.
-    let swapchain = unsafe { xr::Swapchain::from_raw(session.clone(), handle) };
-    let window = vm.attach_current_thread(|env| {
+    // In a local frame of its own: the spec does not say whether the Surface the
+    // runtime returns is a local or a global JNI reference. A local one goes with the
+    // frame (this thread stays attached for the app's life, so it would otherwise be
+    // kept until the app ends, one for each stream started); the window took its own
+    // reference to the Surface by then.
+    vm.attach_current_thread(|env| -> Result<_> {
+        let mut handle = xr::sys::Swapchain::NULL;
+        let mut surface = ptr::null_mut();
+        // SAFETY: valid session and create info; out-pointers live on the stack.
+        let result = unsafe {
+            (ext.create_swapchain_android_surface)(
+                session.as_raw(),
+                &raw const info,
+                &raw mut handle,
+                &raw mut surface,
+            )
+        };
+        if result != xr::sys::Result::SUCCESS {
+            bail!("xrCreateSwapchainAndroidSurfaceKHR failed: {result:?}");
+        }
+        // SAFETY: the handle was just created for this session and is owned by the
+        // wrapper.
+        let swapchain = unsafe { xr::Swapchain::from_raw(session.clone(), handle) };
         // SAFETY: `surface` is a valid android.view.Surface reference returned by the
         // runtime, and `env` is this thread's.
-        unsafe { NativeWindow::from_surface(env.get_raw().cast(), surface.cast()) }
-            .context("ANativeWindow_fromSurface failed")
-    })?;
-    Ok((swapchain, window))
+        let window = unsafe { NativeWindow::from_surface(env.get_raw().cast(), surface.cast()) }
+            .context("ANativeWindow_fromSurface failed")?;
+        Ok((swapchain, window))
+    })
 }
 
 /// Keeps Wi-Fi out of power save while the app runs. Without it the headset's
@@ -145,9 +151,10 @@ pub fn acquire_low_latency_wifi(
     const WIFI_MODE_FULL_LOW_LATENCY: i32 = 4;
     // A Java exception on the way is caught and comes back as the error.
     let lock = vm.attach_current_thread(|env| -> jni::errors::Result<_> {
-        // SAFETY: the activity reference stays valid while the app runs; `JObject`
-        // only wraps it, it never deletes it.
-        let activity = unsafe { JObject::from_raw(env, app.activity_as_ptr().cast()) };
+        let raw: jni::sys::jobject = app.activity_as_ptr().cast();
+        // SAFETY: the activity reference stays valid while the app runs; the cast only
+        // borrows it, it never deletes it.
+        let activity = unsafe { env.as_cast_raw::<JObject<'static>>(&raw) }?;
         let context = env
             .call_method(
                 &activity,

@@ -229,10 +229,11 @@ pub(crate) fn with_activity<T>(
     // In a local frame of its own; a Java exception on the way is caught and cleared,
     // and comes back as the error.
     vm.attach_current_thread(|env| {
+        let raw: jobject = ctx.context().cast();
         // SAFETY: a global reference to the Application, kept for the life of the
-        // process; `JObject` only wraps it, it never deletes it.
-        let activity = unsafe { JObject::from_raw(env, ctx.context().cast()) };
-        f(env, &activity)
+        // process; the cast only borrows it, it never deletes it.
+        let context = unsafe { env.as_cast_raw::<JObject<'static>>(&raw) }?;
+        f(env, &context)
     })
     .inspect_err(|e| warn!("a call into Android failed: {e}"))
     .ok()
