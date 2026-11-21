@@ -208,8 +208,12 @@ pub struct Connected {
 #[derive(Debug)]
 pub enum JobOk {
     Done,
-    /// A picture saved there.
-    Saved(PathBuf),
+    /// A picture saved at `path`; `whole`: of the whole desktop, which was all the
+    /// desktop could take.
+    Saved {
+        path: PathBuf,
+        whole: bool,
+    },
     /// The mouse is on this output, at this point across it (0..=65535).
     Pointer {
         key: OutputKey,

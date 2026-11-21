@@ -499,6 +499,7 @@ prostir
 prostir serve [--monitor WxH[@scale]]... [--codec hevc|h264] [--bitrate MBPS] [--software]
               [--keep-primary] [--linger SECONDS] [--port PORT] [--no-discovery] [--no-adb]
 prostir ctl КОМАНДА [--json]
+prostir mcp
 ```
 
 `prostir`, який запускає значок у меню, відкриває вікно налаштувань, а якщо Prostir не
@@ -526,6 +527,11 @@ busctl --user --timeout=35 call io.github.OlexiyOdarchuk.Prostir \
 ```
 
 Методи, сигнали, помилки й JSON стану описано в [LOCAL-API.md](LOCAL-API.md).
+
+`prostir mcp` дає те саме агентові ШІ через Model Context Protocol: він може додавати
+монітори, розставляти їх, чекати, поки вони запрацюють, і дивитися знімок монітора.
+Для Claude Code: `claude mcp add prostir -- prostir mcp`. Інструменти описано в
+[LOCAL-API.md](LOCAL-API.md#mcp-prostir-mcp).
 
 Без `--monitor` Prostir повертає монітори з минулого сеансу, кожен зі своїм номером,
 тож шолом знаходить його там, де він був. Вони записані в

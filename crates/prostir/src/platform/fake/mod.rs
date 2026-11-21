@@ -253,12 +253,34 @@ pub fn notice_mark() -> PathBuf {
 }
 
 /// In the settings directory (the fake PC has no Pictures folder).
+pub fn screenshot_dir() -> PathBuf {
+    config_home()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("screenshots")
+}
+
+/// A new, empty file there, of a name no other file has (as on a real PC).
 pub fn screenshot_path() -> Result<PathBuf> {
-    let dir = config_home()
-        .ok_or_else(|| anyhow::anyhow!("no settings directory"))?
-        .join("screenshots");
+    let dir = screenshot_dir();
     std::fs::create_dir_all(&dir)?;
-    Ok(dir.join("screenshot.png"))
+    for n in 1..100 {
+        let path = dir.join(format!("screenshot-{n}.png"));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(_) => return Ok(path),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    anyhow::bail!("no free name for a screenshot in {dir:?}")
+}
+
+/// Whether `path` is a file with something in it.
+pub fn has_picture(path: &std::path::Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() > 0)
 }
 
 /// Silence to the headset; the headset microphone goes nowhere; a sound system in
@@ -712,6 +734,11 @@ pub mod autostart {
     }
 
     pub fn start_service() -> bool {
+        false
+    }
+
+    /// A test never starts anything in the real systemd manager of this user.
+    pub fn start_in_user_manager(_args: &[&str]) -> bool {
         false
     }
 

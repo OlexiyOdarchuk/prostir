@@ -9,7 +9,7 @@ use prostir_proto::HostMsg;
 use prostir_proto::state::{ErrorCode, MAX_DETAIL, clip};
 
 use crate::brain::Phase;
-use crate::displays::{DeskNews, Displays};
+use crate::displays::{DeskNews, Displays, JobAnswer};
 use crate::events::Accepted;
 use crate::session::{Session, desktop_not_responding};
 use crate::worker::Done;
@@ -56,10 +56,24 @@ impl Brain {
             }
             DeskNews::Rescaled => keep_screens(&mut self.store, displays, true),
             DeskNews::Job(job, result, answer) => {
+                if self.shot_taken(generation, job, &result, &answer) {
+                    return self.look_at_desk(Instant::now());
+                }
+                let saved = match &answer {
+                    JobAnswer::Saved { path, .. } => Some(path.clone()),
+                    _ => None,
+                };
                 let outcome = requests::outcome_of_job(result, answer);
-                for s in self.sessions.values_mut() {
-                    if s.job_done(job, &outcome) {
-                        break;
+                let taken = self
+                    .sessions
+                    .values_mut()
+                    .any(|s| s.job_done(job, &outcome));
+                // A picture that came after whoever asked gave up (and was told it
+                // failed) is not kept.
+                if !taken && let Some(path) = saved {
+                    info!("a screenshot came too late: removing {path:?}");
+                    if let Err(e) = std::fs::remove_file(&path) {
+                        warn!("cannot remove {path:?}: {e}");
                     }
                 }
             }
@@ -95,6 +109,7 @@ impl Brain {
     /// Lets the screens go: the desktop's worker puts everything back, watched until
     /// it is gone.
     pub(crate) fn let_go_displays(&mut self) {
+        self.shots_without_monitors();
         if let Some(retired) = self.displays.take().and_then(Displays::let_go) {
             self.retiring.push(retired);
         }
@@ -145,6 +160,7 @@ impl Brain {
                         displays.forget_job(job);
                     }
                 }
+                self.give_up_shots(now, true);
                 for accepted in std::mem::take(&mut self.waiting_desk) {
                     turn_away(accepted.conn, desktop_not_responding());
                 }
@@ -173,6 +189,7 @@ impl Brain {
             .sessions
             .values()
             .filter_map(Session::waiting_until)
+            .chain(self.shots.due())
             .min();
         let retiring = self
             .retiring
@@ -186,6 +203,7 @@ impl Brain {
 
     /// Requests that waited for the desktop long enough fail.
     pub(crate) fn desk_answers_due(&mut self, now: Instant) {
+        self.give_up_shots(now, false);
         let Some(displays) = self.displays.as_mut() else {
             return;
         };

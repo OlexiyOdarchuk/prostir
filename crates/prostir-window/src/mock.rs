@@ -715,6 +715,10 @@ impl Inner {
                     "Мікрофон вмикають і вимикають у шоломі.",
                 ));
             }
+            // The window never asks for one; a made-up PC has no picture.
+            Request::Screenshot { .. } => {
+                return Err(refused(ApiError::Capture, "Знімка немає."));
+            }
             Request::Autostart { on } => s.autostart = Some(*on),
             Request::WindowLook {
                 theme,

@@ -111,11 +111,15 @@ pub enum DeskNews {
     Rescaled,
 }
 
-/// What a job's answer carries for the headset.
+/// What a job's answer carries for the headset (or the local API).
 pub enum JobAnswer {
     Done,
     Added,
-    Saved(std::path::PathBuf),
+    /// A picture saved at `path`; `whole`: of the whole desktop.
+    Saved {
+        path: std::path::PathBuf,
+        whole: bool,
+    },
     Pointer(u16, u16),
 }
 
@@ -580,7 +584,7 @@ impl Displays {
         };
         match result {
             Ok(JobOk::Done) => news(Ok(JobAnswer::Done)),
-            Ok(JobOk::Saved(path)) => news(Ok(JobAnswer::Saved(path))),
+            Ok(JobOk::Saved { path, whole }) => news(Ok(JobAnswer::Saved { path, whole })),
             Ok(JobOk::Pointer { key, u, v }) => match self.id_of_output(&key) {
                 Some(id) => DeskNews::Job(job, Ok(id.wire()), JobAnswer::Pointer(u, v)),
                 None => news(Err(anyhow::Error::new(UserError::NotOnDisplays))),
