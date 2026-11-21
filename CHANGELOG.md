@@ -36,12 +36,26 @@
   stays where it was and keeps how it stands: tilted back for a reclined pose,
   overhead for lying down (Line up now works there too), or turned a little as a
   whole. Two monitors placed as mirror images stay mirror images. Rows never merge, and
-  a gap you left between two rows stays.
+  a gap you left between two rows stays. A monitor the magnet glued over or under
+  another stays glued: Line up closes the middle of the seam as you see it instead of
+  lifting the monitor clear and leaving a gap (a wide flat monitor over a curved row
+  overlaps the row a little at its ends, the nearer monitor in front, never by more
+  than 12 % of a monitor's height; where it would, the monitor is lifted clear). Where
+  the two overlap, the picture no longer flickers between them as you move your head.
 - A monitor stays in its row while you move it about. A portrait monitor between two
   others no longer jumps into a row of its own when one of them is nudged; a monitor
   leaves its row only when you clearly move it out.
 - A profile keeps where its monitors stood, so switching to it and back brings your
   rows back. Profiles saved before keep working and are laid out by their layout.
+- A profile also keeps where you sat and which way you faced when you saved it, the
+  circle its monitors stand on and which of them share a row. It comes back around you
+  the way it stood, in front of where your monitors were last brought. So Line up and
+  In front after switching to a profile do what they did before you saved it: monitors
+  stacked one over another no longer fly apart (monitors side by side held together),
+  and the PC desktop is the one the profile had. A profile saved by an earlier 0.2.0
+  build has its monitors where they were in the room, as before, and its rows start
+  afresh instead of following the profile before: save it again once it stands as you
+  like.
 - The PC desktop matches the headset in every direction: the mouse, and a window you
   drag across, go from one monitor to the next where the two meet in the headset,
   sideways and up or down. A monitor you hung higher on purpose is just as much higher

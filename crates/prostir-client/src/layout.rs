@@ -495,6 +495,17 @@ impl Desktop {
         Self { rows, plan }
     }
 
+    /// What [`Desktop::of`] takes as the PC's desktop when only its `rows` are known (a
+    /// profile switched to keeps its rows, not its plan): their pairs of neighbours stay
+    /// pairs until one is clearly moved away, and the plan is made afresh. `None` for no
+    /// rows: rows then start afresh too.
+    pub fn history(rows: Vec<Vec<ScreenId>>) -> Option<Self> {
+        (!rows.is_empty()).then(|| Self {
+            rows,
+            plan: Vec::new(),
+        })
+    }
+
     /// As `SetLayout` carries it: the rows, and where each monitor's spot is centred
     /// (see `PROTOCOL.md`, "Layout").
     pub fn wire(&self) -> Vec<Row> {
@@ -1061,7 +1072,7 @@ fn parse_placement(line: &str) -> Option<(ScreenId, Placement, Option<PixelSize>
 }
 
 /// `center x y z yaw`: where the arrangement was laid out around.
-fn parse_center(line: &str) -> Option<(Vec3, f32)> {
+pub(crate) fn parse_center(line: &str) -> Option<(Vec3, f32)> {
     let rest = line.strip_prefix("center ")?;
     let v: Vec<f32> = rest
         .split_whitespace()
@@ -1099,6 +1110,83 @@ pub fn facing_yaw(placements: &HashMap<ScreenId, Placement>, eye: Vec3) -> Optio
         })
         .fold((0.0f32, 0.0f32), |(s, c), a| (s + a.sin(), c + a.cos()));
     (sin.abs() > 1e-6 || cos.abs() > 1e-6).then(|| sin.atan2(cos))
+}
+
+/// A monitor drawn after another (over it, where they overlap as seen) is drawn before
+/// it only once it is further from the head than that one by more than this (5 cm): two
+/// at about one distance, as a monitor glued over a row and that row, keep their order,
+/// so the strip where they overlap never flickers from one to the other as the head
+/// moves.
+pub const DRAW_HOLD: f32 = 0.05;
+
+/// The order the monitors are drawn in, far to near (the nearest last, over the others):
+/// `order` holds each one's distance from the head (one held in a hand at -1, last of
+/// all) and is put in order in place; `before` is the order of the frame before. It
+/// starts from that order, the new ones after it, and two next to each other swap only
+/// where the one drawn later is further by more than [`DRAW_HOLD`]. Nothing is
+/// allocated.
+pub fn draw_order(order: &mut [(f32, ScreenId)], before: &[ScreenId]) {
+    let rank = |id: ScreenId| before.iter().position(|b| *b == id).unwrap_or(usize::MAX);
+    // As drawn before, the new ones after, far to near (an insertion sort: in place).
+    let first = |a: &(f32, ScreenId), b: &(f32, ScreenId)| (rank(a.1), b.0) < (rank(b.1), a.0);
+    for i in 1..order.len() {
+        let mut j = i;
+        while j > 0 && first(&order[j], &order[j - 1]) {
+            order.swap(j - 1, j);
+            j -= 1;
+        }
+    }
+    for _ in 0..order.len() {
+        let mut swapped = false;
+        for i in 1..order.len() {
+            if order[i].0 > order[i - 1].0 + DRAW_HOLD {
+                order.swap(i - 1, i);
+                swapped = true;
+            }
+        }
+        if !swapped {
+            break;
+        }
+    }
+}
+
+/// `p`, laid out around `from` (eye and yaw, as the headset's `center`), standing the
+/// same way around `to`: turned about the vertical by the difference of the yaws, the
+/// eye carried to the eye. What is worked out as seen from the eye (rows, the desktop,
+/// "Line up", the magnet) sees it from `to` as it saw it from `from`.
+pub fn carried(p: &Placement, from: (Vec3, f32), to: (Vec3, f32)) -> Placement {
+    let turn = Quat::from_rotation_y(to.1 - from.1);
+    Placement {
+        position: to.0 + turn * (p.position - from.0),
+        rotation: (turn * p.rotation).normalize(),
+        width: p.width,
+    }
+}
+
+/// The yaw "In front" brings straight ahead, seen from `eye`: the `primary` monitor's
+/// direction, else the mean direction of `monitors` (what the user arranged around
+/// them, not the layout's old forward, which placing by hand has long left behind).
+pub fn ahead(
+    placements: &HashMap<ScreenId, Placement>,
+    monitors: &[ScreenId],
+    primary: Option<ScreenId>,
+    eye: Vec3,
+) -> Option<f32> {
+    let direction = |p: &Placement| {
+        let d = p.position - eye;
+        (-d.x).atan2(-d.z)
+    };
+    primary
+        .and_then(|id| placements.get(&id))
+        .map(direction)
+        .or_else(|| {
+            let (sin, cos) = monitors
+                .iter()
+                .filter_map(|id| placements.get(id))
+                .map(direction)
+                .fold((0.0f32, 0.0f32), |(s, c), a| (s + a.sin(), c + a.cos()));
+            (sin != 0.0 || cos != 0.0).then(|| sin.atan2(cos))
+        })
 }
 
 #[cfg(test)]
@@ -2257,5 +2345,700 @@ mod tests {
             .collect();
         let got = facing_yaw(&turned, Vec3::ZERO).unwrap();
         assert!((got - yaw).abs() < 1e-4, "got {got}");
+    }
+
+    /// `p` with every monitor carried from `from` to `to` (see [`carried`]).
+    fn carried_all(
+        p: &HashMap<ScreenId, Placement>,
+        from: (Vec3, f32),
+        to: (Vec3, f32),
+    ) -> HashMap<ScreenId, Placement> {
+        p.iter().map(|(k, q)| (*k, carried(q, from, to))).collect()
+    }
+
+    /// How far the corners of `a` seen from the eye of `ca` are from those of `b` seen
+    /// from the eye of `cb`, each turned so the first monitor of `m` is straight ahead
+    /// (metres): 0 when the user sees the one arrangement from the one eye as the other
+    /// from the other.
+    fn seen_apart(
+        a: &HashMap<ScreenId, Placement>,
+        ca: (Vec3, f32),
+        b: &HashMap<ScreenId, Placement>,
+        cb: (Vec3, f32),
+        m: &[(ScreenId, u32, u32)],
+    ) -> f32 {
+        let origin = (Vec3::ZERO, 0.0);
+        let first = Some(m[0].0);
+        let ca = (ca.0, ahead(a, &[], first, ca.0).unwrap());
+        let cb = (cb.0, ahead(b, &[], first, cb.0).unwrap());
+        m.iter()
+            .map(|&(id, w, h)| {
+                let (p, q) = (carried(&a[&id], ca, origin), carried(&b[&id], cb, origin));
+                let tall = |x: &Placement| x.width * h as f32 / w as f32;
+                corners(&p, tall(&p))
+                    .iter()
+                    .zip(corners(&q, tall(&q)))
+                    .map(|(x, y)| x.distance(y))
+                    .fold(0.0f32, f32::max)
+            })
+            .fold(0.0f32, f32::max)
+    }
+
+    /// "In front" as the headset does it: the arrangement turned about the eye of
+    /// `center` so the primary monitor is straight ahead of a head at `head` looking
+    /// along `yaw`, and carried to it; the new center.
+    fn in_front(
+        p: &HashMap<ScreenId, Placement>,
+        m: &[(ScreenId, u32, u32)],
+        primary: Option<ScreenId>,
+        center: (Vec3, f32),
+        head: (Vec3, f32),
+    ) -> (HashMap<ScreenId, Placement>, (Vec3, f32)) {
+        let ids: Vec<ScreenId> = m.iter().map(|x| x.0).collect();
+        let ahead = ahead(p, &ids, primary, center.0).unwrap_or(center.1);
+        (carried_all(p, (center.0, ahead), head), head)
+    }
+
+    /// `id` let go by the magnet over (`up` 1) or under (-1) `under`, its middle `along`
+    /// metres to the right of `under`'s, a hand's 3 cm off: glued edge to edge.
+    fn glued(
+        p: &mut HashMap<ScreenId, Placement>,
+        m: &[(ScreenId, u32, u32)],
+        id: ScreenId,
+        under: ScreenId,
+        up: f32,
+        along: f32,
+    ) {
+        let tall = |id: ScreenId, width: f32| {
+            let &(_, w, h) = m.iter().find(|x| x.0 == id).unwrap();
+            width * h as f32 / w as f32
+        };
+        let &(_, w, _) = m.iter().find(|x| x.0 == id).unwrap();
+        let width = w as f32 * METRES_PER_PIXEL;
+        let n = p[&under];
+        let lift = (tall(under, n.width) + tall(id, width)) / 2.0 + 0.03;
+        let at = n.position + n.rotation * Vec3::new(along, up * lift, 0.0);
+        p.insert(
+            id,
+            Placement {
+                position: at,
+                rotation: facing(at, Vec3::new(0.0, at.y, 0.0)),
+                width,
+            },
+        );
+        let s = stick(p, m, Vec3::ZERO, id).expect("the magnet takes it");
+        assert!(
+            !s.across,
+            "{id} glued over or under {}, not beside",
+            s.neighbour
+        );
+        p.insert(id, s.placement);
+    }
+
+    /// The desktops of `a` seen from `ca` and of `b` seen from `cb` are the same: the
+    /// same rows, and every monitor within a few pixels of the same spot (the eye carried
+    /// along leaves the last bits of the floats).
+    fn same_desktop(
+        a: &HashMap<ScreenId, Placement>,
+        ca: (Vec3, f32),
+        b: &HashMap<ScreenId, Placement>,
+        cb: (Vec3, f32),
+        m: &[(ScreenId, u32, u32)],
+        primary: Option<ScreenId>,
+        what: &str,
+    ) -> Desktop {
+        let (da, db) = (
+            Desktop::of(a, m, ca, Preset::Arc, primary, None),
+            Desktop::of(b, m, cb, Preset::Arc, primary, None),
+        );
+        assert_eq!(da.rows, db.rows, "{what}: rows");
+        for s in &da.plan {
+            let t = db.plan.iter().find(|t| t.id == s.id).unwrap();
+            assert!(
+                (s.x - t.x).abs() <= 2 && (s.y - t.y).abs() <= 2,
+                "{what}: {} at {},{} instead of {},{}",
+                s.id,
+                s.x,
+                s.y,
+                t.x,
+                t.y
+            );
+        }
+        da
+    }
+
+    /// Where each monitor stands.
+    type Placements = HashMap<ScreenId, Placement>;
+
+    /// The owner's monitors of 2026-11-21: 1440x2560 | 2560x1440 primary | 2560x1440 |
+    /// 1440x2560 by the preset, and the 3840x2160 let go by the magnet over the seam of
+    /// the two landscape ones.
+    fn owners_stack() -> (Vec<(ScreenId, u32, u32)>, Placements) {
+        let owner = vec![
+            (2, 1440, 2560),
+            (1, 2560, 1440),
+            (3, 2560, 1440),
+            (4, 1440, 2560),
+            (6, 3840, 2160),
+        ];
+        let mut stack = arrange(Preset::Arc, &owner[..4], Some(1), None, None);
+        let seam = stack[&1].width / 2.0;
+        glued(&mut stack, &owner, 6, 1, 1.0, seam);
+        (owner, stack)
+    }
+
+    /// The profile of `placements` seen from `center` with the rows the PC has
+    /// (`Scene::current_profile`), saved to a file and read back.
+    fn saved_profile(
+        m: &[(ScreenId, u32, u32)],
+        primary: Option<ScreenId>,
+        placements: &HashMap<ScreenId, Placement>,
+        center: (Vec3, f32),
+        rows: &[Vec<ScreenId>],
+        dir: &Path,
+    ) -> crate::profiles::Profile {
+        let live = Arrangement {
+            placements: placements.clone(),
+            sizes: HashMap::new(),
+            center: Some(center),
+            radius: Some(RADIUS),
+        };
+        let desk = Desk::new(dir.join("layout.txt"));
+        let profile = crate::profiles::Profile::of(
+            m,
+            primary,
+            false,
+            crate::settings::Settings::default(),
+            live,
+            rows,
+            &desk,
+        );
+        let path = dir.join("profiles.txt");
+        let mut all = std::array::from_fn(crate::profiles::Profile::default_for);
+        all[0] = profile;
+        crate::profiles::save(&path, &all);
+        let [back, ..] = crate::profiles::load(&path);
+        back
+    }
+
+    /// `profile` switched to with the user's center at `now`, the PC giving its
+    /// monitors the numbers they had (as it does for monitors of the same size): the
+    /// placements and the rows the headset then has (`Scene::profile_made`).
+    fn switched_to(
+        profile: &crate::profiles::Profile,
+        m: &[(ScreenId, u32, u32)],
+        now: (Vec3, f32),
+    ) -> (HashMap<ScreenId, Placement>, Option<Desktop>) {
+        let made: Vec<(ScreenId, Placement)> = m
+            .iter()
+            .map(|x| x.0)
+            .zip(profile.places.iter().copied())
+            .collect();
+        let (placed, rows) = crate::profiles::standing(&made, profile.center, &profile.rows, now);
+        (placed.into_iter().collect(), Desktop::history(rows))
+    }
+
+    /// 2026-11-21, the owner (dev build 74dfe1d): after switching to a profile, "Line
+    /// up" or "In front" sent monitors glued one over another flying, while monitors
+    /// glued side by side held. A profile kept its places in the room but not the eye
+    /// they were laid out around: once the user had turned the arrangement in front
+    /// of them elsewhere (or the headset's room was set anew), everything worked out as
+    /// seen from the eye (the rows the PC gets, "Line up", "In front") saw the profile
+    /// from another place. Rows side by side close up whatever the eye, rows one over
+    /// another are kept apart as seen and so came apart.
+    ///
+    /// What this covers: a profile switched to is seen from the user's eye as it was
+    /// from the eye it was saved around, so what lining up and "In front" do to it after
+    /// the switch is what they did to it before (in either order), and the PC gets the
+    /// desktop it had. For stacks, rows side by side, portraits among landscapes and a
+    /// 3840x2160 over two monitors, each lined up once before it is saved. What the
+    /// first "Line up" does to a monitor the magnet glued is not covered here (see
+    /// `report_first_line_up_of_a_3840_over_two`).
+    #[test]
+    fn a_profile_switched_to_lines_up_and_turns_as_it_did_before() {
+        // Where the user sat when saving, and later (turned in front elsewhere, or
+        // the headset's room set anew): 35 cm aside, lower, further back, turned 75°.
+        let saved_at = (Vec3::new(0.2, 1.15, -0.1), 0.4);
+        let later = (Vec3::new(0.55, 1.03, 0.15), 0.4 + 1.3);
+        let head = |c: (Vec3, f32)| (c.0 + Vec3::new(0.04, 0.02, -0.03), c.1 - 0.6);
+        let (owner, stack) = owners_stack();
+        // Side by side only.
+        let row = [(0, 2560, 1440), (1, 1440, 2560), (2, 2560, 1440)];
+        let side = arrange(Preset::Arc, &row, Some(1), None, None);
+        // Mixed: two landscape side by side, a 1920x1080 glued over the left one and a
+        // 2560x1440 under the right one.
+        let mixed_m = [
+            (0, 2560, 1440),
+            (1, 2560, 1440),
+            (5, 1920, 1080),
+            (7, 2560, 1440),
+        ];
+        let mut mixed = arrange(Preset::Arc, &mixed_m[..2], Some(0), None, None);
+        glued(&mut mixed, &mixed_m, 5, 0, 1.0, 0.0);
+        glued(&mut mixed, &mixed_m, 7, 1, -1.0, -0.1);
+        // Two rows by the preset (six do not fit one).
+        let six = [
+            (0, 2560, 1440),
+            (1, 2560, 1440),
+            (2, 1440, 2560),
+            (3, 2560, 1440),
+            (4, 2560, 1440),
+            (5, 3840, 2160),
+        ];
+        let two_rows = arrange(Preset::Arc, &six, Some(2), None, None);
+        let scenes = [
+            ("a 3840x2160 over two", &owner[..], 1, stack),
+            ("side by side", &row[..], 1, side),
+            ("over and under", &mixed_m[..], 0, mixed),
+            ("two rows of a preset", &six[..], 2, two_rows),
+        ];
+        let dir = std::env::temp_dir().join(format!("prostir-switched-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, m, primary, by_hand) in scenes {
+            let primary = Some(primary);
+            let origin = (Vec3::ZERO, 0.0);
+            // Lined up once, as the user keeps it, where they sat.
+            let kept = carried_all(
+                &line_up(&by_hand, m, origin, Preset::Arc, primary, &[], None),
+                origin,
+                saved_at,
+            );
+            let desktop = same_desktop(&kept, saved_at, &kept, saved_at, m, primary, name);
+            if name == "a 3840x2160 over two" {
+                // Over the two, touching both on the desktop.
+                assert_eq!(desktop.rows, vec![vec![6], vec![2, 1, 3, 4]]);
+                let spot = |id| desktop.plan.iter().find(|s| s.id == id).copied().unwrap();
+                for below in [1, 3] {
+                    assert_eq!(
+                        spot(6).crossing(&spot(below)),
+                        Some(prostir_layout::space::Side::Below),
+                        "{name}: 6 over {below}"
+                    );
+                }
+            }
+            let check = |p: &HashMap<ScreenId, Placement>, at: (Vec3, f32), what: &str| {
+                let off = seen_apart(p, at, &kept, saved_at, m);
+                assert!(off < 2e-3, "{name}, {what}: {off} m from how it was");
+                same_desktop(
+                    p,
+                    at,
+                    &kept,
+                    saved_at,
+                    m,
+                    primary,
+                    &format!("{name}, {what}"),
+                );
+            };
+            let profile = saved_profile(m, primary, &kept, saved_at, &desktop.rows, &dir);
+            for now in [saved_at, later] {
+                let (back, sent) = switched_to(&profile, m, now);
+                assert_eq!(
+                    sent.as_ref().map(|d| &d.rows),
+                    Some(&desktop.rows),
+                    "{name}: its rows"
+                );
+                check(&back, now, "switched to");
+                // Then "Line up".
+                let rows = Desktop::of(&back, m, now, Preset::Arc, primary, sent.as_ref()).rows;
+                let lined = line_up(&back, m, now, Preset::Arc, primary, &rows, None);
+                check(&lined, now, "switched to, lined up");
+                // Then "In front", and "Line up" after it.
+                let (front, at) = in_front(&back, m, primary, now, head(now));
+                check(&front, at, "switched to, in front");
+                let rows = Desktop::of(&front, m, at, Preset::Arc, primary, sent.as_ref()).rows;
+                let lined = line_up(&front, m, at, Preset::Arc, primary, &rows, None);
+                check(&lined, at, "switched to, in front, lined up");
+                // The other order: "In front" and "Line up" first, saved, and back.
+                let (front, at) = in_front(&kept, m, primary, saved_at, head(now));
+                let rows = Desktop::of(&front, m, at, Preset::Arc, primary, None).rows;
+                let lined = line_up(&front, m, at, Preset::Arc, primary, &rows, None);
+                let again = saved_profile(m, primary, &lined, at, &rows, &dir);
+                let (back, _) = switched_to(&again, m, later);
+                check(&back, later, "in front, lined up, saved, switched to");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A profile saved before profiles kept their center comes back where it was in
+    /// the room, as it did, and its rows start afresh.
+    #[test]
+    fn a_profile_without_its_center_stays_in_the_room() {
+        let three = [(0, 2560, 1440), (1, 2560, 1440), (2, 2560, 1440)];
+        let p = arrange(Preset::Arc, &three, Some(1), None, None);
+        let made: Vec<(ScreenId, Placement)> = three.iter().map(|x| (x.0, p[&x.0])).collect();
+        let now = (Vec3::new(0.3, 1.1, 0.2), 0.9);
+        let (placed, rows) = crate::profiles::standing(&made, None, &[], now);
+        for ((_, place), (_, back)) in made.iter().zip(&placed) {
+            assert!(back.position.distance(place.position) < 1e-5);
+            assert!(back.rotation.angle_between(place.rotation) < 1e-4);
+        }
+        assert!(Desktop::history(rows).is_none());
+    }
+
+    /// In cinema the profile keeps the desk arrangement saved before it (with its
+    /// center and circle), not the cinema view; otherwise the arrangement as it stands.
+    #[test]
+    fn in_cinema_a_profile_keeps_the_desk_saved_before_it() {
+        let (dir, desk) = temp_desk("profile-cinema");
+        let three = [(0, 2560, 1440), (1, 2560, 1440), (2, 2560, 1440)];
+        let at_desk = arrange(Preset::Arc, &three, Some(1), None, None);
+        let desk_center = (Vec3::new(0.1, 1.2, 0.3), 0.5);
+        desk.save(&at_desk, &HashMap::new(), (desk_center, 1.3), false);
+        let view = cinema(&three, None);
+        let live = |placements: &HashMap<ScreenId, Placement>| Arrangement {
+            placements: placements.clone(),
+            sizes: HashMap::new(),
+            center: Some((Vec3::ZERO, 0.0)),
+            radius: Some(RADIUS),
+        };
+        let rows = vec![vec![0, 1, 2]];
+        let mut settings = crate::settings::Settings {
+            cinema: true,
+            ..Default::default()
+        };
+        let profile = crate::profiles::Profile::of(
+            &three,
+            Some(1),
+            false,
+            settings,
+            live(&view),
+            &rows,
+            &desk,
+        );
+        assert_eq!(profile.places.len(), 3);
+        for (x, p) in three.iter().zip(&profile.places) {
+            let saved = at_desk[&x.0];
+            assert!(
+                p.position.distance(saved.position) < 1e-6
+                    && p.rotation.angle_between(saved.rotation) < 1e-4,
+                "{}",
+                x.0
+            );
+        }
+        assert_eq!(profile.center, Some(desk_center));
+        assert_eq!(profile.radius, Some(1.3));
+        assert_eq!(profile.rows, vec![vec![0, 1, 2]]);
+        // Not in cinema: as it stands.
+        settings.cinema = false;
+        let profile = crate::profiles::Profile::of(
+            &three,
+            Some(1),
+            false,
+            settings,
+            live(&at_desk),
+            &rows,
+            &desk,
+        );
+        assert_eq!(profile.center, Some((Vec3::ZERO, 0.0)));
+        assert_eq!(profile.radius, Some(RADIUS));
+        // Not every monitor placed: no places, no center, no rows.
+        settings.cinema = false;
+        let profile = crate::profiles::Profile::of(
+            &three,
+            Some(1),
+            false,
+            settings,
+            live(&view),
+            &rows,
+            &desk,
+        );
+        assert!(profile.places.is_empty() && profile.center.is_none());
+        assert!(profile.rows.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The rows of a profile switched to are its own. The PC gives a monitor of the same
+    /// size the number it had in the profile before, so the rows sent then would keep
+    /// a pair of neighbours of that arrangement a pair in this one: the 3840x2160 over
+    /// the landscape ones, its edge beside the top of the portrait on the right, taken
+    /// into the portrait's row. With the rows it was saved with (or, saved without
+    /// them, none) it is over the others, as it was.
+    #[test]
+    fn a_profile_switched_to_keeps_its_own_rows() {
+        let center = (Vec3::ZERO, 0.0);
+        let owner = [
+            (2, 1440, 2560),
+            (1, 2560, 1440),
+            (3, 2560, 1440),
+            (4, 1440, 2560),
+            (6, 3840, 2160),
+        ];
+        let mut p = arrange(Preset::Arc, &owner[..4], Some(1), None, None);
+        // Over 3, its right edge where 3's is, its bottom on 3's top.
+        let under = p[&3];
+        let (w, h) = (
+            3840.0 * METRES_PER_PIXEL,
+            3840.0 * METRES_PER_PIXEL * 2160.0 / 3840.0,
+        );
+        let at = under.position
+            + under.rotation
+                * Vec3::new(
+                    (under.width - w) / 2.0,
+                    (under.width * 1440.0 / 2560.0 + h) / 2.0 + 0.002,
+                    0.0,
+                );
+        p.insert(
+            6,
+            Placement {
+                position: at,
+                rotation: under.rotation,
+                width: w,
+            },
+        );
+        let fresh = Desktop::of(&p, &owner, center, Preset::Arc, Some(1), None);
+        assert_eq!(fresh.rows, vec![vec![6], vec![2, 1, 3, 4]]);
+        // The rows sent for the profile before, where 6 was the portrait's neighbour.
+        let before = Desktop::history(vec![vec![2, 1, 3, 6, 4]]);
+        let stale = Desktop::of(&p, &owner, center, Preset::Arc, Some(1), before.as_ref());
+        assert_ne!(stale.rows, fresh.rows, "the history of another arrangement");
+        // Saved with its rows, switched to: its rows.
+        let dir = std::env::temp_dir().join(format!("prostir-own-rows-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let profile = saved_profile(&owner, Some(1), &p, center, &fresh.rows, &dir);
+        let (back, sent) = switched_to(&profile, &owner, center);
+        let own = Desktop::of(&back, &owner, center, Preset::Arc, Some(1), sent.as_ref());
+        assert_eq!(own.rows, fresh.rows);
+        assert_eq!(own.plan, fresh.plan, "the plan made afresh");
+        // Saved without rows: they start afresh.
+        let mut without = profile;
+        without.rows.clear();
+        let (back, sent) = switched_to(&without, &owner, center);
+        assert!(sent.is_none());
+        assert_eq!(
+            Desktop::of(&back, &owner, center, Preset::Arc, Some(1), None).rows,
+            fresh.rows
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The gaps as seen between the owner's 3840x2160 (6) and each of the two landscape
+    /// monitors under it (1, 3), in the middle of the edge each shares with it, as a
+    /// share of that one's height (negative where they overlap).
+    fn seams_of_6(p: &Placements, owner: &[(ScreenId, u32, u32)]) -> Vec<f64> {
+        use prostir_layout::desk::View;
+        let all = placed(p, owner);
+        let room = Room::new(&frame((Vec3::ZERO, 0.0), Preset::Arc), &all);
+        [1, 3]
+            .iter()
+            .map(|&below| {
+                room.relate(below, 6, prostir_layout::space::Side::Above)
+                    .filter(|r| r.shared > 0.0)
+                    .expect("6 over it")
+                    .apart
+            })
+            .collect()
+    }
+
+    /// 2026-11-21, the owner's decision: a monitor glued by the magnet over or under a
+    /// row stays glued when "Line up" straightens it. The owner's 3840x2160 over the
+    /// two landscape monitors of an arc, let go as the hand leaves it (turned to face the
+    /// axis) and stood upright on their tops, each time glued by the magnet: the first
+    /// "Line up" leaves the middle of the wider seam closed and the other overlapping a
+    /// little (before, let go by hand, it lifted it 13 cm and opened both by 3.8 and 5 %
+    /// of their height), the ends of the flat monitor overlapping the two a little as seen, and
+    /// a second changes nothing. Stood upright on their tops without the magnet it is not
+    /// glued, and is pushed clear of them as before, a gap in the middle of both seams.
+    #[test]
+    fn line_up_keeps_a_monitor_glued_over_two_glued() {
+        let center = (Vec3::ZERO, 0.0);
+        let (owner, by_hand) = owners_stack();
+        let row = arrange(Preset::Arc, &owner[..4], Some(1), None, None);
+        let mut upright = row.clone();
+        {
+            let (one, three) = (row[&1], row[&3]);
+            let shelf = one.position.y + one.width * 1440.0 / 2560.0 / 2.0;
+            let mid = (one.position + three.position) / 2.0;
+            let h = 3840.0 * METRES_PER_PIXEL * 2160.0 / 3840.0;
+            let at = Vec3::new(mid.x, shelf + h / 2.0, mid.z);
+            upright.insert(
+                6,
+                Placement {
+                    position: at,
+                    rotation: facing(at, Vec3::new(0.0, at.y, 0.0)),
+                    width: 3840.0 * METRES_PER_PIXEL,
+                },
+            );
+        }
+        let mut glued_upright = upright.clone();
+        let s = stick(&glued_upright, &owner, Vec3::ZERO, 6).expect("sticks");
+        assert!(!s.across);
+        glued_upright.insert(6, s.placement);
+        let lined = |p: &Placements| {
+            let rows = Desktop::of(p, &owner, center, Preset::Arc, Some(1), None).rows;
+            assert_eq!(rows, vec![vec![6], vec![2, 1, 3, 4]]);
+            line_up(p, &owner, center, Preset::Arc, Some(1), &rows, None)
+        };
+        for (name, p) in [("let go by hand", by_hand), ("upright", glued_upright)] {
+            let once = lined(&p);
+            let seams = seams_of_6(&once, &owner);
+            let widest = seams.iter().copied().fold(f64::MIN, f64::max);
+            assert!(widest.abs() < 1e-3, "{name}: seams {seams:?}");
+            assert!(seams.iter().all(|s| *s > -0.03), "{name}: seams {seams:?}");
+            let rise = once[&6].position.y - p[&6].position.y;
+            // Only as far as closing the seam takes it (the magnet left it over the right
+            // one, as seen): it was 13 cm, with the seams open.
+            assert!(rise.abs() < 0.1, "{name}: rose {rise} m");
+            for id in [2, 1, 3, 4] {
+                assert!(once[&id].position.distance(p[&id].position) < 1e-4);
+            }
+            let twice = lined(&once);
+            assert!(
+                twice[&6].position.distance(once[&6].position) < 1e-4,
+                "{name}"
+            );
+            // Its ends overlap the two as seen, by no more than OVERLAP_MAX.
+            let all = placed(&once, &owner);
+            let of = |id: ScreenId| *all.iter().find(|m| m.id == id).unwrap();
+            let deepest = [1, 3]
+                .iter()
+                .flat_map(|&below| {
+                    [
+                        prostir_layout::view::reach_pair(
+                            &of(below),
+                            &of(6),
+                            prostir_layout::space::Side::Above,
+                            17,
+                        ),
+                        prostir_layout::view::reach_pair(
+                            &of(6),
+                            &of(below),
+                            prostir_layout::space::Side::Below,
+                            17,
+                        ),
+                    ]
+                })
+                .flatten()
+                .fold(0.0f64, f64::max);
+            assert!(
+                deepest <= f64::from(tidy::OVERLAP_MAX),
+                "{name}: overlaps {deepest}"
+            );
+            eprintln!(
+                "{name}: rose {rise:.3} m, seams {seams:.4?}, overlapping {:.1} % at most",
+                deepest * 100.0
+            );
+        }
+        // Not glued: pushed clear as before, covering neither.
+        let once = lined(&upright);
+        let corners = |p: &Placements, id: ScreenId| {
+            let &(_, w, h) = owner.iter().find(|m| m.0 == id).unwrap();
+            let q = p[&id];
+            Placement {
+                position: q.position,
+                rotation: q.rotation,
+                width: q.width,
+            }
+            .corners(q.width * h as f32 / w as f32)
+        };
+        for below in [1, 3] {
+            assert!(!prostir_layout::space::covers(
+                &corners(&once, below),
+                &corners(&once, 6),
+                0.001
+            ));
+        }
+        assert!(
+            once[&6].position.y > upright[&6].position.y,
+            "pushed up clear"
+        );
+        let seams = seams_of_6(&once, &owner);
+        assert!(
+            seams.iter().all(|s| *s > 0.0),
+            "a gap in the middle: {seams:?}"
+        );
+    }
+
+    /// The farthest any corner of `a` is from the same corner in `b` (metres).
+    fn farthest_corner(a: &Placements, b: &Placements, m: &[(ScreenId, u32, u32)]) -> f32 {
+        m.iter()
+            .map(|&(id, w, h)| {
+                let (p, q) = (a[&id], b[&id]);
+                corners(&p, p.width * h as f32 / w as f32)
+                    .iter()
+                    .zip(corners(&q, q.width * h as f32 / w as f32))
+                    .map(|(x, y)| x.distance(y))
+                    .fold(0.0f32, f32::max)
+            })
+            .fold(0.0f32, f32::max)
+    }
+
+    /// The draw order keeps two monitors at about one distance from the head in the
+    /// order they had (a monitor glued over a row and that row): the head moving so
+    /// their distances cross back and forth within DRAW_HOLD never swaps them, so where
+    /// they overlap never flickers; one clearly nearer goes last; one held goes last of
+    /// all, and new ones go by distance.
+    #[test]
+    fn the_draw_order_holds_for_monitors_at_one_distance() {
+        let mut before: Vec<ScreenId> = Vec::new();
+        let mut order: Vec<(f32, ScreenId)> = Vec::new();
+        let mut draw = |d: &[(f32, ScreenId)], before: &mut Vec<ScreenId>| {
+            order.clear();
+            order.extend_from_slice(d);
+            draw_order(&mut order, before);
+            before.clear();
+            before.extend(order.iter().map(|o| o.1));
+            before.clone()
+        };
+        // New: far to near.
+        assert_eq!(
+            draw(&[(0.8, 6), (1.2, 1), (1.0, 3)], &mut before),
+            vec![1, 3, 6]
+        );
+        // 6 and 3 crossing by up to 4 cm each way, frame after frame: no swap.
+        for f in 0..200 {
+            let wobble = if f % 2 == 0 { 0.02 } else { -0.02 };
+            let got = draw(
+                &[(1.0 + wobble, 6), (1.2, 1), (1.0 - wobble, 3)],
+                &mut before,
+            );
+            assert_eq!(got, vec![1, 3, 6], "frame {f}");
+        }
+        // 3 clearly nearer: it goes last.
+        assert_eq!(
+            draw(&[(1.0, 6), (1.2, 1), (0.9, 3)], &mut before),
+            vec![1, 6, 3]
+        );
+        // Held in a hand: last of all.
+        assert_eq!(
+            draw(&[(1.0, 6), (-1.0, 1), (0.9, 3)], &mut before),
+            vec![6, 3, 1]
+        );
+        // A new one far away: first.
+        assert_eq!(
+            draw(&[(1.0, 6), (1.2, 1), (0.9, 3), (2.0, 9)], &mut before),
+            vec![9, 1, 6, 3]
+        );
+    }
+
+    /// Follow mode carries the arrangement after the head a little every frame: after
+    /// a long while of it (60 000 frames, about 14 minutes at 72 Hz, turning and moving
+    /// back and forth) the owner's 3840x2160 glued over the two is still seen glued, and
+    /// "Line up" moves nothing, the last bits of the floats notwithstanding.
+    #[test]
+    fn a_long_follow_leaves_a_glued_seam_glued() {
+        let origin = (Vec3::ZERO, 0.0);
+        let (owner, by_hand) = owners_stack();
+        let rows = Desktop::of(&by_hand, &owner, origin, Preset::Arc, Some(1), None).rows;
+        let kept = line_up(&by_hand, &owner, origin, Preset::Arc, Some(1), &rows, None);
+        let (mut p, mut center) = (kept.clone(), origin);
+        let mut rng = Rng(0xf011);
+        for _ in 0..60_000 {
+            // As `Scene::follow_head` steps: a turn and a shift of a frame's easing.
+            let turn = rng.float(-0.01, 0.01);
+            let shift = Vec3::new(rng.float(-0.003, 0.003), 0.0, rng.float(-0.003, 0.003));
+            let next = (center.0 + shift, center.1 + turn);
+            for q in p.values_mut() {
+                *q = carried(q, (center.0, 0.0), (next.0, turn));
+            }
+            center = next;
+        }
+        assert!(
+            seen_apart(&p, center, &kept, origin, &owner) < 1e-3,
+            "followed as one piece"
+        );
+        let lined = line_up(&p, &owner, center, Preset::Arc, Some(1), &rows, None);
+        let moved = farthest_corner(&p, &lined, &owner);
+        assert!(moved < 1e-4, "Line up after following moves {moved} m");
     }
 }

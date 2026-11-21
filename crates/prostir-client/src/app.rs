@@ -456,6 +456,10 @@ struct Scene {
     radius: f32,
     /// The desktop last sent to the PC.
     sent_layout: Option<layout::Desktop>,
+    /// The monitors far to near as drawn this frame and the frame before (see
+    /// `layout::draw_order`), kept to be filled again rather than made anew.
+    draw_order: Vec<(f32, ScreenId)>,
+    drawn: Vec<ScreenId>,
     /// A changed desktop waiting to settle before it is sent.
     pending_layout: Option<(layout::Desktop, Instant)>,
     /// The desktop for the arrangement now, kept while nothing moves.
@@ -674,27 +678,23 @@ impl Scene {
     }
 
     /// The setup as it is now: monitors left to right, the primary, the laptop screen,
-    /// layout and look.
+    /// layout and look, and the desk arrangement (in cinema, as saved before it).
     fn current_profile(&self) -> Profile {
-        let sizes = self.quest_sizes();
-        // Where the monitors stand on the desk (in cinema, as saved before it).
-        let desk = if self.settings.cinema {
-            self.desk.load().placements
-        } else {
-            self.placements.clone()
+        let live = layout::Arrangement {
+            placements: self.placements.clone(),
+            sizes: self.placed_for.clone(),
+            center: Some(self.center),
+            radius: Some(self.radius),
         };
-        let places: Option<Vec<Placement>> =
-            sizes.iter().map(|m| desk.get(&m.0).copied()).collect();
-        Profile {
-            primary: sizes
-                .iter()
-                .position(|m| Some(m.0) == self.primary)
-                .unwrap_or(0) as u8,
-            sizes: sizes.iter().map(|m| (m.1, m.2)).collect(),
-            mirror: self.mirror_wanted,
-            settings: self.settings,
-            places: places.unwrap_or_default(),
-        }
+        Profile::of(
+            &self.quest_sizes(),
+            self.primary,
+            self.mirror_wanted,
+            self.settings,
+            live,
+            &self.sent_rows(),
+            &self.desk,
+        )
     }
 
     /// Monitors without a place get one: all by the preset when none has any (the
@@ -828,13 +828,22 @@ impl Scene {
         if self.settings.cinema {
             switch.places.clear();
         }
+        let (center, radius, rows) = (switch.center, switch.radius, switch.rows.clone());
         match switch.made(ids, Instant::now()) {
-            Made::Places(places) => {
-                for (id, p) in places {
+            Made::Places(made) => {
+                // Seen from the user's eye now as they were from the eye they were
+                // saved around. Worked out here, once the monitors are made: leaving
+                // cinema for the profile, or following the head meanwhile, moves the
+                // center.
+                let (placed, rows) = profiles::standing(&made, center, &rows, self.center);
+                for (id, p) in placed {
                     self.placements.insert(id, p);
                     self.placed_for.remove(&id);
                 }
+                // A profile saved without its circle stands on the usual one.
+                self.radius = radius.unwrap_or(layout::RADIUS);
                 self.profile_switch = None;
+                self.rows_from(rows);
                 self.save_layout();
                 self.place_missing();
             }
@@ -859,8 +868,17 @@ impl Scene {
             .is_some_and(|s| s.stands(Instant::now(), settled));
         if stands {
             self.profile_switch = None;
+            self.rows_from(Vec::new());
             self.arrange_all();
         }
+    }
+
+    /// A profile switched to is another arrangement: its rows are those it was saved
+    /// with (by the PC's numbers now), or, for a profile without them, start afresh
+    /// (see `layout::Desktop::history`).
+    fn rows_from(&mut self, rows: Vec<Vec<ScreenId>>) {
+        self.sent_layout = layout::Desktop::history(rows);
+        self.pending_layout = None;
     }
 
     /// Saves the arrangement as the desk layout. In cinema mode `placements` is the
@@ -936,11 +954,8 @@ impl Scene {
         &self,
         mut placements: HashMap<ScreenId, Placement>,
     ) -> HashMap<ScreenId, Placement> {
-        let (center, yaw) = self.center;
-        let turn = glam::Quat::from_rotation_y(yaw);
         for p in placements.values_mut() {
-            p.position = center + turn * p.position;
-            p.rotation = turn * p.rotation;
+            *p = layout::carried(p, (Vec3::ZERO, 0.0), self.center);
         }
         placements
     }
@@ -1038,7 +1053,9 @@ impl Scene {
         self.desktop().spots()
     }
 
-    /// The rows last sent to the PC, by id: what its desktop is laid out by now.
+    /// The rows the PC's desktop is laid out by, by id: those last sent, or those a
+    /// profile switched to was saved with until its desktop is sent (see `rows_from`).
+    /// Their neighbours stay neighbours until clearly moved apart (`rows::rows_of`).
     fn sent_rows(&self) -> Vec<Vec<ScreenId>> {
         self.sent_layout
             .as_ref()
@@ -1257,11 +1274,12 @@ impl Scene {
         let k = (dt * 3.0).min(1.0);
         let step_turn = turn * k;
         let step_shift = shift * k;
-        let rot = glam::Quat::from_rotation_y(step_turn);
         let new_pos = pos + step_shift;
         for p in self.placements.values_mut() {
-            p.position = new_pos + rot * (p.position - pos);
-            p.rotation = rot * p.rotation;
+            // Its rotation unit after every step (see `layout::carried`): thousands of
+            // steps of following must not leave one that the last bits of a float have
+            // made other than a turn, nor a seam "Line up" closed no longer seen closed.
+            *p = layout::carried(p, (pos, 0.0), (new_pos, step_turn));
         }
         self.center = (new_pos, center_yaw + step_turn);
         if turn.abs() < 0.02 && shift.length() < 0.02 {
@@ -1282,31 +1300,12 @@ impl Scene {
             return;
         }
         let (old_pos, _) = self.center;
-        // Straight ahead goes the primary monitor (else the middle of the monitors):
-        // what the user arranged around it, not the layout's old forward, which hand
-        // placement has long left behind.
-        let direction = |p: &Placement| {
-            let d = p.position - old_pos;
-            (-d.x).atan2(-d.z)
-        };
-        let ahead = self
-            .primary
-            .and_then(|id| self.placements.get(&id))
-            .map(direction)
-            .or_else(|| {
-                let (sin, cos) = self
-                    .quest_sizes()
-                    .iter()
-                    .filter_map(|(id, _, _)| self.placements.get(id))
-                    .map(direction)
-                    .fold((0.0f32, 0.0f32), |(s, c), a| (s + a.sin(), c + a.cos()));
-                (sin != 0.0 || cos != 0.0).then(|| sin.atan2(cos))
-            })
-            .unwrap_or(self.center.1);
-        let turn = glam::Quat::from_rotation_y(yaw - ahead);
+        // Straight ahead goes the primary monitor (else the middle of the monitors).
+        let ids: Vec<ScreenId> = self.quest_sizes().iter().map(|m| m.0).collect();
+        let ahead =
+            layout::ahead(&self.placements, &ids, self.primary, old_pos).unwrap_or(self.center.1);
         for p in self.placements.values_mut() {
-            p.position = head + turn * (p.position - old_pos);
-            p.rotation = turn * p.rotation;
+            *p = layout::carried(p, (old_pos, ahead), (head, yaw));
         }
         self.center = (head, yaw);
         self.save_layout();
@@ -2171,6 +2170,8 @@ fn run(app: &AndroidApp) -> Result<()> {
         center: (Vec3::ZERO, 0.0),
         radius: layout::RADIUS,
         sent_layout: None,
+        draw_order: Vec::new(),
+        drawn: Vec::new(),
         pending_layout: None,
         desktop_memo: layout::DesktopMemo::default(),
         head: (Vec3::ZERO, -Vec3::Z),
@@ -3158,17 +3159,24 @@ fn run(app: &AndroidApp) -> Result<()> {
         if grabbed.is_empty() && scene.scaling.is_none() && !scene.relayout_pending() {
             scene.send_layout();
         }
-        let mut order: Vec<(f32, ScreenId)> = scene
-            .monitors
-            .keys()
-            // Gone from view as soon as asked to go; back if the PC does not remove it.
-            .filter(|id| !scene.being_removed(**id))
-            .filter_map(|id| {
-                let d = scene.shown.get(id)?.position.distance(head);
-                Some((if grabbed.contains(id) { -1.0 } else { d }, *id))
-            })
-            .collect();
-        order.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let mut order = std::mem::take(&mut scene.draw_order);
+        order.clear();
+        order.extend(
+            scene
+                .monitors
+                .keys()
+                // Gone from view as soon as asked to go; back if the PC does not remove it.
+                .filter(|id| !scene.being_removed(**id))
+                .filter_map(|id| {
+                    let d = scene.shown.get(id)?.position.distance(head);
+                    Some((if grabbed.contains(id) { -1.0 } else { d }, *id))
+                }),
+        );
+        // Far to near, two at about one distance (a monitor glued over a row and that
+        // row) in the order they had, so where they overlap never flickers.
+        layout::draw_order(&mut order, &scene.drawn);
+        scene.drawn.clear();
+        scene.drawn.extend(order.iter().map(|o| o.1));
         let curve = scene.curve_radius();
         // Focus mode: monitors without the mouse fade to DIMMED (colour scale on the
         // compositor layer, no extra rendering).
@@ -3276,6 +3284,7 @@ fn run(app: &AndroidApp) -> Result<()> {
             }
         }
 
+        scene.draw_order = order;
         let button = scene
             .button_place
             .map(|b| button_layer.quad(&local, posef(&b), BUTTON_SIZE, BUTTON_SIZE));
@@ -4139,12 +4148,15 @@ fn handle_action(
             );
             // Placed once the PC answers with its monitors' numbers.
             scene.profile_switch = req.map(|req| {
-                let places = if p.settings.cinema {
-                    Vec::new()
-                } else {
-                    p.places.clone()
-                };
-                ProfileSwitch::new(req, places)
+                if p.settings.cinema {
+                    return ProfileSwitch::new(req, Vec::new());
+                }
+                ProfileSwitch {
+                    center: p.center,
+                    radius: p.radius,
+                    rows: p.rows.clone(),
+                    ..ProfileSwitch::new(req, p.places.clone())
+                }
             });
             let s = &mut scene.settings;
             s.preset = p.settings.preset;

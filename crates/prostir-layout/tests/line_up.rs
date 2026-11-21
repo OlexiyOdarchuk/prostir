@@ -10,7 +10,7 @@ use common::*;
 use glam::{Quat, Vec3};
 use prostir_layout::circle::{self, Limits, Preset};
 use prostir_layout::space::{Frame, Monitor, PixelSize, Placement};
-use prostir_layout::tidy::line_up;
+use prostir_layout::tidy::{glued_pairs, line_up};
 
 /// This crate's "Line up", rows worked out afresh.
 fn mine(scene: &Scene) -> Option<BTreeMap<u8, Placement>> {
@@ -123,4 +123,85 @@ fn a_row_pitched_back_by_10_20_35_degrees_stays_pitched() {
             }
         }
     }
+}
+
+/// L5 again, telling apart the nudges that change which monitors "Line up" keeps glued
+/// (see `tidy::glued_pairs`): those cross a decision, where a jump is what the decision
+/// is. Of the others, no more break L5 than L5 allows over all of them.
+#[test]
+fn a_nudge_across_no_glue_moves_little() {
+    let mut rng = Rng::new(0x11e0_0005);
+    let (mut same, mut broken, mut crossing, mut crossing_broken) = (0, 0, 0, 0);
+    for _ in 0..cases(600) {
+        let scene = hand_scene(&mut rng);
+        let i = rng.below(scene.monitors.len());
+        let d = loop {
+            let v = Vec3::new(
+                rng.float(-1.0, 1.0),
+                rng.float(-1.0, 1.0),
+                rng.float(-1.0, 1.0),
+            );
+            if (0.1..=1.0).contains(&v.length()) {
+                break v.normalize() * 0.01;
+            }
+        };
+        let mut nudged = lined(&scene, &placements(&scene));
+        nudged.monitors[i].placement.position += d;
+        let (rows, rows_nudged) = (rows_now(&scene), rows_now(&nudged));
+        if rows != rows_nudged {
+            continue;
+        }
+        let lid = scene.get(MIRROR).map(|m| m.id);
+        let run = |s: &Scene, rows: &[Vec<u8>]| {
+            (
+                line_up(&s.monitors, &s.frame, s.main, Some(rows), lid),
+                glued_pairs(&s.monitors, &s.frame, s.main, Some(rows), lid),
+            )
+        };
+        let ((a, glued_a), (b, glued_b)) = (run(&scene, &rows), run(&nudged, &rows_nudged));
+        let moved = scene
+            .monitors
+            .iter()
+            .map(|m| a[&m.id].position.distance(b[&m.id].position))
+            .fold(0.0f32, f32::max);
+        if glued_a == glued_b {
+            same += 1;
+            broken += usize::from(moved > 0.012);
+        } else {
+            crossing += 1;
+            crossing_broken += usize::from(moved > 0.012);
+        }
+    }
+    eprintln!(
+        "L5 across no glue: broken in {broken} of {same}; across a glue: {crossing_broken} of {crossing}"
+    );
+    assert!(broken * 100 <= same * 4, "{broken} of {same}");
+}
+
+/// Reported (`--ignored`): how long "Line up" takes over the hand scenes of T1 to T5
+/// (800 of them): the median, the 95th percentile and the longest, in microseconds.
+#[test]
+#[ignore = "a report, not a check"]
+fn report_line_up_timings() {
+    let mut rng = Rng::new(0x3e7a_0007);
+    let mut took: Vec<u128> = Vec::with_capacity(800);
+    for _ in 0..800 {
+        let scene = hand_scene(&mut rng);
+        let ids: Vec<u8> = scene.monitors.iter().map(|m| m.id).collect();
+        let rows = prostir_layout::rows::rows_of(&ids, &scene.room(), None);
+        let lid = scene.get(MIRROR).map(|m| m.id);
+        let start = std::time::Instant::now();
+        let done = line_up(&scene.monitors, &scene.frame, scene.main, Some(&rows), lid);
+        took.push(start.elapsed().as_micros());
+        std::hint::black_box(done);
+    }
+    took.sort_unstable();
+    let at = |q: f64| took[((took.len() - 1) as f64 * q) as usize];
+    eprintln!(
+        "line up over {} hand scenes: median {} us, p95 {} us, longest {} us",
+        took.len(),
+        at(0.5),
+        at(0.95),
+        took[took.len() - 1]
+    );
 }

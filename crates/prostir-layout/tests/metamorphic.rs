@@ -3,14 +3,18 @@
 
 mod common;
 
+use std::collections::BTreeMap;
+
 use common::*;
 use glam::{Quat, Vec3};
 use prostir_layout::circle::Limits;
 use prostir_layout::desk::{self, Desk, Spot, View};
 use prostir_layout::place::place_new;
 use prostir_layout::rows::rows_of;
-use prostir_layout::space::{Monitor, covers};
-use prostir_layout::tidy::line_up;
+use prostir_layout::space::Side;
+use prostir_layout::space::{Monitor, Placement, covers};
+use prostir_layout::tidy::{OVERLAP_MAX, glued_pairs, line_up};
+use prostir_layout::view::reach_pair;
 
 /// The headset's pipeline with history: rows kept as they were within the hysteresis,
 /// the plan kept while it is the same in all but a hand's tremor.
@@ -316,7 +320,7 @@ fn a_quarter_up_moves_only_that_monitor() {
         let holds_alone = row_index != main_row && holders <= 1 && touches_next(id);
         // A monitor over the moved one (rows above rest on it) moves with it: skip.
         let carries = rows[..row_index].iter().flatten().any(|&u| {
-            room.relate(id, u, prostir_layout::space::Side::Above)
+            room.relate(id, u, Side::Above)
                 .is_some_and(|r| r.shared > 0.0)
         });
         if !free || holds_alone || carries || row.len() < 2 {
@@ -428,6 +432,167 @@ fn a_new_monitor_goes_next_to_the_others() {
     assert!(touching * 100 >= total * 80, "P3: {touching} of {total}");
 }
 
+/// How far the monitors of `upper` (where `at` puts them) go down the frame of `scene`
+/// before one covers one of `lower` as seen from its eye, to a tenth of a millimetre
+/// (metres; 1 when not within 1 m).
+fn drop_to_meet(scene: &Scene, at: &BTreeMap<u8, Placement>, upper: &[u8], lower: &[u8]) -> f32 {
+    let down = scene.frame.turn * Vec3::NEG_Y;
+    let corners = |k: u8, by: f32| {
+        let m = scene.get(k).unwrap();
+        let mut p = at[&k];
+        p.position += down * by - scene.frame.eye;
+        p.corners(m.height())
+    };
+    let meets = |by: f32| {
+        upper.iter().any(|&u| {
+            lower
+                .iter()
+                .any(|&l| covers(&corners(l, 0.0), &corners(u, by), 1e-7))
+        })
+    };
+    if meets(0.0) {
+        return 0.0;
+    }
+    // A centimetre at a time, then halving between the last free and the first met.
+    let mut free = 0.0f32;
+    while !meets(free + 0.01) {
+        free += 0.01;
+        if free >= 1.0 {
+            return 1.0;
+        }
+    }
+    let mut met = free + 0.01;
+    while met - free > 1e-4 {
+        let mid = (free + met) / 2.0;
+        if meets(mid) {
+            met = mid;
+        } else {
+            free = mid;
+        }
+    }
+    free
+}
+
+/// Rows over rows for M8: lined up, the rows they are seen in, and a turn and a shift
+/// to carry them away by.
+fn carried_rows(rng: &mut Rng) -> Option<(Scene, Vec<Vec<u8>>, Quat, Vec3)> {
+    let k = 2 + rng.below(2);
+    let scene = rows_scene_of(rng, k, None, false, 0.0, false);
+    let rows = rows_now(&scene);
+    let turn = Quat::from_rotation_y(rng.float(-3.1, 3.1));
+    let shift = Vec3::new(
+        rng.float(-0.4, 0.4),
+        rng.float(-0.2, 0.2),
+        rng.float(-0.4, 0.4),
+    );
+    if rows.len() < 2 {
+        return None;
+    }
+    let kept = lined(
+        &scene,
+        &line_up(&scene.monitors, &scene.frame, scene.main, Some(&rows), None),
+    );
+    let rows = rows_now(&kept);
+    Some((kept, rows, turn, shift))
+}
+
+/// M8 (the owner's, 2026-11-21: monitors glued one over another flew off after a
+/// profile and "Line up"): rows one over another, lined up, carried away together with
+/// the eye they were laid out around (moved and turned, as a profile now comes back
+/// around the user wherever they sit) line up exactly as lining up and carrying them
+/// does, and the desktop is the same.
+#[test]
+fn rows_over_rows_line_up_the_same_carried_with_their_eye() {
+    let mut rng = Rng::new(0x3e7a_0009);
+    let (mut checked, mut differ, mut moved) = (0, 0, 0);
+    let mut first: Option<String> = None;
+    for i in 0..cases(500) {
+        let Some((kept, rows, turn, shift)) = carried_rows(&mut rng) else {
+            continue;
+        };
+        let carried = kept.moved(turn, shift);
+        checked += 1;
+        // Lined up there = lined up here and carried.
+        let here = line_up(&kept.monitors, &kept.frame, kept.main, Some(&rows), None);
+        let there = line_up(
+            &carried.monitors,
+            &carried.frame,
+            carried.main,
+            Some(&rows),
+            None,
+        );
+        let here = placements(&lined(&kept, &here).moved(turn, shift));
+        let off = farthest(&carried, &here, &there);
+        // At a near tie (lining up decides, and the last bits of a float decide it): in
+        // one of the 500 full scenes, the arrangement wrapping round the user, before the
+        // glue too (79a6a0b).
+        if off >= 1e-3 {
+            moved += 1;
+            first.get_or_insert_with(|| format!("case {i}: {off} m\n{}", kept.describe()));
+        }
+        let ((rows0, plan0), (rows1, plan1)) = (pipeline(&kept), pipeline(&carried));
+        let reference = plan0[0].id;
+        if rows0 != rows1 || relative(&plan0, reference) != relative(&plan1, reference) {
+            differ += 1;
+            first.get_or_insert_with(|| format!("case {i}: desktop\n{}", kept.describe()));
+        }
+    }
+    eprintln!(
+        "carried with the eye: {moved} of {checked} lined up otherwise, {differ} desktops differ (float rounding at a near tie)"
+    );
+    if let Some(f) = &first {
+        eprintln!("first: {f}");
+    }
+    assert!(checked * 2 >= cases(500), "{checked}");
+    assert!(differ * 100 <= checked, "{differ} of {checked}");
+    assert!(moved * 100 <= checked, "{moved} of {checked}");
+}
+
+/// Reported (`--ignored`): M8's rows over rows carried away without their eye (a
+/// profile that kept its monitors in the room but not the eye they were laid out
+/// around), lined up from the eye left behind. Lining up fits every row anew around
+/// that eye, each on its own: rows side by side close up, rows one over another keep
+/// their heights. Of the rows resting on the row under them as that eye sees them
+/// (within 5 mm of covering it), how many lining up leaves 2 cm or more apart: before
+/// and after measured alike, from that eye, with the same rows.
+#[test]
+#[ignore = "a report, not a check"]
+fn report_rows_over_rows_lined_up_from_an_eye_left_behind() {
+    let mut rng = Rng::new(0x3e7a_0009);
+    let (mut resting, mut apart, mut worst) = (0, 0, 0.0f32);
+    for _ in 0..cases(500) {
+        let Some((kept, rows, turn, shift)) = carried_rows(&mut rng) else {
+            continue;
+        };
+        let mut stayed = kept.moved(turn, shift);
+        stayed.frame = kept.frame;
+        let out = line_up(
+            &stayed.monitors,
+            &stayed.frame,
+            stayed.main,
+            Some(&rows),
+            None,
+        );
+        let gaps = |at: &BTreeMap<u8, Placement>| -> Vec<f32> {
+            rows.windows(2)
+                .map(|w| drop_to_meet(&stayed, at, &w[0], &w[1]))
+                .collect()
+        };
+        for (b, a) in gaps(&placements(&stayed)).iter().zip(gaps(&out)) {
+            if *b <= 0.005 {
+                resting += 1;
+                worst = worst.max(a);
+                if a >= 0.02 {
+                    apart += 1;
+                }
+            }
+        }
+    }
+    eprintln!(
+        "from the eye left behind: {apart} of {resting} resting rows come 2 cm or more apart, the farthest {worst:.3} m"
+    );
+}
+
 /// T1 to T5: "Line up" keeps the rows, covers nothing, puts neighbours side by side,
 /// keeps sizes, and lining up again changes nothing (the primary is not an anchor: each
 /// row keeps its own direction, see `line_up.rs`). The same with every monitor moved and
@@ -452,6 +617,7 @@ fn lining_up_counts(jitter: Option<(f32, u64)>) -> usize {
     let mut shake = jitter.map(|(_, seed)| Rng::new(seed));
     let (mut t1, mut t2, mut t5, mut total) = (0, 0, 0, 0);
     let mut first: Option<String> = None;
+    let mut glued_overlaps: Vec<f64> = Vec::new();
     for i in 0..cases(800) {
         let mut scene = hand_scene(&mut rng);
         if let (Some((by, _)), Some(r)) = (jitter, shake.as_mut()) {
@@ -482,7 +648,16 @@ fn lining_up_counts(jitter: Option<(f32, u64)>) -> usize {
             });
         }
         // T2: lining up makes no monitor cover one of another row as seen (one that
-        // covered it as the user left them may still).
+        // covered it as the user left them may still, and a row glued to another
+        // overlaps it a little at the ends of its seams, as the owner chose).
+        let glued = glued_pairs(&scene.monitors, &scene.frame, scene.main, Some(&rows), lid);
+        let row_of = |k: &u8| rows.iter().position(|r| r.contains(k));
+        let glued_rows = |a: &u8, b: &u8| {
+            glued.iter().any(|(p, u)| {
+                let (rp, ru) = (row_of(p), row_of(u));
+                (row_of(a) == rp && row_of(b) == ru) || (row_of(a) == ru && row_of(b) == rp)
+            })
+        };
         let corners_of = |s: &Scene| -> Vec<(u8, [Vec3; 4])> {
             s.monitors
                 .iter()
@@ -494,6 +669,38 @@ fn lining_up_counts(jitter: Option<(f32, u64)>) -> usize {
             for (b, (ib, cb)) in corners.iter().enumerate().skip(a + 1) {
                 let same_row = rows.iter().any(|r| r.contains(ia) && r.contains(ib));
                 let was = covers(&before[a].1, &before[b].1, 0.01);
+                // Glued: as deep as OVERLAP_MAX into each other, no deeper.
+                if !same_row && !was && glued_rows(ia, ib) {
+                    let seen = |k: &u8| {
+                        let m = *lined.get(*k).unwrap();
+                        Monitor {
+                            placement: lined.frame.unplace(m.placement),
+                            ..m
+                        }
+                    };
+                    let (ma, mb) = (seen(ia), seen(ib));
+                    let deepest = [Side::Above, Side::Below]
+                        .into_iter()
+                        .flat_map(|side| {
+                            [
+                                reach_pair(&ma, &mb, side, 17),
+                                reach_pair(&mb, &ma, side.opposite(), 17),
+                            ]
+                        })
+                        .flatten()
+                        .fold(0.0f64, f64::max);
+                    glued_overlaps.push(deepest);
+                    if deepest > f64::from(OVERLAP_MAX) + 1e-3 {
+                        t2 += 1;
+                        first.get_or_insert_with(|| {
+                            format!(
+                                "case {i}: T2 glued {ia} {ib} {deepest}\n{}",
+                                scene.describe()
+                            )
+                        });
+                    }
+                    continue;
+                }
                 if !same_row && !was && covers(ca, cb, 0.01) {
                     t2 += 1;
                     first.get_or_insert_with(|| {
@@ -519,6 +726,16 @@ fn lining_up_counts(jitter: Option<(f32, u64)>) -> usize {
     eprintln!(
         "lining up {total}{shaken}: rows changed {t1}, covering {t2}, not settled after twice {t5}"
     );
+    glued_overlaps.sort_by(f64::total_cmp);
+    if let Some(&worst) = glued_overlaps.last() {
+        let at = |q: f64| glued_overlaps[((glued_overlaps.len() - 1) as f64 * q) as usize];
+        eprintln!(
+            "glued pairs overlapping as seen, {} of them: median {:.3}, p95 {:.3}, the deepest {worst:.3} of the height reached into",
+            glued_overlaps.len(),
+            at(0.5),
+            at(0.95)
+        );
+    }
     if let Some(f) = &first {
         eprintln!("first: {f}");
     }
@@ -558,5 +775,23 @@ fn after_lining_up_the_desktop_matches_the_view() {
         total.stack_error,
         total.stack_ratio
     );
-    let _ = total;
+    // Ceilings where lining up stands now (2026-11-21, full count: 39 lost and 176
+    // blocked of 32 013 points, 1436 px beside and 4800 px between rows at the worst,
+    // one arrangement whose glued rows come to be seen in another order): no worse.
+    assert!(
+        total.lost.len() * 500 <= total.samples,
+        "{} lost",
+        total.lost.len()
+    );
+    assert!(
+        total.blocked * 100 <= total.samples,
+        "{} blocked",
+        total.blocked
+    );
+    assert!(total.side_error <= 1500.0, "{} px beside", total.side_error);
+    assert!(
+        total.stack_error <= 5000.0,
+        "{} px between rows",
+        total.stack_error
+    );
 }

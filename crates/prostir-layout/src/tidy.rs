@@ -36,6 +36,17 @@
 //! number. A gap the user left between rows stays: the desktop closes it, the headset
 //! shows it as it was.
 //!
+//! A row glued to the row before it stays glued (the magnet joins a monitor over or
+//! under another edge to edge: see [`GLUED`]). Straightened, its edges are seen
+//! otherwise (a monitor turned to face the axis, a flat one over a curved row, a row
+//! fitted around an eye elsewhere), and pushed clear it would leave a gap in the middle
+//! of the seam. So it moves along the axis of the whole to where the middle of each
+//! seam it is glued along closes as the eye sees it, as near as the seam that would open
+//! most needs; the ends of a flat monitor over a curved row then overlap a little as
+//! seen, the nearer monitor in front, never deeper than [`OVERLAP_MAX`] into a monitor
+//! it did not cover as it stood. Never into one row with the row before it. Where it
+//! cannot, it is pushed clear as a row not glued is.
+//!
 //! A row already lined up, to within [`SNUG`] and [`SQUARE`] (far more than rounding
 //! leaves, far less than the eye sees), is left exactly as it is. So lining up twice
 //! changes nothing the second time, on any machine: what the first time left is lined
@@ -50,9 +61,11 @@ use std::collections::BTreeMap;
 
 use glam::{Mat3, Quat, Vec3};
 
+use crate::desk::TOUCH_GAP;
 use crate::rows::rows_of;
+use crate::space::Side;
 use crate::space::{Frame, Monitor, PixelSize, Placement, covers, facing, unwrap};
-use crate::view::Room;
+use crate::view::{Room, reach_pair, relate_pair};
 
 /// A row of one or two monitors keeps an axis of its own only past this angle from the
 /// axis fitted to all monitors (10°); nearer, it is a monitor standing crooked.
@@ -75,6 +88,30 @@ pub const SQUARE: f32 = 0.05 * std::f32::consts::PI / 180.0;
 pub const SNUG: f32 = 0.0005;
 /// A row moved apart from the one before it goes this much further than it needs (1 mm).
 pub const CLEAR: f32 = 0.001;
+/// A monitor over or under another is glued to it when the edges they face each other
+/// with lie along one another in the room to within this much of the shorter one's
+/// height (0.1 %, 0.7 mm on a 2560x1440 monitor): as the magnet leaves them.
+pub const GLUED: f32 = 0.001;
+/// ... but never further apart than this (a quarter of a millimetre), however big the
+/// monitors.
+pub const GLUED_MOST: f32 = CLEAR / 4.0;
+/// ... or, its row lined up already, they meet as the eye sees them in the middle of the
+/// edge they share to within this (50 micrometres: the gap as a share of the inner
+/// one's height, times that height). Lining up closes a glued seam to a micrometre, and
+/// pushes a row clear [`CLEAR`] further than it covers by: rarely nearer than this in the
+/// middle of a seam.
+pub const CLOSED: f32 = CLEAR / 20.0;
+/// ... along at least this much of the shorter of the two edges (a tenth): a corner
+/// meeting a corner is no seam.
+pub const SHARES: f32 = 0.1;
+/// A glued row overlaps a monitor of the row it is glued to, as seen, by at most this
+/// much of the height of the one it reaches into (12 %; the owner's 3840x2160 over two
+/// 2560x1440 on an arc needs about 11 at the far end): further, it is pushed clear.
+pub const OVERLAP_MAX: f32 = 0.12;
+/// Points along a seam where its overlap is measured.
+const OVERLAP_SAMPLES: usize = 17;
+/// Halving to find where a row meets or clears another stops here (a micrometre).
+const HALVED: f32 = 1e-6;
 
 /// Every monitor lined up (see the module's description), in the room. `main`: the
 /// primary monitor, whose row keeps its place while the others make room.
@@ -93,7 +130,7 @@ pub fn line_up<K: Copy + Ord>(
     let seen_rows = rows_of(&ids, &Room::new(frame, all), previous_rows);
     let monitors: Vec<Monitor<K>> = all.iter().filter(|m| Some(m.id) != lid).copied().collect();
     let screen = all.iter().find(|m| Some(m.id) == lid).copied();
-    let mut lined = line_up_rows(&monitors, frame, main, &seen_rows, screen);
+    let mut lined = line_up_rows(&monitors, frame, main, &seen_rows, screen, None);
     if let Some(l) = screen {
         let mut p = frame.unplace(l.placement);
         // Only a monitor lined up over it pushes it down: one that covered it as it
@@ -309,13 +346,15 @@ fn is_flat(poses: &[Pose]) -> bool {
         })
 }
 
-/// [`line_up`] of the monitors without the laptop screen.
+/// [`line_up`] of the monitors without the laptop screen; the pairs it keeps glued
+/// added to `glued_out`.
 fn line_up_rows<K: Copy + Ord>(
     monitors: &[Monitor<K>],
     frame: &Frame,
     main: Option<K>,
     seen_rows: &[Vec<K>],
     screen: Option<Monitor<K>>,
+    mut glued_out: Option<&mut Vec<(K, K)>>,
 ) -> BTreeMap<K, Placement> {
     let ids: Vec<K> = monitors.iter().map(|m| m.id).collect();
     // The rows as seen, without the laptop screen (which is not lined up).
@@ -363,6 +402,8 @@ fn line_up_rows<K: Copy + Ord>(
 
     let mut out: BTreeMap<K, Placement> = BTreeMap::new();
     let mut axes: Vec<Vec3> = Vec::new();
+    // Rows lined up already as they stood (left exactly as they are).
+    let mut kept: Vec<bool> = Vec::new();
     for row in &rows {
         let poses: Vec<Pose> = row.iter().map(|&k| pose(k)).collect();
         let flat = is_flat(&poses);
@@ -397,7 +438,8 @@ fn line_up_rows<K: Copy + Ord>(
                 (k, p, px)
             })
             .collect();
-        if lined_up(&in_row, flat) {
+        kept.push(lined_up(&in_row, flat));
+        if kept[kept.len() - 1] {
             for &k in row {
                 out.insert(k, local[&k].0);
             }
@@ -427,6 +469,8 @@ fn line_up_rows<K: Copy + Ord>(
     let turn = row_frame(stack);
     let height = |k: K, p: &Placement| p.width * local[&k].1.aspect();
     let mut inner: Vec<K> = rows.get(main_row).cloned().unwrap_or_default();
+    // The glued pairs of the row being placed, the same buffer for every row.
+    let mut pairs: Vec<(K, K)> = Vec::new();
     let order: Vec<(usize, f32)> = (0..main_row)
         .rev()
         .map(|r| (r, 1.0))
@@ -448,6 +492,7 @@ fn line_up_rows<K: Copy + Ord>(
                 turn,
                 dir * shift,
                 seen_rows,
+                true,
             )
         };
         // The least move, outwards or back (a row lined up over the next one from the
@@ -463,7 +508,7 @@ fn line_up_rows<K: Copy + Ord>(
                 return None;
             }
             let mut lo = hi - step;
-            for _ in 0..40 {
+            while hi - lo > HALVED {
                 let mid = (lo + hi) / 2.0;
                 if ok(way * mid) {
                     hi = mid;
@@ -473,7 +518,7 @@ fn line_up_rows<K: Copy + Ord>(
             }
             Some(hi + CLEAR)
         };
-        let shift: f32 = if ok(0.0) {
+        let pushed: f32 = if ok(0.0) {
             0.0
         } else {
             match (least(1.0), least(-1.0)) {
@@ -482,6 +527,93 @@ fn line_up_rows<K: Copy + Ord>(
                 (None, Some(back)) => -back,
                 (None, None) => 0.0,
             }
+        };
+        // A row glued to the rows before it stays glued (see the module's description).
+        let over = sign > 0.0;
+        let stood = |k: K| local[&k].0;
+        let lined = |k: K| out[&k];
+        glued(&rows[r], &inner, &local, (turn, over, kept[r]), &mut pairs);
+        let closing = |p: K, u: K| {
+            close(
+                &|s: f32| seam_gap(p, u, &lined, &local, turn, dir * s, over).map(|g| g.0),
+                tallest,
+            )
+        };
+        // Each glued seam closes; so does each other seam of a glued monitor with the
+        // row it is glued to, along at least SHARES of the shorter edge, that needs the
+        // row at most TOUCH_GAP of its height nearer (the far end of a flat monitor glued
+        // over a curved row): as near as the seam that would open most needs.
+        let mut target: Option<f32> = None;
+        for &(p, u) in &pairs {
+            if let Some(s) = closing(p, u) {
+                target = Some(target.map_or(s, |t: f32| t.min(s)));
+            }
+        }
+        if let Some(at) = target {
+            let mut nearest = at;
+            for (i, &(_, u)) in pairs.iter().enumerate() {
+                if pairs[..i].iter().any(|q| q.1 == u) {
+                    continue;
+                }
+                let under = rows
+                    .iter()
+                    .filter(|row| pairs.iter().any(|(p, _)| row.contains(p)))
+                    .flatten();
+                for &p in under {
+                    let seam = !pairs.contains(&(p, u))
+                        && seam_gap(p, u, &lined, &local, turn, Vec3::ZERO, over)
+                            .is_some_and(|(_, share)| share >= SHARES);
+                    let near = |s: &f32| *s >= at - TOUCH_GAP as f32 * tallest;
+                    if let Some(s) = closing(p, u).filter(|_| seam).filter(near) {
+                        nearest = nearest.min(s);
+                    }
+                }
+            }
+            target = Some(nearest);
+        }
+        // Never into one row with the rows before it, and never deeper into a monitor
+        // of them than OVERLAP_MAX where it did not cover it as it stood.
+        let target = target.filter(|&s| {
+            let covered = |p: K, u: K| {
+                let (a, b) = (
+                    seen_in(p, &stood, &local, turn, Vec3::ZERO),
+                    seen_in(u, &stood, &local, turn, Vec3::ZERO),
+                );
+                covers(
+                    &a.placement.corners(a.height()),
+                    &b.placement.corners(b.height()),
+                    0.001,
+                )
+            };
+            let fits = || {
+                inner.iter().all(|&p| {
+                    rows[r].iter().all(|&u| {
+                        overlap(p, u, &lined, &local, turn, dir * s, over) <= OVERLAP_MAX
+                            || covered(p, u)
+                    })
+                })
+            };
+            apart(
+                &rows[r],
+                &inner,
+                &out,
+                &local,
+                screen,
+                turn,
+                dir * s,
+                seen_rows,
+                false,
+            ) && fits()
+        });
+        let shift = match target {
+            Some(s) => {
+                if let Some(kept_glued) = glued_out.as_deref_mut() {
+                    kept_glued.extend_from_slice(&pairs);
+                }
+                // Closed already (but for the last bits of a number), it stays.
+                if s.abs() > 1e-5 { s } else { 0.0 }
+            }
+            None => pushed,
         };
         if shift != 0.0 {
             for &k in &rows[r] {
@@ -493,6 +625,27 @@ fn line_up_rows<K: Copy + Ord>(
         inner.extend(rows[r].iter().copied());
     }
     out.into_iter().map(|(k, p)| (k, frame.place(p))).collect()
+}
+
+/// The pairs of monitors [`line_up`] keeps glued, the one of the row nearer the main
+/// one first: what it closes the seam of rather than pushing apart (see the module's
+/// description). For tests and reports: whether a nudge changed this decision.
+#[doc(hidden)]
+pub fn glued_pairs<K: Copy + Ord>(
+    all: &[Monitor<K>],
+    frame: &Frame,
+    main: Option<K>,
+    previous_rows: Option<&[Vec<K>]>,
+    lid: Option<K>,
+) -> Vec<(K, K)> {
+    let ids: Vec<K> = all.iter().map(|m| m.id).collect();
+    let seen_rows = rows_of(&ids, &Room::new(frame, all), previous_rows);
+    let monitors: Vec<Monitor<K>> = all.iter().filter(|m| Some(m.id) != lid).copied().collect();
+    let screen = all.iter().find(|m| Some(m.id) == lid).copied();
+    let mut pairs = Vec::new();
+    line_up_rows(&monitors, frame, main, &seen_rows, screen, Some(&mut pairs));
+    pairs.sort();
+    pairs
 }
 
 /// How a row's monitors line up when its steps go.
@@ -730,7 +883,8 @@ fn straighten_flat<K: Copy + Ord>(row: &[(K, Placement, PixelSize)]) -> Vec<(K, 
 /// Whether `row` moved by `shift` keeps apart from the monitors `inner`: none covers
 /// one of them as seen, and, seen in the frame `turn` (the whole's) with the laptop
 /// `screen` where it stands and `rows` (as first seen) as what was, `row` is a row of its
-/// own, so it is taken for one row with none of them. Corners and rows are taken in that frame: where two
+/// own, so it is taken for one row with none of them (only that, without
+/// `covering_counts`). Corners and rows are taken in that frame: where two
 /// monitors are too far apart around the eye to be projected together, covering falls
 /// back to angles, which must be the whole's own.
 #[allow(clippy::too_many_arguments)]
@@ -743,6 +897,7 @@ fn apart<K: Copy + Ord>(
     turn: Quat,
     shift: Vec3,
     rows: &[Vec<K>],
+    covering_counts: bool,
 ) -> bool {
     let size = |k: K| match screen {
         Some((id, (_, px))) if id == k => px,
@@ -763,12 +918,14 @@ fn apart<K: Copy + Ord>(
         }
     };
     let corners = |k: K| placed(k).corners(placed(k).width * size(k).aspect());
-    let covering = row.iter().any(|&u| {
-        inner
-            .iter()
-            .any(|&p| covers(&corners(p), &corners(u), 0.001))
-    });
-    if covering {
+    let covering = || {
+        row.iter().any(|&u| {
+            inner
+                .iter()
+                .any(|&p| covers(&corners(p), &corners(u), 0.001))
+        })
+    };
+    if covering_counts && covering() {
         return false;
     }
     let ids: Vec<K> = inner
@@ -795,4 +952,181 @@ fn apart<K: Copy + Ord>(
         r.sort();
         r == mine
     })
+}
+
+/// How far the edge `a0`..`a1` is from lying along the edge `b0`..`b1` where they run
+/// side by side: of the stretch of `b` that `a` reaches over (its ends seen square
+/// from `b`), how far its two ends are from `a`. `None` when `a` reaches over none of
+/// `b`. Two edges joined by the magnet along one line give 0; edges that only cross, or
+/// one hanging crooked over the other, give how far one end of the stretch stands off.
+/// With how long the stretch is, a share of the shorter edge.
+fn along(a0: Vec3, a1: Vec3, b0: Vec3, b1: Vec3) -> Option<(f32, f32)> {
+    let d = b1 - b0;
+    let foot = |p: Vec3| (p - b0).dot(d) / d.length_squared().max(1e-12);
+    let (t0, t1) = (foot(a0), foot(a1));
+    let (lo, hi) = (t0.min(t1).max(0.0), t0.max(t1).min(1.0));
+    if hi < lo {
+        return None;
+    }
+    let shorter = d.length().min((a1 - a0).length()).max(1e-6);
+    let share = (hi - lo) * d.length() / shorter;
+    let to_a = |p: Vec3| {
+        let e = a1 - a0;
+        let s = ((p - a0).dot(e) / e.length_squared().max(1e-12)).clamp(0.0, 1.0);
+        p.distance(a0 + e * s)
+    };
+    Some((to_a(b0 + d * lo).max(to_a(b0 + d * hi)), share))
+}
+
+/// The monitors of `row` glued to those of `inner` they stand over (`over`) or under, as
+/// the monitors stood (`local`), into `out` as `(inner one, row one)`. Seen in the frame
+/// `turn` (the whole's). Glued: the edges they face each other with run along each
+/// other along at least [`SHARES`] of the shorter (a corner meeting a corner is no seam)
+/// and lie along one another in the room to within [`GLUED`] of the shorter one's
+/// height, at most [`GLUED_MOST`] (the magnet joins them along one line); or, the row
+/// `lined` up already, meet as the eye sees them in the middle of the edge they share to
+/// within [`CLOSED`] in the inner one's height (as lining up leaves a glued seam).
+fn glued<K: Copy + Ord>(
+    row: &[K],
+    inner: &[K],
+    local: &BTreeMap<K, (Placement, PixelSize)>,
+    (turn, over, lined): (Quat, bool, bool),
+    out: &mut Vec<(K, K)>,
+) {
+    let edges = |k: K| {
+        let (p, px) = local[&k];
+        let h = p.height(px);
+        let [tl, tr, br, bl] = p.corners(h);
+        (h, (tl, tr), (bl, br))
+    };
+    let stood = |k: K| local[&k].0;
+    out.clear();
+    for &u in row {
+        let (hu, top_u, bottom_u) = edges(u);
+        for &p in inner {
+            let (hp, top_p, bottom_p) = edges(p);
+            let ((a0, a1), (b0, b1)) = if over {
+                (bottom_u, top_p)
+            } else {
+                (top_u, bottom_p)
+            };
+            let near = (GLUED * hu.min(hp)).min(GLUED_MOST);
+            let in_room =
+                along(a0, a1, b0, b1).is_some_and(|(off, share)| off <= near && share >= SHARES);
+            let seen = lined
+                && seam_gap(p, u, &stood, local, turn, Vec3::ZERO, over)
+                    .is_some_and(|(gap, share)| gap.abs() * hp <= CLOSED && share >= SHARES);
+            if in_room || seen {
+                out.push((p, u));
+            }
+        }
+    }
+}
+
+/// Monitor `k` where `at` puts it, moved by `shift`, in the frame `turn` (the whole's).
+fn seen_in<K: Copy + Ord>(
+    k: K,
+    at: &dyn Fn(K) -> Placement,
+    local: &BTreeMap<K, (Placement, PixelSize)>,
+    turn: Quat,
+    shift: Vec3,
+) -> Monitor<K> {
+    let q = at(k);
+    Monitor {
+        id: k,
+        px: local[&k].1,
+        placement: Placement {
+            position: turn.inverse() * (q.position + shift),
+            rotation: (turn.inverse() * q.rotation).normalize(),
+            width: q.width,
+        },
+    }
+}
+
+/// How far apart `u` (of the row, moved by `shift`) is from `p` (of the rows before
+/// it), both where `at` puts them, as the eye sees them in the middle of the edge they
+/// share: a share of `p`'s height (negative where they overlap), with how much of the
+/// shorter edge they share. Seen in the frame `turn` (the whole's), `u` over `p`
+/// (`over`) or under it. `None` when they share none there.
+fn seam_gap<K: Copy + Ord>(
+    p: K,
+    u: K,
+    at: &dyn Fn(K) -> Placement,
+    local: &BTreeMap<K, (Placement, PixelSize)>,
+    turn: Quat,
+    shift: Vec3,
+    over: bool,
+) -> Option<(f32, f32)> {
+    let side = if over { Side::Above } else { Side::Below };
+    let (mp, mu) = (
+        seen_in(p, at, local, turn, Vec3::ZERO),
+        seen_in(u, at, local, turn, shift),
+    );
+    if !near_around(&mp, &mu) {
+        return None;
+    }
+    let r = relate_pair(&mp, &mu, side).filter(|r| r.shared > 0.0)?;
+    Some((r.apart as f32, r.seam as f32))
+}
+
+/// How deep, as seen, the edges of `u` (moved by `shift`) and `p` facing each other
+/// reach into the other monitor: the most along the stretch they share, as a share of
+/// the height of the one reached into (0 when they do not overlap or do not face each
+/// other). As for [`seam_gap`].
+fn overlap<K: Copy + Ord>(
+    p: K,
+    u: K,
+    at: &dyn Fn(K) -> Placement,
+    local: &BTreeMap<K, (Placement, PixelSize)>,
+    turn: Quat,
+    shift: Vec3,
+    over: bool,
+) -> f32 {
+    let side = if over { Side::Above } else { Side::Below };
+    let (mp, mu) = (
+        seen_in(p, at, local, turn, Vec3::ZERO),
+        seen_in(u, at, local, turn, shift),
+    );
+    if !near_around(&mp, &mu) {
+        return 0.0;
+    }
+    let into_p = reach_pair(&mp, &mu, side, OVERLAP_SAMPLES);
+    let into_u = reach_pair(&mu, &mp, side.opposite(), OVERLAP_SAMPLES);
+    let deepest = into_p.unwrap_or(0.0).max(into_u.unwrap_or(0.0));
+    deepest.max(0.0) as f32
+}
+
+/// Whether two monitors stand within a quarter turn of each other around the eye: one
+/// behind the other's back is no neighbour, and where around the eye its angles are cut
+/// would decide what is seen of the two.
+fn near_around<K>(a: &Monitor<K>, b: &Monitor<K>) -> bool {
+    let flat = |v: Vec3| Vec3::new(v.x, 0.0, v.z).normalize_or_zero();
+    flat(a.placement.position).dot(flat(b.placement.position)) > 0.0
+}
+
+/// Where `gap` (a seam's gap as the row moves outwards by so much) is 0, within `reach`
+/// either way of 0 (to [`HALVED`]); `None` when it is not, or the seam goes.
+fn close(gap: &dyn Fn(f32) -> Option<f32>, reach: f32) -> Option<f32> {
+    let at0 = gap(0.0)?;
+    // A gap closes inwards, an overlap outwards.
+    let way = if at0 > 0.0 { -1.0 } else { 1.0 };
+    let open = |s: f32| gap(way * s).map(|g| (g > 0.0) == (at0 > 0.0));
+    let step = reach / 8.0;
+    let (mut near, mut far) = (0.0f32, step);
+    while open(far)? {
+        if far >= reach {
+            return None;
+        }
+        near = far;
+        far += step;
+    }
+    while far - near > HALVED {
+        let mid = (near + far) / 2.0;
+        if open(mid).unwrap_or(false) {
+            near = mid;
+        } else {
+            far = mid;
+        }
+    }
+    Some(way * (near + far) / 2.0)
 }
