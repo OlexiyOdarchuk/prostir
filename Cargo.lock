@@ -3617,7 +3617,6 @@ dependencies = [
  "anyhow",
  "async-channel",
  "clap",
- "drm-fourcc",
  "env_logger",
  "gbm",
  "gstreamer",

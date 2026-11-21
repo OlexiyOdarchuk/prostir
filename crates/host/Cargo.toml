@@ -14,9 +14,22 @@ name = "prostir"
 path = "src/main.rs"
 
 [features]
+default = ["desktop"]
+# The real desktops (KDE Plasma, Hyprland): what only they use, so a build with the
+# fake desktop has no dependency it does not use.
+desktop = [
+    "dep:gbm",
+    "dep:gstreamer-allocators",
+    "dep:ksni",
+    "dep:wayland-client",
+    "dep:wayland-protocols",
+    "dep:wayland-protocols-plasma",
+    "dep:wayland-protocols-wlr",
+]
 # For the end-to-end tests only (crates/host/tests/e2e): the platform is a fake desktop in
 # memory instead of KDE Plasma or Hyprland (see src/platform/fake). Never in releases.
-# `cargo e2e` runs the tests with it.
+# It replaces `desktop`, so it is built without the default features: `cargo e2e`
+# runs the tests so (`--no-default-features --features fake-desktop`).
 fake-desktop = ["dep:gstreamer-base"]
 
 # Started by the end-to-end tests with the fake desktop and driven by a fake headset.
@@ -46,16 +59,15 @@ gstreamer-app = "0.25"
 # The fake desktop's picture source (a GStreamer element of its own).
 gstreamer-base = { version = "0.25", optional = true }
 gstreamer-video = { version = "0.25", features = ["v1_24"] }
-wayland-client = "0.31"
-wayland-protocols-plasma = { version = "0.3", features = ["client"] }
-ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
+wayland-client = { version = "0.31", optional = true }
+wayland-protocols-plasma = { version = "0.3", features = ["client"], optional = true }
+ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"], optional = true }
 zbus.workspace = true
-wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
-gbm = { version = "0.18.0", default-features = false }
-gstreamer-allocators = "0.25"
-drm-fourcc = "2.2.0"
+wayland-protocols = { version = "0.32", features = ["client", "unstable"], optional = true }
+gbm = { version = "0.18.0", default-features = false, optional = true }
+gstreamer-allocators = { version = "0.25", optional = true }
 serde_json.workspace = true
-wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"], optional = true }
 
 [dev-dependencies]
 prostir-testkit.workspace = true

@@ -121,7 +121,7 @@ impl GpuDevices {
     }
 
     /// Devices that share VA displays too, for measuring both ways.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "desktop"))]
     pub fn sharing_va() -> Self {
         Self {
             va: true,

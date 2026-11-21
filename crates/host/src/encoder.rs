@@ -777,6 +777,8 @@ mod live {
     /// makes them in its own process), pushed into an `appsrc` (as on Hyprland), and go
     /// through the same pipeline a stream uses. The time is from the frame entering the
     /// converter to its access unit leaving the parser.
+    // GPU buffers as the real desktops hand them over (`gstreamer-allocators`).
+    #[cfg(feature = "desktop")]
     #[test]
     #[ignore = "by hand: a measurement on a graphics card"]
     fn va_display_sharing() {

@@ -92,9 +92,17 @@ pub mod sound;
 #[cfg(unix)]
 mod sound_events;
 
-#[cfg(all(target_os = "linux", not(feature = "fake-desktop")))]
+#[cfg(all(
+    target_os = "linux",
+    feature = "desktop",
+    not(feature = "fake-desktop")
+))]
 mod linux;
-#[cfg(all(target_os = "linux", not(feature = "fake-desktop")))]
+#[cfg(all(
+    target_os = "linux",
+    feature = "desktop",
+    not(feature = "fake-desktop")
+))]
 pub use linux::*;
 
 // A desktop inside the process, for the end-to-end tests only (see `fake/mod.rs`). It
@@ -142,6 +150,9 @@ pub mod local_api;
 
 #[cfg(not(any(target_os = "linux", feature = "fake-desktop")))]
 compile_error!("Prostir has no platform layer for this operating system yet (see platform/mod.rs)");
+
+#[cfg(not(any(feature = "desktop", feature = "fake-desktop")))]
+compile_error!("Prostir needs a desktop: the default feature `desktop`, or `fake-desktop`");
 
 /// A virtual monitor to make: its mode and scale.
 #[derive(Debug, Clone, PartialEq)]

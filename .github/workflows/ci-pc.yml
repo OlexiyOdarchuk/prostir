@@ -73,6 +73,6 @@ jobs:
       - run: cargo test -p prostir-settings --locked --lib --test texts --test window
       # The PC app with the fake desktop, driven by a fake headset (crates/host/tests/e2e).
       - name: Clippy with the fake desktop
-        run: cargo clippy -p prostir-host --features fake-desktop --all-targets --locked -- -D warnings
+        run: cargo clippy -p prostir-host --no-default-features --features fake-desktop --all-targets --locked -- -D warnings
       - name: End-to-end tests
         run: cargo e2e --locked

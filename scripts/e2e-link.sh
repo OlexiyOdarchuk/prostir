@@ -21,7 +21,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RATE="${1:-100mbit}"
 DELAY="${2:-2ms}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target/e2e-link}"
-TEST=(cargo test -q --release -p prostir-host --features fake-desktop --test e2e)
+TEST=(cargo test -q --release -p prostir-host --no-default-features --features fake-desktop --test e2e)
 
 cd "$ROOT"
 # Built here: the namespace has no network to fetch anything with.

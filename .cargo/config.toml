@@ -6,4 +6,4 @@ rustflags = ["--cfg", "aes_armv8", "--cfg", "polyval_armv8"]
 
 # `cargo e2e`: the PC app's end-to-end tests, with the fake desktop (crates/host/tests/e2e).
 [alias]
-e2e = "test -p prostir-host --features fake-desktop --test e2e"
+e2e = "test -p prostir-host --no-default-features --features fake-desktop --test e2e"
