@@ -361,7 +361,7 @@ prostir ctl closer [N] | farther [N]       # Distance -N / +N, 1 by default
 prostir ctl preset N
 prostir ctl monitor list | add WxH[@1.25|@125%] | remove ID | retry ID | primary ID
 prostir ctl screen show|hide ID            # the PC's own displays
-prostir ctl quality MBIT | sharp on|off | codec h264|h265|auto [--cpu]
+prostir ctl quality MBIT | sharp on|off | codec h264|hevc|auto [--cpu]
 prostir ctl sound headset|pc
 prostir ctl pair | pair stop
 prostir ctl headsets | forget HEADSET | forget --all

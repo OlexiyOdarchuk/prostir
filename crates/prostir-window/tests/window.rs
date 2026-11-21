@@ -572,12 +572,12 @@ fn a_failed_monitor_is_named_once() {
             .iter_mut()
             .find(|d| d.name == "Prostir-4")
             .unwrap();
-        d.failure.as_mut().unwrap().text = "2560x1440 більше, ніж шолом декодує в H265".into();
+        d.failure.as_mut().unwrap().text = "2560x1440 більше, ніж шолом декодує в HEVC".into();
     });
     let (mut h, _handle) = window(mock, Setup::default());
     open(&mut h, Page::Overview);
     h.get_by_label(
-        "Prostir-4: 2560x1440 більше, ніж шолом декодує в H265. Решта моніторів працює.",
+        "Prostir-4: 2560x1440 більше, ніж шолом декодує в HEVC. Решта моніторів працює.",
     );
 }
 

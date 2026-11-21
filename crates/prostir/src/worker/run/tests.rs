@@ -247,8 +247,8 @@ fn a_kept_encoder_is_tried_again_later() {
     assert_eq!(
         kept_note(Codec::H264, Codec::H265),
         t(
-            "лишився H.264: H.265 не запустився",
-            "kept H.264: H.265 did not start"
+            "лишився H.264: HEVC не запустився",
+            "kept H.264: HEVC did not start"
         )
     );
 }
