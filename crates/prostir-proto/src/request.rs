@@ -74,7 +74,8 @@ wire_enum! {
     pub enum Command {
         /// Bring everything in front.
         1 => Recenter,
-        /// Switch to the profile of this name; answered once it is in place.
+        /// Switch to a profile: the profile's number, 1 to 3, as the headset menu shows
+        /// it; answered once it is in place.
         2 => Profile {
             #[wire(max = MAX_DISPLAY_NAME)]
             name: String,

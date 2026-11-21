@@ -211,7 +211,7 @@ impl Mock {
                 percent: 72,
                 charging: false,
             }),
-            profile: Some("Робота".into()),
+            profile: Some("1".into()),
             mic_allowed: Some(true),
             mic_on: true,
             main: true,

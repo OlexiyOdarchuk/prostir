@@ -522,7 +522,7 @@ a process of its own, so the background part never loads its graphics libraries 
 `-v` or `--version` prints the version, with any command.
 
 `prostir ctl` asks the running Prostir, from a terminal, a script or a hot key (KDE's
-Shortcuts, Hyprland's `bind`): `prostir ctl recenter`, `prostir ctl profile Work`,
+Shortcuts, Hyprland's `bind`): `prostir ctl recenter`, `prostir ctl profile 1`,
 `prostir ctl closer 2`, `prostir ctl monitor add 2560x1440@125%`, `prostir ctl
 quality 50`, `prostir ctl status`, `prostir ctl watch` (a line for each change, until
 Ctrl+C). `prostir ctl help` lists every command. With `--json` each prints JSON. The

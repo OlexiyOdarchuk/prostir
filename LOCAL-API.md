@@ -61,7 +61,7 @@ so) and does not look for one later.
 | `Call` | `s request_json` | `s answer_json` | any [request](#requests), at most 64 KiB; the window and `ctl` use it |
 | `GetState` | | `u revision, s state_json` | the whole [state](#state) |
 | `Recenter`, `LineUp`, `ShowMouse`, `ResetArrangement` | | | commands for the headset |
-| `Profile` | `s name` | | |
+| `Profile` | `s name` | | `name`: the profile's number, 1 to 3, as the headset menu shows it |
 | `Cinema`, `Focus`, `Follow`, `NoLimits`, `SetMic` | `b on` | | `SetMic` is refused, see below |
 | `Distance` | `n steps` | | closer (below 0) or further |
 | `Preset` | `y preset` | | |
@@ -86,7 +86,7 @@ busctl --user --timeout=35 call io.github.OlexiyOdarchuk.Prostir \
     /io/github/OlexiyOdarchuk/Prostir io.github.OlexiyOdarchuk.Prostir1 Recenter
 gdbus call --session --timeout 35 --dest io.github.OlexiyOdarchuk.Prostir \
     --object-path /io/github/OlexiyOdarchuk/Prostir \
-    --method io.github.OlexiyOdarchuk.Prostir1.Profile Work
+    --method io.github.OlexiyOdarchuk.Prostir1.Profile 2
 ```
 
 (`busctl` needs `--` before a negative number: `... call -- io.github... Distance n -2`.)
@@ -145,7 +145,7 @@ The D-Bus error name is `io.github.OlexiyOdarchuk.Prostir1.Error.` and one of:
 | `Capture` | the picture could not be taken |
 | `Sound` | the sound could not be switched |
 | `NotOnDisplays` | the mouse is on none of the displays |
-| `NoSuchProfile` | the headset has no profile of that name |
+| `NoSuchProfile` | no profile saved in that slot |
 | `BadArgument` | a value out of range, or a request that does not read |
 | `NotConnected` | no headset is connected (for a command for the headset) |
 | `TimedOut` | the headset did not answer within 30 s |
@@ -177,7 +177,7 @@ only guests are connected, commands are refused with `NotAllowed`. Without a hea
 | `request` | Arguments |
 |---|---|
 | `recenter`, `line_up`, `show_mouse`, `reset_arrangement` | |
-| `profile` | `name` (string) |
+| `profile` | `name` (string): the profile's number, 1 to 3, as the headset menu shows it |
 | `cinema`, `focus`, `follow`, `no_limits` | `on` (bool) |
 | `distance` | `steps` (-128 to 127; below 0 is closer) |
 | `preset` | `preset` (0 to 255) |
@@ -359,7 +359,7 @@ Prostir leaves and comes back on the bus (it keeps watching).
 prostir ctl status [--json]
 prostir ctl watch [--json]                 # what happens, a line each, until Ctrl+C
 prostir ctl recenter | lineup | showmouse | reset
-prostir ctl profile NAME
+prostir ctl profile N                      # the profile's number, 1 to 3, as the headset menu shows it
 prostir ctl cinema|focus|follow|mic|nolimits on|off
 prostir ctl closer [N] | farther [N]       # Distance -N / +N, 1 by default
 prostir ctl preset N
