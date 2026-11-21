@@ -458,11 +458,13 @@ fn moving_over_and_broken_files() {
     std::fs::write(dir.join("monitors.txt"), old).unwrap();
     std::fs::write(dir.join("count"), "off\n").unwrap();
     std::fs::write(dir.join("screens.txt.tmp"), "half a fi").unwrap();
+    std::fs::write(dir.join("settings.txt.tmp.4321.7"), "half a fi").unwrap();
     let store = Store::open(Some(dir.clone()), Run::default());
     assert!(!store.settings.mirror);
     assert_eq!(store.settings.count, Counting::No);
     assert_eq!(store.screens().specs.len(), 2);
     assert!(!dir.join("screens.txt.tmp").exists());
+    assert!(!dir.join("settings.txt.tmp.4321.7").exists());
     store.close();
     assert_eq!(
         std::fs::read_to_string(dir.join("monitors.txt")).unwrap(),

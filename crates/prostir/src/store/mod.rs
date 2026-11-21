@@ -295,8 +295,8 @@ impl Store {
     fn load(&mut self) {
         let Some(dir) = self.dir.clone() else { return };
         // A write cut short leaves its temporary file; the real one is whole.
-        for name in ["settings.txt.tmp", "screens.txt.tmp", "headsets.txt.tmp"] {
-            let _ = std::fs::remove_file(dir.join(name));
+        for name in ["settings.txt", "screens.txt", "headsets.txt"] {
+            prostir_proto::secure::remove_leftovers(&dir.join(name));
         }
         let read = |name: &str| std::fs::read_to_string(dir.join(name)).ok();
         if let Some(text) = read("headsets.txt") {
