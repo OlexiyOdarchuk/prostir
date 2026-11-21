@@ -14,7 +14,7 @@ pub mod tray;
 mod usb;
 
 pub use desktop::connect;
-pub use screenshot::{has_picture, screenshot_path};
+pub use screenshot::{has_picture, screenshot_dir, screenshot_path};
 pub use system::{
     broadcast_addresses, clean_up_after_crash, config_home, give_memory_back, hostname,
     import_session_environment, notice_mark, run, single_instance, watcher,

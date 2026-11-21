@@ -6,17 +6,21 @@
 //! them, with the same answers and errors.
 //!
 //! MCP runs over stdio: JSON-RPC 2.0, one message a line. Only the protocol's
-//! messages go to stdout; the log goes to stderr. Requests are handled one after the
-//! other; a tool that waits (a command for the headset, `wait_for_state`) holds the
-//! next ones meanwhile. Nothing starts Prostir but the tool `start`.
+//! messages go to stdout; the log goes to stderr. A thread of its own reads stdin: it
+//! answers `ping` at once and takes `notifications/cancelled`, while the requests go
+//! to the server one after the other; a tool that waits (a command for the headset,
+//! `wait_for_state`) holds the next ones meanwhile, and a wait ends when it is
+//! cancelled. Nothing starts Prostir but the tool `start`.
 
 use std::io::{BufRead, Write};
-use std::sync::{Arc, Condvar, Mutex};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 
-use crate::api::{Answer, Request};
+use crate::api::{Answer, ApiError, Request};
 use crate::ctl::{self, ClientError, CtlClient, Watched};
 
 /// The versions of MCP this server speaks, the newest first.
@@ -30,7 +34,15 @@ const INVALID_PARAMS: i64 = -32602;
 
 /// How long `wait_for_state` waits by default, and at most.
 const WAIT_DEFAULT: f64 = 10.0;
-const WAIT_MAX: f64 = 120.0;
+const WAIT_MAX: f64 = 50.0;
+/// The longest a wait sleeps at once, so that a cancellation ends it soon.
+const SLICE: Duration = Duration::from_millis(100);
+/// How often a wait says how long it has waited, where the client asked for that.
+const PROGRESS_EVERY: Duration = Duration::from_secs(1);
+/// A picture larger than this is not sent: its file is kept, and the answer names it.
+const IMAGE_MAX: usize = 5 * 1024 * 1024;
+/// How a PNG file begins.
+const PNG_MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n";
 
 const INSTRUCTIONS: &str = "\
 Prostir streams virtual monitors of this PC (KDE Plasma, Hyprland) to a Meta Quest \
@@ -38,9 +50,25 @@ headset. These tools are the local API of the Prostir running for this user: eac
 is one request, answered with the revision of the state that already shows the change \
 (LOCAL-API.md describes every field). Look at the result with get_state, \
 list_monitors, wait_for_state and screenshot_monitor. Prostir runs only while \
-something needs it (a headset, monitors waiting for one, its settings window): the \
-tools then answer NotRunning, and only the start tool starts it. Commands for the \
-headset need a connected headset (NotConnected otherwise) and wait up to 30 s for it.";
+something needs it (a headset, monitors waiting for one, its settings window). While \
+it is not running, the tools answer NotRunning; only the start tool starts it. \
+Commands for the headset need a connected headset (NotConnected otherwise) and wait up \
+to 30 s for it.";
+
+/// Where the protocol's messages go (stdout): whole lines, from any thread.
+pub struct Out(Mutex<Box<dyn Write + Send>>);
+
+impl Out {
+    pub fn new(to: impl Write + Send + 'static) -> Self {
+        Self(Mutex::new(Box::new(to)))
+    }
+
+    fn send(&self, message: &Value) {
+        let mut to = self.0.lock().unwrap();
+        // A client that went away is seen as the end of stdin.
+        let _ = writeln!(to, "{message}").and_then(|()| to.flush());
+    }
+}
 
 /// Counts the state's changes the bus told of, so a wait wakes on each.
 #[derive(Default)]
@@ -60,96 +88,183 @@ impl Changes {
         *self.seen.lock().unwrap()
     }
 
-    /// Sleeps until a change after `since`, `timeout` at most.
-    fn wait(&self, since: u64, timeout: Duration) {
+    /// Sleeps until a change after `since`, `timeout` at most: whether one came.
+    fn wait(&self, since: u64, timeout: Duration) -> bool {
         let seen = self.seen.lock().unwrap();
-        let _ = self.told.wait_timeout_while(seen, timeout, |n| *n == since);
+        let (seen, _) = self
+            .told
+            .wait_timeout_while(seen, timeout, |n| *n == since)
+            .unwrap();
+        *seen != since
     }
 }
 
 /// Starts following the state's changes into the given [`Changes`].
 pub type Follow = Box<dyn FnOnce(Arc<Changes>)>;
+/// A new connection to Prostir's bus.
+pub type Connect = Box<dyn Fn() -> Result<Box<dyn CtlClient>, ClientError>>;
+/// Starts Prostir (the tool `start`): what to tell the agent, or the error's name and
+/// why.
+pub type Start = Box<dyn Fn() -> Result<String, (&'static str, String)>>;
+
+/// What the request being handled is told while it runs.
+#[derive(Default)]
+struct Asked {
+    /// The client cancelled it.
+    cancelled: Arc<AtomicBool>,
+    /// Where the client asked to hear how it goes (`_meta.progressToken`).
+    progress: Option<Value>,
+}
+
+/// What the thread reading stdin and the server share: the request being handled and
+/// its cancellation, and requests cancelled before they began.
+#[derive(Default)]
+struct Running {
+    now: Mutex<Option<(Value, Arc<AtomicBool>)>>,
+    early: Mutex<Vec<Value>>,
+}
+
+impl Running {
+    /// The client cancelled request `id`.
+    fn cancel(&self, id: &Value) {
+        if let Some((now, flag)) = self.now.lock().unwrap().as_ref()
+            && now == id
+        {
+            flag.store(true, Ordering::Release);
+            return;
+        }
+        let mut early = self.early.lock().unwrap();
+        // Only a few are kept: one cancelled long ago never comes.
+        if early.len() >= 64 {
+            early.remove(0);
+        }
+        early.push(id.clone());
+    }
+
+    /// Request `id` begins: `None` when it was cancelled already.
+    fn begin(&self, id: &Value) -> Option<Arc<AtomicBool>> {
+        let mut early = self.early.lock().unwrap();
+        if let Some(i) = early.iter().position(|e| e == id) {
+            early.remove(i);
+            return None;
+        }
+        drop(early);
+        let flag = Arc::new(AtomicBool::new(false));
+        *self.now.lock().unwrap() = Some((id.clone(), flag.clone()));
+        Some(flag)
+    }
+
+    fn end(&self) {
+        self.now.lock().unwrap().take();
+    }
+}
 
 /// The MCP server: the way to Prostir, and what a session of the protocol keeps.
 pub struct Server {
-    client: Result<Box<dyn CtlClient>, ClientError>,
-    /// Starts Prostir (the tool `start`): what to tell the agent, or why it did not.
-    start: Box<dyn Fn() -> Result<String, String>>,
+    connect: Connect,
+    /// Connected when a tool first needs it, and again after a connection broke.
+    client: Option<Box<dyn CtlClient>>,
+    start: Start,
     /// Starts following the state's changes, once a wait needs it.
     follow: Option<Follow>,
     changes: Option<Arc<Changes>>,
     /// How often a wait looks at the state itself, besides waking on each change.
     poll: Duration,
+    /// Where progress goes, while serving.
+    out: Option<Arc<Out>>,
+    /// The folder Prostir saves screenshots to: only a picture there is read.
+    shots: PathBuf,
 }
 
 impl Server {
-    pub fn new(
-        client: Result<Box<dyn CtlClient>, ClientError>,
-        start: Box<dyn Fn() -> Result<String, String>>,
-        follow: Option<Follow>,
-    ) -> Self {
+    pub fn new(connect: Connect, start: Start, follow: Option<Follow>, shots: PathBuf) -> Self {
         let poll = if follow.is_some() {
             Duration::from_secs(1)
         } else {
             Duration::from_millis(200)
         };
         Self {
-            client,
+            connect,
+            client: None,
             start,
             follow,
             changes: None,
             poll,
+            out: None,
+            shots,
         }
     }
 
-    /// Reads messages from `input` until it ends, answering each to `output`.
-    pub fn serve(
-        &mut self,
-        input: &mut dyn BufRead,
-        output: &mut dyn Write,
-    ) -> std::io::Result<()> {
-        let mut line = String::new();
-        loop {
-            line.clear();
-            if input.read_line(&mut line)? == 0 {
-                return Ok(());
-            }
-            if line.trim().is_empty() {
-                continue;
-            }
-            if let Some(reply) = self.handle_line(&line) {
-                writeln!(output, "{reply}")?;
-                output.flush()?;
+    /// Reads messages from `input` until it ends, answering each to `out`.
+    pub fn serve(&mut self, input: Box<dyn BufRead + Send>, out: &Arc<Out>) -> std::io::Result<()> {
+        self.out = Some(out.clone());
+        let running = Arc::new(Running::default());
+        let (to_server, messages) = mpsc::channel();
+        let reader = {
+            let (out, running) = (out.clone(), running.clone());
+            std::thread::Builder::new()
+                .name("mcp-stdin".into())
+                .spawn(move || read(input, &out, &running, &to_server))?
+        };
+        for message in messages {
+            if let Some(reply) = self.message(message, &running) {
+                out.send(&reply);
             }
         }
+        let _ = reader.join();
+        Ok(())
     }
 
     /// One line of input: the line to answer with, if any (not for notifications).
-    pub fn handle_line(&mut self, line: &str) -> Option<String> {
-        let message: Value = match serde_json::from_str(line) {
-            Ok(message) => message,
-            Err(e) => {
-                return Some(
-                    failure(&Value::Null, PARSE_ERROR, &format!("not JSON: {e}")).to_string(),
-                );
-            }
+    #[cfg(test)]
+    fn handle_line(&mut self, line: &str) -> Option<String> {
+        let reply = match serde_json::from_slice::<Value>(line.as_bytes()) {
+            Ok(message) => self.message(message, &Running::default()),
+            Err(e) => Some(not_json(&e)),
         };
-        match message {
+        reply.map(|r| r.to_string())
+    }
+
+    /// One message from the client (a request, a notification or a batch): the answer,
+    /// if there is one. A request cancelled before or while it ran gets none.
+    fn message(&mut self, message: Value, running: &Running) -> Option<Value> {
+        let message = match message {
             // A batch (MCP up to 2025-03-26): an answer for each request in it.
             Value::Array(batch) if batch.is_empty() => {
-                Some(failure(&Value::Null, INVALID_REQUEST, "an empty batch").to_string())
+                return Some(failure(&Value::Null, INVALID_REQUEST, "an empty batch"));
             }
             Value::Array(batch) => {
-                let replies: Vec<Value> =
-                    batch.into_iter().filter_map(|m| self.handle(m)).collect();
-                (!replies.is_empty()).then(|| Value::Array(replies).to_string())
+                let replies: Vec<Value> = batch
+                    .into_iter()
+                    .filter_map(|m| self.handle(m, &Asked::default()))
+                    .collect();
+                return (!replies.is_empty()).then_some(Value::Array(replies));
             }
-            message => self.handle(message).map(|reply| reply.to_string()),
-        }
+            message => message,
+        };
+        let id = message
+            .get("id")
+            .filter(|id| id.is_string() || id.is_number())
+            .cloned();
+        let Some(id) = id.filter(|_| message.get("method").is_some()) else {
+            return self.handle(message, &Asked::default());
+        };
+        let cancelled = running.begin(&id)?;
+        let asked = Asked {
+            cancelled: cancelled.clone(),
+            progress: message
+                .pointer("/params/_meta/progressToken")
+                .filter(|t| t.is_string() || t.is_number())
+                .cloned(),
+        };
+        let reply = self.handle(message, &asked);
+        running.end();
+        // The client gave up on it: it expects no answer.
+        reply.filter(|_| !cancelled.load(Ordering::Acquire))
     }
 
     /// One message: its answer, `None` for a notification or a response.
-    fn handle(&mut self, message: Value) -> Option<Value> {
+    fn handle(&mut self, message: Value, asked: &Asked) -> Option<Value> {
         let Value::Object(mut message) = message else {
             return Some(failure(&Value::Null, INVALID_REQUEST, "not an object"));
         };
@@ -168,7 +283,7 @@ impl Server {
         let params = message.remove("params").unwrap_or_else(|| json!({}));
         match (method, id) {
             (Some(method), Some(id)) if id.is_string() || id.is_number() => {
-                Some(match self.method(&method, &params) {
+                Some(match self.method(&method, &params, asked) {
                     Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
                     Err((code, text)) => failure(&id, code, &text),
                 })
@@ -178,8 +293,8 @@ impl Server {
                 INVALID_REQUEST,
                 "an id is a string or a number",
             )),
-            // Notifications (`notifications/initialized`, `notifications/cancelled`):
-            // nothing to answer, nothing to do.
+            // Notifications (`notifications/initialized`; `notifications/cancelled` is
+            // taken as it comes): nothing to answer, nothing to do.
             (Some(method), None) => {
                 log::debug!("mcp: {method}");
                 None
@@ -196,11 +311,16 @@ impl Server {
         }
     }
 
-    fn method(&mut self, method: &str, params: &Value) -> Result<Value, (i64, String)> {
+    fn method(
+        &mut self,
+        method: &str,
+        params: &Value,
+        asked: &Asked,
+    ) -> Result<Value, (i64, String)> {
         match method {
             "initialize" => {
-                let asked = params.get("protocolVersion").and_then(Value::as_str);
-                let version = asked
+                let wanted = params.get("protocolVersion").and_then(Value::as_str);
+                let version = wanted
                     .filter(|v| VERSIONS.contains(v))
                     .unwrap_or(VERSIONS[0]);
                 Ok(json!({
@@ -231,7 +351,7 @@ impl Server {
                     Some(Value::Object(args)) => args.clone(),
                     Some(_) => return Err((INVALID_PARAMS, "arguments are an object".into())),
                 };
-                Ok(match self.call(tool, &args) {
+                Ok(match self.call(tool, &args, asked) {
                     Ok(content) => json!({"content": content}),
                     Err(e) => json!({"content": [text(&e.to_string())], "isError": true}),
                 })
@@ -240,26 +360,51 @@ impl Server {
         }
     }
 
-    fn client(&self) -> Result<&dyn CtlClient, Value> {
-        self.client.as_deref().map_err(|e| refused(e, false))
+    /// The connection to Prostir's bus, made now if there is none.
+    fn connected(&mut self) -> Result<&dyn CtlClient, Value> {
+        if self.client.is_none() {
+            let client = (self.connect)().map_err(|e| refused(&e, false))?;
+            self.client = Some(client);
+        }
+        match self.client.as_deref() {
+            Some(client) => Ok(client),
+            None => Err(refused(&ClientError::NotRunning, false)),
+        }
+    }
+
+    /// What `e` says, the connection let go when it broke (made again next time).
+    fn failed(&mut self, e: &ClientError, for_headset: bool) -> Value {
+        if matches!(e, ClientError::Broken(_) | ClientError::NoBus(_)) {
+            self.client = None;
+        }
+        refused(e, for_headset)
     }
 
     /// Carries out `tool` with `args`: what it gives, or the error as JSON.
-    fn call(&mut self, tool: &Tool, args: &Map<String, Value>) -> Result<Vec<Value>, Value> {
+    fn call(
+        &mut self,
+        tool: &Tool,
+        args: &Map<String, Value>,
+        asked: &Asked,
+    ) -> Result<Vec<Value>, Value> {
+        if let Some(unknown) = args
+            .keys()
+            .find(|k| !tool.args.iter().any(|a| a.name == *k))
+        {
+            return Err(bad(&format!("{}: no argument {unknown:?}", tool.name)));
+        }
         match tool.does {
             Does::Ask(request) => {
-                let mut asked = args.clone();
-                asked.insert("request".into(), request.into());
-                let request = Request::from_json(&Value::Object(asked).to_string())
+                let mut fields = args.clone();
+                fields.insert("request".into(), request.into());
+                let request = Request::from_json(&Value::Object(fields).to_string())
                     .map_err(|f| json!({"error": f.error.name(), "text": f.text}))?;
                 let answer = self.ask(&request)?;
                 Ok(vec![text(&answer.to_json())])
             }
             Does::Call => {
                 let Some(request) = args.get("request").filter(|r| r.is_object()) else {
-                    return Err(
-                        json!({"error": "BadArgument", "text": "request: a request object"}),
-                    );
+                    return Err(bad("request: a request object"));
                 };
                 let request = Request::from_json(&request.to_string())
                     .map_err(|f| json!({"error": f.error.name(), "text": f.text}))?;
@@ -282,35 +427,34 @@ impl Server {
                 Ok(vec![text(&shown.to_string())])
             }
             Does::Screenshot => self.screenshot(args),
-            Does::Wait => self.wait(args),
+            Does::Wait => self.wait(args, asked),
             Does::Start => match (self.start)() {
                 Ok(said) => Ok(vec![text(
                     &json!({"started": true, "text": said}).to_string(),
                 )]),
-                Err(why) => Err(json!({"error": "NotRunning", "text": why})),
+                Err((name, why)) => Err(json!({"error": name, "text": why})),
             },
         }
     }
 
-    fn ask(&self, request: &Request) -> Result<Answer, Value> {
-        self.client()?
-            .call(request)
-            .map_err(|e| refused(&e, request.for_headset()))
+    fn ask(&mut self, request: &Request) -> Result<Answer, Value> {
+        let asked = self.connected()?.call(request);
+        asked.map_err(|e| self.failed(&e, request.for_headset()))
     }
 
     /// The state now: its revision and its JSON.
-    fn state(&self) -> Result<(u32, Value), Value> {
-        let (revision, text) = self.client()?.state().map_err(|e| refused(&e, false))?;
-        let state = serde_json::from_str(&text).map_err(
-            |e| json!({"error": "Other", "text": format!("the state does not read: {e}")}),
-        )?;
+    fn state(&mut self) -> Result<(u32, Value), Value> {
+        let got = self.connected()?.state();
+        let (revision, text) = got.map_err(|e| self.failed(&e, false))?;
+        let state = serde_json::from_str(&text).map_err(|e| {
+            json!({"error": ApiError::Other.name(), "text": format!("the state does not read: {e}")})
+        })?;
         Ok((revision, state))
     }
 
     /// `screenshot_monitor`: the picture, read from the file Prostir saved it to
-    /// (removed afterwards, unless `keep`).
-    fn screenshot(&self, args: &Map<String, Value>) -> Result<Vec<Value>, Value> {
-        let bad = |text: &str| json!({"error": "BadArgument", "text": text});
+    /// (removed afterwards, unless `keep`, or it is too large to send).
+    fn screenshot(&mut self, args: &Map<String, Value>) -> Result<Vec<Value>, Value> {
         let id = args
             .get("id")
             .and_then(Value::as_u64)
@@ -323,42 +467,51 @@ impl Server {
         };
         let answer = self.ask(&Request::Screenshot { id })?;
         let Some(path) = answer.path.clone() else {
-            return Err(json!({"error": "Other", "text": "the answer names no file"}));
+            return Err(
+                json!({"error": ApiError::Other.name(), "text": "the answer names no file"}),
+            );
         };
-        let png = std::fs::read(&path)
-            .map_err(|e| json!({"error": "Capture", "text": format!("{path}: {e}")}))?;
+        let capture = |text: String| json!({"error": ApiError::Capture.name(), "text": text});
+        let png = picture_at(Path::new(&path), &self.shots).map_err(capture)?;
+        let large = png.len() > IMAGE_MAX;
+        let keep = keep || large;
         if !keep && let Err(e) = std::fs::remove_file(&path) {
             log::warn!("mcp: cannot remove {path}: {e}");
         }
-        let said = json!({
+        let mut said = json!({
             "id": id,
             "whole": answer.whole.unwrap_or(false),
-            "path": keep.then_some(path),
+            "path": keep.then_some(&path),
             "bytes": png.len(),
             "revision": answer.revision,
         });
+        if large {
+            said["text"] = format!(
+                "too large to send (more than {} MB): kept at path",
+                IMAGE_MAX / (1024 * 1024)
+            )
+            .into();
+            return Ok(vec![text(&said.to_string())]);
+        }
         Ok(vec![
             text(&said.to_string()),
             json!({"type": "image", "data": base64(&png), "mimeType": "image/png"}),
         ])
     }
 
-    /// `wait_for_state`: until the condition holds in the state, or the time is up.
-    fn wait(&mut self, args: &Map<String, Value>) -> Result<Vec<Value>, Value> {
-        let condition =
-            Condition::read(args).map_err(|text| json!({"error": "BadArgument", "text": text}))?;
+    /// `wait_for_state`: until the condition holds in the state, the time is up, or
+    /// the client cancelled it.
+    fn wait(&mut self, args: &Map<String, Value>, asked: &Asked) -> Result<Vec<Value>, Value> {
+        let condition = Condition::read(args).map_err(|e| bad(&e))?;
         let timeout = match args.get("timeout") {
             None | Some(Value::Null) => WAIT_DEFAULT,
             Some(t) => t
                 .as_f64()
                 .filter(|t| (0.0..=WAIT_MAX).contains(t))
-                .ok_or_else(
-                    || json!({"error": "BadArgument", "text": "timeout: 0 to 120 seconds"}),
-                )?,
+                .ok_or_else(|| bad("timeout: 0 to 50 seconds"))?,
         };
-        let client = self.client()?;
         // Not running now: said at once, as every other tool says it.
-        if !client.running() {
+        if !self.connected()?.running() {
             return Err(refused(&ClientError::NotRunning, false));
         }
         if self.changes.is_none()
@@ -368,10 +521,15 @@ impl Server {
             follow(changes.clone());
             self.changes = Some(changes);
         }
-        let client = self.client()?;
+        let Some(client) = self.client.as_deref() else {
+            return Err(refused(&ClientError::NotRunning, false));
+        };
         let started = Instant::now();
         let until = started + Duration::from_secs_f64(timeout);
+        let mut told = started;
         let mut first = None;
+        // Prostir was away during the wait: back, its state is a change too.
+        let mut was_away = false;
         let mut last: (Option<u32>, Option<Value>) = (None, None);
         loop {
             let seen = self.changes.as_ref().map(|c| c.count());
@@ -380,7 +538,7 @@ impl Server {
                     let state: Value = serde_json::from_str(&json).unwrap_or_default();
                     let value = state.pointer(&condition.pointer).cloned();
                     let first = *first.get_or_insert(revision);
-                    if condition.holds(value.as_ref(), revision != first) {
+                    if condition.holds(value.as_ref(), was_away || revision != first) {
                         let waited = started.elapsed().as_millis() as u64;
                         let done =
                             json!({"revision": revision, "value": value, "waited_ms": waited});
@@ -389,30 +547,147 @@ impl Server {
                     last = (Some(revision), value);
                 }
                 // Gone meanwhile (restarting, say): looked at again until the time is up.
-                Err(ClientError::NotRunning) => last.0 = None,
+                Err(ClientError::NotRunning) => {
+                    was_away = true;
+                    last.0 = None;
+                }
                 Err(e) => return Err(refused(&e, false)),
             }
-            let left = until.saturating_duration_since(Instant::now());
-            if left.is_zero() {
+            if Instant::now() >= until {
                 let why = if last.0.is_none() {
                     "Prostir is not running"
                 } else {
                     "the condition did not hold in time"
                 };
                 return Err(json!({
-                    "error": "TimedOut",
+                    "error": ApiError::TimedOut.name(),
                     "text": format!("{why} (waited {timeout} s)"),
                     "revision": last.0,
                     "value": last.1,
                 }));
             }
-            let pause = left.min(self.poll);
-            match (&self.changes, seen) {
-                (Some(changes), Some(seen)) => changes.wait(seen, pause),
-                _ => std::thread::sleep(pause),
+            // Asleep until the state changes, the next look of its own, the end, or a
+            // cancellation.
+            let look = Instant::now() + self.poll;
+            loop {
+                if asked.cancelled.load(Ordering::Acquire) {
+                    return Err(json!({"error": ApiError::Other.name(), "text": "cancelled"}));
+                }
+                let now = Instant::now();
+                if let (Some(token), Some(out)) = (&asked.progress, &self.out)
+                    && now.duration_since(told) >= PROGRESS_EVERY
+                {
+                    told = now;
+                    out.send(&json!({
+                        "jsonrpc": "2.0",
+                        "method": "notifications/progress",
+                        "params": {
+                            "progressToken": token,
+                            "progress": now.duration_since(started).as_secs_f64(),
+                            "total": timeout,
+                            "message": "waiting for the state",
+                        },
+                    }));
+                }
+                let next = look.min(until);
+                if now >= next {
+                    break;
+                }
+                let slice = SLICE.min(next - now);
+                match (&self.changes, seen) {
+                    (Some(changes), Some(seen)) => {
+                        if changes.wait(seen, slice) {
+                            break;
+                        }
+                    }
+                    _ => std::thread::sleep(slice),
+                }
             }
         }
     }
+}
+
+/// Reads stdin, a message a line: a `ping` is answered and a cancellation taken here
+/// at once, everything else goes to the server. A line that is no JSON (not even
+/// UTF-8) is answered with a parse error, and reading goes on.
+fn read(
+    mut input: Box<dyn BufRead + Send>,
+    out: &Out,
+    running: &Running,
+    to_server: &mpsc::Sender<Value>,
+) {
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match input.read_until(b'\n', &mut line) {
+            Ok(0) => return,
+            Ok(_) => {}
+            Err(e) => {
+                log::warn!("mcp: stdin: {e}");
+                return;
+            }
+        }
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let message: Value = match serde_json::from_slice(&line) {
+            Ok(message) => message,
+            Err(e) => {
+                out.send(&not_json(&e));
+                continue;
+            }
+        };
+        let rpc = message.get("jsonrpc").and_then(Value::as_str) == Some("2.0");
+        let id = message
+            .get("id")
+            .filter(|id| id.is_string() || id.is_number());
+        match (rpc, message.get("method").and_then(Value::as_str), id) {
+            (true, Some("ping"), Some(id)) => {
+                out.send(&json!({"jsonrpc": "2.0", "id": id, "result": {}}));
+            }
+            (true, Some("notifications/cancelled"), None) => {
+                if let Some(id) = message.pointer("/params/requestId") {
+                    running.cancel(id);
+                }
+            }
+            _ => {
+                if to_server.send(message).is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// The answer to a line that is no JSON.
+fn not_json(e: &serde_json::Error) -> Value {
+    failure(&Value::Null, PARSE_ERROR, &format!("not JSON: {e}"))
+}
+
+/// The picture in the file at `path`, if it is one Prostir saved: a regular file (not
+/// a link) ending in `.png` right in `shots`, the folder screenshots go to, that begins
+/// as a PNG does. Anything else is left as it is.
+fn picture_at(path: &Path, shots: &Path) -> Result<Vec<u8>, String> {
+    let said = |why: &str| format!("{}: {why}", path.display());
+    let meta = std::fs::symlink_metadata(path).map_err(|e| said(&e.to_string()))?;
+    if !meta.file_type().is_file() {
+        return Err(said("not a regular file"));
+    }
+    if path.extension().and_then(|e| e.to_str()) != Some("png") {
+        return Err(said("not a .png file"));
+    }
+    let folder = path.parent().and_then(|p| p.canonicalize().ok());
+    if folder.is_none() || folder != shots.canonicalize().ok() {
+        return Err(said(&format!(
+            "not in {}, where Prostir saves screenshots",
+            shots.display()
+        )));
+    }
+    let png = std::fs::read(path).map_err(|e| said(&e.to_string()))?;
+    if !png.starts_with(PNG_MAGIC) {
+        return Err(said("not a PNG picture"));
+    }
+    Ok(png)
 }
 
 /// A JSON-RPC error answer.
@@ -423,6 +698,11 @@ fn failure(id: &Value, code: i64, message: &str) -> Value {
 /// Text content of a tool's result.
 fn text(text: &str) -> Value {
     json!({"type": "text", "text": text})
+}
+
+/// Arguments that do not read.
+fn bad(text: &str) -> Value {
+    json!({"error": ApiError::BadArgument.name(), "text": text})
 }
 
 /// The error of a tool as `ctl --json` says it: `{"error": NAME, "text": ...}`.
@@ -462,7 +742,7 @@ impl Condition {
             tests.push(Test::Contains(v.clone()));
         }
         match args.get("exists") {
-            None => {}
+            None | Some(Value::Null) => {}
             Some(Value::Bool(b)) => tests.push(Test::Exists(*b)),
             Some(_) => return Err("exists: true or false".into()),
         }
@@ -550,31 +830,98 @@ enum Touch {
 struct Tool {
     name: &'static str,
     description: &'static str,
-    /// Its arguments: name, JSON type, whether needed, what it is.
-    args: &'static [(&'static str, &'static str, bool, &'static str)],
+    args: &'static [Arg],
     does: Does,
     touch: Touch,
+}
+
+/// One argument of a tool, for its schema.
+#[derive(Clone, Copy)]
+struct Arg {
+    name: &'static str,
+    /// Its JSON type; empty for any.
+    kind: &'static str,
+    needed: bool,
+    about: &'static str,
+    min: Option<i64>,
+    max: Option<i64>,
+    /// The words it may be, where only those.
+    words: &'static [&'static str],
+}
+
+impl Arg {
+    const fn of(name: &'static str, kind: &'static str, about: &'static str) -> Self {
+        Self {
+            name,
+            kind,
+            needed: true,
+            about,
+            min: None,
+            max: None,
+            words: &[],
+        }
+    }
+
+    const fn optional(self) -> Self {
+        Self {
+            needed: false,
+            ..self
+        }
+    }
+
+    const fn within(self, min: i64, max: i64) -> Self {
+        Self {
+            min: Some(min),
+            max: Some(max),
+            ..self
+        }
+    }
+
+    const fn one_of(self, words: &'static [&'static str]) -> Self {
+        Self { words, ..self }
+    }
+
+    fn schema(&self) -> Value {
+        let mut schema = json!({"description": self.about});
+        if !self.kind.is_empty() {
+            schema["type"] = self.kind.into();
+        }
+        if let Some(min) = self.min {
+            schema["minimum"] = min.into();
+        }
+        if let Some(max) = self.max {
+            schema["maximum"] = max.into();
+        }
+        if !self.words.is_empty() {
+            schema["enum"] = self.words.into();
+        }
+        schema
+    }
 }
 
 impl Tool {
     /// As `tools/list` gives it.
     fn listed(&self) -> Value {
-        let mut properties = Map::new();
-        let mut required = Vec::new();
-        for (name, kind, needed, about) in self.args {
-            let mut schema = json!({"description": about});
-            if !kind.is_empty() {
-                schema["type"] = (*kind).into();
-            }
-            properties.insert((*name).into(), schema);
-            if *needed {
-                required.push(*name);
-            }
-        }
+        let properties: Map<String, Value> = self
+            .args
+            .iter()
+            .map(|a| (a.name.to_owned(), a.schema()))
+            .collect();
+        let required: Vec<&str> = self
+            .args
+            .iter()
+            .filter(|a| a.needed)
+            .map(|a| a.name)
+            .collect();
         json!({
             "name": self.name,
             "description": self.description,
-            "inputSchema": {"type": "object", "properties": properties, "required": required},
+            "inputSchema": {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+                "additionalProperties": false,
+            },
             "annotations": {
                 "readOnlyHint": self.touch == Touch::Reads,
                 "destructiveHint": self.touch == Touch::Destroys,
@@ -585,31 +932,21 @@ impl Tool {
     }
 }
 
-const ID: (&str, &str, bool, &str) = (
+const ID: Arg = Arg::of(
     "id",
     "integer",
-    true,
     "the display's id (displays[].id in the state)",
-);
-const ON: (&str, &str, bool, &str) = ("on", "boolean", true, "on (true) or off");
+)
+.within(0, u32::MAX as i64);
+const ON: Arg = Arg::of("on", "boolean", "on (true) or off");
 
 /// A command for the headset without arguments.
 const fn command(name: &'static str, description: &'static str) -> Tool {
-    Tool {
-        name,
-        description,
-        args: &[],
-        does: Does::Ask(name),
-        touch: Touch::Changes,
-    }
+    asks(name, description, &[])
 }
 
 /// A tool that is the request of the same name.
-const fn asks(
-    name: &'static str,
-    description: &'static str,
-    args: &'static [(&'static str, &'static str, bool, &'static str)],
-) -> Tool {
+const fn asks(name: &'static str, description: &'static str, args: &'static [Arg]) -> Tool {
     Tool {
         name,
         description,
@@ -635,33 +972,38 @@ static TOOLS: &[Tool] = &[
         name: "list_monitors",
         description: "The displays (id, kind virtual/physical/window, name, output, mode with \
                       w, h and scale, desk rectangle in logical pixels, state \
-                      starting/running/failed/absent/kept, failure) and the primary display's id.",
+                      starting/running/failed/absent/kept, failure) and the primary display's id. \
+                      A new monitor can stand running with desk null for a few seconds while the \
+                      headset places it: that is not off the desktop; wait for its desk (pointer \
+                      /displays, contains {\"id\": ID, \"desk\": {}}).",
         args: &[],
         does: Does::Monitors,
         touch: Touch::Reads,
     },
-    Tool {
-        name: "add_monitor",
-        description: "Adds a virtual monitor of w x h pixels at a scale in percent; answers its id. \
-                      It stands starting until it runs (running), failed if it could not start. \
-                      With no headset connected and no monitors on the desktop it joins the set \
-                      kept for the next headset (kept). Wait for it with wait_for_state.",
-        args: &[
-            ("w", "integer", true, "width in pixels"),
-            ("h", "integer", true, "height in pixels"),
-            (
+    asks(
+        "add_monitor",
+        "Adds a virtual monitor of w x h pixels at a scale in percent; answers its id. It \
+         stands starting until it runs (running), failed if it could not start. With no \
+         headset connected and no monitors on the desktop it joins the set kept for the next \
+         headset (kept). Wait for it with wait_for_state. Running, it can have desk null for \
+         a few seconds while the headset places it: wait for its desk too (pointer /displays, \
+         contains {\"id\": ID, \"desk\": {}}) rather than take it as off the desktop.",
+        &[
+            Arg::of("w", "integer", "width in pixels").within(1, 16384),
+            Arg::of("h", "integer", "height in pixels").within(1, 16384),
+            Arg::of(
                 "scale",
                 "integer",
-                false,
                 "scale in percent, 100 by default (limits.scales lists them)",
-            ),
+            )
+            .within(25, 400)
+            .optional(),
         ],
-        does: Does::Ask("add_monitor"),
-        touch: Touch::Changes,
-    },
+    ),
     Tool {
         name: "remove_monitor",
-        description: "Removes a virtual monitor (LastDisplay for the last one while a headset is connected).",
+        description: "Removes a virtual monitor (LastDisplay for the last one while a headset \
+                      is connected).",
         args: &[ID],
         does: Does::Ask("remove_monitor"),
         touch: Touch::Destroys,
@@ -680,8 +1022,8 @@ static TOOLS: &[Tool] = &[
                       the desktop.",
         args: &[
             ID,
-            ("x", "integer", true, "left edge, logical pixels"),
-            ("y", "integer", true, "top edge, logical pixels"),
+            Arg::of("x", "integer", "left edge, logical pixels").within(-65536, 65536),
+            Arg::of("y", "integer", "top edge, logical pixels").within(-65536, 65536),
         ],
         does: Does::Ask("place"),
         touch: Touch::Changes,
@@ -690,12 +1032,15 @@ static TOOLS: &[Tool] = &[
         "set_scale",
         "Another scale for a monitor, in percent: its output is made anew with the same id \
          (starting meanwhile).",
-        &[ID, ("scale", "integer", true, "scale in percent")],
+        &[
+            ID,
+            Arg::of("scale", "integer", "scale in percent").within(25, 400),
+        ],
     ),
     Tool {
         name: "show_pc_display",
         description: "Shows one of the PC's own displays (kind physical) in the headset, or hides it.",
-        args: &[ID, ("shown", "boolean", true, "shown in the headset")],
+        args: &[ID, Arg::of("shown", "boolean", "shown in the headset")],
         does: Does::Ask("show_physical"),
         touch: Touch::Changes,
     },
@@ -715,7 +1060,7 @@ static TOOLS: &[Tool] = &[
     asks(
         "profile",
         "Headset command: switches to the headset's profile of this name.",
-        &[("name", "string", true, "the profile's name")],
+        &[Arg::of("name", "string", "the profile's name")],
     ),
     asks("cinema", "Headset command: cinema mode on or off.", &[ON]),
     asks("focus", "Headset command: focus mode on or off.", &[ON]),
@@ -728,17 +1073,17 @@ static TOOLS: &[Tool] = &[
     asks(
         "distance",
         "Headset command: the monitors closer (steps below 0) or further.",
-        &[("steps", "integer", true, "-128 to 127")],
+        &[Arg::of("steps", "integer", "steps, below 0 closer").within(-128, 127)],
     ),
     asks(
         "preset",
         "Headset command: the headset's preset of this number.",
-        &[("preset", "integer", true, "0 to 255")],
+        &[Arg::of("preset", "integer", "the preset's number").within(0, 255)],
     ),
     asks(
         "set_quality",
         "The bitrate per monitor.",
-        &[("mbit", "integer", true, "Mbit/s, 5 to 100")],
+        &[Arg::of("mbit", "integer", "Mbit/s").within(5, 100)],
     ),
     asks(
         "set_sharp",
@@ -749,13 +1094,18 @@ static TOOLS: &[Tool] = &[
         "set_codec",
         "The video codec.",
         &[
-            ("codec", "string", true, "h264, h265 or auto"),
-            (
+            Arg::of(
+                "codec",
+                "string",
+                "the codec; auto is h265 where every side can",
+            )
+            .one_of(&["h264", "h265", "auto"]),
+            Arg::of(
                 "cpu",
                 "boolean",
-                false,
                 "encode on the CPU even where the graphics card could",
-            ),
+            )
+            .optional(),
         ],
     ),
     asks(
@@ -783,10 +1133,9 @@ static TOOLS: &[Tool] = &[
     Tool {
         name: "forget_headset",
         description: "Forgets a paired headset (it has to pair again); its session ends.",
-        args: &[(
+        args: &[Arg::of(
             "headset",
             "string",
-            true,
             "its key, its whole key or its name",
         )],
         does: Does::Ask("forget_headset"),
@@ -816,10 +1165,9 @@ static TOOLS: &[Tool] = &[
         description: "Any request of the local API, given whole as LOCAL-API.md writes it, for \
                       what no other tool covers: {\"request\": \"window_look\", \"theme\": \"dark\", \
                       \"palette\": \"ink\"}.",
-        args: &[(
+        args: &[Arg::of(
             "request",
             "object",
-            true,
             "the request, its name in the field request",
         )],
         does: Does::Call,
@@ -827,47 +1175,41 @@ static TOOLS: &[Tool] = &[
     },
     Tool {
         name: "screenshot_monitor",
-        description: "A picture of a virtual monitor or a window panel, as a PNG image. Where the \
-                      desktop can only take all of it (KDE Plasma while the monitor does not stream \
-                      to a headset) it is the whole desktop, and whole says so. The file Prostir \
-                      saves to the Pictures folder is removed afterwards unless keep. The picture \
-                      shows what is on that screen.",
+        description: "A picture of a virtual monitor or a window panel, as a PNG image. On KDE \
+                      Plasma while the monitor does not stream to a headset, the picture is of \
+                      the whole desktop: every screen and every window on it, and whole says \
+                      so. The file Prostir saves to the Pictures folder is removed afterwards \
+                      unless keep; a picture over 5 MB is not sent, its file is kept and its path \
+                      given.",
         args: &[
             ID,
-            (
-                "keep",
-                "boolean",
-                false,
-                "keep the file (its path is given)",
-            ),
+            Arg::of("keep", "boolean", "keep the file (its path is given)").optional(),
         ],
         does: Does::Screenshot,
-        touch: Touch::Reads,
+        touch: Touch::Changes,
     },
     Tool {
         name: "wait_for_state",
         description: "Waits until the value at a JSON Pointer (RFC 6901) in the state holds a \
                       condition: equals (exactly that), contains (an object with these fields, \
                       an array with such an element, a string with this text) or exists. Without \
-                      one, waits for any change of the state. Example: pointer /displays, \
-                      contains {\"id\": 103, \"state\": \"running\"}. Answers the revision and the \
-                      value; TimedOut with the last value if it did not hold in time.",
+                      one, waits for any change of the state (Prostir coming back counts). \
+                      Example: pointer /displays, contains {\"id\": 103, \"state\": \"running\"}. \
+                      Answers the revision and the value; TimedOut with the last value if it did \
+                      not hold in time.",
         args: &[
-            (
+            Arg::of(
                 "pointer",
                 "string",
-                false,
                 "a JSON Pointer into the state, \"\" (the whole state) by default",
-            ),
-            ("equals", "", false, "the value wanted"),
-            ("contains", "", false, "what the value has in it"),
-            ("exists", "boolean", false, "whether there is a value there"),
-            (
-                "timeout",
-                "number",
-                false,
-                "seconds, 10 by default, 120 at most",
-            ),
+            )
+            .optional(),
+            Arg::of("equals", "", "the value wanted").optional(),
+            Arg::of("contains", "", "what the value has in it").optional(),
+            Arg::of("exists", "boolean", "whether there is a value there").optional(),
+            Arg::of("timeout", "number", "seconds, 10 by default")
+                .within(0, 50)
+                .optional(),
         ],
         does: Does::Wait,
         touch: Touch::Reads,
@@ -885,39 +1227,67 @@ static TOOLS: &[Tool] = &[
 /// `prostir mcp`: serves stdin and stdout until stdin ends; its exit code.
 pub fn run() -> i32 {
     use crate::platform::local_api::Client;
-    let client = Client::connect(ctl::WAIT).map(|c| -> Box<dyn CtlClient> { Box::new(c) });
-    let start = Box::new(|| {
-        let client = Client::connect(ctl::WAIT).map_err(|e| ctl::what_failed(&e, false).2)?;
+    let connect: Connect =
+        Box::new(|| Client::connect(ctl::WAIT).map(|c| -> Box<dyn CtlClient> { Box::new(c) }));
+    let start: Start = Box::new(|| {
+        let client = Client::connect(ctl::WAIT).map_err(|e| {
+            let (_, name, text) = ctl::what_failed(&e, false);
+            (name, text)
+        })?;
         if client.running() {
             return Ok("Prostir is running already".to_owned());
         }
-        match ctl::open(&client, &crate::local::wake_for_agent) {
+        let why = std::cell::RefCell::new(None);
+        let wake = || {
+            crate::local::wake_for_agent().inspect_err(|e| *why.borrow_mut() = Some(e.to_string()))
+        };
+        match ctl::open(&client, &wake) {
             ctl::DONE => Ok("Prostir is running".to_owned()),
-            _ => Err("Prostir did not start (its log says why)".to_owned()),
+            ctl::TIMED_OUT => Err((
+                ApiError::TimedOut.name(),
+                "Prostir did not come on the bus in time (its log says why)".to_owned(),
+            )),
+            _ => Err((
+                ctl::what_failed(&ClientError::NotRunning, false).1,
+                why.take()
+                    .unwrap_or_else(|| "Prostir did not start (its log says why)".to_owned()),
+            )),
         }
     });
     let follow: Follow = Box::new(|changes: Arc<Changes>| {
         let spawned = std::thread::Builder::new()
             .name("mcp-watch".into())
             .spawn(move || {
-                let Ok(client) = Client::connect(ctl::WAIT) else {
-                    return;
+                let client = match Client::connect(ctl::WAIT) {
+                    Ok(client) => client,
+                    Err(e) => {
+                        let (_, name, text) = ctl::what_failed(&e, false);
+                        return log::warn!(
+                            "mcp: the state's changes are not followed ({name}: {text}); \
+                             waits look at the state once a second"
+                        );
+                    }
                 };
-                let _ = client.watch(&mut |seen| {
+                let watched = client.watch(&mut |seen| {
                     if !matches!(seen, Watched::Event(_)) {
                         changes.bump();
                     }
                     true
                 });
+                if let Err(e) = watched {
+                    let (_, name, text) = ctl::what_failed(&e, false);
+                    log::warn!("mcp: the state's changes are followed no more ({name}: {text})");
+                }
             });
         if let Err(e) = spawned {
             log::warn!("mcp: the state's changes are not followed: {e}");
         }
     });
-    let mut server = Server::new(client, start, Some(follow));
-    let (stdin, stdout) = (std::io::stdin(), std::io::stdout());
-    let served = server.serve(&mut stdin.lock(), &mut stdout.lock());
-    match served {
+    let shots = crate::platform::screenshot_dir();
+    let mut server = Server::new(connect, start, Some(follow), shots);
+    let out = Arc::new(Out::new(std::io::stdout()));
+    let input = Box::new(std::io::BufReader::new(std::io::stdin()));
+    match server.serve(input, &out) {
         Ok(()) => ctl::DONE,
         Err(e) => {
             eprintln!("prostir mcp: {e}");

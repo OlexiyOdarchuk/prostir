@@ -1,8 +1,9 @@
 # Prostir local API
 
 Programs of the same user on the PC (`prostir ctl`, the settings window
-`prostir window`, scripts, hot keys, an AI agent through [`prostir mcp`](#mcp-prostir-mcp)) talk to the running Prostir through this API.
-The headset protocol is a separate thing (`PROTOCOL.md`).
+`prostir window`, scripts, hot keys, an AI agent through
+[`prostir mcp`](#mcp-prostir-mcp)) talk to the running Prostir through this API. The
+headset protocol is a separate thing (`PROTOCOL.md`).
 
 The requests, answers, events and the state are Rust types in the crate
 `prostir-api` (`crates/prostir-api/src/lib.rs`), shared by the service (`prostir serve`) and every
@@ -408,13 +409,27 @@ Code:
 claude mcp add prostir -- prostir mcp
 ```
 
+It needs the session bus (`DBUS_SESSION_BUS_ADDRESS`); `start` without a systemd user
+manager also needs the desktop session's `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY` (or
+`DISPLAY`), and says so when they are missing. An agent started from the desktop
+session has them. One started elsewhere (over SSH, by a service) gets them in the
+server's environment: `claude mcp add prostir -e
+DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus -e XDG_RUNTIME_DIR=/run/user/1000
+-e WAYLAND_DISPLAY=wayland-0 -- prostir mcp`, or `"env"` next to `"command"` in the
+client's MCP configuration. It connects to the bus when a tool first needs it, and
+again after the connection broke.
+
 It is a client of the session bus like `prostir ctl`, with the same rights (those of
 the PC's owner) and no other way in: no network port, only the stdio of the process the
 user's own agent started. Each tool is one request (or `GetState`); the agent's program
 can ask the person before the tools marked `destructiveHint` (`remove_monitor`,
-`forget_headset`, `forget_all`, `quit`, `call`). What the agent sees its model sees too:
-the state has the pairing code while one is shown, and a screenshot shows what is on
-that monitor.
+`forget_headset`, `forget_all`, `quit`, `call`); only `get_state`, `list_monitors` and
+`wait_for_state` are marked `readOnlyHint`. What the agent sees, its model sees too: the
+state has the pairing code while one is shown, and a screenshot shows what is on that
+monitor. On KDE Plasma while the monitor does not stream to a headset, the screenshot
+is of the whole desktop: every screen, and every window on them. The tools' schemas are
+closed (`additionalProperties: false`, with the bounds of each number), and an argument
+a tool does not take is refused with `BadArgument`.
 
 | Tool | Arguments | |
 |---|---|---|
@@ -429,14 +444,16 @@ that monitor.
 | `set_quality`, `set_sharp`, `set_codec`, `sound_to_headset`, `set_counting`, `autostart` | as the requests | |
 | `pair_new_headset`, `stop_pairing`, `forget_headset`, `forget_all`, `show_settings`, `quit` | as the requests | |
 | `call` | `request`: a request object | any request as it is, also those no tool covers |
-| `screenshot_monitor` | `id`, `keep` (false) | `screenshot`; the picture as MCP `image` content (`image/png`), after a text `{"id", "whole", "bytes", "revision", "path"}`; the file is removed afterwards unless `keep` (then `path` names it) |
-| `wait_for_state` | `pointer`, one of `equals`, `contains`, `exists`; `timeout` (seconds, 10 by default, 120 at most) | waits until the value at the JSON Pointer `pointer` (RFC 6901, `""` the whole state) is `equals`, has `contains` in it (an object those fields, an array such an element, a string that text) or `exists` (true or false); without a condition, until the state changes. Answers `{"revision", "value", "waited_ms"}` |
-| `start` | | starts Prostir as `prostir` does (the settings window opens too, and keeps it running while open); nothing else starts it |
+| `screenshot_monitor` | `id`, `keep` (false) | `screenshot`; the picture as MCP `image` content (`image/png`), after a text `{"id", "whole", "bytes", "revision", "path"}`; the file is removed afterwards unless `keep` (then `path` names it). A picture over 5 MB is not sent: its file is kept and `path` names it. Only a picture Prostir saved is read: a regular file (no link) ending in `.png`, right in `Prostir` of the Pictures folder as this program finds it, that begins as a PNG; anything else is `Capture`, and the file is left as it is |
+| `wait_for_state` | `pointer`, one of `equals`, `contains`, `exists` (`null` as left out); `timeout` (seconds, 10 by default, 50 at most) | waits until the value at the JSON Pointer `pointer` (RFC 6901, `""` the whole state) is `equals`, has `contains` in it (an object those fields, an array such an element, a string that text) or `exists` (true or false); without a condition, until the state changes (Prostir coming back on the bus counts). Answers `{"revision", "value", "waited_ms"}` |
+| `start` | | starts Prostir as `prostir` does (the settings window opens too, and keeps it running while open), waiting 30 s at most for it on the bus; a new Prostir starts with `systemd-run --user` (its log in the journal) where there is a systemd user manager, else on its own with nothing on the agent's stdio. Its errors: `NoBus`, `NotRunning` (with why), `TimedOut`. Nothing else starts it |
 
 For example, after `add_monitor` answered `{"id": 105, …}`, `wait_for_state` with
 `{"pointer": "/displays", "contains": {"id": 105, "state": "running"}, "timeout": 30}`
-returns once monitor 105 runs. It looks at `GetState` first, then again on each
-`StateChanged` and at least once a second.
+returns once monitor 105 runs. A new monitor can stand `running` with `desk: null` for a
+few seconds while the headset places it; `{"pointer": "/displays", "contains": {"id":
+105, "desk": {}}}` waits until it is on the desktop. A wait looks at `GetState` first,
+then again on each `StateChanged` and at least once a second.
 
 A tool that did not do what it was asked answers its result with `isError: true` and
 a text `{"error": NAME, "text": …}`, NAME as `ctl --json` gives it: the
@@ -444,9 +461,15 @@ a text `{"error": NAME, "text": …}`, NAME as `ctl --json` gives it: the
 not read, `TimedOut` for a wait whose condition did not hold in time (with `revision`
 and `value` as they were last). While Prostir is not running every tool says
 `NotRunning` at once. JSON-RPC errors are left for what is not MCP: `-32700` (not JSON),
-`-32600` (not a request), `-32601` (no such method), `-32602` (no such tool). Requests
-are handled one after the other: a command for the headset or a wait holds the next
-ones until it is answered.
+`-32600` (not a request), `-32601` (no such method), `-32602` (no such tool); a line
+that is no JSON (not even UTF-8) gets `-32700`, and the server reads on.
+
+Requests are handled one after the other: a command for the headset or a wait holds
+the next ones until it is answered. A `ping` is answered at once, also meanwhile.
+`notifications/cancelled` ends a wait soon, and a cancelled request gets no answer
+(a command for the headset or a screenshot already asked of Prostir still happens).
+With `_meta.progressToken` in its request, a wait sends `notifications/progress` about
+once a second: `progress` the seconds waited, `total` its timeout.
 
 ## `prostir` and the settings window
 

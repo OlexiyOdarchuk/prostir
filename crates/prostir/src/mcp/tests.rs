@@ -1,5 +1,5 @@
 use super::*;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
 
@@ -59,9 +59,19 @@ fn state(display: &str) -> String {
     .to_string()
 }
 
+/// A folder of this test's own, empty.
+fn folder(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("prostir-mcp-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
 fn server(fake: &Fake) -> Server {
-    let start = Box::new(|| Ok("Prostir is running".to_owned()));
-    let mut server = Server::new(Ok(Box::new(fake.clone())), start, None);
+    let fake = fake.clone();
+    let connect: Connect = Box::new(move || Ok(Box::new(fake.clone())));
+    let start: Start = Box::new(|| Ok("Prostir is running".to_owned()));
+    let mut server = Server::new(connect, start, None, std::env::temp_dir());
     server.poll = Duration::from_millis(5);
     server
 }
@@ -92,6 +102,42 @@ fn said(content: &[Value]) -> Value {
     serde_json::from_str(content[0]["text"].as_str().unwrap()).unwrap()
 }
 
+/// What `serve` wrote, kept for the test.
+#[derive(Clone, Default)]
+struct Written(Arc<Mutex<Vec<u8>>>);
+
+impl Write for Written {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Written {
+    /// Each line, as JSON (every line is).
+    fn lines(&self) -> Vec<Value> {
+        String::from_utf8(self.0.lock().unwrap().clone())
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {l}")))
+            .collect()
+    }
+}
+
+/// Serves `input` to its end: every line written.
+fn serve(server: &mut Server, input: Vec<u8>) -> Vec<Value> {
+    let written = Written::default();
+    let out = Arc::new(Out::new(written.clone()));
+    server
+        .serve(Box::new(std::io::Cursor::new(input)), &out)
+        .unwrap();
+    written.lines()
+}
+
 /// `initialize` takes the client's version where it is one of ours, else gives the
 /// newest; it says there are tools.
 #[test]
@@ -115,13 +161,15 @@ fn initialize_agrees_on_a_version() {
     assert_eq!(ask(&mut server, "ping", &json!({}))["result"], json!({}));
 }
 
-/// Every tool is listed with a description and a schema of its arguments.
+/// Every tool is listed with a description and a closed schema of its arguments,
+/// with the bounds and words they may take.
 #[test]
 fn every_tool_is_listed() {
     let mut server = server(&Fake::new());
     let reply = ask(&mut server, "tools/list", &json!({}));
     let tools = reply["result"]["tools"].as_array().unwrap();
     assert_eq!(tools.len(), TOOLS.len());
+    assert_eq!(tools.len(), 36);
     let mut names = std::collections::BTreeSet::new();
     for t in tools {
         let name = t["name"].as_str().unwrap();
@@ -129,6 +177,7 @@ fn every_tool_is_listed() {
         assert!(!t["description"].as_str().unwrap().is_empty(), "{name}");
         let schema = &t["inputSchema"];
         assert_eq!(schema["type"], "object", "{name}");
+        assert_eq!(schema["additionalProperties"], false, "{name}");
         for needed in schema["required"].as_array().unwrap() {
             let needed = needed.as_str().unwrap();
             assert!(
@@ -157,8 +206,21 @@ fn every_tool_is_listed() {
     ] {
         assert!(names.contains(wanted), "{wanted}");
     }
-    let quit = tools.iter().find(|t| t["name"] == "quit").unwrap();
-    assert_eq!(quit["annotations"]["destructiveHint"], true);
+    let find = |name: &str| tools.iter().find(|t| t["name"] == name).unwrap();
+    assert_eq!(find("quit")["annotations"]["destructiveHint"], true);
+    assert_eq!(
+        find("screenshot_monitor")["annotations"]["readOnlyHint"],
+        false
+    );
+    let quality = &find("set_quality")["inputSchema"]["properties"]["mbit"];
+    assert_eq!(
+        (&quality["minimum"], &quality["maximum"]),
+        (&json!(5), &json!(100))
+    );
+    let codec = &find("set_codec")["inputSchema"]["properties"]["codec"];
+    assert_eq!(codec["enum"], json!(["h264", "h265", "auto"]));
+    let timeout = &find("wait_for_state")["inputSchema"]["properties"]["timeout"];
+    assert_eq!(timeout["maximum"], json!(50));
 }
 
 /// Each tool that is a request asks for it with the tool's arguments: every request
@@ -219,8 +281,9 @@ fn tools_ask_for_their_requests() {
     );
 }
 
-/// Arguments that do not read, a refusal, and Prostir not running are the tool's
-/// errors, named as `ctl --json` names them; nothing is asked for wrong arguments.
+/// Arguments that do not read (or that a tool does not take), a refusal, and
+/// Prostir not running are the tool's errors, named as `ctl --json` names them;
+/// nothing is asked for wrong arguments.
 #[test]
 fn errors_of_tools() {
     let mut fake = Fake::new();
@@ -228,13 +291,18 @@ fn errors_of_tools() {
     let (failed, content) = tool(&mut s, "cinema", &json!({}));
     assert!(failed);
     assert_eq!(said(&content)["error"], "BadArgument");
+    let (failed, content) = tool(&mut s, "cinema", &json!({"on": true, "loud": 1}));
+    assert!(failed);
+    let got = said(&content);
+    assert_eq!(got["error"], "BadArgument");
+    assert!(got["text"].as_str().unwrap().contains("loud"), "{got}");
     let (failed, content) = tool(&mut s, "call", &json!({"request": {"request": "fly"}}));
     assert!(failed);
     assert_eq!(said(&content)["error"], "Unsupported");
     assert!(fake.asked.borrow().is_empty());
 
     fake.answer = Err(ClientError::Refused(crate::api::Failure::new(
-        crate::api::ApiError::NotConnected,
+        ApiError::NotConnected,
         "No headset is connected",
     )));
     let mut s = server(&fake);
@@ -250,15 +318,38 @@ fn errors_of_tools() {
     let (failed, content) = tool(&mut s, "add_monitor", &json!({"w": 640, "h": 360}));
     assert!(failed);
     assert_eq!(said(&content)["error"], "NotRunning");
+}
 
-    let start = Box::new(|| Ok(String::new()));
-    let mut no_bus = Server::new(Err(ClientError::NoBus("none".into())), start, None);
-    let (failed, content) = tool(&mut no_bus, "get_state", &json!({}));
+/// Without a bus a tool says so, and the next one connects again; `start` says its
+/// error by its name.
+#[test]
+fn the_bus_is_connected_when_needed() {
+    let fake = Fake::new();
+    let tries = Rc::new(Cell::new(0));
+    let connect: Connect = {
+        let tries = tries.clone();
+        Box::new(move || {
+            tries.set(tries.get() + 1);
+            if tries.get() == 1 {
+                Err(ClientError::NoBus("none".into()))
+            } else {
+                Ok(Box::new(fake.clone()))
+            }
+        })
+    };
+    let start: Start = Box::new(|| Err(("TimedOut", "not in time".to_owned())));
+    let mut s = Server::new(connect, start, None, std::env::temp_dir());
+    assert_eq!(tries.get(), 0, "nothing connects before a tool needs it");
+    let (failed, content) = tool(&mut s, "get_state", &json!({}));
     assert!(failed);
     assert_eq!(said(&content)["error"], "NoBus");
-    let (failed, content) = tool(&mut no_bus, "start", &json!({}));
+    let (failed, _) = tool(&mut s, "get_state", &json!({}));
     assert!(!failed);
-    assert_eq!(said(&content)["started"], true);
+    tool(&mut s, "list_monitors", &json!({}));
+    assert_eq!(tries.get(), 2, "connected once, kept");
+    let (failed, content) = tool(&mut s, "start", &json!({}));
+    assert!(failed);
+    assert_eq!(said(&content)["error"], "TimedOut");
 }
 
 /// What is not MCP gets JSON-RPC's errors; notifications and responses get nothing;
@@ -307,31 +398,87 @@ fn the_protocol_around_the_tools() {
     assert_eq!(ids, [&json!("a"), &json!("b")]);
 }
 
-/// `serve` answers a line for each request and nothing else on stdout.
+/// `serve` answers a line for each request and nothing else on stdout; a line that
+/// is not even UTF-8 gets a parse error, and serving goes on.
 #[test]
 fn serve_answers_line_by_line() {
     let mut s = server(&Fake::new());
-    let input = concat!(
-        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}"#,
-        "\n",
-        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
-        "\n\n",
-        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_state"}}"#,
-        "\n",
+    let mut input = Vec::new();
+    input.extend_from_slice(
+        br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}"#,
     );
-    let mut out = Vec::new();
-    s.serve(&mut input.as_bytes(), &mut out).unwrap();
-    let lines: Vec<Value> = String::from_utf8(out)
+    input.extend_from_slice(b"\n\xff\xfe not text\n");
+    input.extend_from_slice(br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);
+    input.extend_from_slice(b"\n\n");
+    input.extend_from_slice(
+        br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_state"}}"#,
+    );
+    input.push(b'\n');
+    let lines = serve(&mut s, input);
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    let by_id = |id: Value| lines.iter().find(|l| l["id"] == id).cloned().unwrap();
+    assert_eq!(by_id(json!(1))["result"]["protocolVersion"], "2025-03-26");
+    assert_eq!(by_id(Value::Null)["error"]["code"], PARSE_ERROR);
+    let content = by_id(json!(2))["result"]["content"]
+        .as_array()
         .unwrap()
-        .lines()
-        .map(|l| serde_json::from_str(l).unwrap())
-        .collect();
-    assert_eq!(lines.len(), 2);
-    assert_eq!(lines[0]["result"]["protocolVersion"], "2025-03-26");
-    let content = lines[1]["result"]["content"].as_array().unwrap();
-    let got = said(content);
+        .clone();
+    let got = said(&content);
     assert_eq!(got["revision"], 1);
     assert_eq!(got["state"]["primary"], 103);
+}
+
+/// A `ping` is answered while a wait runs, and a cancelled wait ends soon, without
+/// an answer; what comes after it is answered.
+#[test]
+fn a_wait_is_cancelled() {
+    let mut s = server(&Fake::new());
+    let lines = [
+        json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+            "name": "wait_for_state",
+            "arguments": {"pointer": "/primary", "equals": 1, "timeout": 30}}}),
+        json!({"jsonrpc": "2.0", "id": 4, "method": "ping"}),
+        json!({"jsonrpc": "2.0", "method": "notifications/cancelled",
+               "params": {"requestId": 3, "reason": "the test"}}),
+        json!({"jsonrpc": "2.0", "id": 5, "method": "tools/list"}),
+    ];
+    let input: String = lines.iter().map(|l| l.to_string() + "\n").collect();
+    let began = Instant::now();
+    let written = serve(&mut s, input.into_bytes());
+    assert!(began.elapsed() < Duration::from_secs(5), "the wait ended");
+    let ids: Vec<&Value> = written.iter().map(|l| &l["id"]).collect();
+    assert!(
+        !ids.contains(&&json!(3)),
+        "a cancelled request is not answered"
+    );
+    assert!(
+        ids.contains(&&json!(4)) && ids.contains(&&json!(5)),
+        "{ids:?}"
+    );
+}
+
+/// A wait the client follows says how long it has waited, about once a second.
+#[test]
+fn a_wait_tells_its_progress() {
+    let mut s = server(&Fake::new());
+    let call = json!({"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {
+        "name": "wait_for_state",
+        "arguments": {"pointer": "/primary", "equals": 1, "timeout": 1.5},
+        "_meta": {"progressToken": "w"}}});
+    let written = serve(&mut s, format!("{call}\n").into_bytes());
+    let progress: Vec<&Value> = written
+        .iter()
+        .filter(|l| l["method"] == "notifications/progress")
+        .collect();
+    assert!(!progress.is_empty(), "{written:?}");
+    assert_eq!(progress[0]["params"]["progressToken"], "w");
+    assert_eq!(progress[0]["params"]["total"], 1.5);
+    let done = written.iter().find(|l| l["id"] == 6).unwrap();
+    assert_eq!(done["result"]["isError"], true);
+    assert_eq!(
+        said(done["result"]["content"].as_array().unwrap())["error"],
+        "TimedOut"
+    );
 }
 
 /// The conditions `wait_for_state` reads, and when each holds.
@@ -356,6 +503,7 @@ fn conditions() {
     let any = read(json!({})).unwrap();
     assert_eq!(any.test, Test::Changed);
     assert!(!any.holds(None, false) && any.holds(None, true));
+    assert_eq!(read(json!({"exists": null})).unwrap().test, Test::Changed);
     assert!(read(json!({"pointer": "displays"})).is_err());
     assert!(read(json!({"equals": 1, "exists": true})).is_err());
     assert!(read(json!({"exists": "yes"})).is_err());
@@ -365,6 +513,10 @@ fn conditions() {
     ));
     assert!(contains(&json!([[1, 2], [3]]), &json!([3])));
     assert!(!contains(&json!({"a": 1}), &json!({"a": 1, "b": 2})));
+    // A monitor placed on the desktop, as the tools' descriptions say to wait for it.
+    let placed = json!({"desk": {}});
+    assert!(!contains(&json!([{"id": 1, "desk": null}]), &placed));
+    assert!(contains(&json!([{"id": 1, "desk": {"x": 0}}]), &placed));
 }
 
 /// `wait_for_state` looks until the condition holds, answering the value; in time
@@ -392,9 +544,11 @@ fn waiting_for_the_state() {
     assert_eq!(got["error"], "TimedOut");
     assert_eq!(got["value"], "running");
 
-    let (failed, content) = tool(&mut s, "wait_for_state", &json!({"timeout": 500}));
-    assert!(failed);
-    assert_eq!(said(&content)["error"], "BadArgument");
+    for timeout in [51, -1] {
+        let (failed, content) = tool(&mut s, "wait_for_state", &json!({"timeout": timeout}));
+        assert!(failed);
+        assert_eq!(said(&content)["error"], "BadArgument");
+    }
 
     fake.states.borrow_mut().clear();
     let (failed, content) = tool(&mut s, "wait_for_state", &running);
@@ -402,20 +556,59 @@ fn waiting_for_the_state() {
     assert_eq!(said(&content)["error"], "NotRunning");
 }
 
+/// Prostir going away and coming back during a wait for any change is a change,
+/// even with the same revision (it counts from 1 again).
+#[test]
+fn a_restart_is_a_change() {
+    /// Running, then gone once, then running again with the same revision.
+    struct Restarting(Cell<u32>);
+    impl CtlClient for Restarting {
+        fn call(&self, _: &Request) -> Result<Answer, ClientError> {
+            Err(ClientError::NotRunning)
+        }
+        fn state(&self) -> Result<(u32, String), ClientError> {
+            self.0.set(self.0.get() + 1);
+            match self.0.get() {
+                2 => Err(ClientError::NotRunning),
+                _ => Ok((1, state("running"))),
+            }
+        }
+        fn running(&self) -> bool {
+            true
+        }
+        fn watch(&self, _: &mut dyn FnMut(Watched) -> bool) -> Result<(), ClientError> {
+            Ok(())
+        }
+    }
+    let connect: Connect = Box::new(|| Ok(Box::new(Restarting(Cell::new(0)))));
+    let start: Start = Box::new(|| Ok(String::new()));
+    let mut s = Server::new(connect, start, None, std::env::temp_dir());
+    s.poll = Duration::from_millis(5);
+    let (failed, content) = tool(&mut s, "wait_for_state", &json!({"timeout": 2}));
+    assert!(!failed, "{content:?}");
+    assert_eq!(said(&content)["revision"], 1);
+}
+
 /// A screenshot comes as a PNG image read from the file Prostir saved, which goes
-/// unless kept.
+/// unless kept; a file that is not a picture Prostir saved there is left as it is,
+/// and one too large to send is kept and named.
 #[test]
 fn a_screenshot_is_an_image() {
-    let path = std::env::temp_dir().join(format!("prostir-mcp-test-{}.png", std::process::id()));
+    let shots = folder("shots");
+    let path = shots.join("1.png");
     let png = b"\x89PNG\r\n\x1a\nnot really";
     let mut fake = Fake::new();
-    fake.answer = Ok(Answer {
-        path: Some(path.to_string_lossy().into_owned()),
-        whole: Some(true),
-        revision: 8,
-        ..Answer::default()
-    });
+    let answer = |path: &Path| {
+        Ok(Answer {
+            path: Some(path.to_string_lossy().into_owned()),
+            whole: Some(true),
+            revision: 8,
+            ..Answer::default()
+        })
+    };
+    fake.answer = answer(&path);
     let mut s = server(&fake);
+    s.shots.clone_from(&shots);
     for keep in [true, false] {
         std::fs::write(&path, png).unwrap();
         let (failed, content) = tool(
@@ -440,6 +633,40 @@ fn a_screenshot_is_an_image() {
     let (failed, content) = tool(&mut s, "screenshot_monitor", &json!({"id": "x"}));
     assert!(failed);
     assert_eq!(said(&content)["error"], "BadArgument");
+
+    // Not one Prostir saved: elsewhere, a link, not a PNG, not .png.
+    let elsewhere = folder("elsewhere").join("1.png");
+    std::fs::write(&elsewhere, png).unwrap();
+    let link = shots.join("link.png");
+    std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+    let text = shots.join("text.png");
+    std::fs::write(&text, b"hello").unwrap();
+    let named = shots.join("1.txt");
+    std::fs::write(&named, png).unwrap();
+    for wrong in [&elsewhere, &link, &text, &named] {
+        fake.answer = answer(wrong);
+        let mut s = server(&fake);
+        s.shots.clone_from(&shots);
+        let (failed, content) = tool(&mut s, "screenshot_monitor", &json!({"id": 103}));
+        assert!(failed, "{wrong:?}");
+        assert_eq!(said(&content)["error"], "Capture", "{wrong:?}");
+        assert!(wrong.exists(), "{wrong:?} is left");
+    }
+
+    let large = shots.join("large.png");
+    let mut big = png.to_vec();
+    big.resize(IMAGE_MAX + 1, 0);
+    std::fs::write(&large, &big).unwrap();
+    fake.answer = answer(&large);
+    let mut s = server(&fake);
+    s.shots.clone_from(&shots);
+    let (failed, content) = tool(&mut s, "screenshot_monitor", &json!({"id": 103}));
+    assert!(!failed);
+    assert_eq!(content.len(), 1, "no image");
+    assert_eq!(said(&content)["path"], large.to_string_lossy().as_ref());
+    assert!(large.exists(), "kept");
+    let _ = std::fs::remove_dir_all(&shots);
+    let _ = std::fs::remove_dir_all(elsewhere.parent().unwrap());
 }
 
 #[test]

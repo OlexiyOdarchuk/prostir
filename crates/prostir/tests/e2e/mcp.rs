@@ -11,13 +11,15 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use crate::pc::{Bus, Options, TestDir};
-use crate::{START, session};
+use crate::{SOON, START, session};
 
 /// A running `prostir mcp`, and what it wrote to stdout, a line each.
 struct Mcp {
     child: Child,
     stdin: Option<ChildStdin>,
     lines: mpsc::Receiver<String>,
+    /// The thread reading its stdout, until it ends.
+    reader: Option<std::thread::JoinHandle<()>>,
     next_id: u64,
 }
 
@@ -34,7 +36,7 @@ impl Mcp {
             .expect("run prostir mcp");
         let out = child.stdout.take().unwrap();
         let (tx, lines) = mpsc::channel();
-        std::thread::spawn(move || {
+        let reader = std::thread::spawn(move || {
             for line in BufReader::new(out).lines().map_while(Result::ok) {
                 if tx.send(line).is_err() {
                     return;
@@ -46,8 +48,20 @@ impl Mcp {
             child,
             stdin,
             lines,
+            reader: Some(reader),
             next_id: 1,
         }
+    }
+
+    /// The next line on its stdout, as JSON-RPC.
+    fn next(&self, what: &str) -> Value {
+        let line = self
+            .lines
+            .recv_timeout(START + SOON)
+            .unwrap_or_else(|_| panic!("no answer to {what}"));
+        let reply: Value = serde_json::from_str(&line).unwrap_or_else(|e| panic!("{e}: {line}"));
+        assert_eq!(reply["jsonrpc"], "2.0", "{line}");
+        reply
     }
 
     fn send(&mut self, message: &Value) {
@@ -61,13 +75,8 @@ impl Mcp {
         let id = self.next_id;
         self.next_id += 1;
         self.send(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
-        let line = self
-            .lines
-            .recv_timeout(START)
-            .unwrap_or_else(|_| panic!("no answer to {method}"));
-        let reply: Value = serde_json::from_str(&line).unwrap_or_else(|e| panic!("{e}: {line}"));
-        assert_eq!(reply["jsonrpc"], "2.0", "{line}");
-        assert_eq!(reply["id"], id, "{line}");
+        let reply = self.next(method);
+        assert_eq!(reply["id"], id, "{reply}");
         reply
     }
 
@@ -97,6 +106,8 @@ impl Mcp {
         drop(self.stdin.take());
         let status = self.child.wait().unwrap();
         assert_eq!(status.code(), Some(0));
+        // Everything it wrote has been read once the reader ends.
+        self.reader.take().unwrap().join().unwrap();
         assert!(self.lines.try_recv().is_err(), "nothing more on stdout");
     }
 }
@@ -159,6 +170,32 @@ fn an_agent_drives_prostir() {
     let (failed, content) = mcp.tool("screenshot_monitor", &json!({"id": 99_999}));
     assert!(failed);
     assert_eq!(said(&content)["error"], "UnknownDisplay");
+
+    // A ping while a wait runs is answered at once; the wait, cancelled, ends without
+    // an answer, and the next request is answered.
+    mcp.send(
+        &json!({"jsonrpc": "2.0", "id": "wait", "method": "tools/call", "params": {
+        "name": "wait_for_state",
+        "arguments": {"pointer": "/primary", "equals": -1, "timeout": 40},
+        "_meta": {"progressToken": 1}}}),
+    );
+    mcp.send(&json!({"jsonrpc": "2.0", "id": "ping", "method": "ping"}));
+    assert_eq!(mcp.next("ping")["id"], "ping");
+    let began = std::time::Instant::now();
+    mcp.send(
+        &json!({"jsonrpc": "2.0", "method": "notifications/cancelled",
+                     "params": {"requestId": "wait"}}),
+    );
+    mcp.send(&json!({"jsonrpc": "2.0", "id": "after", "method": "tools/list"}));
+    loop {
+        let line = mcp.next("the request after the wait");
+        assert_ne!(line["id"], "wait", "a cancelled request is not answered");
+        if line["id"] == "after" {
+            break;
+        }
+        assert_eq!(line["method"], "notifications/progress", "{line}");
+    }
+    assert!(began.elapsed() < SOON, "the wait ended once cancelled");
 
     let (failed, content) = mcp.tool("remove_monitor", &json!({"id": id}));
     assert!(!failed, "{content:?}");
