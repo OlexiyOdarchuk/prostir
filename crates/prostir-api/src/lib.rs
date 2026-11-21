@@ -567,8 +567,8 @@ pub struct State {
     /// Headsets that asked for this PC recently, by name (from step 6.8).
     pub nearby: Vec<String>,
     /// The answer to "Count this PC among users?"; `null`: this build or this run
-    /// never counts (a build from source, `PROSTIR_NO_COUNT=1`), so there is nothing
-    /// to ask.
+    /// never counts (a debug build, no `count` feature or key, `PROSTIR_NO_COUNT=1`), so
+    /// there is nothing to ask.
     pub counting: Option<Counting>,
     /// What is wrong now, in the PC's language.
     pub problems: Vec<Problem>,

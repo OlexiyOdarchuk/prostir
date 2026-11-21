@@ -676,18 +676,22 @@ send on the session bus and passes their app name, title and text to the headset
 the same encrypted connection. It stops reading them when you turn it off or the
 headset disconnects.
 
-Official builds can count how many PCs use Prostir, only if you agree. The first time
-the settings window opens, it asks "Count this PC among Prostir's users?", with Yes
-and No and neither chosen; until you answer, nothing is sent, so a PC where nobody
-answered (one that only runs `prostir serve`, a server) never counts. With a yes, once
-a day, when a headset connects, the PC sends one request to GoatCounter with only the
-date in it (and `/install` the first time). No identifier, host name or settings go
-with it. Change the answer at any time in the settings window or the tray ("Count this
-PC among users"), or with `prostir ctl count yes|no`; `PROSTIR_NO_COUNT=1` turns it off
-whatever the answer, and builds from source never count. After an update from 0.1,
-which counted until turned off, the window asks once too; if you had turned it off, it
-stays off and is not asked.
-The key that official builds use for counting can be read out of the program. It can
+Prostir can count how many PCs use it, only if you agree. The first time the settings
+window opens, it asks "Count this PC among Prostir's users?", with Yes and No and
+neither chosen. Nothing is sent unless you answer Yes, so a PC where nobody answered
+(one that only runs `prostir serve`, a server) never counts. With a yes, once a day,
+when a headset connects, the PC sends one request to GoatCounter with only the date in
+it (and `/install` the first time). No identifier, host name or settings go with it.
+Change the answer at any time on the Overview page of the settings window, in the tray
+("Count this PC among users") or with `prostir ctl count yes|no`; `PROSTIR_NO_COUNT=1`
+turns it off whatever the answer. After an update from 0.1, which counted until turned
+off, the window asks once too; if you had turned it off, it stays off and is not
+asked.
+Every build asks first, so every release build may count, also one built from source.
+Debug builds never count. A distribution that does not want counting builds without
+the `count` feature (`cargo build --no-default-features --features desktop`): the
+window then never asks. The key for counting is in the source
+(`crates/prostir/count.key`) and so in every build; anyone can read it, but it can
 only add counts, so the worst anyone can do with it is inflate the numbers. See the
 [privacy policy](https://prostir.ishawyha.dev/privacy.html).
 

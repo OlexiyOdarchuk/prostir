@@ -114,8 +114,12 @@
   is sent until you answer; counting turned off in 0.1 stays off and is not asked
   about.
 - Change the answer at any time in the settings window, the tray ("Count this PC among
-  users") or with `prostir ctl count yes|no`. `PROSTIR_NO_COUNT=1` still turns it off,
-  and builds from source still never count. The answer is kept in `settings.txt`
+  users") or with `prostir ctl count yes|no`. `PROSTIR_NO_COUNT=1` still turns it off.
+- As every build asks first, every release build may count, also one built from
+  source: the key is in the source (`crates/prostir/count.key`), and
+  `PROSTIR_COUNT_TOKEN` at build time still takes its place. Debug builds and the tests
+  never count. A distribution that does not want counting builds without the `count`
+  feature (`--no-default-features --features desktop`), and the window never asks. The answer is kept in `settings.txt`
   (`count unasked`, `yes` or `no`) and is in the local API's state (`counting`).
 
 ### Nothing runs while the headset is off

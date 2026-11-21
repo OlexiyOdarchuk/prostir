@@ -10,8 +10,11 @@
 //! later in the window, the tray or `prostir ctl count`. Until the answer is yes
 //! nothing is sent, so a PC where nobody opened the window (only `prostir serve`, a
 //! server, CI) never counts. `PROSTIR_NO_COUNT=1` turns it off whatever the answer.
-//! Only official builds count: the key is set at build time (`PROSTIR_COUNT_TOKEN`),
-//! so builds from source and forks never send anything.
+//! Every build may count, as it asks first. The key, GoatCounter's, which can only add
+//! counts, is in the source (`crates/prostir/count.key`, read when the program is
+//! built; empty: that build never counts); `PROSTIR_COUNT_TOKEN` at build time takes
+//! its place when set. A build without the `count` feature (a distribution that does
+//! not want it), a debug build and the tests never count, and never ask.
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -93,20 +96,30 @@ pub fn headset_connected(count: Counting) {
         });
 }
 
-/// The real counter: GoatCounter, with the key of an official build.
-#[cfg(not(feature = "fake-desktop"))]
+/// The real counter: GoatCounter, with the `count` feature; it counts only in a
+/// release build, never in a debug build or the tests.
+#[cfg(all(feature = "count", not(feature = "fake-desktop")))]
 mod sender {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
-    const TOKEN: Option<&str> = option_env!("PROSTIR_COUNT_TOKEN");
+    /// The key: `PROSTIR_COUNT_TOKEN` at build time, else `count.key`; none when
+    /// empty.
+    const TOKEN: Option<&str> = {
+        let key = match option_env!("PROSTIR_COUNT_TOKEN") {
+            Some(t) if !t.trim_ascii().is_empty() => t,
+            _ => include_str!("../count.key"),
+        };
+        let key = key.trim_ascii();
+        if key.is_empty() { None } else { Some(key) }
+    };
     const SITE: &str = match option_env!("PROSTIR_COUNT_SITE") {
         Some(s) => s,
         None => "ishawyha",
     };
 
     pub fn available() -> bool {
-        TOKEN.is_some_and(|t| !t.is_empty())
+        cfg!(not(any(debug_assertions, test))) && TOKEN.is_some()
     }
 
     /// One POST through curl (always present on desktops), with the key passed on
@@ -172,6 +185,18 @@ mod sender {
     }
 }
 
+/// A build without the `count` feature: it never counts.
+#[cfg(all(not(feature = "count"), not(feature = "fake-desktop")))]
+mod sender {
+    pub fn available() -> bool {
+        false
+    }
+
+    pub fn send(_paths: &[String]) -> bool {
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,14 +238,12 @@ mod tests {
         );
     }
 
-    /// A run that may count only in a build that counts, and never with
-    /// `PROSTIR_NO_COUNT=1`; a build from source never counts.
+    /// A run that may count only in a build that counts; the tests never do (but for
+    /// the fake desktop's file, `PROSTIR_FAKE_COUNT`).
     #[test]
     fn only_a_build_that_counts_may() {
         assert!(!possible() || available());
         #[cfg(not(feature = "fake-desktop"))]
-        if option_env!("PROSTIR_COUNT_TOKEN").is_none_or(str::is_empty) {
-            assert!(!available() && !possible());
-        }
+        assert!(!available() && !possible());
     }
 }
