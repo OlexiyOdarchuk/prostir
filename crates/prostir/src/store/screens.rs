@@ -97,15 +97,13 @@ pub fn startup_set(saved: &SavedScreens, args: &[MonitorSpec]) -> Option<SavedSc
 }
 
 /// `at CENTER MIDDLE`, either `next` (unknown centre) or missing (unknown middle).
-pub(super) fn parse_seen<'a>(
-    mut words: impl Iterator<Item = &'a str>,
-) -> (Option<i32>, Option<i32>) {
+fn parse_seen<'a>(mut words: impl Iterator<Item = &'a str>) -> (Option<i32>, Option<i32>) {
     let center = words.next().and_then(|w| w.parse().ok());
     let middle = words.next().and_then(|w| w.parse().ok());
     (center, middle)
 }
 
-pub(super) fn seen_text(e: &Entry<ScreenId>) -> String {
+fn seen_text(e: &Entry<ScreenId>) -> String {
     if e.center.is_none() && e.middle.is_none() {
         return String::new();
     }
@@ -123,7 +121,7 @@ pub const LEGACY_LAPTOP: u32 = 100;
 
 /// `ID [edid "TEXT"] connector NAME [builtin] [shown] [seen SECONDS]`: a display of
 /// the PC itself.
-pub(super) fn parse_physical(rest: &str) -> Option<(ScreenId, Physical)> {
+fn parse_physical(rest: &str) -> Option<(ScreenId, Physical)> {
     let (id, rest) = rest.split_once(' ')?;
     let id = ScreenId::saved(id.parse().ok()?);
     let (edid, rest) = match rest.strip_prefix("edid \"") {
@@ -158,7 +156,7 @@ pub(super) fn parse_physical(rest: &str) -> Option<(ScreenId, Physical)> {
     ))
 }
 
-pub(super) fn physical_text(id: ScreenId, p: &Physical) -> String {
+fn physical_text(id: ScreenId, p: &Physical) -> String {
     let mut text = format!("physical {}", id.number());
     if let Some(edid) = &p.key.edid {
         let _ = write!(text, " edid \"{}\"", edid.replace('"', "'"));

@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(super) const STEPS: usize = 4;
+const STEPS: usize = 4;
 
 pub(super) fn first_run(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
     let tk = v.tk;

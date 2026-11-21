@@ -213,7 +213,7 @@ impl Activate {
             .status()
         {
             assert!(
-                !std::env::var_os("CI").is_some(),
+                std::env::var_os("CI").is_none(),
                 "no systemd-socket-activate ({e}), which CI must have"
             );
             eprintln!(

@@ -239,10 +239,7 @@ impl Displays {
     }
 
     /// The rows with every monitor, and the other screens `kept` says.
-    pub(super) fn rows_with(
-        &self,
-        kept: impl Fn(&Screen) -> bool,
-    ) -> Vec<Vec<desk::Entry<ScreenId>>> {
+    fn rows_with(&self, kept: impl Fn(&Screen) -> bool) -> Vec<Vec<desk::Entry<ScreenId>>> {
         let monitors: Vec<ScreenId> = self.monitors().map(|s| s.id).collect();
         rows_in_step(
             &self.rows,
@@ -314,7 +311,7 @@ impl Displays {
         self.rows = rows;
     }
 
-    pub(super) fn set_order(&mut self, ids: &[ScreenId]) -> Result<()> {
+    fn set_order(&mut self, ids: &[ScreenId]) -> Result<()> {
         let mut sorted = ids.to_vec();
         sorted.sort_unstable();
         let current: Vec<ScreenId> = self.monitors().map(|s| s.id).collect();
@@ -360,7 +357,7 @@ impl Displays {
     }
 
     /// Where screen `id` is on the desktop now, if it is there.
-    pub(super) fn desk_rect(&self, id: ScreenId) -> Option<state::DeskRect> {
+    fn desk_rect(&self, id: ScreenId) -> Option<state::DeskRect> {
         let screen = self.screens.get(&id)?;
         let name = match &screen.kind {
             ScreenKind::Physical { key, .. } => key.connector.as_str(),

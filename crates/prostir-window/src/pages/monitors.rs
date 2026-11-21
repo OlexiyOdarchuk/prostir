@@ -3,7 +3,7 @@
 use super::*;
 
 /// Sizes offered when the state names none.
-pub(super) const SIZES: [[u32; 2]; 5] = [
+const SIZES: [[u32; 2]; 5] = [
     [1920, 1080],
     [2560, 1440],
     [3840, 2160],
@@ -11,7 +11,7 @@ pub(super) const SIZES: [[u32; 2]; 5] = [
     [1440, 2560],
 ];
 
-pub(super) const SCALES: [u16; 3] = [100, 125, 150];
+const SCALES: [u16; 3] = [100, 125, 150];
 
 pub(super) fn monitors(ui: &mut Ui, v: &mut View<'_, '_>, s: &State, _revision: u32) {
     let tk = v.tk;
@@ -110,7 +110,7 @@ pub(super) fn monitors(ui: &mut Ui, v: &mut View<'_, '_>, s: &State, _revision: 
     });
 }
 
-pub(super) fn selected_monitor(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
+fn selected_monitor(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
     let tk = v.tk;
     let p = tk.p;
     let Some(d) = v.ui.selected.and_then(|id| s.display(id)) else {

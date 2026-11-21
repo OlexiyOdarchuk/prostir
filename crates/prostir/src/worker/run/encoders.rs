@@ -297,7 +297,7 @@ impl Worker {
 
     /// Sessions each encoder holds now, those of the screens `except` left out: every
     /// stream that opened, or is opening (it runs, and has not said it did not open).
-    pub(super) fn running_encoders(&self, except: &[ScreenId]) -> BTreeMap<Kind, u32> {
+    fn running_encoders(&self, except: &[ScreenId]) -> BTreeMap<Kind, u32> {
         // Those left behind may still hold their sessions.
         let mut running = self.behind.running();
         for (_, s) in self.slots.iter().filter(|(id, _)| !except.contains(id)) {
@@ -380,7 +380,7 @@ impl Worker {
     }
 
     /// Starts screen `id`'s encoder over with the settings it has.
-    pub(super) fn restart_same(&mut self, id: ScreenId) {
+    fn restart_same(&mut self, id: ScreenId) {
         let Some(slot) = self.slots.get_mut(&id) else {
             return;
         };

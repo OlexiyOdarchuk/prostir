@@ -97,7 +97,7 @@ pub(super) fn sound(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
 }
 
 /// Bitrates offered, Mbit/s per monitor.
-pub(super) const BITRATES: [u32; 5] = [10, 20, 30, 50, 80];
+const BITRATES: [u32; 5] = [10, 20, 30, 50, 80];
 
 pub(super) fn quality(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
     let tk = v.tk;

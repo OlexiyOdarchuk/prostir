@@ -5,7 +5,7 @@ use super::*;
 
 impl Worker {
     /// The output that is to be primary, where it is ours to pick.
-    pub(super) fn primary_key(&self) -> Option<OutputKey> {
+    fn primary_key(&self) -> Option<OutputKey> {
         if !self.desktop.caps().has_primary {
             return None;
         }
@@ -110,7 +110,7 @@ impl Worker {
 
     /// The size of the stream of screen `id`: as its encoder says, else as the
     /// monitor was made.
-    pub(super) fn stream_size_of(&self, id: ScreenId) -> Option<(i32, i32)> {
+    fn stream_size_of(&self, id: ScreenId) -> Option<(i32, i32)> {
         let (w, h) = self.shared.router.stream_size(id).or_else(|| {
             let spec = self.slots.get(&id)?.made.spec()?;
             Some((spec.width, spec.height))
@@ -123,7 +123,7 @@ impl Worker {
     /// under the main monitor unless the headset placed it, other real displays next
     /// to it and window panels right of everything. The mouse then crosses screens
     /// where the eyes expect it to. Returns where each output went.
-    pub(super) fn place_now(&mut self) -> Result<BTreeMap<OutputKey, state::DeskRect>> {
+    fn place_now(&mut self) -> Result<BTreeMap<OutputKey, state::DeskRect>> {
         let Some(wanted) = self.wanted.clone() else {
             return Ok(BTreeMap::new());
         };

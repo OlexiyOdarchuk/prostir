@@ -4,7 +4,7 @@ use super::*;
 
 /// Does what the volume logic says: asks the headset (through `outbox`) or puts the
 /// device at the headset's level.
-pub(super) fn do_volume(sink: &SinkVolume, act: Option<Act>, outbox: &outbox::Outbox) {
+fn do_volume(sink: &SinkVolume, act: Option<Act>, outbox: &outbox::Outbox) {
     match act {
         Some(Act::Ask(asked)) => {
             // At most every 50 ms while a slider moves.

@@ -3,7 +3,7 @@
 
 use super::*;
 
-pub(super) fn countdown(left: f64) -> String {
+fn countdown(left: f64) -> String {
     let s = left.max(0.0).ceil() as u64;
     format!("{}:{:02}", s / 60, s % 60)
 }
@@ -69,7 +69,7 @@ pub(super) fn pair_body(ui: &mut Ui, v: &mut View<'_, '_>, pr: &Pairing, revisio
     }
 }
 
-pub(super) fn pairing_card(ui: &mut Ui, v: &mut View<'_, '_>, pr: &Pairing, revision: u32) {
+fn pairing_card(ui: &mut Ui, v: &mut View<'_, '_>, pr: &Pairing, revision: u32) {
     let tk = v.tk;
     let p = tk.p;
     let left = (v.ui.pair.ends - v.now).max(0.0);
@@ -114,7 +114,7 @@ pub(super) fn pairing_card(ui: &mut Ui, v: &mut View<'_, '_>, pr: &Pairing, revi
 
 /// "Pair a new headset", or where this Prostir does not open pairing from the window
 /// (before step 6.8), what to do instead.
-pub(super) fn pair_new(ui: &mut Ui, v: &mut View<'_, '_>) {
+fn pair_new(ui: &mut Ui, v: &mut View<'_, '_>) {
     let tk = v.tk;
     if v.ui.unsupported.contains("pair_new_headset") {
         w::status(ui, tk, tk.p.text_muted, &tk.t("hs-pair-hint"));
@@ -155,7 +155,7 @@ pub(super) fn kept_monitors(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
     });
 }
 
-pub(super) fn outcome_card(ui: &mut Ui, v: &mut View<'_, '_>, o: &Outcome) {
+fn outcome_card(ui: &mut Ui, v: &mut View<'_, '_>, o: &Outcome) {
     let tk = v.tk;
     let p = tk.p;
     w::card(ui, tk, |ui| {

@@ -44,7 +44,7 @@ pub(super) fn hex(key: &[u8; 32]) -> String {
 }
 
 /// The words of rights in `access` lines.
-pub(super) const PERMS: [(&str, u32); 6] = [
+const PERMS: [(&str, u32); 6] = [
     ("input", perms::INPUT),
     ("mic", perms::MIC),
     ("camera", perms::CAMERA),
@@ -63,7 +63,7 @@ pub fn perm_words(perms: u32) -> Vec<String> {
 }
 
 /// No right at all: a headset whose `access` line has a word that is no role or right.
-pub(super) const NO_RIGHTS: Access = Access {
+const NO_RIGHTS: Access = Access {
     role: role::GUEST,
     perms: 0,
 };
@@ -72,7 +72,7 @@ pub(super) const NO_RIGHTS: Access = Access {
 /// mistyped. A line with a key and a word that is no role or right (a typo) makes that
 /// headset a guest with no rights, never one with every right as a headset without a
 /// line is; `None` for a line without a key.
-pub(super) fn parse_access(value: &str) -> Option<(String, Access, bool)> {
+fn parse_access(value: &str) -> Option<(String, Access, bool)> {
     let mut words = value.split_whitespace();
     let key = words.next()?;
     if key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -94,7 +94,7 @@ pub(super) fn parse_access(value: &str) -> Option<(String, Access, bool)> {
     Some((key, Access { role, perms }, false))
 }
 
-pub(super) fn access_text(key: &str, a: Access) -> String {
+fn access_text(key: &str, a: Access) -> String {
     let role = if a.is_main() { "main" } else { "guest" };
     let mut text = format!("access {key} {role}");
     for (name, bit) in PERMS {
@@ -123,11 +123,11 @@ impl Default for Settings {
     }
 }
 
-pub(super) fn on_off(v: bool) -> &'static str {
+fn on_off(v: bool) -> &'static str {
     if v { "on" } else { "off" }
 }
 
-pub(super) fn codec_name(codec: Codec) -> &'static str {
+fn codec_name(codec: Codec) -> &'static str {
     match codec {
         Codec::H264 => "h264",
         Codec::H265 => "h265",

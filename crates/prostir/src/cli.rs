@@ -100,6 +100,6 @@ pub(super) enum CodecArg {
     H265,
 }
 
-pub(super) fn parse_monitor(s: &str) -> Result<MonitorSpec, String> {
+fn parse_monitor(s: &str) -> Result<MonitorSpec, String> {
     s.parse()
 }

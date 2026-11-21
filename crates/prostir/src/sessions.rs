@@ -138,7 +138,7 @@ impl Brain {
 
     /// The keys of the headsets with a session and the rights of their lines, in the
     /// order they first connected; with `opening`, one whose session opens now.
-    pub(super) fn in_order(
+    fn in_order(
         &self,
         opening: Option<([u8; 32], prostir_proto::state::Access)>,
     ) -> Vec<([u8; 32], prostir_proto::state::Access)> {
@@ -164,7 +164,7 @@ impl Brain {
     }
 
     /// "No limits" of the main headset, which the PC's limits follow.
-    pub(super) fn main_no_limits(&self) -> bool {
+    fn main_no_limits(&self) -> bool {
         self.roles
             .main
             .and_then(|key| self.sessions.get(&key))
@@ -267,7 +267,7 @@ impl Brain {
     /// Closes the session of headset `key` (see [`Session::finish`]), with nothing
     /// else changed for the others yet: whether its headset was taken off, if it had
     /// a session.
-    pub(super) fn close_session(
+    fn close_session(
         &mut self,
         key: [u8; 32],
         goodbye: Option<PcGoodbye>,
@@ -296,7 +296,7 @@ impl Brain {
     /// Sessions ended (the last of them taken off with `taken_off`): the encoders and
     /// sound as the sessions left need them, in a codec they all decode; without any,
     /// what becomes of the monitors.
-    pub(super) fn sessions_ended(&mut self, taken_off: bool) {
+    fn sessions_ended(&mut self, taken_off: bool) {
         if !self.sessions.is_empty()
             && let Some(displays) = self.displays.as_mut()
         {
@@ -313,7 +313,7 @@ impl Brain {
     /// No session is left: the monitors stay for a while, or go now when the last
     /// headset was taken off (`taken_off`: it reconnects by itself once worn again)
     /// or they broke.
-    pub(super) fn after_the_last_session(&mut self, taken_off: bool) {
+    fn after_the_last_session(&mut self, taken_off: bool) {
         self.control.no_headset(&self.answers);
         self.roles = brain::Roles::NONE;
         let how = match &self.displays {

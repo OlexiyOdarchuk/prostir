@@ -224,7 +224,7 @@ pub(super) fn bridges<K>(
 /// joined in that row without a gap to keep between them. The main row is laid out
 /// first, so only a row above it can hold its other pieces (placed after the rows
 /// above).
-pub(super) fn bridged<K: Copy + PartialEq, V: View<K>>(
+fn bridged<K: Copy + PartialEq, V: View<K>>(
     a: K,
     b: K,
     bridges: &[&Vec<Member<K>>],
@@ -643,13 +643,13 @@ pub(super) fn place_piece<K: Copy + Ord, V: View<K>>(
 /// Weighted mean of `(value, weight)`; `None` without weight. A mean, not a median: it
 /// moves smoothly when one vote does (a hand's tremor moves the piece as little), and
 /// it puts the squared errors at the seams' middles at their least.
-pub(super) fn mean(votes: &[(f64, f64)]) -> Option<f64> {
+fn mean(votes: &[(f64, f64)]) -> Option<f64> {
     let total: f64 = votes.iter().map(|v| v.1.max(0.0)).sum();
     (total > 0.0).then(|| votes.iter().map(|v| v.0 * v.1.max(0.0)).sum::<f64>() / total)
 }
 
 /// The piece side by side from `x`, its first monitor's top at `y`, offsets as given.
-pub(super) fn chain_spots<K: Copy>(
+fn chain_spots<K: Copy>(
     piece: &[Member<K>],
     ix: &[i32],
     down: &[i32],
@@ -681,7 +681,7 @@ pub(super) fn chain_spots<K: Copy>(
 /// goes down onto it, as long as both its neighbours still share what the mouse needs
 /// (further than noise, how it stands against its neighbours as seen wins). Never into
 /// anything placed. `None` when nothing placed is under (over) any of its monitors.
-pub(super) fn settle<K: Copy>(
+fn settle<K: Copy>(
     piece: &[Member<K>],
     ix: &[i32],
     down: &[i32],

@@ -99,7 +99,7 @@ impl Worker {
     }
 
     /// Where the mouse is: the output and the point across its image (0..=65535).
-    pub(super) fn find_mouse(&mut self) -> Result<JobOk> {
+    fn find_mouse(&mut self) -> Result<JobOk> {
         let Some((x, y)) = self
             .desktop
             .pointer()
@@ -122,7 +122,7 @@ impl Worker {
     }
 
     /// Puts the mouse on screen `id` at `x`/`y` across its image (0..=65535).
-    pub(super) fn mouse_to(&mut self, id: ScreenId, x: u16, y: u16) {
+    fn mouse_to(&mut self, id: ScreenId, x: u16, y: u16) {
         let key = self.slots.get(&id).and_then(Slot::key).cloned();
         let Some((_, g)) = self
             .geometries()
@@ -144,7 +144,7 @@ impl Worker {
 
     /// Moves the PC's active window to screen `id` (a monitor, or a display of the PC
     /// that streams).
-    pub(super) fn window_here(&mut self, id: ScreenId) -> Result<()> {
+    fn window_here(&mut self, id: ScreenId) -> Result<()> {
         let Some(output) = self
             .slots
             .get(&id)
@@ -166,7 +166,7 @@ impl Worker {
     }
 
     /// Saves a picture of monitor `id` (all of them where only that is possible).
-    pub(super) fn screenshot(&mut self, id: ScreenId) -> Result<std::path::PathBuf> {
+    fn screenshot(&mut self, id: ScreenId) -> Result<std::path::PathBuf> {
         let Some(slot) = self.slots.get(&id).filter(|s| !s.is_physical()) else {
             bail!(UserError::UnknownDisplay);
         };

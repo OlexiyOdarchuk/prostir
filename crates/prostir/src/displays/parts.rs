@@ -81,78 +81,7 @@ impl Displays {
     pub fn desktop_name(&self) -> &'static str {
         self.facts.as_ref().map_or("", |f| f.caps.name)
     }
-}
 
-/// `Displays` holds at most `MAX_DISPLAYS`: beyond that, displays of the PC that are
-/// not connected go first (from the end), then the last ones, with a warning. Never
-/// more than that, so the part always goes out.
-pub(super) fn within_limit(mut displays: Vec<state::Display>) -> Vec<state::Display> {
-    let max = state::MAX_DISPLAYS;
-    if displays.len() <= max {
-        return displays;
-    }
-    warn!(
-        "{} displays, the headset is told about {max}: absent ones of the PC left out first",
-        displays.len()
-    );
-    while displays.len() > max {
-        match displays
-            .iter()
-            .rposition(|d| matches!(d.state, state::DisplayState::Absent))
-        {
-            Some(i) => {
-                displays.remove(i);
-            }
-            None => displays.truncate(max),
-        }
-    }
-    displays
-}
-
-/// `rows` kept in step with the outputs: only monitors (`monitor`) and other outputs
-/// that show (`shown`) stay, each in the first place it is listed in, and any of
-/// `monitors` left out go to the end of the bottom row. So every monitor is listed
-/// exactly once.
-pub(super) fn rows_in_step<K: Copy + PartialEq>(
-    rows: &[Vec<desk::Entry<K>>],
-    monitors: &[K],
-    monitor: impl Fn(K) -> bool,
-    shown: impl Fn(K) -> bool,
-) -> Vec<Vec<desk::Entry<K>>> {
-    let mut placed: Vec<K> = Vec::new();
-    let mut kept: Vec<Vec<desk::Entry<K>>> = rows
-        .iter()
-        .map(|r| {
-            r.iter()
-                .filter(|e| {
-                    let new = (monitor(e.id) || shown(e.id)) && !placed.contains(&e.id);
-                    if new {
-                        placed.push(e.id);
-                    }
-                    new
-                })
-                .copied()
-                .collect::<Vec<_>>()
-        })
-        .filter(|r| !r.is_empty())
-        .collect();
-    let mut missing = Vec::new();
-    for &id in monitors {
-        if monitor(id) && !placed.contains(&id) {
-            placed.push(id);
-            missing.push(desk::Entry::new(id));
-        }
-    }
-    if !missing.is_empty() {
-        match kept.last_mut() {
-            Some(last) => last.extend(missing),
-            None => kept.push(missing),
-        }
-    }
-    kept
-}
-
-impl Displays {
     /// Every screen as it is on the PC, for no headset in particular (the local API):
     /// each kind, each in the state it is in, none failed for what one headset cannot
     /// decode or take (see [`Displays::displays_part`] for that).
@@ -299,4 +228,73 @@ impl Displays {
             .filter(|p| displays.iter().any(|d| d.id == *p));
         state::Displays { displays, primary }
     }
+}
+
+/// `Displays` holds at most `MAX_DISPLAYS`: beyond that, displays of the PC that are
+/// not connected go first (from the end), then the last ones, with a warning. Never
+/// more than that, so the part always goes out.
+pub(super) fn within_limit(mut displays: Vec<state::Display>) -> Vec<state::Display> {
+    let max = state::MAX_DISPLAYS;
+    if displays.len() <= max {
+        return displays;
+    }
+    warn!(
+        "{} displays, the headset is told about {max}: absent ones of the PC left out first",
+        displays.len()
+    );
+    while displays.len() > max {
+        match displays
+            .iter()
+            .rposition(|d| matches!(d.state, state::DisplayState::Absent))
+        {
+            Some(i) => {
+                displays.remove(i);
+            }
+            None => displays.truncate(max),
+        }
+    }
+    displays
+}
+
+/// `rows` kept in step with the outputs: only monitors (`monitor`) and other outputs
+/// that show (`shown`) stay, each in the first place it is listed in, and any of
+/// `monitors` left out go to the end of the bottom row. So every monitor is listed
+/// exactly once.
+pub(super) fn rows_in_step<K: Copy + PartialEq>(
+    rows: &[Vec<desk::Entry<K>>],
+    monitors: &[K],
+    monitor: impl Fn(K) -> bool,
+    shown: impl Fn(K) -> bool,
+) -> Vec<Vec<desk::Entry<K>>> {
+    let mut placed: Vec<K> = Vec::new();
+    let mut kept: Vec<Vec<desk::Entry<K>>> = rows
+        .iter()
+        .map(|r| {
+            r.iter()
+                .filter(|e| {
+                    let new = (monitor(e.id) || shown(e.id)) && !placed.contains(&e.id);
+                    if new {
+                        placed.push(e.id);
+                    }
+                    new
+                })
+                .copied()
+                .collect::<Vec<_>>()
+        })
+        .filter(|r| !r.is_empty())
+        .collect();
+    let mut missing = Vec::new();
+    for &id in monitors {
+        if monitor(id) && !placed.contains(&id) {
+            placed.push(id);
+            missing.push(desk::Entry::new(id));
+        }
+    }
+    if !missing.is_empty() {
+        match kept.last_mut() {
+            Some(last) => last.extend(missing),
+            None => kept.push(missing),
+        }
+    }
+    kept
 }

@@ -109,7 +109,7 @@ impl Displays {
 
     /// Forgets the displays of the PC not connected beyond [`ABSENT_KEPT`], the least
     /// recently seen first: they leave the list, the rows and the saved set.
-    pub(super) fn forget_long_absent(&mut self) {
+    fn forget_long_absent(&mut self) {
         let absent: Vec<(ScreenId, u64)> = self
             .physical()
             .filter(|s| matches!(s.state, ScreenState::Absent))
@@ -128,7 +128,7 @@ impl Displays {
     /// earlier versions keeps 100 and its place), shown if it is the one the desktop
     /// shows by default and the laptop screen is wanted. Known by its EDID where no
     /// other connected display says the same, else by its connector.
-    pub(super) fn found_physical(
+    fn found_physical(
         &mut self,
         display: &PhysicalDisplay,
         seen: &[PhysicalDisplay],
@@ -175,7 +175,7 @@ impl Displays {
     }
 
     /// Streams display `id` of the PC: `Starting` until the worker says it streams.
-    pub(super) fn start_physical(&mut self, id: ScreenId) {
+    fn start_physical(&mut self, id: ScreenId) {
         let number = self.free_number();
         let Some(s) = self.screens.get_mut(&id) else {
             return;
@@ -255,6 +255,13 @@ impl Displays {
     pub fn physical_shown(&self) -> usize {
         self.physical().filter(|s| s.is_shown_physical()).count()
     }
+
+    /// Whether `id` is a display of the PC itself connected now.
+    pub fn is_connected_physical(&self, id: ScreenId) -> bool {
+        self.screens
+            .get(&id)
+            .is_some_and(|s| s.is_physical() && !matches!(s.state, ScreenState::Absent))
+    }
 }
 
 /// Which known display of the PC (`known`: number and how it is known) each connected
@@ -303,13 +310,4 @@ pub(super) fn least_recently_seen(mut absent: Vec<(ScreenId, u64)>, keep: usize)
     // The most recent first; of the same moment, the newer number.
     absent.sort_by(|a, b| b.1.cmp(&a.1).then(b.0.cmp(&a.0)));
     absent.into_iter().skip(keep).map(|(id, _)| id).collect()
-}
-
-impl Displays {
-    /// Whether `id` is a display of the PC itself connected now.
-    pub fn is_connected_physical(&self, id: ScreenId) -> bool {
-        self.screens
-            .get(&id)
-            .is_some_and(|s| s.is_physical() && !matches!(s.state, ScreenState::Absent))
-    }
 }

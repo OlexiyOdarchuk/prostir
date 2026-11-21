@@ -6,7 +6,7 @@ use super::*;
 /// Ends the session once the writer thread stops, however it stops: the outbox takes
 /// nothing more and the connection closes, so the reader and the headset notice at once.
 /// After a goodbye the connection stays open for the control loop to close.
-pub(super) struct EndSession {
+struct EndSession {
     outbox: Arc<outbox::Outbox>,
     closer: Option<Closer>,
 }
