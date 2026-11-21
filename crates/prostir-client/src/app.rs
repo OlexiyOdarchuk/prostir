@@ -39,6 +39,7 @@ use crate::profiles::{self, Profile};
 #[cfg(all(feature = "selftest", not(feature = "store")))]
 use crate::selftest::device::{self as selftest, Act, Selftest};
 use crate::settings::{Background, HandMode, Settings};
+use crate::store::{StoreCheck, UpdateHint};
 use crate::system::SystemEvent;
 use crate::ui::{self, Action, MonitorEntry, Panel, Tab, UiState};
 use crate::xrutil::{self, Gfx, ImageLayer, as_layer, pose, posef, vec3};
@@ -1834,7 +1835,15 @@ impl Scene {
         self.error = Some((text, Instant::now()));
     }
 
-    fn ui_state(&self, room: bool, keyboard: bool, panorama: bool, custom: bool) -> UiState {
+    /// What the menu shows; `update_from`: where this build is updated (its store's).
+    fn ui_state(
+        &self,
+        room: bool,
+        keyboard: bool,
+        panorama: bool,
+        custom: bool,
+        update_from: UpdateHint,
+    ) -> UiState {
         let spots = self.map_spots();
         UiState {
             host: self.host.clone(),
@@ -1922,6 +1931,7 @@ impl Scene {
             lang: self.lang(),
             intro: !self.settings.intro_seen,
             update: self.update_needed.clone(),
+            update_from,
             profiles: self.profiles.to_vec(),
             active_profile: self.active_profile,
             asks: self.ask_views(),
@@ -2304,11 +2314,12 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     let mut pokes = [Poke::default(); 2];
     // Touches that just happened: (where, when), drawn as a ring spreading out.
     let mut rings: Vec<(Vec3, Instant)> = Vec::new();
-    // Store builds: the store requires checking the user owns the app at launch.
-    #[cfg(feature = "store")]
-    let mut entitlement = crate::store::Entitlement::start(app);
-    #[cfg(feature = "store")]
-    let mut not_entitled_since: Option<Instant> = entitlement.is_none().then(Instant::now);
+    // Where this build comes from. A store build checks the user owns the app (the
+    // Meta Horizon Store requires it at launch); a build from GitHub has nothing to
+    // check.
+    let mut store = crate::store::of_this_build(app);
+    // Since when the store says the app is not the user's: it closes after saying so.
+    let mut not_owned_since: Option<Instant> = None;
     let mut session_running = false;
     // The input is the app's: false while the system menu is open over it (the app
     // keeps drawing, but shows no hands or rays of its own and takes no input).
@@ -2338,34 +2349,20 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         if destroy {
             break;
         }
-        #[cfg(feature = "store")]
-        {
-            if entitlement
-                .as_mut()
-                .and_then(crate::store::Entitlement::poll)
-                == Some(false)
-                && not_entitled_since.is_none()
-            {
-                not_entitled_since = Some(Instant::now());
+        if let StoreCheck::NotOwned(what) = store.poll(scene.lang()) {
+            let since = *not_owned_since.get_or_insert_with(Instant::now);
+            if scene.error.as_ref().is_none_or(|(t, _)| t != what) {
+                scene.show_error(what.into());
+                // In front of the user, wherever the menu was last.
+                let (head, forward) = scene.head;
+                let hands = scene.hands_in_view;
+                scene.open_panel(head, forward, hands);
+                // The 6 s count from when the message is up, not from the failure.
+                not_owned_since = Some(Instant::now());
             }
-            if let Some(since) = not_entitled_since {
-                let what = scene.lang().t(
-                    "Не вдалося підтвердити, що Prostir отримано з Meta Horizon Store",
-                    "Could not confirm Prostir came from the Meta Horizon Store",
-                );
-                if scene.error.as_ref().is_none_or(|(t, _)| t != what) {
-                    scene.show_error(what.into());
-                    // In front of the user, wherever the menu was last.
-                    let (head, forward) = scene.head;
-                    let hands = scene.hands_in_view;
-                    scene.open_panel(head, forward, hands);
-                    // The 6 s count from when the message is up, not from the failure.
-                    not_entitled_since = Some(Instant::now());
-                }
-                // Long enough to read, then close as the store expects.
-                if since.elapsed() > Duration::from_secs(6) {
-                    break;
-                }
+            // Long enough to read, then close as the store expects.
+            if since.elapsed() > Duration::from_secs(6) {
+                break;
             }
         }
         if input_waiting {
@@ -2704,6 +2701,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                     .is_some_and(passthrough::Passthrough::window_supported),
                 exts.khr_composition_layer_equirect2,
                 custom_pano,
+                store.update_hint(scene.lang()),
             );
             wrist_panel.set_state(&ui_state);
             wrist_panel.hover(wrist_hover);
@@ -3091,6 +3089,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                     .is_some_and(passthrough::Passthrough::window_supported),
                 exts.khr_composition_layer_equirect2,
                 custom_pano,
+                store.update_hint(scene.lang()),
             );
             panel.set_state(&ui_state);
             let drawing = test.is_some().then(Instant::now);
