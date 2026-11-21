@@ -1,7 +1,5 @@
 //! Headset-side preferences chosen in the menu, kept between launches.
 
-use std::path::Path;
-
 pub use crate::background::Sky;
 use crate::lang::{Lang, Language};
 
@@ -173,16 +171,6 @@ impl Default for Settings {
 }
 
 impl Settings {
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the core's own file access, until step 7.3 hands it to persist"
-    )]
-    pub fn load(path: &Path) -> Self {
-        std::fs::read_to_string(path)
-            .map(|text| Self::parse(&text))
-            .unwrap_or_default()
-    }
-
     /// Reads `key value` lines; unknown keys are ignored and missing ones default.
     pub fn parse(text: &str) -> Self {
         let mut s = Self::default();
@@ -266,17 +254,16 @@ impl Settings {
         s
     }
 
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the core's own file access, until step 7.3 hands it to persist"
-    )]
-    pub fn save(&self, path: &Path) {
-        if let Err(e) = prostir_proto::secure::write_atomic(path, self.to_text().as_bytes()) {
-            log::warn!("cannot save settings to {}: {e}", path.display());
-        }
+    /// The text of `settings.txt`.
+    pub fn to_text(&self) -> String {
+        let mut text = String::new();
+        self.write_text(&mut text);
+        text
     }
 
-    pub fn to_text(&self) -> String {
+    /// [`Settings::to_text`] added to `out` (a buffer kept between saves).
+    pub fn write_text(&self, out: &mut String) {
+        use std::fmt::Write as _;
         let preset = match self.preset {
             Preset::Arc => "arc",
             Preset::Wall => "wall",
@@ -303,14 +290,14 @@ impl Settings {
             HandMode::Control => "control",
         };
         let on = |b: bool| if b { "on" } else { "off" };
-        format!(
+        let _ = write!(
+            out,
             "preset {preset}\ncurve {curve}\nbackground {background}\nhands {hands}\n\
              focus {}\ncinema {}\ncinema-screen {}\nlanguage {}\npc-language {}\nintro {}\nkeyboard-window {}\nmic {}\ntab {}\nfollow {}\n\
              gaze-mouse {}\nlarge-menu {}\nleft-handed {}\nbattery-saver {}\nnotifications {}\nrest-every {}\nmagnet {}\nmove-all {}\nsound-from-screen {}\nclock {}\ndate {}\nmenu-button {}\nbrightness {}\nno-limits {}\n",
             on(self.focus),
             on(self.cinema),
-            self.cinema_screen
-                .map_or_else(|| "auto".to_owned(), |i| i.to_string()),
+            CinemaScreen(self.cinema_screen),
             match &self.language {
                 Language::LikePc => "like-pc",
                 Language::LikeSystem => "like-system",
@@ -341,23 +328,28 @@ impl Settings {
             on(self.menu_button),
             self.brightness,
             on(self.no_limits)
-        )
+        );
+    }
+}
+
+/// `cinema-screen`: the screen's place in the row, or `auto`.
+struct CinemaScreen(Option<u8>);
+
+impl std::fmt::Display for CinemaScreen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(i) => write!(f, "{i}"),
+            None => f.write_str("auto"),
+        }
     }
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::disallowed_methods,
-    reason = "tests make the folders the code under test reads and writes in"
-)]
 mod tests {
     use super::*;
 
     #[test]
     fn roundtrip() {
-        let dir = std::env::temp_dir().join(format!("prostir-settings-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("settings.txt");
         let s = Settings {
             preset: Preset::Overhead,
             curve: Curve::Gentle,
@@ -388,9 +380,18 @@ mod tests {
             language: Language::Fixed(Lang::FALLBACK),
             pc_language: Lang::new("uk"),
         };
-        s.save(&path);
-        assert_eq!(Settings::load(&path), s);
-        std::fs::remove_dir_all(dir).unwrap();
+        assert_eq!(Settings::parse(&s.to_text()), s);
+        // Written into a buffer that held a longer text: only the new text is read.
+        let mut out = Settings::default().to_text().repeat(2);
+        out.clear();
+        s.write_text(&mut out);
+        assert_eq!(out, s.to_text());
+        let auto = Settings {
+            cinema_screen: None,
+            ..s
+        };
+        assert!(auto.to_text().contains("\ncinema-screen auto\n"));
+        assert_eq!(Settings::parse(&auto.to_text()), auto);
     }
 
     /// Any language code is kept, and the two "like" choices; what is not a code is

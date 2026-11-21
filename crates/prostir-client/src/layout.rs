@@ -6,7 +6,6 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 
 use glam::{Quat, Vec2, Vec3};
 use prostir_layout::circle::{self, Limits};
@@ -923,18 +922,20 @@ mod grab_tests {
     }
 }
 
-/// The desk arrangement kept on disk: where the user put the monitors and the laptop
-/// screen. Cinema mode shows its own one-screen view instead, and that view never
-/// takes the desk arrangement's place here.
+/// The desk arrangement: where the user put the monitors and the laptop screen. Read
+/// from `layout.txt` once at the start and held in memory from then on (the file
+/// follows it and is never read again). Cinema mode shows its own one-screen view
+/// instead, and that view never takes the desk arrangement's place here.
+#[derive(Default)]
 pub struct Desk {
-    path: PathBuf,
+    saved: Arrangement,
 }
 
 /// A stream's size in pixels, width then height.
 pub type PixelSize = (u32, u32);
 
 /// The desk arrangement as `layout.txt` keeps it.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Arrangement {
     pub placements: HashMap<ScreenId, Placement>,
     /// The stream size each placement was made for. Files from 0.1.0 have none.
@@ -947,20 +948,9 @@ pub struct Arrangement {
 }
 
 impl Desk {
-    pub fn new(path: PathBuf) -> Self {
-        Self { path }
-    }
-
-    /// The saved arrangement (of monitors and the PC's displays: window panels are
-    /// placed afresh when they appear, and never saved).
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the core's own file access, until step 7.3 hands it to persist"
-    )]
-    pub fn load(&self) -> Arrangement {
-        let Ok(text) = std::fs::read_to_string(&self.path) else {
-            return Arrangement::default();
-        };
+    /// The arrangement `layout.txt` holds (of monitors and the PC's displays: window
+    /// panels are placed afresh when they appear, and never saved).
+    pub fn parse(text: &str) -> Self {
         let mut saved = Arrangement::default();
         for line in text.lines() {
             if let Some(center) = parse_center(line) {
@@ -978,79 +968,107 @@ impl Desk {
                 }
             }
         }
-        saved
+        Self { saved }
+    }
+
+    /// The desk arrangement as last kept.
+    pub fn arrangement(&self) -> &Arrangement {
+        &self.saved
     }
 
     /// Keeps `placements` (made for the stream `sizes`, around `center`, on the circle
-    /// of `radius`) as the desk arrangement, unless they are the cinema view. Older
-    /// readers skip the `radius` line.
-    pub fn save(
-        &self,
-        placements: &HashMap<ScreenId, Placement>,
+    /// of `radius`) as the desk arrangement, unless they are the cinema view; true when
+    /// kept, and `layout.txt` is to be written. What is kept is what the file says:
+    /// a size only for a placement. Its maps keep their memory from one time to the
+    /// next.
+    pub fn keep(
+        &mut self,
+        placements: impl IntoIterator<Item = (ScreenId, Placement)>,
         sizes: &HashMap<ScreenId, PixelSize>,
         (center, radius): ((Vec3, f32), f32),
         cinema: bool,
-    ) {
+    ) -> bool {
         if cinema {
-            return;
+            return false;
         }
-        let (eye, yaw) = center;
-        let mut text = format!(
-            "center {} {} {} {yaw}\nradius {radius}\n",
-            eye.x, eye.y, eye.z
+        let saved = &mut self.saved;
+        saved.placements.clear();
+        saved.placements.extend(placements);
+        saved.sizes.clear();
+        saved.sizes.extend(
+            sizes
+                .iter()
+                .filter(|(id, _)| saved.placements.contains_key(id))
+                .map(|(id, size)| (*id, *size)),
         );
-        let mut ids: Vec<_> = placements.keys().copied().collect();
-        ids.sort_unstable();
-        for id in ids {
-            text += &placement_line(id, &placements[&id], sizes.get(&id).copied());
+        saved.center = Some(center);
+        saved.radius = Some(radius);
+        true
+    }
+
+    /// The text of `layout.txt`, added to `out` (a buffer kept between saves). Older
+    /// readers skip the `radius` line.
+    pub fn write_text(&self, out: &mut String) {
+        use std::fmt::Write as _;
+        let saved = &self.saved;
+        if let Some((eye, yaw)) = saved.center {
+            let _ = writeln!(out, "center {} {} {} {yaw}", eye.x, eye.y, eye.z);
         }
-        write(&self.path, &text);
+        if let Some(radius) = saved.radius {
+            let _ = writeln!(out, "radius {radius}");
+        }
+        for id in ascending(&saved.placements) {
+            if let Some(p) = saved.placements.get(&id) {
+                write_placement(out, id, p, saved.sizes.get(&id).copied());
+            }
+        }
     }
 }
 
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the core's own file access, until step 7.3 hands it to persist"
-)]
-pub fn load(path: &Path) -> HashMap<ScreenId, Placement> {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return HashMap::new();
-    };
+/// Where the keyboard window lies, as `keyboard.txt` keeps it (one line, number 0).
+pub fn parse_keyboard(text: &str) -> Option<Placement> {
+    // The last such line, as before.
     text.lines()
+        .rev()
         .filter_map(parse_placement)
-        .map(|(id, p, _)| (id, p))
-        .collect()
+        .find(|(id, _, _)| *id == 0)
+        .map(|(_, p, _)| p)
 }
 
-pub fn save(path: &Path, placements: &HashMap<ScreenId, Placement>) {
-    let mut ids: Vec<_> = placements.keys().copied().collect();
-    ids.sort_unstable();
-    let text: String = ids
-        .iter()
-        .map(|id| placement_line(*id, &placements[id], None))
-        .collect();
-    write(path, &text);
+/// The text of `keyboard.txt` for the window at `place`, added to `out`.
+pub fn write_keyboard(out: &mut String, place: &Placement) {
+    write_placement(out, 0, place, None);
 }
 
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the core's own file access, until step 7.3 hands it to persist"
-)]
-fn write(path: &Path, text: &str) {
-    if let Err(e) = prostir_proto::secure::write_atomic(path, text.as_bytes()) {
-        log::warn!("cannot save layout to {}: {e}", path.display());
-    }
+/// The numbers of `map` from the smallest up, without a sorted copy (an arrangement
+/// has a handful).
+fn ascending<V>(map: &HashMap<ScreenId, V>) -> impl Iterator<Item = ScreenId> + '_ {
+    let mut last: Option<ScreenId> = None;
+    std::iter::from_fn(move || {
+        let next = map
+            .keys()
+            .copied()
+            .filter(|id| last.is_none_or(|l| *id > l))
+            .min()?;
+        last = Some(next);
+        Some(next)
+    })
 }
 
 /// `id x y z qx qy qz qw width`, then the stream size it was placed for (`2560x1440`)
-/// when known. Older readers skip the size: it is not a number.
-fn placement_line(id: ScreenId, p: &Placement, size: Option<PixelSize>) -> String {
+/// when known, added to `out`. Older readers skip the size: it is not a number.
+fn write_placement(out: &mut String, id: ScreenId, p: &Placement, size: Option<PixelSize>) {
+    use std::fmt::Write as _;
     let (pos, q) = (p.position, p.rotation);
-    let size = size.map_or(String::new(), |(w, h)| format!(" {w}x{h}"));
-    format!(
-        "{id} {} {} {} {} {} {} {} {}{size}\n",
+    let _ = write!(
+        out,
+        "{id} {} {} {} {} {} {} {} {}",
         pos.x, pos.y, pos.z, q.x, q.y, q.z, q.w, p.width
-    )
+    );
+    if let Some((w, h)) = size {
+        let _ = write!(out, " {w}x{h}");
+    }
+    out.push('\n');
 }
 
 fn parse_placement(line: &str) -> Option<(ScreenId, Placement, Option<PixelSize>)> {
@@ -1202,10 +1220,6 @@ pub fn ahead(
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::disallowed_methods,
-    reason = "tests make and read the files the code under test reads and writes"
-)]
 mod tests {
     use super::*;
 
@@ -1845,12 +1859,9 @@ mod tests {
         with.remove(&4);
         same(&with, "removed");
         // The headset app restarted.
-        let dir = std::env::temp_dir().join(format!("prostir-two-rows-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let desk_file = Desk::new(dir.join("layout.txt"));
-        desk_file.save(&p, &HashMap::new(), (center, RADIUS), false);
-        same(&desk_file.load().placements, "restarted");
-        let _ = std::fs::remove_dir_all(&dir);
+        let mut desk = Desk::default();
+        desk.keep(p.clone(), &HashMap::new(), (center, RADIUS), false);
+        same(&reread(&desk).saved.placements, "restarted");
         // Lined up again.
         same(
             &line_up(&p, four, center, Preset::Arc, Some(0), &desktop.rows, None),
@@ -1861,14 +1872,9 @@ mod tests {
         profile.sizes = four.iter().map(|x| (x.1, x.2)).collect();
         profile.places = four.iter().map(|x| p[&x.0]).collect();
         let text = {
-            let path =
-                std::env::temp_dir().join(format!("prostir-two-rows-p-{}", std::process::id()));
             let mut all = std::array::from_fn(crate::profiles::Profile::default_for);
             all[0] = profile;
-            crate::profiles::save(&path, &all);
-            let back = crate::profiles::load(&path);
-            let _ = std::fs::remove_file(&path);
-            back
+            reread_profiles(&all)
         };
         let back: HashMap<ScreenId, Placement> = four
             .iter()
@@ -2249,69 +2255,173 @@ mod tests {
         assert_eq!(get(&p), of(&p));
     }
 
-    fn temp_desk(name: &str) -> (PathBuf, Desk) {
-        let dir = std::env::temp_dir().join(format!("prostir-{name}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let desk = Desk::new(dir.join("layout.txt"));
-        (dir, desk)
+    /// `desk` as the app finds it after a restart: written to its file and read back.
+    fn reread(desk: &Desk) -> Desk {
+        let mut text = String::new();
+        desk.write_text(&mut text);
+        Desk::parse(&text)
+    }
+
+    /// `profiles` written to their file and read back.
+    fn reread_profiles(
+        profiles: &[crate::profiles::Profile; crate::profiles::SLOTS],
+    ) -> [crate::profiles::Profile; crate::profiles::SLOTS] {
+        let mut text = String::new();
+        crate::profiles::write_text(&mut text, profiles);
+        crate::profiles::parse(&text)
     }
 
     /// The cinema view never replaces the desk arrangement: leaving cinema finds the
     /// monitors where the user put them.
     #[test]
     fn cinema_view_keeps_the_desk_arrangement() {
-        let (dir, desk) = temp_desk("desk");
+        let mut desk = Desk::default();
         let two = [(0, 2560, 1440), (1, 1920, 1080)];
         let sizes = HashMap::from([(0, (2560, 1440)), (1, (1920, 1080))]);
         let center = (Vec3::ZERO, 0.0);
         let mut arranged = arrange(Preset::Arc, &two, Some(0), None, None);
         arranged.get_mut(&1).unwrap().position += Vec3::new(0.1, 0.3, 0.0);
-        desk.save(&arranged, &sizes, (center, RADIUS), false);
-        desk.save(&cinema(&two, None), &sizes, (center, RADIUS), true);
-        let kept = desk.load().placements;
-        assert_eq!(kept.len(), 2);
-        for (id, p) in &arranged {
-            assert!(kept[id].position.distance(p.position) < 1e-5);
+        assert!(desk.keep(arranged.clone(), &sizes, (center, RADIUS), false));
+        assert!(!desk.keep(cinema(&two, None), &sizes, (center, RADIUS), true));
+        for kept in [desk.arrangement(), reread(&desk).arrangement()] {
+            assert_eq!(kept.placements.len(), 2);
+            for (id, p) in &arranged {
+                assert!(kept.placements[id].position.distance(p.position) < 1e-5);
+            }
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The stream sizes and the way the arrangement faces come back as saved.
+    /// Cinema on, the cinema view moved, cinema off, all in one pass of the loop, with
+    /// no write of `layout.txt` done yet (they go on a thread of their own): the desk
+    /// is the one from before cinema, as nothing reads the file back. And a profile
+    /// saved in cinema takes that desk, not the cinema view.
+    #[test]
+    fn cinema_in_one_pass_needs_no_file() {
+        let two = [(0, 2560, 1440), (1, 1920, 1080)];
+        let sizes = HashMap::from([(0, (2560, 1440)), (1, (1920, 1080))]);
+        let center = (Vec3::ZERO, 0.0);
+        // Started with an older desk on disk.
+        let mut desk = reread(&{
+            let mut was = Desk::default();
+            was.keep(
+                arrange(Preset::Wall, &two, Some(0), None, None),
+                &sizes,
+                (center, RADIUS),
+                false,
+            );
+            was
+        });
+        let mut at_desk = arrange(Preset::Arc, &two, Some(0), None, None);
+        at_desk.get_mut(&0).unwrap().position += Vec3::new(-0.2, 0.1, 0.0);
+        // Cinema on: the desk is kept first (`Scene::set_cinema`).
+        assert!(desk.keep(at_desk.clone(), &sizes, (center, RADIUS), false));
+        // The cinema view, moved by hand, kept as cinema is not.
+        let mut view = cinema(&two, None);
+        for p in view.values_mut() {
+            p.position += Vec3::new(0.3, 0.0, -0.4);
+        }
+        assert!(!desk.keep(view.clone(), &sizes, (center, RADIUS), true));
+        // Saved as a profile while in cinema.
+        let monitors = [(0, 2560, 1440), (1, 1920, 1080)];
+        let settings = crate::settings::Settings {
+            cinema: true,
+            ..crate::settings::Settings::default()
+        };
+        let live = Arrangement {
+            placements: view,
+            sizes: sizes.clone(),
+            center: Some(center),
+            radius: Some(RADIUS),
+        };
+        let profile =
+            crate::profiles::Profile::of(&monitors, Some(0), false, settings, live, &[], &desk);
+        assert_eq!(profile.places.len(), 2);
+        // Cinema off: what `Scene::adopt_desk` takes.
+        let back = desk.arrangement();
+        for (i, id) in [0, 1].iter().enumerate() {
+            assert!(back.placements[id].position.distance(at_desk[id].position) < 1e-6);
+            assert!(profile.places[i].position.distance(at_desk[id].position) < 1e-6);
+        }
+    }
+
+    /// The stream sizes and the way the arrangement faces come back as saved; a size
+    /// without a placement is not kept (the file has no line for it).
     #[test]
     fn desk_keeps_sizes_and_center() {
-        let (dir, desk) = temp_desk("desk-sizes");
+        let mut desk = Desk::default();
         let two = [(0, 2560, 1440), (1, 1440, 2560)];
         let arranged = arrange(Preset::Arc, &two, Some(0), None, None);
-        let sizes = HashMap::from([(0, (2560, 1440)), (1, (1440, 2560))]);
+        let sizes = HashMap::from([(0, (2560, 1440)), (1, (1440, 2560)), (7, (800, 600))]);
         let center = (Vec3::new(0.1, 0.0, -0.2), 0.7);
-        desk.save(&arranged, &sizes, (center, RADIUS), false);
-        let saved = desk.load();
-        assert_eq!(saved.sizes, sizes);
-        assert_eq!(saved.radius, Some(RADIUS));
-        let (eye, yaw) = saved.center.unwrap();
-        assert!(eye.distance(center.0) < 1e-6 && (yaw - center.1).abs() < 1e-6);
-        assert_eq!(saved.placements.len(), 2);
-        let _ = std::fs::remove_dir_all(&dir);
+        desk.keep(arranged, &sizes, (center, RADIUS), false);
+        let reread = reread(&desk);
+        for saved in [desk.arrangement(), reread.arrangement()] {
+            assert_eq!(saved.sizes.len(), 2);
+            assert_eq!(saved.sizes[&1], (1440, 2560));
+            assert_eq!(saved.radius, Some(RADIUS));
+            let (eye, yaw) = saved.center.unwrap();
+            assert!(eye.distance(center.0) < 1e-6 && (yaw - center.1).abs() < 1e-6);
+            assert_eq!(saved.placements.len(), 2);
+        }
+        // Written in order of the numbers, the same text each time.
+        let mut text = String::new();
+        desk.write_text(&mut text);
+        let mut again = String::new();
+        reread.write_text(&mut again);
+        assert_eq!(text, again);
+        let ids: Vec<&str> = text
+            .lines()
+            .skip(2)
+            .filter_map(|l| l.split(' ').next())
+            .collect();
+        assert_eq!(ids, ["0", "1"]);
+    }
+
+    /// The numbers of a map from the smallest up, each once.
+    #[test]
+    fn ascending_numbers() {
+        let map = HashMap::from([(9, ()), (0, ()), (4, ()), (ScreenId::MAX, ()), (2, ())]);
+        assert_eq!(
+            ascending(&map).collect::<Vec<_>>(),
+            [0, 2, 4, 9, ScreenId::MAX]
+        );
+        assert_eq!(ascending(&HashMap::<ScreenId, ()>::new()).count(), 0);
+    }
+
+    /// Where the keyboard window lies comes back as saved.
+    #[test]
+    fn keyboard_roundtrip() {
+        let place = Placement {
+            position: Vec3::new(0.1, 1.2, -0.4),
+            rotation: Quat::from_rotation_x(-1.2),
+            width: 0.5,
+        };
+        let mut text = String::new();
+        write_keyboard(&mut text, &place);
+        let back = parse_keyboard(&text).unwrap();
+        assert!(back.position.distance(place.position) < 1e-6);
+        assert!(back.rotation.angle_between(place.rotation) < 1e-4);
+        assert!((back.width - place.width).abs() < 1e-6);
+        assert!(parse_keyboard("").is_none());
+        assert!(parse_keyboard("garbage\n").is_none());
     }
 
     /// A file written by 0.1.0 (no sizes, no center) still reads; and a 0.1.0 reader,
     /// which keeps lines of exactly nine numbers, still reads ours.
     #[test]
     fn desk_reads_and_is_read_by_0_1_0() {
-        let (dir, desk) = temp_desk("desk-old");
-        std::fs::write(
-            dir.join("layout.txt"),
+        let mut desk = Desk::parse(
             "0 -0.5 -0.08 -0.9 0 0.2 0 0.98 1.38\n1 0.5 -0.08 -0.9 0 -0.2 0 0.98 1.03\n",
-        )
-        .unwrap();
-        let saved = desk.load();
+        );
+        let saved = desk.arrangement().clone();
         assert_eq!(saved.placements.len(), 2);
         assert!(saved.sizes.is_empty() && saved.center.is_none());
         assert!((saved.placements[&1].width - 1.03).abs() < 1e-6);
 
         let sizes = HashMap::from([(0, (2560, 1440))]);
-        desk.save(&saved.placements, &sizes, ((Vec3::ZERO, 0.3), 1.3), false);
-        let text = std::fs::read_to_string(dir.join("layout.txt")).unwrap();
+        desk.keep(saved.placements, &sizes, ((Vec3::ZERO, 0.3), 1.3), false);
+        let mut text = String::new();
+        desk.write_text(&mut text);
         let old_reader = |line: &str| {
             line.split_whitespace()
                 .filter_map(|w| w.parse::<f32>().ok())
@@ -2319,7 +2429,6 @@ mod tests {
                 == 9
         };
         assert_eq!(text.lines().filter(|l| old_reader(l)).count(), 2);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A monitor that comes back with another resolution keeps the size of a pixel.
@@ -2504,14 +2613,13 @@ mod tests {
     }
 
     /// The profile of `placements` seen from `center` with the rows the PC has
-    /// (`Scene::current_profile`), saved to a file and read back.
+    /// (`Scene::current_profile`), written to its file and read back.
     fn saved_profile(
         m: &[(ScreenId, u32, u32)],
         primary: Option<ScreenId>,
         placements: &HashMap<ScreenId, Placement>,
         center: (Vec3, f32),
         rows: &[Vec<ScreenId>],
-        dir: &Path,
     ) -> crate::profiles::Profile {
         let live = Arrangement {
             placements: placements.clone(),
@@ -2519,7 +2627,6 @@ mod tests {
             center: Some(center),
             radius: Some(RADIUS),
         };
-        let desk = Desk::new(dir.join("layout.txt"));
         let profile = crate::profiles::Profile::of(
             m,
             primary,
@@ -2527,13 +2634,11 @@ mod tests {
             crate::settings::Settings::default(),
             live,
             rows,
-            &desk,
+            &Desk::default(),
         );
-        let path = dir.join("profiles.txt");
         let mut all = std::array::from_fn(crate::profiles::Profile::default_for);
         all[0] = profile;
-        crate::profiles::save(&path, &all);
-        let [back, ..] = crate::profiles::load(&path);
+        let [back, ..] = reread_profiles(&all);
         back
     }
 
@@ -2608,8 +2713,6 @@ mod tests {
             ("over and under", &mixed_m[..], 0, mixed),
             ("two rows of a preset", &six[..], 2, two_rows),
         ];
-        let dir = std::env::temp_dir().join(format!("prostir-switched-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
         for (name, m, primary, by_hand) in scenes {
             let primary = Some(primary);
             let origin = (Vec3::ZERO, 0.0);
@@ -2645,7 +2748,7 @@ mod tests {
                     &format!("{name}, {what}"),
                 );
             };
-            let profile = saved_profile(m, primary, &kept, saved_at, &desktop.rows, &dir);
+            let profile = saved_profile(m, primary, &kept, saved_at, &desktop.rows);
             for now in [saved_at, later] {
                 let (back, sent) = switched_to(&profile, m, now);
                 assert_eq!(
@@ -2668,12 +2771,11 @@ mod tests {
                 let (front, at) = in_front(&kept, m, primary, saved_at, head(now));
                 let rows = Desktop::of(&front, m, at, Preset::Arc, primary, None).rows;
                 let lined = line_up(&front, m, at, Preset::Arc, primary, &rows, None);
-                let again = saved_profile(m, primary, &lined, at, &rows, &dir);
+                let again = saved_profile(m, primary, &lined, at, &rows);
                 let (back, _) = switched_to(&again, m, later);
                 check(&back, later, "in front, lined up, saved, switched to");
             }
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A profile saved before profiles kept their center comes back where it was in
@@ -2696,11 +2798,11 @@ mod tests {
     /// center and circle), not the cinema view; otherwise the arrangement as it stands.
     #[test]
     fn in_cinema_a_profile_keeps_the_desk_saved_before_it() {
-        let (dir, desk) = temp_desk("profile-cinema");
+        let mut desk = Desk::default();
         let three = [(0, 2560, 1440), (1, 2560, 1440), (2, 2560, 1440)];
         let at_desk = arrange(Preset::Arc, &three, Some(1), None, None);
         let desk_center = (Vec3::new(0.1, 1.2, 0.3), 0.5);
-        desk.save(&at_desk, &HashMap::new(), (desk_center, 1.3), false);
+        desk.keep(at_desk.clone(), &HashMap::new(), (desk_center, 1.3), false);
         let view = cinema(&three, None);
         let live = |placements: &HashMap<ScreenId, Placement>| Arrangement {
             placements: placements.clone(),
@@ -2727,7 +2829,7 @@ mod tests {
             let saved = at_desk[&x.0];
             assert!(
                 p.position.distance(saved.position) < 1e-6
-                    && p.rotation.angle_between(saved.rotation) < 1e-4,
+                    && p.rotation.abs_diff_eq(saved.rotation, 1e-6),
                 "{}",
                 x.0
             );
@@ -2761,7 +2863,6 @@ mod tests {
         );
         assert!(profile.places.is_empty() && profile.center.is_none());
         assert!(profile.rows.is_empty());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The rows of a profile switched to are its own. The PC gives a monitor of the same
@@ -2809,9 +2910,7 @@ mod tests {
         let stale = Desktop::of(&p, &owner, center, Preset::Arc, Some(1), before.as_ref());
         assert_ne!(stale.rows, fresh.rows, "the history of another arrangement");
         // Saved with its rows, switched to: its rows.
-        let dir = std::env::temp_dir().join(format!("prostir-own-rows-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let profile = saved_profile(&owner, Some(1), &p, center, &fresh.rows, &dir);
+        let profile = saved_profile(&owner, Some(1), &p, center, &fresh.rows);
         let (back, sent) = switched_to(&profile, &owner, center);
         let own = Desktop::of(&back, &owner, center, Preset::Arc, Some(1), sent.as_ref());
         assert_eq!(own.rows, fresh.rows);
@@ -2825,7 +2924,6 @@ mod tests {
             Desktop::of(&back, &owner, center, Preset::Arc, Some(1), None).rows,
             fresh.rows
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The gaps as seen between the owner's 3840x2160 (6) and each of the two landscape

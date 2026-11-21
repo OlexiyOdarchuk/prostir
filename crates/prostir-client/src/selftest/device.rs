@@ -523,7 +523,10 @@ impl Selftest {
             last_tab: 0,
             ..crate::settings::Settings::default()
         };
-        settings.save(&dir.join("settings.txt"));
+        let path = dir.join(crate::persist::File::Settings.name());
+        if let Err(e) = prostir_proto::secure::write_atomic(&path, settings.to_text().as_bytes()) {
+            warn!("cannot save {}: {e}", path.display());
+        }
         dir
     }
 
