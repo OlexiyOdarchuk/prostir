@@ -16,12 +16,12 @@ rust-version = "1.96"
 # place. A crate adds the features only it needs (`x = { workspace = true, features
 # = [...] }`); a dependency of one crate only stays in that crate's Cargo.toml.
 [workspace.dependencies]
-prostir-proto = { path = "crates/proto" }
-prostir-layout = { path = "crates/layout" }
-prostir-api = { path = "crates/api" }
-prostir-lang = { path = "crates/lang" }
-prostir-settings = { path = "crates/settings" }
-prostir-testkit = { path = "crates/testkit" }
+prostir-proto = { path = "crates/prostir-proto" }
+prostir-layout = { path = "crates/prostir-layout" }
+prostir-api = { path = "crates/prostir-api" }
+prostir-lang = { path = "crates/prostir-lang" }
+prostir-window = { path = "crates/prostir-window" }
+prostir-testkit = { path = "crates/prostir-testkit" }
 anyhow = "1"
 env_logger = "0.11"
 glam = "0.30"

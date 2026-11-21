@@ -7,8 +7,8 @@ use eframe::egui::{FontData, FontDefinitions, FontFamily, FontId};
 
 use crate::theme::{FontFiles, Type};
 
-static REGULAR: &[u8] = include_bytes!("../../client/assets/NotoSans-Regular.ttf");
-static MEDIUM: &[u8] = include_bytes!("../../client/assets/NotoSans-Medium.ttf");
+static REGULAR: &[u8] = include_bytes!("../../prostir-client/assets/NotoSans-Regular.ttf");
+static MEDIUM: &[u8] = include_bytes!("../../prostir-client/assets/NotoSans-Medium.ttf");
 
 const REGULAR_NAME: &str = "Noto Sans";
 const MEDIUM_NAME: &str = "Noto Sans Medium";

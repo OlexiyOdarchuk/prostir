@@ -75,7 +75,7 @@ fi
 unzip -p "$AAR" jni/arm64-v8a/libopenxr_loader.so > "$STAGE/lib/arm64-v8a/libopenxr_loader.so"
 APK=prostir.apk
 PACKAGE=dev.prostir.client
-MANIFEST="$ROOT/crates/client/AndroidManifest.xml"
+MANIFEST="$ROOT/crates/prostir-client/AndroidManifest.xml"
 # PROSTIR_PREVIEW=1: a test build of an unreleased version that installs next to the
 # released app (its own package and name), so testing never replaces the daily one.
 if [[ "${PROSTIR_PREVIEW:-}" == 1 ]]; then
@@ -83,7 +83,7 @@ if [[ "${PROSTIR_PREVIEW:-}" == 1 ]]; then
     MANIFEST="$OUT/AndroidManifest.preview.xml"
     sed -e 's/package="dev\.prostir\.client"/package="dev.prostir.client.preview"/' \
         -e 's/android:label="Prostir"/android:label="Prostir (preview)"/' \
-        "$ROOT/crates/client/AndroidManifest.xml" > "$MANIFEST"
+        "$ROOT/crates/prostir-client/AndroidManifest.xml" > "$MANIFEST"
     grep -q 'package="dev.prostir.client.preview"' "$MANIFEST" \
         && grep -q 'android:label="Prostir (preview)"' "$MANIFEST" \
         || { echo "!! could not make the preview manifest" >&2; exit 1; }
@@ -106,7 +106,7 @@ cp "$ROOT/LICENSE" "$ROOT/LICENSE-EXCEPTION.md" "$OUT/THIRD-PARTY-LICENSES.txt" 
 
 echo ">> packaging with $(basename "$BUILD_TOOLS") / $(basename "$PLATFORM")"
 rm -rf "$OUT/res" && mkdir -p "$OUT/res"
-"$BUILD_TOOLS/aapt2" compile --dir "$ROOT/crates/client/res" -o "$OUT/res"
+"$BUILD_TOOLS/aapt2" compile --dir "$ROOT/crates/prostir-client/res" -o "$OUT/res"
 # The APK version follows the workspace version: 1.2.3 -> versionCode 10203. That only
 # works for plain MAJOR.MINOR.PATCH with MINOR and PATCH below 100 (a pre-release such as
 # 0.2.0-rc.1 would get the same code as 0.2.0, and 0.1.100 the same as 0.2.0).

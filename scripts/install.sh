@@ -123,7 +123,7 @@ if [[ -x "$ROOT/prostir" ]]; then
     built="$ROOT"
 else
     echo ">> building"
-    (cd "$ROOT" && cargo build --release --locked -p prostir-host --bin prostir)
+    (cd "$ROOT" && cargo build --release --locked -p prostir --bin prostir)
     built="$ROOT/target/release"
 fi
 assets="$ROOT/packaging"

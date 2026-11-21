@@ -838,7 +838,7 @@ mod tests {
         // A real font is read once and kept.
         let noto = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../client/assets/NotoSans-Regular.ttf"
+            "/../prostir-client/assets/NotoSans-Regular.ttf"
         );
         let t = Theme::load(
             PaletteName::Ink,

@@ -116,7 +116,7 @@ export CARGO_PROFILE_RELEASE_DEBUG=1 CARGO_PROFILE_RELEASE_STRIP=false
 cargo build --frozen --release \
     --config 'source.crates-io.replace-with="vendored-sources"' \
     --config 'source.vendored-sources.directory="vendor"' \
-    -p prostir-host --bin prostir
+    -p prostir --bin prostir
 
 %install
 install -Dm755 target/release/prostir %{buildroot}%{_bindir}/prostir
@@ -139,7 +139,7 @@ export CARGO_PROFILE_RELEASE_DEBUG=1 CARGO_PROFILE_RELEASE_STRIP=false
 cargo test --frozen --release \
     --config 'source.crates-io.replace-with="vendored-sources"' \
     --config 'source.vendored-sources.directory="vendor"' \
-    -p prostir-host -p prostir-proto -p prostir-lang -- --test-threads=1
+    -p prostir -p prostir-proto -p prostir-lang -- --test-threads=1
 
 %files
 %license LICENSE LICENSE-EXCEPTION.md THIRD-PARTY-LICENSES.txt

@@ -6,13 +6,13 @@ on:
   push:
     branches: [main, "dev/**"]
     paths:
-      - "crates/host/**"
-      - "crates/proto/**"
-      - "crates/layout/**"
-      - "crates/api/**"
-      - "crates/testkit/**"
-      - "crates/lang/**"
-      - "crates/settings/**"
+      - "crates/prostir/**"
+      - "crates/prostir-proto/**"
+      - "crates/prostir-layout/**"
+      - "crates/prostir-api/**"
+      - "crates/prostir-testkit/**"
+      - "crates/prostir-lang/**"
+      - "crates/prostir-window/**"
       - ".cargo/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -20,13 +20,13 @@ on:
       - ".github/actions/**"
   pull_request:
     paths:
-      - "crates/host/**"
-      - "crates/proto/**"
-      - "crates/layout/**"
-      - "crates/api/**"
-      - "crates/testkit/**"
-      - "crates/lang/**"
-      - "crates/settings/**"
+      - "crates/prostir/**"
+      - "crates/prostir-proto/**"
+      - "crates/prostir-layout/**"
+      - "crates/prostir-api/**"
+      - "crates/prostir-testkit/**"
+      - "crates/prostir-lang/**"
+      - "crates/prostir-window/**"
       - ".cargo/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -65,14 +65,14 @@ jobs:
           toolchain: stable
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: cargo fmt -p prostir-host -p prostir-proto -p prostir-layout -p prostir-api -p prostir-testkit -p prostir-lang -p prostir-settings --check
-      - run: cargo clippy -p prostir-host -p prostir-proto -p prostir-layout -p prostir-api -p prostir-testkit -p prostir-lang -p prostir-settings --all-targets --locked -- -D warnings
-      - run: cargo test -p prostir-host -p prostir-proto -p prostir-layout -p prostir-api -p prostir-testkit -p prostir-lang --locked
+      - run: cargo fmt -p prostir -p prostir-proto -p prostir-layout -p prostir-api -p prostir-testkit -p prostir-lang -p prostir-window --check
+      - run: cargo clippy -p prostir -p prostir-proto -p prostir-layout -p prostir-api -p prostir-testkit -p prostir-lang -p prostir-window --all-targets --locked -- -D warnings
+      - run: cargo test -p prostir -p prostir-proto -p prostir-layout -p prostir-api -p prostir-testkit -p prostir-lang --locked
       # The settings window, driven without drawing; its pictures need a graphics card
       # (or lavapipe), which the runner does not have.
-      - run: cargo test -p prostir-settings --locked --lib --test texts --test window
-      # The PC app with the fake desktop, driven by a fake headset (crates/host/tests/e2e).
+      - run: cargo test -p prostir-window --locked --lib --test texts --test window
+      # The PC app with the fake desktop, driven by a fake headset (crates/prostir/tests/e2e).
       - name: Clippy with the fake desktop
-        run: cargo clippy -p prostir-host --no-default-features --features fake-desktop --all-targets --locked -- -D warnings
+        run: cargo clippy -p prostir --no-default-features --features fake-desktop --all-targets --locked -- -D warnings
       - name: End-to-end tests
         run: cargo e2e --locked

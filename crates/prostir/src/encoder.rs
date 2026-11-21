@@ -769,7 +769,7 @@ mod live {
 
     /// Encoder latency with several streams on VA-API, each pipeline with a VA display
     /// of its own or all sharing one ([`super::GpuDevices`]). Run by hand on a quiet PC:
-    /// `cargo test -p prostir-host -- --ignored va_display_sharing --nocapture`
+    /// `cargo test -p prostir -- --ignored va_display_sharing --nocapture`
     /// (`PROSTIR_MEASURE_SECS`, `PROSTIR_MEASURE_SIZE=2560x1440`,
     /// `PROSTIR_MEASURE_STREAMS=4,6`); needs VA-API.
     ///

@@ -6,10 +6,10 @@
 use eframe::egui::{self, Role};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use prostir_settings::app::{CloseNote, Page, Started};
-use prostir_settings::mock::{Mock, MockHandle};
-use prostir_settings::portal::SystemScheme;
-use prostir_settings::{App, Options};
+use prostir_window::app::{CloseNote, Page, Started};
+use prostir_window::mock::{Mock, MockHandle};
+use prostir_window::portal::SystemScheme;
+use prostir_window::{App, Options};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 

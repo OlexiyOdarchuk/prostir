@@ -596,7 +596,7 @@ fn main() -> Result<()> {
             open_window()
         }
         Some(Sub::Serve(args)) => serve(args)?,
-        Some(Sub::Window { mock }) => match prostir_settings::run(mock) {
+        Some(Sub::Window { mock }) => match prostir_window::run(mock) {
             Ok(()) => 0,
             Err(e) => {
                 eprintln!("prostir window: {e}");
@@ -987,6 +987,9 @@ mod tests {
         };
         assert!(on("prostir::session", Level::Info));
         assert!(on("prostir", Level::Info));
+        // The window's and the translations' crates: their own names, Prostir's lines.
+        assert!(on("prostir_window::run", Level::Info));
+        assert!(on("prostir_lang", Level::Info));
         assert!(!on("prostir::session", Level::Debug));
         assert!(!on("zbus::object_server", Level::Info));
         assert!(!on("tracing::span", Level::Info));

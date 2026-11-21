@@ -6,9 +6,9 @@ mod common;
 use common::{Setup, open, press, press_as, window};
 use eframe::egui::{self, Key, Role};
 use egui_kittest::kittest::Queryable;
-use prostir_settings::api::{ClientError, Request, ThemeMode};
-use prostir_settings::app::{Conn, Page, Start};
-use prostir_settings::mock::Mock;
+use prostir_window::api::{ClientError, Request, ThemeMode};
+use prostir_window::app::{Conn, Page, Start};
+use prostir_window::mock::Mock;
 
 #[test]
 fn pairing_by_name_and_keyboard() {
@@ -198,7 +198,7 @@ fn starting_gives_up_after_ten_seconds() {
 #[test]
 fn a_prostir_that_runs_already_is_not_started_again() {
     let setup = Setup {
-        started: prostir_settings::app::Started::AlreadyRunning,
+        started: prostir_window::app::Started::AlreadyRunning,
         ..Setup::default()
     };
     let (mut h, handle) = window(Mock::not_running(), setup);
@@ -232,7 +232,7 @@ fn the_code_can_be_pasted() {
 
 #[test]
 fn a_theme_font_that_is_not_a_font_does_not_stop_the_window() {
-    let dir = std::env::temp_dir().join(format!("prostir-settings-font-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("prostir-window-font-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let text = dir.join("words.ttf");
     std::fs::write(&text, "not a font at all").unwrap();
@@ -276,7 +276,7 @@ fn a_refused_request_says_why_until_closed() {
     let (mut h, handle) = window(Mock::connected(), Setup::default());
     open(&mut h, Page::Monitors);
     handle.refuse_next(ClientError::Refused {
-        code: prostir_settings::api::ApiError::Desktop,
+        code: prostir_window::api::ApiError::Desktop,
         message: "KWin не відповів.".into(),
     });
     press(&mut h, "2560 × 1440");
@@ -311,7 +311,7 @@ fn the_first_run_says_when_pairing_is_closed() {
 
 #[test]
 fn a_new_theme_file_pins_nothing() {
-    let dir = std::env::temp_dir().join(format!("prostir-settings-new-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("prostir-window-new-{}", std::process::id()));
     let path = dir.join("window-theme.toml");
     let (mut h, _) = window(
         Mock::connected(),
@@ -330,7 +330,7 @@ fn a_new_theme_file_pins_nothing() {
     press(&mut h, "Нейтральна");
     h.run_steps(30);
     let graphite =
-        prostir_settings::theme::Theme::builtin(prostir_settings::theme::PaletteName::Graphite);
+        prostir_window::theme::Theme::builtin(prostir_window::theme::PaletteName::Graphite);
     assert_eq!(h.state().theme().dark, graphite.dark);
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -388,7 +388,7 @@ fn monitors_kept_for_the_next_headset() {
         .into_iter()
         .find(|d| d.name == "Prostir-4")
         .unwrap();
-    assert_eq!(added.state, prostir_settings::api::DisplayState::Kept);
+    assert_eq!(added.state, prostir_window::api::DisplayState::Kept);
     press(&mut h, "Прибрати Prostir-1");
     assert_eq!(
         handle.calls().last(),
@@ -436,12 +436,12 @@ fn quality_by_name() {
         [
             Request::SetQuality { mbit: 50 },
             Request::SetCodec {
-                codec: prostir_settings::api::CodecChoice::H264,
+                codec: prostir_window::api::CodecChoice::H264,
                 cpu: false
             },
             Request::SetSharp { on: true },
             Request::SetCodec {
-                codec: prostir_settings::api::CodecChoice::H264,
+                codec: prostir_window::api::CodecChoice::H264,
                 cpu: true
             },
         ]
@@ -455,7 +455,7 @@ fn what_the_service_does_not_do_is_disabled_quietly() {
     let (mut h, handle) = window(Mock::connected(), Setup::default());
     open(&mut h, Page::Quality);
     handle.refuse_next(ClientError::Refused {
-        code: prostir_settings::api::ApiError::Unsupported,
+        code: prostir_window::api::ApiError::Unsupported,
         message: "Not on this PC.".into(),
     });
     press_as(&mut h, Some(Role::Switch), "Чіткіший текст");
@@ -484,7 +484,7 @@ fn a_move_holds_until_the_state_with_it_is_in() {
 /// with its size, and no display says a size of 0 × 0.
 #[test]
 fn the_map_has_every_display_on_the_desktop() {
-    use prostir_settings::api::{DeskRect, Display, DisplayKind, DisplayState, Mode};
+    use prostir_window::api::{DeskRect, Display, DisplayKind, DisplayState, Mode};
     let monitor = |id: u32, name: &str, x: i32| Display {
         id,
         kind: DisplayKind::Virtual,
@@ -616,7 +616,7 @@ fn the_window_quits_prostir() {
 /// tray and how to open the window again; never again after that.
 #[test]
 fn the_first_close_says_prostir_goes_on() {
-    use prostir_settings::app::CloseNote;
+    use prostir_window::app::CloseNote;
     use std::sync::{Arc, Mutex};
     let dir = std::env::temp_dir().join(format!("prostir-close-note-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

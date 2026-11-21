@@ -43,7 +43,7 @@ jobs:
           KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASS }}
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           REQUIRE_RELEASE_KEY: "1"
-          # GoatCounter key for counting users (see crates/host/src/usage.rs). Anyone can read
+          # GoatCounter key for counting users (see crates/prostir/src/usage.rs). Anyone can read
           # it out of the released binary, so it must only be allowed to record
           # pageviews, and only for the Prostir site. Without it the build never counts.
           PROSTIR_COUNT_TOKEN: ${{ secrets.GOATCOUNTER_TOKEN }}
@@ -68,8 +68,8 @@ jobs:
         run: |
           cargo install --locked cargo-deb@3.8.0 cargo-generate-rpm@0.21.1
           # Already stripped as it ships (symbol names kept): no stripping again.
-          cargo deb -p prostir-host --no-build --no-strip -o dist/
-          cargo generate-rpm -p crates/host -o dist/
+          cargo deb -p prostir --no-build --no-strip -o dist/
+          cargo generate-rpm -p crates/prostir -o dist/
           (cd dist && sha256sum ./*.tar.gz ./*.apk ./*.deb ./*.rpm THIRD-PARTY-LICENSES.txt | sed 's| \./| |' > SHA256SUMS)
           # The release text: this version's part of the changelog.
           v="${GITHUB_REF_NAME#v}"

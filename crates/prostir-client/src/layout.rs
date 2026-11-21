@@ -1562,7 +1562,7 @@ mod tests {
     }
 
     /// What the PC makes of `desktop` as `SetLayout` brings it (as
-    /// `crates/host/src/displays/` does): boxes from the wire, planned again.
+    /// `crates/prostir/src/displays/` does): boxes from the wire, planned again.
     fn on_the_pc(
         desktop: &Desktop,
         m: &[(ScreenId, u32, u32)],

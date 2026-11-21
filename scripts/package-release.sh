@@ -25,7 +25,7 @@ PROFILE=release ./scripts/build-apk.sh
 cp build/prostir.apk "$DIST/prostir-$VERSION.apk"
 cp build/THIRD-PARTY-LICENSES.txt "$DIST/"
 
-cargo build --release --locked -p prostir-host --bin prostir
+cargo build --release --locked -p prostir --bin prostir
 # Where cargo builds: its own CARGO_TARGET_DIR when set, else target/ here.
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 cp "$TARGET_DIR/release/prostir" "$DIST/$NAME/"

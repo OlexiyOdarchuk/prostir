@@ -54,7 +54,7 @@ build() {
   # makepkg strips and makes the debug package itself: from line tables, not from a
   # program the release profile already stripped.
   export CARGO_PROFILE_RELEASE_DEBUG=1 CARGO_PROFILE_RELEASE_STRIP=false
-  cargo build --frozen --release -p prostir-host --bin prostir
+  cargo build --frozen --release -p prostir --bin prostir
 }
 
 check() {
@@ -64,7 +64,7 @@ check() {
   # makepkg strips and makes the debug package itself: from line tables, not from a
   # program the release profile already stripped.
   export CARGO_PROFILE_RELEASE_DEBUG=1 CARGO_PROFILE_RELEASE_STRIP=false
-  cargo test --frozen --release -p prostir-host -p prostir-proto -p prostir-layout -p prostir-lang
+  cargo test --frozen --release -p prostir -p prostir-proto -p prostir-layout -p prostir-lang
 }
 
 package() {

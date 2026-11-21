@@ -100,7 +100,7 @@ rustPlatform.buildRustPackage {
   cargoLock.lockFile = root + "/Cargo.lock";
   cargoBuildFlags = [
     "-p"
-    "prostir-host"
+    "prostir"
     "--bin"
     "prostir"
   ];

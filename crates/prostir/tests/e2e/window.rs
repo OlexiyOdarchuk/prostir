@@ -8,8 +8,8 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use prostir_api::{DisplayKind, DisplayState, ThemeMode};
-use prostir_settings::api::{Change, Client, ClientError, Request};
-use prostir_settings::dbus::DbusClient;
+use prostir_window::api::{Change, Client, ClientError, Request};
+use prostir_window::dbus::DbusClient;
 
 use crate::pc::Options;
 use crate::{SOON, START, session};

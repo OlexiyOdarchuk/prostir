@@ -5,7 +5,7 @@ that ends up inside Prostir's release files besides Prostir itself.
     scripts/third-party-licenses.py [-o FILE] [--openxr-aar AAR]
 
 It walks the normal (not dev, not build) dependencies of the PC program
-(prostir-host, with the settings window, for x86_64 Linux) and the headset app
+(prostir, with the settings window, for x86_64 Linux) and the headset app
 (prostir-client for Android), reads each crate's license files from the local Cargo
 registry, and adds the font (in the APK and the settings window) and the Khronos
 OpenXR loader that the APK bundles. Only the Python standard library and
@@ -24,7 +24,7 @@ import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PARTS = [
-    ("prostir-host", "x86_64-unknown-linux-gnu", "PC"),
+    ("prostir", "x86_64-unknown-linux-gnu", "PC"),
     ("prostir-client", "aarch64-linux-android", "headset"),
 ]
 # For "A OR B" the first license in this list that a crate offers is the one we use.
@@ -235,7 +235,7 @@ def main():
     w("")
     w("Noto Sans (NotoSans-Regular.ttf, NotoSans-Medium.ttf), SIL Open Font License 1.1:")
     w("")
-    w(read(os.path.join(ROOT, "crates", "client", "assets", "OFL-NotoSans.txt")))
+    w(read(os.path.join(ROOT, "crates", "prostir-client", "assets", "OFL-NotoSans.txt")))
     w("")
     w("Khronos OpenXR loader for Android (libopenxr_loader.so), Apache License 2.0,")
     w("https://github.com/KhronosGroup/OpenXR-SDK-Source")

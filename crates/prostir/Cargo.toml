@@ -1,5 +1,5 @@
 [package]
-name = "prostir-host"
+name = "prostir"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -26,7 +26,7 @@ desktop = [
     "dep:wayland-protocols-plasma",
     "dep:wayland-protocols-wlr",
 ]
-# For the end-to-end tests only (crates/host/tests/e2e): the platform is a fake desktop in
+# For the end-to-end tests only (crates/prostir/tests/e2e): the platform is a fake desktop in
 # memory instead of KDE Plasma or Hyprland (see src/platform/fake). Never in releases.
 # It replaces `desktop`, so it is built without the default features: `cargo e2e`
 # runs the tests so (`--no-default-features --features fake-desktop`).
@@ -46,7 +46,7 @@ prostir-api.workspace = true
 # Texts with a count, in the plural form each language needs (Fluent).
 prostir-lang.workspace = true
 # The settings window (`prostir window`, a process of its own).
-prostir-settings.workspace = true
+prostir-window.workspace = true
 anyhow.workspace = true
 # A reply for a D-Bus method that waits for the control loop (the local API).
 async-channel = "2"
@@ -74,8 +74,8 @@ wayland-protocols-wlr = { version = "0.3", features = ["client"], optional = tru
 [dev-dependencies]
 prostir-testkit.workspace = true
 
-# Packages built in the release workflow: `cargo deb -p prostir-host` and
-# `cargo generate-rpm -p crates/host`, after scripts/package-release.sh (which writes
+# Packages built in the release workflow: `cargo deb -p prostir` and
+# `cargo generate-rpm -p crates/prostir`, after scripts/package-release.sh (which writes
 # build/THIRD-PARTY-LICENSES.txt and builds the program; the release profile strips
 # it).
 # Same files as scripts/install.sh puts in ~/.local.

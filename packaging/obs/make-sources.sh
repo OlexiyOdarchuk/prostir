@@ -60,7 +60,7 @@ deps = {n["id"]: [d["pkg"] for d in n["deps"]
                   if any(k["kind"] != "dev" for k in d["dep_kinds"])]
         for n in meta["resolve"]["nodes"]}
 todo = [i for i, p in packages.items()
-        if p["name"] in ("prostir-host", "prostir-proto")]
+        if p["name"] in ("prostir", "prostir-proto")]
 seen = set()
 while todo:
     i = todo.pop()

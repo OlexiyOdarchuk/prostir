@@ -7,18 +7,18 @@ on:
   push:
     branches: [main, "dev/**"]
     paths:
-      - "crates/client/**"
-      - "crates/proto/**"
-      - "crates/layout/**"
+      - "crates/prostir-client/**"
+      - "crates/prostir-proto/**"
+      - "crates/prostir-layout/**"
       - ".cargo/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/ci-headset.yml"
   pull_request:
     paths:
-      - "crates/client/**"
-      - "crates/proto/**"
-      - "crates/layout/**"
+      - "crates/prostir-client/**"
+      - "crates/prostir-proto/**"
+      - "crates/prostir-layout/**"
       - ".cargo/**"
       - "Cargo.toml"
       - "Cargo.lock"

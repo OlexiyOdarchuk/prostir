@@ -63,8 +63,8 @@ fn every_language_has_every_message() {
 fn no_long_dashes_anywhere() {
     let files = [("en.ftl", EN), ("uk.ftl", UK)];
     let themes = [
-        ("ink.toml", prostir_settings::theme::INK),
-        ("graphite.toml", prostir_settings::theme::GRAPHITE),
+        ("ink.toml", prostir_window::theme::INK),
+        ("graphite.toml", prostir_window::theme::GRAPHITE),
     ];
     for (name, text) in files.iter().chain(&themes).chain(SOURCES).chain(ALL_CODE) {
         for (n, line) in text.lines().enumerate() {

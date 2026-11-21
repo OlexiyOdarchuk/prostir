@@ -440,7 +440,7 @@ mod tests;
 #[cfg(test)]
 mod mic_harness {
     //! Measures the headset microphone path on this PC's PipeWire (with its PulseAudio
-    //! server, and `parecord`): `cargo test -p prostir-host -- --ignored mic_harness
+    //! server, and `parecord`): `cargo test -p prostir -- --ignored mic_harness
     //! --nocapture`. It makes its own devices (`prostir_test_mic`, gone when it
     //! ends), leaves Prostir's and the default input alone, and can run while Prostir
     //! does. It prints, for each case, how much sound was lost, old or late, and the
@@ -637,7 +637,7 @@ mod mic_harness {
     /// fake headset pushes 10 ms blocks numbered in their samples, so every block
     /// that comes out tells how late it is. The recording is looked at where the sound
     /// system's event would come (see `sound_harness` for those). Run by hand:
-    /// `cargo test -p prostir-host -- --ignored mic_harness --nocapture`.
+    /// `cargo test -p prostir -- --ignored mic_harness --nocapture`.
     #[test]
     #[ignore = "by hand: records through the real sound system"]
     fn mic_harness() {
@@ -767,7 +767,7 @@ mod mic_harness {
 mod sound_harness {
     //! Follows this PC's PipeWire (through its PulseAudio server) as Prostir does, with
     //! throwaway devices of its own (`prostir_test_sink`, `prostir_test_mic`,
-    //! gone when it ends): `cargo test -p prostir-host -- --ignored sound_harness
+    //! gone when it ends): `cargo test -p prostir -- --ignored sound_harness
     //! --nocapture`. It leaves Prostir's devices, the defaults and every other volume
     //! alone, and can run while Prostir does. It prints how often the watcher woke while
     //! the sound was idle, how soon each change came as an event, and what is captured

@@ -2,7 +2,7 @@
 //! light and dark with both palettes, and the states each page has. They need a
 //! graphics card or lavapipe.
 //!
-//! Pictures live in tests/snapshots; `UPDATE_SNAPSHOTS=1 cargo test -p prostir-settings`
+//! Pictures live in tests/snapshots; `UPDATE_SNAPSHOTS=1 cargo test -p prostir-window`
 //! writes them anew after a deliberate change. Before every picture kittest checks that
 //! each control has an accessible name.
 
@@ -12,10 +12,10 @@ use common::{Setup, open, press, window};
 use eframe::egui::Key;
 use egui_kittest::kittest::Queryable;
 use egui_kittest::{Harness, SnapshotOptions, SnapshotResults};
-use prostir_settings::App;
-use prostir_settings::api::{ClientError, Pairing, Request, ThemeMode};
-use prostir_settings::app::Page;
-use prostir_settings::mock::Mock;
+use prostir_window::App;
+use prostir_window::api::{ClientError, Pairing, Request, ThemeMode};
+use prostir_window::app::Page;
+use prostir_window::mock::Mock;
 
 /// Setup for a picture.
 fn shot() -> Setup {
@@ -92,8 +92,8 @@ fn each_state_of_the_overview() {
             dark(Mock::connected().edit(|s| {
                 let session = s.headsets[0].session.as_mut().unwrap();
                 session.worn = false;
-                s.problems.push(prostir_settings::api::Problem {
-                    code: prostir_settings::api::ApiError::Desktop,
+                s.problems.push(prostir_window::api::Problem {
+                    code: prostir_window::api::ApiError::Desktop,
                     text: "KWin не відповідає: нові монітори чекають на нього.".into(),
                 });
             })),
@@ -144,7 +144,7 @@ fn each_state_of_the_other_pages() {
     h.get_by_label("Код із шолома").focus();
     h.run_steps(1);
     h.get_by_label("Код із шолома")
-        .type_text(prostir_settings::mock::WRONG_CODE);
+        .type_text(prostir_window::mock::WRONG_CODE);
     h.run_steps(2);
     h.key_press(Key::Enter);
     h.run_steps(4);
@@ -154,7 +154,7 @@ fn each_state_of_the_other_pages() {
     open(&mut h, Page::Headsets);
     picture(&mut h, &mut all, "headsets-pc-code");
     // Pairing from the window (step 6.8), open and waiting for a headset.
-    let waiting = |s: &mut prostir_settings::api::State| {
+    let waiting = |s: &mut prostir_window::api::State| {
         s.pairing = Some(Pairing {
             seconds_left: 95,
             seconds_total: 180,
@@ -180,7 +180,7 @@ fn each_state_of_the_other_pages() {
     picture(&mut h, &mut all, "sound-offline");
 
     // A theme file with mistakes: what was not used and what is hard to read.
-    let dir = std::env::temp_dir().join(format!("prostir-settings-test-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("prostir-window-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("window-theme.toml");
     std::fs::write(
@@ -238,7 +238,7 @@ fn a_failed_request_says_why() {
     let (mut h, handle) = window(Mock::connected().look(ThemeMode::Dark, "ink"), shot());
     open(&mut h, Page::Monitors);
     handle.refuse_next(ClientError::Refused {
-        code: prostir_settings::api::ApiError::Desktop,
+        code: prostir_window::api::ApiError::Desktop,
         message: "KWin не відповів.".into(),
     });
     press(&mut h, "2560 × 1440");

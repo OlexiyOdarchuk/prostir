@@ -1,6 +1,6 @@
 //! End-to-end tests: the real PC app (built with the fake desktop) driven by a fake
 //! headset over a real encrypted connection. Run with `cargo e2e` (an alias for
-//! `cargo test -p prostir-host --no-default-features --features fake-desktop --test
+//! `cargo test -p prostir --no-default-features --features fake-desktop --test
 //! e2e`). Needs GStreamer
 //! with x264enc (plugins-ugly), h264parse (plugins-bad) and the base plugins.
 

@@ -3578,6 +3578,38 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 
 [[package]]
+name = "prostir"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "async-channel",
+ "clap",
+ "env_logger",
+ "gbm",
+ "gstreamer",
+ "gstreamer-allocators",
+ "gstreamer-app",
+ "gstreamer-base",
+ "gstreamer-video",
+ "ksni",
+ "libc",
+ "log",
+ "prostir-api",
+ "prostir-lang",
+ "prostir-layout",
+ "prostir-proto",
+ "prostir-testkit",
+ "prostir-window",
+ "serde",
+ "serde_json",
+ "wayland-client",
+ "wayland-protocols",
+ "wayland-protocols-plasma",
+ "wayland-protocols-wlr",
+ "zbus",
+]
+
+[[package]]
 name = "prostir-api"
 version = "0.2.0"
 dependencies = [
@@ -3611,38 +3643,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "prostir-host"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "async-channel",
- "clap",
- "env_logger",
- "gbm",
- "gstreamer",
- "gstreamer-allocators",
- "gstreamer-app",
- "gstreamer-base",
- "gstreamer-video",
- "ksni",
- "libc",
- "log",
- "prostir-api",
- "prostir-lang",
- "prostir-layout",
- "prostir-proto",
- "prostir-settings",
- "prostir-testkit",
- "serde",
- "serde_json",
- "wayland-client",
- "wayland-protocols",
- "wayland-protocols-plasma",
- "wayland-protocols-wlr",
- "zbus",
-]
-
-[[package]]
 name = "prostir-lang"
 version = "0.2.0"
 dependencies = [
@@ -3671,7 +3671,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "prostir-settings"
+name = "prostir-testkit"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "prostir-proto",
+]
+
+[[package]]
+name = "prostir-window"
 version = "0.2.0"
 dependencies = [
  "eframe",
@@ -3685,15 +3694,6 @@ dependencies = [
  "skrifa",
  "toml",
  "zbus",
-]
-
-[[package]]
-name = "prostir-testkit"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "libc",
- "prostir-proto",
 ]
 
 [[package]]
