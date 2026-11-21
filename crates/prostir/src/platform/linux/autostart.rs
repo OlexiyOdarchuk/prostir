@@ -71,16 +71,10 @@ impl Places {
                 .is_some_and(|d| Path::new(&d).join("systemd/private").exists()),
             hyprland: super::hyprland::running(),
             systemctl: "systemctl".into(),
-            // A wrapper (Nix) names the program to start; else this very file.
-            exe: std::env::var("PROSTIR_EXE")
-                .ok()
-                .filter(|e| !e.is_empty())
-                .or_else(|| {
-                    std::env::current_exe()
-                        .ok()
-                        .map(|p| p.display().to_string())
-                })
-                .unwrap_or_else(|| "prostir".into()),
+            // A wrapper (Nix) names the program to start; else this very file (not
+            // "... (deleted)" once an update replaced it).
+            exe: prostir_window::launch::this_program()
+                .map_or_else(|_| "prostir".into(), |p| p.display().to_string()),
         }
     }
 

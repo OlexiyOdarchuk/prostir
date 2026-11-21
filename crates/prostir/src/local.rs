@@ -1003,13 +1003,8 @@ fn api_display(d: &wire::Display, output: String) -> api::Display {
 }
 
 /// This program, to start again (the window, the service): as a wrapper (Nix) names
-/// it, else this very file.
-fn this_program() -> std::io::Result<std::path::PathBuf> {
-    match std::env::var_os("PROSTIR_EXE").filter(|e| !e.is_empty()) {
-        Some(exe) => Ok(exe.into()),
-        None => std::env::current_exe(),
-    }
-}
+/// it, else this very file, also after an update replaced it.
+use prostir_window::launch::this_program;
 
 /// A library path for the settings window only, as a package sets it (Nix).
 const WINDOW_LIBRARY_PATH: &str = "PROSTIR_WINDOW_LIBRARY_PATH";

@@ -303,12 +303,10 @@ pub struct Start {
 
 impl Start {
     /// This program again, with this run's arguments: a wrapper's name for it (Nix,
-    /// `PROSTIR_EXE`), else this very file (looked up now, while it is surely there).
+    /// `PROSTIR_EXE`), else this very file, as found at the start (see
+    /// [`prostir_window::launch::this_program`]).
     pub fn this_program() -> Result<Self> {
-        let exe = match std::env::var_os("PROSTIR_EXE").filter(|e| !e.is_empty()) {
-            Some(exe) => exe.into(),
-            None => std::env::current_exe()?,
-        };
+        let exe = prostir_window::launch::this_program()?;
         let mut args: Vec<String> = std::env::args().skip(1).collect();
         if args.first().map(String::as_str) != Some("serve") {
             args.insert(0, "serve".into());

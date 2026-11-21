@@ -584,6 +584,8 @@ fn asks_version(cli: &Cli) -> bool {
 }
 
 fn main() -> Result<()> {
+    // This program's file, found now: a package update may replace it while it runs.
+    let _ = prostir_window::launch::this_program();
     let cli = Cli::parse();
     if asks_version(&cli) {
         println!("{}", version_line());
