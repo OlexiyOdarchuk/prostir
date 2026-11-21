@@ -395,19 +395,20 @@ impl Brain {
                     "Monitors are placed while they are on the desktop",
                 )),
             },
-            Request::Volume { level } => {
-                if self
-                    .lead_mut()
-                    .is_some_and(|s| s.volume_from_pc(level.min(100)))
-                {
-                    done()
-                } else {
-                    unsupported(t(
-                        "Гучність цього шолома з ПК не змінюється: лише його кнопками",
-                        "This headset's volume is not changed from the PC, only with its buttons",
-                    ))
-                }
+            Request::Volume { level } if level > 100 => {
+                CtlReply::failed(ApiError::BadArgument, "level: 0 to 100")
             }
+            Request::Volume { level } => match self.lead_mut().map(|s| s.volume_from_pc(level)) {
+                None => unsupported(t(
+                    "Гучність шолома змінюється, поки він підключений",
+                    "The headset's volume is changed while it is connected",
+                )),
+                Some(true) => done(),
+                Some(false) => unsupported(t(
+                    "Гучність цього шолома з ПК не змінюється: лише його кнопками",
+                    "This headset's volume is not changed from the PC, only with its buttons",
+                )),
+            },
             // Handled above.
             Request::Recenter
             | Request::LineUp

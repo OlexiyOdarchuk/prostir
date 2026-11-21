@@ -934,6 +934,32 @@ fn the_volume_from_the_pc_reaches_the_headset() {
     // Quiet after: the device's echo of the level asks nothing more.
     headset.take_for(Duration::from_secs(1)).unwrap();
     assert_eq!(headset.view().volume_asks.len(), asks + 1);
+
+    // Muted on the PC, then set from the settings: unmuted, as Plasma's slider does.
+    let volume = |bus: &Connection| get_state(bus).1.sound.volume.unwrap();
+    pc.desktop("volume 60 muted");
+    let started = Instant::now();
+    while !volume(&bus).muted {
+        assert!(started.elapsed() < SOON, "not muted: {:?}", volume(&bus));
+        headset.take_for(Duration::from_millis(50)).unwrap();
+    }
+    call(&bus, "Call", &(r#"{"request":"volume","level":20}"#,)).unwrap();
+    let step = prostir_testkit::quest_step(20);
+    let started = Instant::now();
+    while volume(&bus)
+        != (prostir_api::Volume {
+            level: step,
+            muted: false,
+        })
+    {
+        assert!(started.elapsed() < SOON, "{:?}", volume(&bus));
+        headset.take_for(Duration::from_millis(50)).unwrap();
+    }
+    assert_eq!(headset.volume(), Some(step));
+
+    // Not a level.
+    let bad = call(&bus, "Call", &(r#"{"request":"volume","level":101}"#,)).unwrap_err();
+    assert_eq!(error_name(&bad), "BadArgument");
 }
 
 /// Back and forth between scales from the PC, 100 % among them: each one is applied,

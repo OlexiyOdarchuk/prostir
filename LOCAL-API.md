@@ -201,6 +201,7 @@ exist, monitor requests change the set kept for the next headset (its monitors s
 | `set_sharp` | `on` | the slower encoder preset for clearer small text |
 | `set_codec` | `codec` (`h264`, `h265`, `auto`), `cpu` (bool, default false) | `auto` is the same as `h265` (H.265 where the PC and every headset can, else H.264), and the state shows it as `h265` |
 | `sound_to_headset` | `on` | the PC's sound in the headset, or on the PC |
+| `volume` | `level` (0 to 100) | the main headset's volume, as a slider of it on the PC: the headset's sound device goes to that level, unmuted (as moving a volume slider in Plasma unmutes), and the headset is asked for it, as when the device's own slider moves; `sound.volume` then shows the level the headset took (its nearest step). `BadArgument` above 100; `Unsupported` while `sound.volume` is `null` (no headset connected, or one that does not tell its volume) |
 | `set_counting` | `on` | count this PC among users |
 | `autostart` | `on` | start with the session: with systemd, enables `prostir.socket` (and removes an autostart entry of 0.1), else an XDG autostart entry (`prostir serve`); `Unsupported` where it is not set from here (Hyprland, whose config starts it). On by default: the first start of Prostir for a user turns it on; the choice is kept in `settings.txt` (`autostart on` or `off`), so once turned off (here, the tray, `prostir ctl autostart off`) no later start or update turns it on again |
 | `pair_new_headset` | | opens the pairing window for 3 minutes (again from now if it is open), answers `seconds_left`: while it is open the PC answers every headset that asks for it, and the program stays running. It closes at its time, with `stop_pairing`, or once a headset pairs. A headset can pair over a connection (a typed address, USB) whether it is open or not; its code protects that |
@@ -212,14 +213,12 @@ exist, monitor requests change the set kept for the next headset (its monitors s
 | `show_settings` | | starts the settings window, `prostir window`, a process of its own (it keeps one window per user itself) |
 | `quit` | | Prostir quits after answering, as the tray's "Quit": nothing waits for the headset afterwards (the sockets' watcher quits too; under systemd the socket stops until the next login) |
 
-### Not yet
+### Not from the PC
 
-These read, and are answered `Unsupported` with a text saying why, until the step that
-brings them:
+This reads, and is answered `Unsupported` with a text saying why:
 
 | `request` | Arguments | |
 |---|---|---|
-| `volume` | `level` (0 to 100) | the main headset's volume from the PC: its sound device goes to that level and the headset is asked for it, as when the device's own slider moves; `Unsupported` while `sound.volume` is `null` |
 | `set_mic` | `on` | always: the headset microphone's switch is the headset user's, changed only in the headset; the state shows it (`session.mic_on`) |
 
 ## Answers
