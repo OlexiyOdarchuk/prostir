@@ -1168,7 +1168,6 @@ impl Scene {
         self.placed_for.insert(id, size);
     }
 
-    /// Lays everything out by the chosen preset.
     /// Layouts are worked out around the origin facing -Z; this moves them to where
     /// the user sat and looked when they last asked to bring everything in front.
     fn around_user(
@@ -1181,43 +1180,44 @@ impl Scene {
         placements
     }
 
+    /// Lays the monitors of this session's PC (and its own display shown) out by the
+    /// chosen preset, or in cinema its one screen. Only the places it lays out change:
+    /// window panels, another PC's displays and a display of this PC that shows
+    /// nothing now (a closed laptop's panel) stay where they are. With nothing to lay
+    /// out (no PC yet, or no monitor of it streams) nothing changes and nothing is
+    /// saved, so the arrangement waiting for its PC is not lost.
     fn arrange_all(&mut self) {
-        // Window panels stay where they are, whatever the layout, and so do the
-        // displays of another PC (laid out with their own PC).
-        let panels: Vec<(DisplayKey, Placement)> = self
-            .placements
-            .iter()
-            .filter(|(id, _)| self.is_window(**id) || self.of_other_pc(**id))
-            .map(|(id, p)| (*id, *p))
-            .collect();
-        self.arrange_monitors();
-        self.placements.extend(panels);
-    }
-
-    fn arrange_monitors(&mut self) {
+        let sizes = self.quest_sizes();
         if self.settings.cinema {
-            self.placements =
-                self.around_user(layout::cinema(&self.quest_sizes(), self.desk.cinema()));
+            // The view takes the place of the monitors here, which it does not show (the
+            // desk keeps theirs).
+            let view = self.around_user(layout::cinema(&sizes, self.desk.cinema()));
+            let hidden: Vec<DisplayKey> = self
+                .placements
+                .keys()
+                .copied()
+                .filter(|k| !self.is_window(*k) && !self.of_other_pc(*k))
+                .collect();
+            for k in &hidden {
+                self.placements.remove(k);
+            }
+            self.placements.extend(view);
             self.grabs = [None, None];
             return;
         }
-        let mirror = self.mirror_id();
-        let mirror_place = mirror.and_then(|id| self.placements.get(&id).copied());
-        self.radius = layout::preset_radius(self.settings.preset, &self.quest_sizes());
+        if sizes.is_empty() {
+            return;
+        }
+        self.radius = layout::preset_radius(self.settings.preset, &sizes);
         self.tilt = layout::tilt(self.settings.preset);
-        self.placements = self.around_user(layout::arrange(
+        let laid = self.around_user(layout::arrange(
             self.settings.preset,
-            &self.quest_sizes(),
+            &sizes,
             self.primary,
             self.mirror_size(),
             self.curve_factor(),
         ));
-        // Keep the mirror's spot while the laptop lid is closed.
-        if let (Some(id), Some(p)) = (mirror, mirror_place)
-            && !self.placements.contains_key(&id)
-        {
-            self.placements.insert(id, p);
-        }
+        self.placements.extend(laid);
         self.grabs = [None, None];
         self.save_layout();
         self.send_layout();
