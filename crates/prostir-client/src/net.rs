@@ -542,12 +542,11 @@ pub fn spawn(
     std::thread::Builder::new()
         .name("net".into())
         .spawn(move || {
-            let beacon = match discovery.only {
-                Some(_) => None,
-                None => UdpSocket::bind((Ipv4Addr::UNSPECIFIED, prostir_proto::DISCOVERY_PORT))
-                    .inspect_err(|e| warn!("discovery socket: {e}"))
-                    .ok(),
-            };
+            // The socket PCs announce themselves to. A network thread of an earlier
+            // start that has not stopped yet may still hold it: tried again each round
+            // until this one has it.
+            let mut beacon = None;
+            let mut beacon_told = false;
             let identity = match Identity::load_or_create(&discovery.identity_file) {
                 Ok(id) => id,
                 Err(e) => {
@@ -575,6 +574,21 @@ pub fn spawn(
                     trusted = TrustStore::load(&discovery.trust_file);
                 }
                 round += 1;
+                if beacon.is_none() && discovery.only.is_none() {
+                    match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, prostir_proto::DISCOVERY_PORT)) {
+                        Ok(socket) => {
+                            if beacon_told {
+                                info!("discovery socket open");
+                            }
+                            beacon = Some(socket);
+                        }
+                        Err(e) if !beacon_told => {
+                            warn!("discovery socket: {e}; trying again each round");
+                            beacon_told = true;
+                        }
+                        Err(_) => {}
+                    }
+                }
                 if let Some(stream) = connect(
                     beacon.as_ref(),
                     &discovery,
@@ -700,14 +714,29 @@ struct Finder {
 }
 
 impl Finder {
-    /// Listens for beacons for a moment and reports changes to the menu.
-    fn listen(&mut self, beacon: &UdpSocket, events: &Sender<NetEvent>) {
+    /// Listens for beacons for a moment and reports changes to the menu. Looks every
+    /// 100 ms whether the app is closing, and stops then.
+    fn listen(&mut self, beacon: &UdpSocket, events: &Sender<NetEvent>, steering: &Steering) {
         let until = Instant::now() + Duration::from_millis(1200);
         let mut buf = [0u8; 512];
         while let Some(left) = until.checked_duration_since(Instant::now()) {
-            let _ = beacon.set_read_timeout(Some(left.max(Duration::from_millis(1))));
-            let Ok((n, from)) = beacon.recv_from(&mut buf) else {
-                break;
+            if steering.quitting() {
+                return;
+            }
+            let slice = left.clamp(Duration::from_millis(1), Duration::from_millis(100));
+            let _ = beacon.set_read_timeout(Some(slice));
+            let (n, from) = match beacon.recv_from(&mut buf) {
+                Ok(got) => got,
+                // Nothing in this slice: the next one.
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    continue;
+                }
+                Err(_) => break,
             };
             if let Some((port, name)) = prostir_proto::decode_beacon(&buf[..n]) {
                 self.seen
@@ -760,6 +789,10 @@ fn connect(
     {
         return Some(stream);
     }
+    // Each attempt takes a moment: none starts once the app is closing.
+    if steering.quitting() {
+        return None;
+    }
     if let Some(addr) = choice {
         if let Some(stream) = try_connect(addr) {
             return Some(stream);
@@ -767,9 +800,9 @@ fn connect(
         blocked(finder, events, addr);
     }
     if let Some(beacon) = beacon {
-        finder.listen(beacon, events);
+        finder.listen(beacon, events, steering);
     }
-    if picking || choice.is_some() {
+    if picking || choice.is_some() || steering.quitting() {
         // The user is choosing (or their choice is unreachable): only listen.
         return None;
     }
@@ -781,8 +814,14 @@ fn connect(
     {
         return Some(stream);
     }
+    if steering.quitting() {
+        return None;
+    }
     if let Some(stream) = read_addr(&discovery.last_host_file).and_then(try_connect) {
         return Some(stream);
+    }
+    if steering.quitting() {
+        return None;
     }
     // Exactly one PC around: just use it. Several: wait for a pick in the menu.
     match finder.reported.as_slice() {
@@ -798,7 +837,11 @@ fn connect(
         _ => return None,
     }
     // Some networks drop broadcasts: now and then probe the local /24.
-    if round % 5 == 1 { scan_subnet() } else { None }
+    if round % 5 == 1 && !steering.quitting() {
+        scan_subnet()
+    } else {
+        None
+    }
 }
 
 /// The headset's own IPv4 address on the network the default route uses.
