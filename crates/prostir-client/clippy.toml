@@ -1,10 +1,10 @@
 # What the headset's core (the model, its rules, what the menu shows) must not call:
 # it is tested on the desktop with time as a parameter, and nothing in it waits,
 # starts threads or touches files. The shell (OpenXR, Android, the network, the
-# selftest, the writer of files) lifts these for a whole module with
-# #[expect(clippy::disallowed_methods, reason = "...")]; the core does not. Until the
-# files' writer takes them over, each file call of the core carries an expect of its
-# own, and once it is gone the expect itself fails, so none is forgotten.
+# selftest, the writer of files in persist/disk.rs) lifts these for a whole module
+# with #[expect(clippy::disallowed_methods, reason = "...")]; the core does not. What
+# the core keeps is written by the files' writer: the core only says which file
+# changed.
 disallowed-methods = [
     { path = "std::time::Instant::now", reason = "the core takes the time as a parameter, read once per pass of the loop" },
     { path = "std::time::Instant::elapsed", reason = "reads the time too: compare with the time passed in" },

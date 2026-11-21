@@ -2,8 +2,6 @@
 //! switched with one press. Three slots with sensible starting points; any of them
 //! can be overwritten with the current setup.
 
-use std::path::Path;
-
 use glam::{Quat, Vec3};
 
 use crate::layout::{self, Placement, ScreenId};
@@ -69,7 +67,7 @@ impl Profile {
     /// The setup as it stands: `monitors` (number, width, height) left to right, the
     /// `primary` one, whether the laptop screen is wanted, `settings`, and the desk
     /// arrangement `live` with the `rows` the PC has (by number). In cinema the desk
-    /// is the one `desk` keeps, saved before the cinema view replaced it.
+    /// is the one `desk` keeps in memory, kept before the cinema view replaced it.
     pub fn of(
         monitors: &[(ScreenId, u32, u32)],
         primary: Option<ScreenId>,
@@ -79,7 +77,11 @@ impl Profile {
         rows: &[Vec<ScreenId>],
         desk: &layout::Desk,
     ) -> Self {
-        let arrangement = if settings.cinema { desk.load() } else { live };
+        let arrangement = if settings.cinema {
+            desk.arrangement().clone()
+        } else {
+            live
+        };
         let places: Option<Vec<Placement>> = monitors
             .iter()
             .map(|m| arrangement.placements.get(&m.0).copied())
@@ -180,53 +182,53 @@ impl Profile {
         })
     }
 
-    fn to_text(&self) -> String {
+    /// The profile's section of `profiles.txt` (after its `[slot]` line), added to
+    /// `out`.
+    fn write_text(&self, out: &mut String) {
         use std::fmt::Write as _;
-        let monitors: Vec<String> = self
-            .sizes
-            .iter()
-            .enumerate()
-            .map(|(i, (w, h))| {
-                let star = if i == self.primary as usize { "*" } else { "" };
-                format!("{star}{w}x{h}")
-            })
-            .collect();
-        let mut places =
-            self.places
-                .iter()
-                .enumerate()
-                .fold(String::new(), |mut places, (i, p)| {
-                    let (a, q) = (p.position, p.rotation);
-                    let _ = writeln!(
-                        places,
-                        "place {i} {} {} {} {} {} {} {} {}",
-                        a.x, a.y, a.z, q.x, q.y, q.z, q.w, p.width
-                    );
-                    places
-                });
+        out.push_str("monitors ");
+        for (i, (w, h)) in self.sizes.iter().enumerate() {
+            let space = if i > 0 { " " } else { "" };
+            let star = if i == usize::from(self.primary) {
+                "*"
+            } else {
+                ""
+            };
+            let _ = write!(out, "{space}{star}{w}x{h}");
+        }
+        let mirror = if self.mirror { "on" } else { "off" };
+        let _ = writeln!(out, "\nmirror {mirror}");
+        for (i, p) in self.places.iter().enumerate() {
+            let (a, q) = (p.position, p.rotation);
+            let _ = writeln!(
+                out,
+                "place {i} {} {} {} {} {} {} {} {}",
+                a.x, a.y, a.z, q.x, q.y, q.z, q.w, p.width
+            );
+        }
         // Older readers skip these lines: they are no settings of theirs.
         if !self.places.is_empty() {
             if let Some((eye, yaw)) = self.center {
-                let _ = writeln!(places, "center {} {} {} {yaw}", eye.x, eye.y, eye.z);
+                let _ = writeln!(out, "center {} {} {} {yaw}", eye.x, eye.y, eye.z);
                 if let Some(r) = self.radius {
-                    let _ = writeln!(places, "radius {r}");
+                    let _ = writeln!(out, "radius {r}");
                 }
             }
             if !self.rows.is_empty() {
-                let rows: Vec<String> = self
-                    .rows
-                    .iter()
-                    .map(|r| r.iter().map(usize::to_string).collect::<Vec<_>>().join(" "))
-                    .collect();
-                let _ = writeln!(places, "rows {}", rows.join(" / "));
+                out.push_str("rows ");
+                for (n, row) in self.rows.iter().enumerate() {
+                    if n > 0 {
+                        out.push_str(" / ");
+                    }
+                    for (k, i) in row.iter().enumerate() {
+                        let space = if k > 0 { " " } else { "" };
+                        let _ = write!(out, "{space}{i}");
+                    }
+                }
+                out.push('\n');
             }
         }
-        format!(
-            "monitors {}\nmirror {}\n{places}{}",
-            monitors.join(" "),
-            if self.mirror { "on" } else { "off" },
-            self.settings.to_text()
-        )
+        self.settings.write_text(out);
     }
 }
 
@@ -281,13 +283,9 @@ fn parse_place(v: &str) -> Option<(usize, Placement)> {
         .then_some((i, p))
 }
 
-/// `[slot]` sections in one file.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the core's own file access, until step 7.3 hands it to persist"
-)]
-pub fn load(path: &Path) -> [Profile; SLOTS] {
-    let text = std::fs::read_to_string(path).unwrap_or_default();
+/// The profiles `profiles.txt` holds: `[slot]` sections in one file; a slot it does
+/// not have keeps its starting point.
+pub fn parse(text: &str) -> [Profile; SLOTS] {
     let mut out: [Profile; SLOTS] = std::array::from_fn(Profile::default_for);
     for section in text.split("\n[").map(|s| s.trim_start_matches('[')) {
         let Some((slot, body)) = section.split_once("]\n") else {
@@ -302,36 +300,64 @@ pub fn load(path: &Path) -> [Profile; SLOTS] {
     out
 }
 
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the core's own file access, until step 7.3 hands it to persist"
-)]
-pub fn save(path: &Path, profiles: &[Profile; SLOTS]) {
-    let text: String = profiles
-        .iter()
-        .enumerate()
-        .map(|(i, p)| format!("[{i}]\n{}", p.to_text()))
-        .collect::<Vec<_>>()
-        .join("\n");
-    if let Err(e) = prostir_proto::secure::write_atomic(path, text.as_bytes()) {
-        log::warn!("cannot save profiles to {}: {e}", path.display());
+/// The text of `profiles.txt`, added to `out` (a buffer kept between saves).
+pub fn write_text(out: &mut String, profiles: &[Profile; SLOTS]) {
+    use std::fmt::Write as _;
+    for (i, p) in profiles.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let _ = writeln!(out, "[{i}]");
+        p.write_text(out);
     }
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::disallowed_methods,
-    reason = "tests make the folders the code under test reads and writes in"
-)]
 mod tests {
     use super::*;
     use crate::settings::Curve;
 
+    fn text_of(profiles: &[Profile; SLOTS]) -> String {
+        let mut text = String::new();
+        write_text(&mut text, profiles);
+        text
+    }
+
+    /// The text is the one the app wrote before the files' writer took it over: a
+    /// profile's lines, the settings after them, an empty line between sections.
+    #[test]
+    fn the_text_as_before() {
+        let mut profiles: [Profile; SLOTS] = std::array::from_fn(Profile::default_for);
+        profiles[0].places = vec![
+            Placement {
+                position: Vec3::new(-1.0, 0.5, -1.25),
+                rotation: Quat::IDENTITY,
+                width: 1.2,
+            };
+            3
+        ];
+        profiles[0].center = Some((Vec3::new(0.0, 1.5, 0.0), 0.25));
+        profiles[0].radius = Some(1.3);
+        profiles[0].rows = vec![vec![0, 1], vec![2]];
+        let text = text_of(&profiles);
+        let settings = Settings::default().to_text();
+        let cinema = Profile::default_for(1).settings.to_text();
+        let lying = Profile::default_for(2).settings.to_text();
+        let place = "-1 0.5 -1.25 0 0 0 1 1.2";
+        assert_eq!(
+            text,
+            format!(
+                "[0]\nmonitors 2560x1440 *2560x1440 2560x1440\nmirror on\n\
+                 place 0 {place}\nplace 1 {place}\nplace 2 {place}\n\
+                 center 0 1.5 0 0.25\nradius 1.3\nrows 0 1 / 2\n{settings}\n\
+                 [1]\nmonitors *3840x2160\nmirror off\n{cinema}\n\
+                 [2]\nmonitors *2560x1440 2560x1440\nmirror off\n{lying}"
+            )
+        );
+    }
+
     #[test]
     fn roundtrip() {
-        let dir = std::env::temp_dir().join(format!("prostir-profiles-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("profiles.txt");
         let mut profiles: [Profile; SLOTS] = std::array::from_fn(Profile::default_for);
         profiles[2].sizes = vec![(1920, 1080), (1440, 2560), (3440, 1440)];
         profiles[2].primary = 2;
@@ -347,8 +373,7 @@ mod tests {
         profiles[2].center = Some((Vec3::new(0.3, 1.2, -0.4), -0.7));
         profiles[2].radius = Some(1.35);
         profiles[2].rows = vec![vec![0, 1], vec![2]];
-        save(&path, &profiles);
-        let back = load(&path);
+        let back = parse(&text_of(&profiles));
         assert_eq!(back[..2], profiles[..2]);
         for (a, b) in back[2].places.iter().zip(&profiles[2].places) {
             assert!(a.position.distance(b.position) < 1e-6 && (a.width - b.width).abs() < 1e-6);
@@ -357,7 +382,6 @@ mod tests {
         assert_eq!(back[2].center, profiles[2].center);
         assert_eq!(back[2].radius, profiles[2].radius);
         assert_eq!(back[2].rows, profiles[2].rows);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// A profile never asks for more monitors than any PC makes.
@@ -401,7 +425,7 @@ mod tests {
 
     #[test]
     fn missing_file_gives_defaults() {
-        let p = load(Path::new("/nonexistent/profiles.txt"));
+        let p = parse("");
         assert_eq!(p[0].sizes.len(), 3);
         assert!(p[1].settings.cinema);
         assert_eq!(p[2].settings.preset, Preset::Overhead);

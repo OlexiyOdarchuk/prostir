@@ -523,7 +523,10 @@ impl Selftest {
             last_tab: 0,
             ..crate::settings::Settings::default()
         };
-        settings.save(&dir.join("settings.txt"));
+        let file = crate::persist::File::Settings;
+        if let Err(e) = crate::persist::write_now(&dir, file, &settings.to_text()) {
+            warn!("cannot save {} in {}: {e}", file.name(), dir.display());
+        }
         dir
     }
 

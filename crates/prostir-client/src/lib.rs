@@ -15,6 +15,7 @@ pub mod lang;
 pub mod layout;
 pub mod outbox;
 pub mod pending;
+pub mod persist;
 pub mod physical;
 pub mod profiles;
 #[cfg(all(feature = "selftest", not(feature = "store")))]

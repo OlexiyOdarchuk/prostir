@@ -314,6 +314,16 @@ error-too-big = { $name }: { $size } ({ $codec }) is too large for this headset 
 error-cameras = Cameras unavailable: { $error }
 # $typed (String): what was typed
 error-not-ip = «{ $typed }»: is not an IP address
+# $error (String): what went wrong, as the system says it
+error-save-settings = Could not save the settings: { $error }
+# $error (String): what went wrong, as the system says it
+error-save-desk = Could not save the arrangement: { $error }
+# $error (String): what went wrong, as the system says it
+error-save-profiles = Could not save the profiles: { $error }
+# $error (String): what went wrong, as the system says it
+error-save-keyboard = Could not save where the keyboard window lies: { $error }
+# $error (String): what went wrong, as the system says it
+error-save-files = Could not save the changes: { $error }
 pc-usb = PC (USB)
 bye-pc-quit = The PC app was closed
 bye-forgotten = The PC no longer knows this headset. Pair them again

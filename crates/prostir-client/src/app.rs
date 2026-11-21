@@ -43,7 +43,7 @@ use crate::store::{StoreCheck, UpdateHint};
 use crate::system::SystemEvent;
 use crate::ui::{self, Action, MonitorEntry, Panel, Tab, UiState};
 use crate::xrutil::{self, Gfx, ImageLayer, as_layer, pose, posef, vec3};
-use crate::{background, decoder, egl, net, passthrough, physical};
+use crate::{background, decoder, egl, net, passthrough, persist, physical};
 #[cfg(not(all(feature = "selftest", not(feature = "store"))))]
 use no_selftest::{self as selftest, Act, Selftest};
 
@@ -503,7 +503,6 @@ struct Scene {
     hands_in_view: bool,
     /// Where the keyboard window lies (set the first time it is shown).
     keyboard_place: Option<Placement>,
-    keyboard_path: PathBuf,
     /// The headset's own system language.
     system_lang: Option<Lang>,
     /// The menu's language: what it shows, and the one it waits for.
@@ -512,19 +511,37 @@ struct Scene {
     /// Which languages the Language page shows, when there are many.
     language_page: u8,
     profiles: [Profile; profiles::SLOTS],
-    profiles_path: PathBuf,
+    /// A profile was saved, now or at an earlier start.
+    profiles_saved: bool,
     /// The profile last switched to, until something is changed by hand.
     active_profile: Option<usize>,
     /// A profile being switched to, until its monitors stand where it says.
     profile_switch: Option<ProfileSwitch>,
     /// A monitor being added, shown as a placeholder where it will appear.
     adding: Option<Adding>,
-    /// The desk arrangement on disk; see `save_layout`.
+    /// The desk arrangement as last kept, in memory (`layout.txt` follows it and is
+    /// never read again); see `save_layout`.
     desk: layout::Desk,
     /// The stream size each desk placement was made for (see `fit_to_stream`). Not
     /// kept for the cinema view.
     placed_for: HashMap<ScreenId, layout::PixelSize>,
-    settings_path: PathBuf,
+    /// The files changed in this pass, handed to the files' writer after it (see
+    /// `save_due`).
+    saves: persist::Dirty,
+    /// The files whose failed save the menu told of, once each.
+    save_failures_told: persist::Dirty,
+    /// The files' writer of this start. Last, and stopped when the scene goes (see
+    /// `Drop`), however `run` ends.
+    saver: persist::Saver,
+}
+
+impl Drop for Scene {
+    /// What the last pass changed is written, and the files' writer ends, before the
+    /// app does, also when `run` ends early with an error or a panic.
+    fn drop(&mut self) {
+        self.save_due();
+        self.saver.stop(persist::Saver::STOPS_WITHIN);
+    }
 }
 
 impl Scene {
@@ -822,8 +839,9 @@ impl Scene {
     }
 
     /// Turns cinema mode on or off. The one place that switches it: the desk layout is
-    /// saved before the cinema view replaces it (follow mode may have moved it), and
-    /// comes back from disk after, window panels staying where they are.
+    /// kept before the cinema view replaces it (follow mode may have moved it), and
+    /// comes back after from memory (not from its file, which may not be written yet),
+    /// window panels staying where they are.
     fn set_cinema(&mut self, on: bool) {
         if on == self.settings.cinema {
             return;
@@ -835,7 +853,7 @@ impl Scene {
             return;
         }
         self.settings.cinema = false;
-        let saved = self.desk.load();
+        let saved = self.desk.arrangement().clone();
         self.adopt_desk(saved);
         self.place_missing();
     }
@@ -930,22 +948,101 @@ impl Scene {
         self.pending_layout = None;
     }
 
-    /// Saves the arrangement as the desk layout. In cinema mode `placements` is the
-    /// cinema view, which is not saved: the desk layout stays as the user left it.
-    /// Window panels are placed afresh when they appear, so they are not kept.
-    fn save_layout(&self) {
-        let desk: HashMap<ScreenId, Placement> = self
-            .placements
-            .iter()
-            .filter(|(id, _)| !self.is_window(**id))
-            .map(|(id, p)| (*id, *p))
-            .collect();
-        self.desk.save(
-            &desk,
+    /// Keeps the arrangement as the desk layout, and `layout.txt` is saved after this
+    /// pass. In cinema mode `placements` is the cinema view, which is not kept: the
+    /// desk layout stays as the user left it. Window panels are placed afresh when
+    /// they appear, so they are not kept.
+    fn save_layout(&mut self) {
+        // Taken out for the while (its maps keep their memory) so the rest of the
+        // scene can be read meanwhile.
+        let mut desk = std::mem::take(&mut self.desk);
+        let kept = desk.keep(
+            self.placements
+                .iter()
+                .filter(|(id, _)| !self.is_window(**id))
+                .map(|(id, p)| (*id, *p)),
             &self.placed_for,
             (self.center, self.radius),
             self.settings.cinema,
         );
+        self.desk = desk;
+        if kept {
+            self.saves.mark(persist::File::Desk);
+        }
+    }
+
+    /// The files changed in this pass (`saves`), handed to the files' writer: each
+    /// one's text written into the writer's buffer for it, once, whatever changed it
+    /// how often. The writing itself is done on the writer's thread.
+    fn save_due(&mut self) {
+        use persist::File;
+        for file in self.saves.take() {
+            match file {
+                File::Settings => self.saver.save(file, |out| self.settings.write_text(out)),
+                File::Desk => self.saver.save(file, |out| self.desk.write_text(out)),
+                File::Profiles => self
+                    .saver
+                    .save(file, |out| profiles::write_text(out, &self.profiles)),
+                File::Keyboard => {
+                    if let Some(place) = &self.keyboard_place {
+                        self.saver
+                            .save(file, |out| layout::write_keyboard(out, place));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Hands over what changed and waits until it is written (for
+    /// [`persist::Saver::STOPS_WITHIN`] at most): the app is `why` (paused, or the
+    /// headset taken off), and may not come back.
+    fn flush_saves(&mut self, why: &str) {
+        self.save_due();
+        if !self.saver.flush(persist::Saver::STOPS_WITHIN) {
+            warn!(
+                "{why}: the files were not all written within {} ms",
+                persist::Saver::STOPS_WITHIN.as_millis()
+            );
+        }
+    }
+
+    /// What the files' writer said: a file that could not be saved is told once in
+    /// this start (the next save tries again, and the log says each time), and files
+    /// that failed together in one message.
+    fn saves_told(&mut self) {
+        let mut failed = persist::Dirty::default();
+        let mut first: Option<(persist::File, String)> = None;
+        while let Some(event) = self.saver.try_recv() {
+            match event {
+                persist::PersistEvent::Failed { file, error } => {
+                    if !self.save_failures_told.has(file) && !failed.has(file) {
+                        failed.mark(file);
+                        first.get_or_insert((file, error));
+                    }
+                }
+            }
+        }
+        let Some((file, error)) = first else {
+            return;
+        };
+        let mut several = 0;
+        for f in failed.take() {
+            self.save_failures_told.mark(f);
+            several += 1;
+        }
+        let id = if several > 1 {
+            "error-save-files"
+        } else {
+            match file {
+                persist::File::Settings => "error-save-settings",
+                persist::File::Desk => "error-save-desk",
+                persist::File::Profiles => "error-save-profiles",
+                persist::File::Keyboard => "error-save-keyboard",
+            }
+        };
+        let text = self.texts().f(id, &[("error", error.into())]);
+        // The log has it already, from the writer.
+        self.put_error(text);
     }
 
     /// Takes `saved` as the desk arrangement. Window panels stay where they are; a
@@ -1879,12 +1976,17 @@ impl Scene {
             .update(now, s.clock_12h, s.date_style, self.lang.texts());
     }
 
+    fn show_error(&mut self, text: String) {
+        warn!("{text}");
+        self.put_error(text);
+    }
+
+    /// [`Scene::show_error`] without the line in the log.
     #[expect(
         clippy::disallowed_methods,
         reason = "until step 7.7 passes the time in and moves the threads to the shell"
     )]
-    fn show_error(&mut self, text: String) {
-        warn!("{text}");
+    fn put_error(&mut self, text: String) {
         self.error = Some((text, Instant::now()));
     }
 
@@ -2157,19 +2259,22 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         return Ok(());
     }
     // A write cut short leaves its temporary file; the real one is whole.
-    for name in [
-        "settings.txt",
-        "layout.txt",
-        "profiles.txt",
-        "keyboard.txt",
-        "identity",
-        "paired_hosts",
-    ] {
+    let persisted = persist::File::ALL.map(persist::File::name);
+    for name in persisted.into_iter().chain(["identity", "paired_hosts"]) {
         prostir_proto::secure::remove_leftovers(&data_dir.join(name));
     }
-    let settings_path = data_dir.join("settings.txt");
-    let profiles_path = data_dir.join("profiles.txt");
-    let mut settings = Settings::load(&settings_path);
+    // The files are read here once; from now on the model in memory is what counts,
+    // and the files' writer only writes them, off the frame. However this function
+    // ends, what waits is written and the thread waited for (see `persist::Saver`,
+    // and `Scene`'s `Drop` once the scene has it).
+    let (loaded, saver) = persist::start(&data_dir);
+    let persist::Loaded {
+        mut settings,
+        desk,
+        profiles: saved_profiles,
+        profiles_saved,
+        keyboard: keyboard_place,
+    } = loaded;
     // This start's own: a new start in the same process begins afresh.
     let mic = Arc::new(Mic::new(settings.mic, app.clone()));
     let gains = Arc::new(Gains::default());
@@ -2304,13 +2409,12 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         .inspect_err(|e| warn!("Wi-Fi low-latency lock unavailable: {e:#}"))
         .ok();
 
-    let desk = layout::Desk::new(data_dir.join("layout.txt"));
     let mut scene = Scene {
         monitors: HashMap::new(),
         order: Vec::new(),
         // Filled from the desk below; in cinema mode the view is built once the PC's
-        // monitors are here (see `build_cinema_view_if_due`) and the desk layout stays
-        // on disk until cinema ends.
+        // monitors are here (see `build_cinema_view_if_due`) and the desk layout waits
+        // in `desk` until cinema ends.
         placements: HashMap::new(),
         primary: None,
         mirror_wanted: true,
@@ -2380,20 +2484,21 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         head_right: Vec3::X,
         view_eye: None,
         hands_in_view: false,
-        keyboard_place: layout::load(&data_dir.join("keyboard.txt")).remove(&0),
-        keyboard_path: data_dir.join("keyboard.txt"),
+        keyboard_place,
         system_lang,
         lang,
         clock: ClockFace::default(),
         language_page: 0,
-        profiles: profiles::load(&profiles_path),
-        profiles_path,
+        profiles: saved_profiles,
+        profiles_saved,
         active_profile: None,
         profile_switch: None,
         adding: None,
         desk,
         placed_for: HashMap::new(),
-        settings_path,
+        saves: persist::Dirty::default(),
+        save_failures_told: persist::Dirty::default(),
+        saver,
     };
     // The language's file had lines that could not be read: said once, in front.
     if let Some(warning) = scene.texts().warning() {
@@ -2401,7 +2506,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         scene.show_toast(text);
     }
     if !scene.settings.cinema {
-        let saved = scene.desk.load();
+        let saved = scene.desk.arrangement().clone();
         scene.adopt_desk(saved);
     }
 
@@ -2435,7 +2540,10 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         if let Some(t) = test.as_deref_mut() {
             t.loop_top();
         }
+        // What the last pass changed goes to the files' writer, however the pass ended.
+        scene.save_due();
         let mut destroy = false;
+        let mut paused = false;
         let timeout = if session_running {
             Duration::ZERO
         } else {
@@ -2444,11 +2552,16 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         let mut input_waiting = false;
         app.poll_events(Some(timeout), |event| match event {
             PollEvent::Main(MainEvent::Destroy) => destroy = true,
+            PollEvent::Main(MainEvent::Pause) => paused = true,
             PollEvent::Main(MainEvent::InputAvailable) => input_waiting = true,
             _ => {}
         });
         if destroy {
             break;
+        }
+        if paused {
+            // The system may end a paused app without a word: what waits is written now.
+            scene.flush_saves("paused");
         }
         if let StoreCheck::NotOwned { store: name } = store.poll() {
             let since = *not_owned_since.get_or_insert_with(Instant::now);
@@ -2542,6 +2655,11 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                         xr::SessionState::STOPPING => {
                             session.end()?;
                             session_running = false;
+                            // Taken off (the headset may sleep for long): saved now.
+                            scene.flush_saves("stopping");
+                        }
+                        xr::SessionState::IDLE => {
+                            scene.flush_saves("idle");
                         }
                         xr::SessionState::EXITING | xr::SessionState::LOSS_PENDING => break 'main,
                         _ => {}
@@ -2584,6 +2702,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         if let Some(reading) = newest {
             scene.battery_read(reading);
         }
+        scene.saves_told();
         // Another language chosen (or the PC's changed): loaded on the system thread,
         // the menu keeps the one it has until then.
         if let Some(lang) = scene.wanted_lang() {
@@ -2739,6 +2858,9 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                     let took = Instant::now();
                     let action = Action::Move { id, delta: 1 };
                     handle_action(&mut scene, action, &mut passthrough, &mut controls);
+                    // Handed to the files' writer now, so the time is the whole of what
+                    // saving costs the frame.
+                    scene.save_due();
                     if let Some(t) = test.as_deref_mut() {
                         t.saved(took.elapsed());
                     }
@@ -2757,6 +2879,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                     &mut passthrough,
                     &mut controls,
                 );
+                scene.save_due();
                 if let Some(t) = test.as_deref_mut() {
                     t.saved(took.elapsed());
                 }
@@ -3058,8 +3181,8 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                 scene.scaling = None;
                 match released.id {
                     Held::Keyboard => {
-                        if let Some(k) = scene.keyboard_place {
-                            layout::save(&scene.keyboard_path, &HashMap::from([(0, k)]));
+                        if scene.keyboard_place.is_some() {
+                            scene.saves.mark(persist::File::Keyboard);
                         }
                     }
                     Held::Menu if !scene.settings.cinema => scene.save_layout(),
@@ -3703,6 +3826,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     }
 
     info!("exiting");
+    // What waits is written, and the files' writer ends (see `Scene`'s `Drop`).
     drop(scene);
     Ok(())
 }
@@ -3742,7 +3866,7 @@ fn handle_net_event(
             info!("connected to {addr} ({name:?}), language {language:?}");
             if language.is_some() && language != scene.settings.pc_language {
                 scene.settings.pc_language = language;
-                scene.settings.save(&scene.settings_path);
+                scene.saves.mark(persist::File::Settings);
             }
             let host = name.unwrap_or_else(|| {
                 if addr.ip().is_loopback() {
@@ -4142,7 +4266,7 @@ fn take_command(
         }
         Does::NoLimits(on) => {
             scene.settings.no_limits = on;
-            scene.settings.save(&scene.settings_path);
+            scene.saves.mark(persist::File::Settings);
             scene.prefs_changed();
             Outcome::Done
         }
@@ -4181,7 +4305,6 @@ fn handle_action(
     passthrough: &mut Option<passthrough::Passthrough>,
     controls: &mut Controls,
 ) {
-    let settings_path: &Path = &scene.settings_path.clone();
     // Changing the setup by hand leaves the profile it came from.
     if matches!(
         action,
@@ -4233,7 +4356,7 @@ fn handle_action(
         Action::Tab(tab) => {
             scene.tab = tab;
             scene.settings.last_tab = tab_code(tab);
-            scene.settings.save(settings_path);
+            scene.saves.mark(persist::File::Settings);
         }
         Action::Recenter => {
             scene.recenter();
@@ -4247,31 +4370,31 @@ fn handle_action(
         }
         Action::IntroDone => {
             scene.settings.intro_seen = true;
-            scene.settings.save(settings_path);
+            scene.saves.mark(persist::File::Settings);
         }
         Action::LanguagePage(page) => scene.language_page = page,
         Action::Language(language) => {
             scene.settings.language = language;
-            scene.settings.save(settings_path);
+            scene.saves.mark(persist::File::Settings);
         }
         Action::CinemaScreen(i) => {
             scene.settings.cinema_screen = Some(i);
-            scene.settings.save(settings_path);
+            scene.saves.mark(persist::File::Settings);
             if scene.settings.cinema {
                 scene.arrange_all();
             }
         }
         Action::Cinema(on) => {
             scene.set_cinema(on);
-            scene.settings.save(settings_path);
+            scene.saves.mark(persist::File::Settings);
         }
         Action::KeyboardWindow(on) => {
             scene.settings.keyboard_window = on;
-            scene.settings.save(settings_path);
+            scene.saves.mark(persist::File::Settings);
         }
         Action::Focus(on) => {
             scene.settings.focus = on;
-            scene.settings.save(settings_path);
+            scene.saves.mark(persist::File::Settings);
             scene.prefs_changed();
         }
         Action::DetachWindow => {
@@ -4311,38 +4434,38 @@ fn handle_action(
         }
         Action::GazeMouse(on) => {
             scene.settings.gaze_mouse = on;
-            scene.settings.save(settings_path);
+            scene.saves.mark(persist::File::Settings);
             scene.prefs_changed();
         }
         Action::LargeMenu(on) => {
             scene.settings.large_menu = on;
-            scene.settings.save(settings_path);
+            scene.saves.mark(persist::File::Settings);
             scene.panel_place.width = panel_width(on);
         }
         Action::RestEvery(minutes) => {
             scene.settings.rest_every = minutes;
-            scene.settings.save(settings_path);
+            scene.saves.mark(persist::File::Settings);
             scene.worn_for = Duration::ZERO;
         }
         Action::Brightness(percent) => {
             scene.settings.brightness = percent;
-            scene.settings.save(settings_path);
+            scene.saves.mark(persist::File::Settings);
         }
         Action::Clock12h(on) => {
             scene.settings.clock_12h = on;
-            scene.settings.save(settings_path);
+            scene.saves.mark(persist::File::Settings);
         }
         Action::DateStyle(style) => {
             scene.settings.date_style = style;
-            scene.settings.save(settings_path);
+            scene.saves.mark(persist::File::Settings);
         }
         Action::MenuButton(on) => {
             scene.settings.menu_button = on;
-            scene.settings.save(settings_path);
+            scene.saves.mark(persist::File::Settings);
         }
         Action::SoundFromScreen(on) => {
             scene.settings.sound_from_screen = on;
-            scene.settings.save(settings_path);
+            scene.saves.mark(persist::File::Settings);
             scene.prefs_changed();
             if !on {
                 scene.sound_from = None;
@@ -4350,17 +4473,17 @@ fn handle_action(
         }
         Action::Notifications(on) => {
             scene.settings.notifications = on;
-            scene.settings.save(settings_path);
+            scene.saves.mark(persist::File::Settings);
             scene.prefs_changed();
         }
         Action::BatterySaver(on) => {
             scene.settings.battery_saver = on;
-            scene.settings.save(settings_path);
+            scene.saves.mark(persist::File::Settings);
             scene.refresh_due = true;
         }
         Action::LeftHanded(on) => {
             scene.settings.left_handed = on;
-            scene.settings.save(settings_path);
+            scene.saves.mark(persist::File::Settings);
         }
         Action::OpenMenu => {
             let (head, forward) = scene.head;
@@ -4369,23 +4492,23 @@ fn handle_action(
         }
         Action::MoveAll(on) => {
             scene.settings.move_all = on;
-            scene.settings.save(settings_path);
+            scene.saves.mark(persist::File::Settings);
         }
         Action::Magnet(on) => {
             scene.settings.magnet = on;
-            scene.settings.save(settings_path);
+            scene.saves.mark(persist::File::Settings);
         }
         Action::Follow(on) => {
             scene.settings.follow = on;
             scene.follow_hold = false;
-            scene.settings.save(settings_path);
+            scene.saves.mark(persist::File::Settings);
             if !on {
                 scene.save_layout();
             }
         }
         Action::Hands(mode) => {
             scene.settings.hands = mode;
-            scene.settings.save(settings_path);
+            scene.saves.mark(persist::File::Settings);
             controls.hands_enabled = mode == HandMode::Control;
         }
         Action::MakePrimary(id) => {
@@ -4419,7 +4542,7 @@ fn handle_action(
         Action::SetMic(enabled) => {
             scene.mic_wanted = enabled;
             scene.settings.mic = enabled;
-            scene.settings.save(&scene.settings_path);
+            scene.saves.mark(persist::File::Settings);
             scene.mic.set_allowed(enabled);
             scene.mic_changed();
         }
@@ -4446,12 +4569,12 @@ fn handle_action(
         }
         Action::Preset(preset) => {
             scene.settings.preset = preset;
-            scene.settings.save(settings_path);
+            scene.saves.mark(persist::File::Settings);
             scene.arrange_all();
         }
         Action::Curve(curve) => {
             scene.settings.curve = curve;
-            scene.settings.save(settings_path);
+            scene.saves.mark(persist::File::Settings);
             // Flat it hangs tilted, curved it continues the cylinder.
             if !scene.settings.cinema {
                 scene.place_mirror();
@@ -4459,15 +4582,16 @@ fn handle_action(
         }
         Action::Background(background) => {
             scene.settings.background = background;
-            scene.settings.save(settings_path);
+            scene.saves.mark(persist::File::Settings);
             set_passthrough(scene, passthrough);
         }
         Action::ApplyProfile(i) => {
             // Never saved yet: the setup the user built by hand becomes "Work", so
             // switching away and back returns to it instead of the starting template.
-            if !scene.profiles_path.exists() && !scene.quest_sizes().is_empty() {
+            if !scene.profiles_saved && !scene.quest_sizes().is_empty() {
                 scene.profiles[0] = scene.current_profile();
-                profiles::save(&scene.profiles_path, &scene.profiles);
+                scene.profiles_saved = true;
+                scene.saves.mark(persist::File::Profiles);
             }
             let p = scene.profiles[i].clone();
             let shown_physical = scene
@@ -4503,7 +4627,7 @@ fn handle_action(
             s.background = p.settings.background;
             s.cinema_screen = p.settings.cinema_screen;
             scene.set_cinema(p.settings.cinema);
-            scene.settings.save(settings_path);
+            scene.saves.mark(persist::File::Settings);
             set_passthrough(scene, passthrough);
             scene.active_profile = Some(i);
             // The monitors changing is the answer: the menu gets out of the way.
@@ -4516,7 +4640,8 @@ fn handle_action(
             if confirmed {
                 scene.confirm_save = None;
                 scene.profiles[i] = scene.current_profile();
-                profiles::save(&scene.profiles_path, &scene.profiles);
+                scene.profiles_saved = true;
+                scene.saves.mark(persist::File::Profiles);
                 scene.active_profile = Some(i);
             } else {
                 scene.confirm_save = Some((i, Instant::now()));
@@ -4571,7 +4696,7 @@ fn handle_action(
         }
         Action::ShowTips => {
             scene.settings.intro_seen = false;
-            scene.settings.save(settings_path);
+            scene.saves.mark(persist::File::Settings);
         }
         Action::ConnectTo(i) => {
             if let Some(h) = scene.found.get(i) {
@@ -4638,7 +4763,7 @@ fn handle_action(
             // Closing the tips counts as read, or they would open again right away.
             if !scene.settings.intro_seen {
                 scene.settings.intro_seen = true;
-                scene.settings.save(settings_path);
+                scene.saves.mark(persist::File::Settings);
             }
         }
     }
