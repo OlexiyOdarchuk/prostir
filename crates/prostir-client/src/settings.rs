@@ -87,9 +87,6 @@ pub struct Settings {
     pub focus: bool,
     /// One big screen further away; the other monitors are hidden.
     pub cinema: bool,
-    /// Position in the row of the monitor shown in cinema mode; `None`: the largest
-    /// landscape one.
-    pub cinema_screen: Option<u8>,
     /// The first-run tips were shown and dismissed.
     pub intro_seen: bool,
     /// A passthrough window onto the real keyboard.
@@ -144,7 +141,6 @@ impl Default for Settings {
             hands: HandMode::Visible,
             focus: false,
             cinema: false,
-            cinema_screen: None,
             intro_seen: false,
             keyboard_window: false,
             mic: true,
@@ -192,7 +188,6 @@ impl Settings {
                 }
                 Some(("focus", v)) => s.focus = v == "on",
                 Some(("cinema", v)) => s.cinema = v == "on",
-                Some(("cinema-screen", v)) => s.cinema_screen = v.parse().ok(),
                 Some(("intro", v)) => s.intro_seen = v == "seen",
                 Some(("keyboard-window", v)) => s.keyboard_window = v == "on",
                 Some(("mic", v)) => s.mic = v != "off",
@@ -293,11 +288,10 @@ impl Settings {
         let _ = write!(
             out,
             "preset {preset}\ncurve {curve}\nbackground {background}\nhands {hands}\n\
-             focus {}\ncinema {}\ncinema-screen {}\nlanguage {}\npc-language {}\nintro {}\nkeyboard-window {}\nmic {}\ntab {}\nfollow {}\n\
+             focus {}\ncinema {}\nlanguage {}\npc-language {}\nintro {}\nkeyboard-window {}\nmic {}\ntab {}\nfollow {}\n\
              gaze-mouse {}\nlarge-menu {}\nleft-handed {}\nbattery-saver {}\nnotifications {}\nrest-every {}\nmagnet {}\nmove-all {}\nsound-from-screen {}\nclock {}\ndate {}\nmenu-button {}\nbrightness {}\nno-limits {}\n",
             on(self.focus),
             on(self.cinema),
-            CinemaScreen(self.cinema_screen),
             match &self.language {
                 Language::LikePc => "like-pc",
                 Language::LikeSystem => "like-system",
@@ -332,18 +326,6 @@ impl Settings {
     }
 }
 
-/// `cinema-screen`: the screen's place in the row, or `auto`.
-struct CinemaScreen(Option<u8>);
-
-impl std::fmt::Display for CinemaScreen {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.0 {
-            Some(i) => write!(f, "{i}"),
-            None => f.write_str("auto"),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -357,7 +339,6 @@ mod tests {
             hands: HandMode::Control,
             focus: true,
             cinema: true,
-            cinema_screen: Some(2),
             intro_seen: true,
             keyboard_window: true,
             mic: false,
@@ -386,12 +367,11 @@ mod tests {
         out.clear();
         s.write_text(&mut out);
         assert_eq!(out, s.to_text());
-        let auto = Settings {
-            cinema_screen: None,
-            ..s
-        };
-        assert!(auto.to_text().contains("\ncinema-screen auto\n"));
-        assert_eq!(Settings::parse(&auto.to_text()), auto);
+        // Which screen cinema shows is the arrangement's now (`layout.txt`): a line
+        // of an older version is passed over.
+        let older = format!("cinema-screen 2\n{}", s.to_text());
+        assert_eq!(Settings::parse(&older), s);
+        assert!(!s.to_text().contains("cinema-screen"));
     }
 
     /// Any language code is kept, and the two "like" choices; what is not a code is

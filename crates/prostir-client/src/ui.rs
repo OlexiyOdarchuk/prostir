@@ -132,6 +132,8 @@ pub struct UiState {
     /// The laptop screen on the map: centre and half size as seen, in radians.
     pub mirror_seen: Option<[f32; 4]>,
     pub primary: Option<DisplayKey>,
+    /// The screen picked for cinema (see `layout::cinema_choice`).
+    pub cinema_screen: Option<DisplayKey>,
     pub mirror_wanted: bool,
     /// PC sound goes to the headset.
     pub audio_wanted: bool,
@@ -363,7 +365,7 @@ pub enum Action {
     KeyboardWindow(bool),
     Cinema(bool),
     /// Which monitor (position in the row) cinema mode shows.
-    CinemaScreen(u8),
+    CinemaScreen(DisplayKey),
     ApplyProfile(usize),
     SaveProfile(usize),
     Tab(Tab),
@@ -2049,7 +2051,7 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
             .iter()
             .map(|m| (m.id, m.width, m.height))
             .collect();
-        let shown = crate::layout::cinema_choice(&sizes, st.cinema_screen);
+        let shown = crate::layout::cinema_choice(&sizes, s.cinema_screen);
         let short = s.monitors.len() > 3;
         let labels: Vec<String> = s
             .monitors
@@ -2071,11 +2073,10 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
             s.monitors
                 .iter()
                 .zip(&labels)
-                .enumerate()
-                .map(|(i, (m, label))| {
+                .map(|(m, label)| {
                     (
                         label.as_str(),
-                        Action::CinemaScreen(i as u8),
+                        Action::CinemaScreen(m.id),
                         shown == Some(m.id),
                         true,
                     )
@@ -3517,6 +3518,7 @@ mod tests {
             selected: None,
             mirror_seen: Some([0.0, -0.55, 0.35, 0.22]),
             primary: Some(k(102)),
+            cinema_screen: None,
             mirror_wanted: true,
             audio_wanted: true,
             mic_wanted: true,

@@ -320,10 +320,10 @@ pub fn stick_on_wall<K: Key>(
     })
 }
 
-/// The monitor shown in cinema mode: the one at position `pick` in the row, else the
+/// The monitor shown in cinema mode: `pick` if it is among `monitors`, else the
 /// largest landscape one (films are wide), else the first.
-pub fn cinema_choice<K: Key>(monitors: &[(K, u32, u32)], pick: Option<u8>) -> Option<K> {
-    pick.and_then(|i| monitors.get(i as usize))
+pub fn cinema_choice<K: Key>(monitors: &[(K, u32, u32)], pick: Option<K>) -> Option<K> {
+    pick.and_then(|k| monitors.iter().find(|m| m.0 == k))
         .or_else(|| {
             monitors
                 .iter()
@@ -336,7 +336,7 @@ pub fn cinema_choice<K: Key>(monitors: &[(K, u32, u32)], pick: Option<u8>) -> Op
 
 /// Cinema: one monitor big and further away, straight ahead at eye level; the others
 /// are not shown.
-pub fn cinema<K: Key>(monitors: &[(K, u32, u32)], pick: Option<u8>) -> HashMap<K, Placement> {
+pub fn cinema<K: Key>(monitors: &[(K, u32, u32)], pick: Option<K>) -> HashMap<K, Placement> {
     const DISTANCE: f32 = 3.0;
     /// About 56° wide, like a good seat in a cinema.
     const WIDTH: f32 = 3.2;
@@ -922,6 +922,8 @@ mod grab_tests {
 #[derive(Default)]
 pub struct Desk {
     saved: Arrangement,
+    /// The screen cinema shows (see [`cinema_choice`]): one picked in the menu.
+    cinema: Option<DisplayKey>,
 }
 
 /// A stream's size in pixels, width then height.
@@ -958,12 +960,14 @@ impl Desk {
     /// format 2
     /// center 0 1.6 0 0.25
     /// radius 1.3
+    /// cinema 0123456789abcdef:3
     /// 0123456789abcdef:3 -0.6 1.6 -1.2 0 0.2 0 0.98 0.77 2560x1440
     /// ```
     ///
     /// A file this version does not write so is not read at all.
     pub fn parse(text: &str) -> Result<Self, LoadError> {
         let mut saved = Arrangement::default();
+        let mut cinema = None;
         for (n, line) in persist::body(text)? {
             let bad = LoadError::Line(n);
             let (word, rest) = line.split_once(' ').ok_or(bad)?;
@@ -974,6 +978,7 @@ impl Desk {
                 "radius" if saved.radius.is_none() => {
                     saved.radius = Some(parse_radius(rest).ok_or(bad)?);
                 }
+                "cinema" if cinema.is_none() => cinema = Some(DisplayKey::parse(rest).ok_or(bad)?),
                 _ => {
                     let key = DisplayKey::parse(word).ok_or(bad)?;
                     let (p, size) = parse_place(rest, true).ok_or(bad)?;
@@ -986,7 +991,7 @@ impl Desk {
                 }
             }
         }
-        Ok(Self { saved })
+        Ok(Self { saved, cinema })
     }
 
     /// The desk arrangement as last kept.
@@ -1024,14 +1029,29 @@ impl Desk {
         true
     }
 
-    /// Forgets the places of the displays `gone`; true when it had one of them, and
+    /// The screen cinema shows, as picked in the menu.
+    pub fn cinema(&self) -> Option<DisplayKey> {
+        self.cinema
+    }
+
+    /// Cinema shows `screen` from now on; true when that is a change, and
     /// `layout.txt` is to be written.
+    pub fn pick_cinema(&mut self, screen: Option<DisplayKey>) -> bool {
+        std::mem::replace(&mut self.cinema, screen) != screen
+    }
+
+    /// Forgets the places of the displays `gone`, and the cinema's pick if it is one of
+    /// them; true when it had one of them, and `layout.txt` is to be written.
     pub fn forget(&mut self, gone: &[DisplayKey]) -> bool {
         let saved = &mut self.saved;
         let before = saved.placements.len();
         saved.placements.retain(|k, _| !gone.contains(k));
         saved.sizes.retain(|k, _| !gone.contains(k));
-        saved.placements.len() != before
+        let picked = self.cinema.is_some_and(|k| gone.contains(&k));
+        if picked {
+            self.cinema = None;
+        }
+        saved.placements.len() != before || picked
     }
 
     /// The text of `layout.txt` (see [`Desk::parse`]), added to `out` (a buffer kept
@@ -1045,6 +1065,9 @@ impl Desk {
         }
         if let Some(radius) = saved.radius {
             let _ = writeln!(out, "radius {radius}");
+        }
+        if let Some(screen) = self.cinema {
+            let _ = writeln!(out, "cinema {screen}");
         }
         for key in ascending(&saved.placements) {
             if let Some(p) = saved.placements.get(&key) {
@@ -1530,12 +1553,8 @@ mod tests {
     fn cinema_shows_one_monitor() {
         // Row order: portrait in the middle.
         let monitors = [(0, 2560, 1440), (2, 1440, 2560), (1, 3840, 2160)];
-        let out = cinema(&monitors, Some(1));
-        assert_eq!(
-            out.keys().copied().collect::<Vec<_>>(),
-            vec![2],
-            "picked by position"
-        );
+        let out = cinema(&monitors, Some(2));
+        assert_eq!(out.keys().copied().collect::<Vec<_>>(), vec![2], "picked");
         assert!(out[&2].position.z < -2.0, "further away than the desk");
         // Nothing picked (or a stale pick): the largest landscape monitor, not a portrait one.
         assert_eq!(cinema_choice(&monitors, None), Some(1));
@@ -2519,7 +2538,7 @@ mod tests {
     /// that is not one, a width of nothing, a turn of nothing, words after the size.
     #[test]
     fn desk_format_2() {
-        let text = "format 2\ncenter 0 1.6 0 0.25\nradius 1.3\n\
+        let text = "format 2\ncenter 0 1.6 0 0.25\nradius 1.3\ncinema 0123456789abcdef:12\n\
                     0123456789abcdef:3 -0.5 1.5 -0.9 0 0.2 0 0.98 1.38 2560x1440\n\
                     0123456789abcdef:12 0.5 1.5 -0.9 0 -0.2 0 0.98 1.03\n";
         let desk = Desk::parse(text).unwrap();
@@ -2533,6 +2552,7 @@ mod tests {
         assert!((saved.placements[&twelve].width - 1.03).abs() < 1e-6);
         assert_eq!(saved.radius, Some(1.3));
         assert_eq!(saved.center, Some((Vec3::new(0.0, 1.6, 0.0), 0.25)));
+        assert_eq!(desk.cinema(), Some(twelve));
         let mut again = String::new();
         desk.write_text(&mut again);
         let back = Desk::parse(&again).unwrap();
@@ -2541,7 +2561,16 @@ mod tests {
             assert!(q.position.distance(p.position) < 1e-6 && (q.width - p.width).abs() < 1e-6);
             assert!(q.rotation.angle_between(p.rotation) < 1e-4);
         }
-        assert!(again.starts_with("format 2\ncenter 0 1.6 0 0.25\nradius 1.3\n"));
+        assert!(again.starts_with(
+            "format 2\ncenter 0 1.6 0 0.25\nradius 1.3\ncinema 0123456789abcdef:12\n"
+        ));
+        assert_eq!(back.cinema(), Some(twelve));
+        // A display gone takes the cinema's pick with it.
+        let mut desk = back;
+        assert!(desk.forget(&[twelve]));
+        assert_eq!(desk.cinema(), None);
+        assert!(!desk.forget(&[twelve]));
+        assert!(desk.pick_cinema(Some(three)) && !desk.pick_cinema(Some(three)));
         let old = "0 -0.5 -0.08 -0.9 0 0.2 0 0.98 1.38\n1 0.5 -0.08 -0.9 0 -0.2 0 0.98 1.03\n";
         assert_eq!(Desk::parse(old).err(), Some(LoadError::Format));
         let place = "-0.5 1.5 -0.9 0 0.2 0 0.98 1.38";
@@ -2554,6 +2583,11 @@ mod tests {
             ("center 0 1.6 0 0\ncenter 0 1.6 0 0\n".to_owned(), 3),
             ("radius 1.3\nradius 1.3\n".to_owned(), 3),
             ("radius 0\n".to_owned(), 2),
+            ("cinema 12\n".to_owned(), 2),
+            (
+                "cinema 0123456789abcdef:3\ncinema 0123456789abcdef:3\n".to_owned(),
+                3,
+            ),
             ("center 0 1.6 0\n".to_owned(), 2),
             (format!("0123456789abcdef:3 {place} 2560\n"), 2),
             ("0123456789abcdef:3 0 0 -1 0 0 0 1 0\n".to_owned(), 2),

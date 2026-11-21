@@ -1157,10 +1157,8 @@ impl Scene {
 
     fn arrange_monitors(&mut self) {
         if self.settings.cinema {
-            self.placements = self.around_user(layout::cinema(
-                &self.quest_sizes(),
-                self.settings.cinema_screen,
-            ));
+            self.placements =
+                self.around_user(layout::cinema(&self.quest_sizes(), self.desk.cinema()));
             self.grabs = [None, None];
             return;
         }
@@ -2095,6 +2093,7 @@ impl Scene {
                 })
                 .collect(),
             primary: self.primary,
+            cinema_screen: self.desk.cinema(),
             selected: self.selected.filter(|id| self.monitors.contains_key(id)),
             mirror_seen: self
                 .mirror_id()
@@ -4450,9 +4449,10 @@ fn handle_action(
             scene.settings.language = language;
             scene.saves.mark(persist::File::Settings);
         }
-        Action::CinemaScreen(i) => {
-            scene.settings.cinema_screen = Some(i);
-            scene.saves.mark(persist::File::Settings);
+        Action::CinemaScreen(screen) => {
+            if scene.desk.pick_cinema(Some(screen)) {
+                scene.saves.mark(persist::File::Desk);
+            }
             if scene.settings.cinema {
                 scene.arrange_all();
             }

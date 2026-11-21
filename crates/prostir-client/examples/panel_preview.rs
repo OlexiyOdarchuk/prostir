@@ -155,6 +155,7 @@ fn main() {
             },
         ],
         primary: Some(k(1)),
+        cinema_screen: None,
         selected: None,
         mirror_seen: Some([0.0, -0.55, 0.35, 0.22]),
         mirror_wanted: true,
