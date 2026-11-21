@@ -6,7 +6,7 @@ use std::path::Path;
 
 use glam::{Quat, Vec3};
 
-use crate::layout::Placement;
+use crate::layout::{self, Placement};
 use crate::settings::{Background, Preset, Settings};
 
 pub const SLOTS: usize = 3;
@@ -23,6 +23,10 @@ pub struct Profile {
     /// Layout, curve, background and cinema are applied; hands and focus stay as
     /// they are (they are habits, not part of a setup).
     pub settings: Settings,
+    /// The eye and the yaw `places` were laid out around (as the desk arrangement keeps
+    /// them, see `layout::Arrangement`). Profiles saved without one have places in
+    /// the room as it was then.
+    pub center: Option<(Vec3, f32)>,
     /// Where each monitor stood, by its place in `sizes`: all of them or none (a
     /// profile from before 0.2.0, or a starting point: the preset lays them out).
     pub places: Vec<Placement>,
@@ -41,6 +45,7 @@ impl Profile {
                     primary: 0,
                     mirror: false,
                     settings,
+                    center: None,
                     places: Vec::new(),
                 }
             }
@@ -51,6 +56,7 @@ impl Profile {
                     primary: 0,
                     mirror: false,
                     settings,
+                    center: None,
                     places: Vec::new(),
                 }
             }
@@ -59,6 +65,7 @@ impl Profile {
                 primary: 1,
                 mirror: true,
                 settings,
+                center: None,
                 places: Vec::new(),
             },
         }
@@ -69,7 +76,12 @@ impl Profile {
         let mut primary = 0;
         let mut mirror = false;
         let mut places: Vec<(usize, Placement)> = Vec::new();
+        let mut center = None;
         for line in text.lines() {
+            if let Some(c) = layout::parse_center(line) {
+                center = Some(c);
+                continue;
+            }
             match line.split_once(' ') {
                 Some(("place", v)) => {
                     if let Some(p) = parse_place(v) {
@@ -108,8 +120,23 @@ impl Profile {
             primary,
             mirror,
             settings: Settings::parse(text),
+            center: center.filter(|_| !places.is_empty()),
             places,
         })
+    }
+
+    /// Its places as laid out around the origin facing -Z (as `layout::arrange` lays a
+    /// preset out), to stand around the user the way they stood around the user when
+    /// saved, wherever the user sits and faces now: rows, the desktop, "Line up" and "In
+    /// front" then see them from the eye they were arranged around. A profile saved
+    /// without its center is taken as laid out around `now`: its monitors come back
+    /// where they were in the room.
+    pub fn local_places(&self, now: (Vec3, f32)) -> Vec<Placement> {
+        let from = self.center.unwrap_or(now);
+        self.places
+            .iter()
+            .map(|p| layout::carried(p, from, (Vec3::ZERO, 0.0)))
+            .collect()
     }
 
     fn to_text(&self) -> String {
@@ -136,8 +163,15 @@ impl Profile {
                 );
                 places
             });
+        // Older readers skip the line: it is no setting of theirs.
+        let center = self
+            .center
+            .filter(|_| !self.places.is_empty())
+            .map_or(String::new(), |(eye, yaw)| {
+                format!("center {} {} {} {yaw}\n", eye.x, eye.y, eye.z)
+            });
         format!(
-            "monitors {}\nmirror {}\n{places}{}",
+            "monitors {}\nmirror {}\n{center}{places}{}",
             monitors.join(" "),
             if self.mirror { "on" } else { "off" },
             self.settings.to_text()
@@ -213,6 +247,7 @@ mod tests {
                 width: 1.2,
             })
             .collect();
+        profiles[2].center = Some((Vec3::new(0.3, 1.2, -0.4), -0.7));
         save(&path, &profiles);
         let back = load(&path);
         assert_eq!(back[..2], profiles[..2]);
@@ -220,6 +255,7 @@ mod tests {
             assert!(a.position.distance(b.position) < 1e-6 && (a.width - b.width).abs() < 1e-6);
         }
         assert_eq!(back[2].sizes, profiles[2].sizes);
+        assert_eq!(back[2].center, profiles[2].center);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

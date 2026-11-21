@@ -42,6 +42,12 @@
   leaves its row only when you clearly move it out.
 - A profile keeps where its monitors stood, so switching to it and back brings your
   rows back. Profiles saved before keep working and are laid out by their layout.
+- A profile also keeps where you sat and which way you faced when you saved it, and
+  comes back around you that way wherever you sit and face now. Line up and In front
+  after switching to a profile no longer send monitors stacked one over another flying
+  apart (monitors side by side held together), and the PC desktop is the one the
+  profile had. A profile saved by an earlier 0.2.0 build has its monitors where they
+  were in the room, as before: save it again once it stands as you like.
 - The PC desktop matches the headset in every direction: the mouse, and a window you
   drag across, go from one monitor to the next where the two meet in the headset,
   sideways and up or down. A monitor you hung higher on purpose is just as much higher

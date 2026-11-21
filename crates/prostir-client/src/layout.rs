@@ -1061,7 +1061,7 @@ fn parse_placement(line: &str) -> Option<(ScreenId, Placement, Option<PixelSize>
 }
 
 /// `center x y z yaw`: where the arrangement was laid out around.
-fn parse_center(line: &str) -> Option<(Vec3, f32)> {
+pub(crate) fn parse_center(line: &str) -> Option<(Vec3, f32)> {
     let rest = line.strip_prefix("center ")?;
     let v: Vec<f32> = rest
         .split_whitespace()
@@ -1099,6 +1099,45 @@ pub fn facing_yaw(placements: &HashMap<ScreenId, Placement>, eye: Vec3) -> Optio
         })
         .fold((0.0f32, 0.0f32), |(s, c), a| (s + a.sin(), c + a.cos()));
     (sin.abs() > 1e-6 || cos.abs() > 1e-6).then(|| sin.atan2(cos))
+}
+
+/// `p`, laid out around `from` (eye and yaw, as the headset's `center`), standing the
+/// same way around `to`: turned about the vertical by the difference of the yaws, the
+/// eye carried to the eye. What is worked out as seen from the eye (rows, the desktop,
+/// "Line up", the magnet) sees it from `to` as it saw it from `from`.
+pub fn carried(p: &Placement, from: (Vec3, f32), to: (Vec3, f32)) -> Placement {
+    let turn = Quat::from_rotation_y(to.1 - from.1);
+    Placement {
+        position: to.0 + turn * (p.position - from.0),
+        rotation: (turn * p.rotation).normalize(),
+        width: p.width,
+    }
+}
+
+/// The yaw "In front" brings straight ahead, seen from `eye`: the `primary` monitor's
+/// direction, else the mean direction of `monitors` (what the user arranged around
+/// them, not the layout's old forward, which placing by hand has long left behind).
+pub fn ahead(
+    placements: &HashMap<ScreenId, Placement>,
+    monitors: &[ScreenId],
+    primary: Option<ScreenId>,
+    eye: Vec3,
+) -> Option<f32> {
+    let direction = |p: &Placement| {
+        let d = p.position - eye;
+        (-d.x).atan2(-d.z)
+    };
+    primary
+        .and_then(|id| placements.get(&id))
+        .map(direction)
+        .or_else(|| {
+            let (sin, cos) = monitors
+                .iter()
+                .filter_map(|id| placements.get(id))
+                .map(direction)
+                .fold((0.0f32, 0.0f32), |(s, c), a| (s + a.sin(), c + a.cos()));
+            (sin != 0.0 || cos != 0.0).then(|| sin.atan2(cos))
+        })
 }
 
 #[cfg(test)]
@@ -2257,5 +2296,280 @@ mod tests {
             .collect();
         let got = facing_yaw(&turned, Vec3::ZERO).unwrap();
         assert!((got - yaw).abs() < 1e-4, "got {got}");
+    }
+
+    /// `p` with every monitor carried from `from` to `to` (see [`carried`]).
+    fn carried_all(
+        p: &HashMap<ScreenId, Placement>,
+        from: (Vec3, f32),
+        to: (Vec3, f32),
+    ) -> HashMap<ScreenId, Placement> {
+        p.iter().map(|(k, q)| (*k, carried(q, from, to))).collect()
+    }
+
+    /// How far the corners of `a` seen from the eye of `ca` are from those of `b` seen
+    /// from the eye of `cb`, each turned so the first monitor of `m` is straight ahead
+    /// (metres): 0 when the user sees the one arrangement from the one eye as the other
+    /// from the other.
+    fn seen_apart(
+        a: &HashMap<ScreenId, Placement>,
+        ca: (Vec3, f32),
+        b: &HashMap<ScreenId, Placement>,
+        cb: (Vec3, f32),
+        m: &[(ScreenId, u32, u32)],
+    ) -> f32 {
+        let origin = (Vec3::ZERO, 0.0);
+        let first = Some(m[0].0);
+        let ca = (ca.0, ahead(a, &[], first, ca.0).unwrap());
+        let cb = (cb.0, ahead(b, &[], first, cb.0).unwrap());
+        m.iter()
+            .map(|&(id, w, h)| {
+                let (p, q) = (carried(&a[&id], ca, origin), carried(&b[&id], cb, origin));
+                let tall = |x: &Placement| x.width * h as f32 / w as f32;
+                corners(&p, tall(&p))
+                    .iter()
+                    .zip(corners(&q, tall(&q)))
+                    .map(|(x, y)| x.distance(y))
+                    .fold(0.0f32, f32::max)
+            })
+            .fold(0.0f32, f32::max)
+    }
+
+    /// "In front" as the headset does it: the arrangement turned about the eye of
+    /// `center` so the primary monitor is straight ahead of a head at `head` looking
+    /// along `yaw`, and carried to it; the new center.
+    fn in_front(
+        p: &HashMap<ScreenId, Placement>,
+        m: &[(ScreenId, u32, u32)],
+        primary: Option<ScreenId>,
+        center: (Vec3, f32),
+        head: (Vec3, f32),
+    ) -> (HashMap<ScreenId, Placement>, (Vec3, f32)) {
+        let ids: Vec<ScreenId> = m.iter().map(|x| x.0).collect();
+        let ahead = ahead(p, &ids, primary, center.0).unwrap_or(center.1);
+        (carried_all(p, (center.0, ahead), head), head)
+    }
+
+    /// `id` let go by the magnet over (`up` 1) or under (-1) `under`, its middle `along`
+    /// metres to the right of `under`'s, a hand's 3 cm off: glued edge to edge.
+    fn glued(
+        p: &mut HashMap<ScreenId, Placement>,
+        m: &[(ScreenId, u32, u32)],
+        id: ScreenId,
+        under: ScreenId,
+        up: f32,
+        along: f32,
+    ) {
+        let tall = |id: ScreenId, width: f32| {
+            let &(_, w, h) = m.iter().find(|x| x.0 == id).unwrap();
+            width * h as f32 / w as f32
+        };
+        let &(_, w, _) = m.iter().find(|x| x.0 == id).unwrap();
+        let width = w as f32 * METRES_PER_PIXEL;
+        let n = p[&under];
+        let lift = (tall(under, n.width) + tall(id, width)) / 2.0 + 0.03;
+        let at = n.position + n.rotation * Vec3::new(along, up * lift, 0.0);
+        p.insert(
+            id,
+            Placement {
+                position: at,
+                rotation: facing(at, Vec3::new(0.0, at.y, 0.0)),
+                width,
+            },
+        );
+        let s = stick(p, m, Vec3::ZERO, id).expect("the magnet takes it");
+        assert!(
+            !s.across,
+            "{id} glued over or under {}, not beside",
+            s.neighbour
+        );
+        p.insert(id, s.placement);
+    }
+
+    /// The desktops of `a` seen from `ca` and of `b` seen from `cb` are the same: the
+    /// same rows, and every monitor within a few pixels of the same spot (the eye carried
+    /// along leaves the last bits of the floats).
+    fn same_desktop(
+        a: &HashMap<ScreenId, Placement>,
+        ca: (Vec3, f32),
+        b: &HashMap<ScreenId, Placement>,
+        cb: (Vec3, f32),
+        m: &[(ScreenId, u32, u32)],
+        primary: Option<ScreenId>,
+        what: &str,
+    ) -> Desktop {
+        let (da, db) = (
+            Desktop::of(a, m, ca, Preset::Arc, primary, None),
+            Desktop::of(b, m, cb, Preset::Arc, primary, None),
+        );
+        assert_eq!(da.rows, db.rows, "{what}: rows");
+        for s in &da.plan {
+            let t = db.plan.iter().find(|t| t.id == s.id).unwrap();
+            assert!(
+                (s.x - t.x).abs() <= 2 && (s.y - t.y).abs() <= 2,
+                "{what}: {} at {},{} instead of {},{}",
+                s.id,
+                s.x,
+                s.y,
+                t.x,
+                t.y
+            );
+        }
+        da
+    }
+
+    /// 2026-11-21, the owner (dev build 74dfe1d): after switching to a profile, "Line
+    /// up" or "In front" sent monitors glued one over another flying, while monitors
+    /// glued side by side held. A profile kept its places in the room but not the eye
+    /// they were laid out around: once the user had turned the arrangement in front
+    /// of them elsewhere (or the headset's room was set anew), everything worked out as
+    /// seen from the eye (the rows the PC gets, "Line up", "In front") saw the profile
+    /// from another place. Rows side by side close up whatever the eye, rows one over
+    /// another are kept apart as seen and so came apart. Now a profile comes back around
+    /// the user as it was around the user: lining up changes nothing, "In front" turns
+    /// it as one piece, and the PC gets the desktop it had, in either order, for stacks,
+    /// rows side by side, portraits among landscapes and a 3840x2160 over two monitors.
+    #[test]
+    fn glued_monitors_stay_glued_after_a_profile_and_line_up_or_in_front() {
+        // Where the user sat when saving, and later (turned in front elsewhere, or
+        // the headset's room set anew): 35 cm aside, lower, further back, turned 75°.
+        let saved_at = (Vec3::new(0.2, 1.15, -0.1), 0.4);
+        let later = (Vec3::new(0.55, 1.03, 0.15), 0.4 + 1.3);
+        let head = |c: (Vec3, f32)| (c.0 + Vec3::new(0.04, 0.02, -0.03), c.1 - 0.6);
+        // The owner's: 1440x2560 | 2560x1440 primary | 2560x1440 | 1440x2560, and the
+        // 3840x2160 glued over the two landscape ones.
+        let owner = [
+            (2, 1440, 2560),
+            (1, 2560, 1440),
+            (3, 2560, 1440),
+            (4, 1440, 2560),
+            (6, 3840, 2160),
+        ];
+        let mut stack = arrange(Preset::Arc, &owner[..4], Some(1), None, None);
+        let seam = stack[&1].width / 2.0;
+        glued(&mut stack, &owner, 6, 1, 1.0, seam);
+        // Side by side only.
+        let row = [(0, 2560, 1440), (1, 1440, 2560), (2, 2560, 1440)];
+        let side = arrange(Preset::Arc, &row, Some(1), None, None);
+        // Mixed: two landscape side by side, a 1920x1080 glued over the left one and a
+        // 2560x1440 under the right one.
+        let mixed_m = [
+            (0, 2560, 1440),
+            (1, 2560, 1440),
+            (5, 1920, 1080),
+            (7, 2560, 1440),
+        ];
+        let mut mixed = arrange(Preset::Arc, &mixed_m[..2], Some(0), None, None);
+        glued(&mut mixed, &mixed_m, 5, 0, 1.0, 0.0);
+        glued(&mut mixed, &mixed_m, 7, 1, -1.0, -0.1);
+        // Two rows by the preset (six do not fit one).
+        let six = [
+            (0, 2560, 1440),
+            (1, 2560, 1440),
+            (2, 1440, 2560),
+            (3, 2560, 1440),
+            (4, 2560, 1440),
+            (5, 3840, 2160),
+        ];
+        let two_rows = arrange(Preset::Arc, &six, Some(2), None, None);
+        let scenes = [
+            ("a 3840x2160 over two", &owner[..], 1, stack),
+            ("side by side", &row[..], 1, side),
+            ("over and under", &mixed_m[..], 0, mixed),
+            ("two rows of a preset", &six[..], 2, two_rows),
+        ];
+        let dir = std::env::temp_dir().join(format!("prostir-glued-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, m, primary, by_hand) in scenes {
+            let primary = Some(primary);
+            let origin = (Vec3::ZERO, 0.0);
+            // Lined up once, as the user keeps it, where they sat.
+            let kept = carried_all(
+                &line_up(&by_hand, m, origin, Preset::Arc, primary, &[], None),
+                origin,
+                saved_at,
+            );
+            let desktop = same_desktop(&kept, saved_at, &kept, saved_at, m, primary, name);
+            if name == "a 3840x2160 over two" {
+                // Over the two, touching both on the desktop.
+                assert_eq!(desktop.rows, vec![vec![6], vec![2, 1, 3, 4]]);
+                let spot = |id| desktop.plan.iter().find(|s| s.id == id).copied().unwrap();
+                for below in [1, 3] {
+                    assert_eq!(
+                        spot(6).crossing(&spot(below)),
+                        Some(prostir_layout::space::Side::Below),
+                        "{name}: 6 over {below}"
+                    );
+                }
+            }
+            // Saved in a profile (and read back), the user elsewhere, switched to it.
+            let switched = |kept: &HashMap<ScreenId, Placement>,
+                            at: (Vec3, f32),
+                            now: (Vec3, f32)|
+             -> HashMap<ScreenId, Placement> {
+                let mut all = std::array::from_fn(crate::profiles::Profile::default_for);
+                all[0].sizes = m.iter().map(|x| (x.1, x.2)).collect();
+                all[0].center = Some(at);
+                all[0].places = m.iter().map(|x| kept[&x.0]).collect();
+                let path = dir.join("profiles.txt");
+                crate::profiles::save(&path, &all);
+                let back = crate::profiles::load(&path);
+                // As the headset stands them: around the user (`Scene::around_user`).
+                m.iter()
+                    .zip(back[0].local_places(now))
+                    .map(|(x, p)| (x.0, carried(&p, origin, now)))
+                    .collect()
+            };
+            let check = |p: &HashMap<ScreenId, Placement>, at: (Vec3, f32), what: &str| {
+                let off = seen_apart(p, at, &kept, saved_at, m);
+                assert!(off < 2e-3, "{name}, {what}: {off} m from how it was");
+                same_desktop(
+                    p,
+                    at,
+                    &kept,
+                    saved_at,
+                    m,
+                    primary,
+                    &format!("{name}, {what}"),
+                );
+            };
+            for now in [saved_at, later] {
+                let back = switched(&kept, saved_at, now);
+                check(&back, now, "switched to");
+                // Then "Line up".
+                let rows = Desktop::of(&back, m, now, Preset::Arc, primary, None).rows;
+                let lined = line_up(&back, m, now, Preset::Arc, primary, &rows, None);
+                check(&lined, now, "switched to, lined up");
+                // Then "In front", and "Line up" after it.
+                let (front, at) = in_front(&back, m, primary, now, head(now));
+                check(&front, at, "switched to, in front");
+                let rows = Desktop::of(&front, m, at, Preset::Arc, primary, None).rows;
+                let lined = line_up(&front, m, at, Preset::Arc, primary, &rows, None);
+                check(&lined, at, "switched to, in front, lined up");
+                // The other order: "In front" and "Line up" first, saved, and back.
+                let (front, at) = in_front(&kept, m, primary, saved_at, head(now));
+                let rows = Desktop::of(&front, m, at, Preset::Arc, primary, None).rows;
+                let lined = line_up(&front, m, at, Preset::Arc, primary, &rows, None);
+                let back = switched(&lined, at, later);
+                check(&back, later, "in front, lined up, saved, switched to");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A profile saved before profiles kept their center comes back where it was in
+    /// the room, as it did.
+    #[test]
+    fn a_profile_without_its_center_stays_in_the_room() {
+        let three = [(0, 2560, 1440), (1, 2560, 1440), (2, 2560, 1440)];
+        let p = arrange(Preset::Arc, &three, Some(1), None, None);
+        let mut profile = crate::profiles::Profile::default_for(0);
+        profile.places = three.iter().map(|x| p[&x.0]).collect();
+        let now = (Vec3::new(0.3, 1.1, 0.2), 0.9);
+        for (place, local) in profile.places.iter().zip(profile.local_places(now)) {
+            let back = carried(&local, (Vec3::ZERO, 0.0), now);
+            assert!(back.position.distance(place.position) < 1e-5);
+            assert!(back.rotation.angle_between(place.rotation) < 1e-4);
+        }
     }
 }

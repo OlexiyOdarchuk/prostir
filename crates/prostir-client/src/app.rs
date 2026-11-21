@@ -677,11 +677,13 @@ impl Scene {
     /// layout and look.
     fn current_profile(&self) -> Profile {
         let sizes = self.quest_sizes();
-        // Where the monitors stand on the desk (in cinema, as saved before it).
-        let desk = if self.settings.cinema {
-            self.desk.load().placements
+        // Where the monitors stand on the desk (in cinema, as saved before it), and the
+        // eye and the way they were laid out around.
+        let (desk, center) = if self.settings.cinema {
+            let saved = self.desk.load();
+            (saved.placements, saved.center)
         } else {
-            self.placements.clone()
+            (self.placements.clone(), Some(self.center))
         };
         let places: Option<Vec<Placement>> =
             sizes.iter().map(|m| desk.get(&m.0).copied()).collect();
@@ -693,6 +695,7 @@ impl Scene {
             sizes: sizes.iter().map(|m| (m.1, m.2)).collect(),
             mirror: self.mirror_wanted,
             settings: self.settings,
+            center: center.filter(|_| places.is_some()),
             places: places.unwrap_or_default(),
         }
     }
@@ -830,7 +833,9 @@ impl Scene {
         }
         match switch.made(ids, Instant::now()) {
             Made::Places(places) => {
-                for (id, p) in places {
+                // Around the user as they stood around the user when saved (see
+                // `Profile::local_places`).
+                for (id, p) in self.around_user(places.into_iter().collect()) {
                     self.placements.insert(id, p);
                     self.placed_for.remove(&id);
                 }
@@ -1282,31 +1287,12 @@ impl Scene {
             return;
         }
         let (old_pos, _) = self.center;
-        // Straight ahead goes the primary monitor (else the middle of the monitors):
-        // what the user arranged around it, not the layout's old forward, which hand
-        // placement has long left behind.
-        let direction = |p: &Placement| {
-            let d = p.position - old_pos;
-            (-d.x).atan2(-d.z)
-        };
-        let ahead = self
-            .primary
-            .and_then(|id| self.placements.get(&id))
-            .map(direction)
-            .or_else(|| {
-                let (sin, cos) = self
-                    .quest_sizes()
-                    .iter()
-                    .filter_map(|(id, _, _)| self.placements.get(id))
-                    .map(direction)
-                    .fold((0.0f32, 0.0f32), |(s, c), a| (s + a.sin(), c + a.cos()));
-                (sin != 0.0 || cos != 0.0).then(|| sin.atan2(cos))
-            })
-            .unwrap_or(self.center.1);
-        let turn = glam::Quat::from_rotation_y(yaw - ahead);
+        // Straight ahead goes the primary monitor (else the middle of the monitors).
+        let ids: Vec<ScreenId> = self.quest_sizes().iter().map(|m| m.0).collect();
+        let ahead =
+            layout::ahead(&self.placements, &ids, self.primary, old_pos).unwrap_or(self.center.1);
         for p in self.placements.values_mut() {
-            p.position = head + turn * (p.position - old_pos);
-            p.rotation = turn * p.rotation;
+            *p = layout::carried(p, (old_pos, ahead), (head, yaw));
         }
         self.center = (head, yaw);
         self.save_layout();
@@ -4142,7 +4128,7 @@ fn handle_action(
                 let places = if p.settings.cinema {
                     Vec::new()
                 } else {
-                    p.places.clone()
+                    p.local_places(scene.center)
                 };
                 ProfileSwitch::new(req, places)
             });

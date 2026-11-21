@@ -3,13 +3,15 @@
 
 mod common;
 
+use std::collections::BTreeMap;
+
 use common::*;
 use glam::{Quat, Vec3};
 use prostir_layout::circle::Limits;
 use prostir_layout::desk::{self, Desk, Spot, View};
 use prostir_layout::place::place_new;
 use prostir_layout::rows::rows_of;
-use prostir_layout::space::{Monitor, covers};
+use prostir_layout::space::{Monitor, Placement, covers};
 use prostir_layout::tidy::line_up;
 
 /// The headset's pipeline with history: rows kept as they were within the hysteresis,
@@ -426,6 +428,119 @@ fn a_new_monitor_goes_next_to_the_others() {
     }
     eprintln!("a new monitor: touches the arrangement in {touching} of {total}");
     assert!(touching * 100 >= total * 80, "P3: {touching} of {total}");
+}
+
+/// How far the monitors of `upper` (where `at` puts them) go down the frame of `scene`
+/// before one covers one of `lower` as seen from its eye (metres; 1 when not within 1 m).
+fn drop_to_meet(scene: &Scene, at: &BTreeMap<u8, Placement>, upper: &[u8], lower: &[u8]) -> f32 {
+    let down = scene.frame.turn * Vec3::NEG_Y;
+    let corners = |k: u8, by: f32| {
+        let m = scene.get(k).unwrap();
+        let mut p = at[&k];
+        p.position += down * by - scene.frame.eye;
+        p.corners(m.height())
+    };
+    let meets = |by: f32| {
+        upper.iter().any(|&u| {
+            lower
+                .iter()
+                .any(|&l| covers(&corners(l, 0.0), &corners(u, by), 1e-7))
+        })
+    };
+    let mut by = 0.0;
+    while by < 1.0 && !meets(by + 0.001) {
+        by += 0.001;
+    }
+    by
+}
+
+/// M8 (the owner's, 2026-11-21: monitors glued one over another flew off after a
+/// profile and "Line up"): rows one over another, lined up, carried away together with
+/// the eye they were laid out around (moved and turned, as a profile now comes back
+/// around the user wherever they sit) line up exactly as lining up and carrying them
+/// does, and the desktop is the same. Seen from an eye left behind instead (a profile
+/// that kept its monitors in the room but not its eye), lining up fits every row anew
+/// around that eye, each on its own: rows side by side close up, rows one over another
+/// come apart. How often is reported.
+#[test]
+fn rows_over_rows_line_up_the_same_carried_with_their_eye() {
+    let mut rng = Rng::new(0x3e7a_0009);
+    let (mut checked, mut differ, mut behind, mut resting_rows) = (0, 0, 0, 0);
+    let mut first: Option<String> = None;
+    for i in 0..cases(500) {
+        let k = 2 + rng.below(2);
+        let scene = rows_scene_of(&mut rng, k, None, false, 0.0, false);
+        let rows = rows_now(&scene);
+        if rows.len() < 2 {
+            continue;
+        }
+        let kept = lined(
+            &scene,
+            &line_up(&scene.monitors, &scene.frame, scene.main, Some(&rows), None),
+        );
+        let rows = rows_now(&kept);
+        let turn = Quat::from_rotation_y(rng.float(-3.1, 3.1));
+        let shift = Vec3::new(
+            rng.float(-0.4, 0.4),
+            rng.float(-0.2, 0.2),
+            rng.float(-0.4, 0.4),
+        );
+        let carried = kept.moved(turn, shift);
+        checked += 1;
+        // Lined up there = lined up here and carried.
+        let here = line_up(&kept.monitors, &kept.frame, kept.main, Some(&rows), None);
+        let there = line_up(
+            &carried.monitors,
+            &carried.frame,
+            carried.main,
+            Some(&rows),
+            None,
+        );
+        let here = placements(&lined(&kept, &here).moved(turn, shift));
+        let off = farthest(&carried, &here, &there);
+        assert!(off < 1e-3, "case {i}: {off} m\n{}", kept.describe());
+        let ((rows0, plan0), (rows1, plan1)) = (pipeline(&kept), pipeline(&carried));
+        let reference = plan0[0].id;
+        if rows0 != rows1 || relative(&plan0, reference) != relative(&plan1, reference) {
+            differ += 1;
+            first.get_or_insert_with(|| format!("case {i}: desktop\n{}", kept.describe()));
+        }
+        // The eye left behind.
+        let mut stayed = carried.clone();
+        stayed.frame = kept.frame;
+        let out = line_up(
+            &stayed.monitors,
+            &stayed.frame,
+            stayed.main,
+            Some(&rows_now(&stayed)),
+            None,
+        );
+        let resting = |s: &Scene, at: &BTreeMap<u8, Placement>| -> Vec<f32> {
+            rows.windows(2)
+                .map(|w| drop_to_meet(s, at, &w[0], &w[1]))
+                .collect()
+        };
+        let (before, after) = (
+            resting(&carried, &placements(&carried)),
+            resting(&stayed, &out),
+        );
+        for (b, a) in before.iter().zip(&after) {
+            if *b <= 0.005 {
+                resting_rows += 1;
+                if *a > 0.02 {
+                    behind += 1;
+                }
+            }
+        }
+    }
+    eprintln!(
+        "carried with the eye: {differ} of {checked} desktops differ (float rounding at a near tie); seen from the eye left behind, {behind} of {resting_rows} rows resting on the row under them come 2 cm or more apart"
+    );
+    if let Some(f) = &first {
+        eprintln!("first: {f}");
+    }
+    assert!(checked * 2 >= cases(500), "{checked}");
+    assert!(differ * 100 <= checked, "{differ} of {checked}");
 }
 
 /// T1 to T5: "Line up" keeps the rows, covers nothing, puts neighbours side by side,
