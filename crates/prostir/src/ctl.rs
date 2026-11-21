@@ -467,7 +467,12 @@ fn error_json(name: &str, text: &str, running: Option<bool>) -> serde_json::Valu
 /// The line for people when a request was done.
 fn done_line(answer: &Answer) -> String {
     if let Some(path) = &answer.path {
-        return format!("{} {path}", t("Збережено:", "Saved:"));
+        let whole = if answer.whole == Some(true) {
+            t(" (уся стільниця)", " (whole desktop)")
+        } else {
+            ""
+        };
+        return format!("{} {path}{whole}", t("Збережено:", "Saved:"));
     }
     match (answer.id, answer.seconds_left) {
         (Some(id), _) => format!("{} {id}", t("Додано, номер", "Added, id")),
@@ -715,8 +720,9 @@ const WAKE_WAIT: Duration = Duration::from_secs(30);
 
 /// `prostir` (the menu entry): the settings window, from Prostir. When Prostir
 /// is not running, `start` starts it (`prostir serve --open-settings`, which opens the
-/// window itself once it is on the bus), and this waits for as long as it lives and
-/// is not on the bus yet.
+/// window itself once it is on the bus), and this waits until it is on the bus, for
+/// [`WAKE_WAIT`] at most ([`TIMED_OUT`] after that), [`NOT_RUNNING`] when it ends
+/// first.
 pub fn open(client: &dyn CtlClient, wake: &dyn Fn() -> std::io::Result<Woken>) -> i32 {
     if !client.running() {
         let woken = match wake() {
@@ -738,13 +744,20 @@ pub fn open(client: &dyn CtlClient, wake: &dyn Fn() -> std::io::Result<Woken>) -
                 }
                 break;
             }
-            let ended = match &mut child {
-                Some(child) => child.try_wait().ok().flatten().map(|s| s.to_string()),
-                None if std::time::Instant::now() >= until => {
-                    Some(t("не відповів", "no answer").into())
-                }
-                None => None,
-            };
+            let ended = child
+                .as_mut()
+                .and_then(|child| child.try_wait().ok().flatten())
+                .map(|s| s.to_string());
+            if ended.is_none() && std::time::Instant::now() >= until {
+                eprintln!(
+                    "prostir: {}",
+                    t(
+                        "Prostir не з'явився на шині вчасно",
+                        "Prostir did not come on the bus in time"
+                    )
+                );
+                return TIMED_OUT;
+            }
             if let Some(how) = ended {
                 eprintln!(
                     "prostir: {} ({how})",

@@ -197,7 +197,7 @@ exist, monitor requests change the set kept for the next headset (its monitors s
 | `set_scale` | `id`, `scale` (percent) | another scale for a monitor: its output is made anew under the same name and id (it stands `starting` meanwhile); `BadSize` for a scale the desktop does not give its size |
 | `place` | `id`, `x`, `y` | moves a display on the desktop to about `x`, `y` (its top-left corner, logical pixels): into the row it is then in, between its neighbours left and right, or a row of its own above or under the others; the desktop's arrangement then lines it up. Only while the monitors are on the desktop (`Unsupported` otherwise). The main headset's next arrangement (when the person moves a monitor in the headset) replaces it; the headset's own 3D arrangement is not changed |
 | `set_primary` | `id` | the desktop's primary display |
-| `screenshot` | `id` | a picture of a virtual monitor or a window panel, saved as a PNG as the headset's screenshots are (`Prostir/<date and time>.png` in the Pictures folder); answers `path` (the whole path) and `whole`. Answered once the desktop took it (20 s at most, else `Desktop`): with `grim -o` on Hyprland; on KDE Plasma from the monitor's own stream while it streams to a headset, else Spectacle's picture of the whole desktop (`whole`: true). `UnknownDisplay` for no such monitor or a display of the PC, `Capture` when it could not be taken, `Unsupported` while no monitors are on the desktop |
+| `screenshot` | `id` | a picture of a virtual monitor or a window panel, saved as a PNG as the headset's screenshots are (`Prostir/<date and time to the millisecond>.png` in the Pictures folder, a name no other file there has); answers `path` (the whole path) and `whole`. Answered once the desktop took it (20 s at most, else `Desktop`): with `grim -o` on Hyprland; on KDE Plasma from the monitor's own stream while it streams to a headset, else Spectacle's picture of the whole desktop (`whole`: true). `UnknownDisplay` for no such monitor or a display of the PC, `Capture` when it could not be taken, `Unsupported` while no monitors are on the desktop, or when they leave it before the picture |
 | `set_quality` | `mbit` (5 to 100) | per monitor |
 | `set_sharp` | `on` | the slower encoder preset for clearer small text |
 | `set_codec` | `codec` (`h264`, `h265`, `auto`), `cpu` (bool, default false) | `auto` is the same as `h265` (H.265 where the PC and every headset can, else H.264), and the state shows it as `h265` |
@@ -231,7 +231,7 @@ brings them:
 {"revision": 7}
 {"id": 103, "revision": 8}
 {"seconds_left": 180, "revision": 9}
-{"path": "/home/me/Pictures/Prostir/2026-11-21 14-05-09.png", "whole": false, "revision": 9}
+{"path": "/home/me/Pictures/Prostir/2026-11-21 14-05-09.042.png", "whole": false, "revision": 9}
 ```
 
 `revision` is that of the state that already has the change; `id` comes with
@@ -462,8 +462,9 @@ sleeps, it wakes it: the watcher (SIGUSR1), which starts it with the window, or 
 (`systemctl --user start prostir.service`), and then asks for the window once it is on
 the bus, 30 s at most. When nothing runs, it starts `prostir serve --open-settings` on
 its own (its log goes where `prostir`'s errors go: the journal, when the desktop
-started it), which opens the window once it is on the bus; `prostir` waits for that as
-long as the new Prostir lives, and says so when it ends first. Prostir takes its name
+started it), which opens the window once it is on the bus; `prostir` waits for that
+30 s at most (exit code 3 after that), and says so when the new Prostir ends first
+(exit code 2). Prostir takes its name
 on the bus before it starts GStreamer, so this is quick. `prostir serve` started again
 while Prostir runs opens the window of the running one too, and so does a click on the
 tray icon; the very first start of Prostir for a user opens it as well. The tray has

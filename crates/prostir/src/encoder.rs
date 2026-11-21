@@ -692,7 +692,24 @@ impl Probe {
 /// Decodes one keyframe of a monitor's stream into a PNG in the Pictures folder (a
 /// screenshot of just that monitor where the desktop's tool cannot take one output).
 pub fn keyframe_to_png(data: &[u8], codec: Codec) -> Result<std::path::PathBuf> {
+    // A new file, made empty for this picture: only one with the picture in it counts.
     let path = crate::platform::screenshot_path()?;
+    match decode_to(data, codec, &path) {
+        Ok(()) if crate::platform::has_picture(&path) => {
+            info!("screenshot saved to {path:?}");
+            Ok(path)
+        }
+        done => {
+            let _ = std::fs::remove_file(&path);
+            Err(done
+                .err()
+                .unwrap_or_else(|| anyhow::anyhow!("the frame was decoded into nothing")))
+        }
+    }
+}
+
+/// Decodes the keyframe `data` into a PNG at `path`.
+fn decode_to(data: &[u8], codec: Codec, path: &std::path::Path) -> Result<()> {
     let (caps, parse) = match codec {
         Codec::H264 => ("video/x-h264", "h264parse"),
         Codec::H265 => ("video/x-h265", "h265parse"),
@@ -724,10 +741,7 @@ pub fn keyframe_to_png(data: &[u8], codec: Codec) -> Result<std::path::PathBuf> 
     let _ = pipeline.set_state(gst::State::Null);
     pushed?;
     match ended.as_ref().map(|m| m.view()) {
-        Some(gst::MessageView::Eos(_)) if path.exists() => {
-            info!("screenshot saved to {path:?}");
-            Ok(path)
-        }
+        Some(gst::MessageView::Eos(_)) => Ok(()),
         Some(gst::MessageView::Error(e)) => bail!("{}", e.error()),
         _ => bail!("the frame was not decoded in time"),
     }

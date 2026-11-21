@@ -124,9 +124,8 @@ struct Brain {
     /// The settings window typed a code a headset shows: answered once the pairing
     /// attempt ends.
     code_reply: Option<api::Reply>,
-    /// Screenshots asked for on the local API, waiting for the desktop's worker: the
-    /// job, the reply, and until when.
-    shots: Vec<(worker::JobId, api::Reply, Instant)>,
+    /// Screenshots asked for on the local API, waiting for the desktop's worker.
+    shots: local::Shots,
     /// The person asked Prostir to quit (the tray, the local API), not a signal.
     quit_asked: bool,
     /// Connections whose session opens once the desktop's worker connected.
@@ -977,7 +976,7 @@ fn full_with(
         door,
         listening,
         code_reply: None,
-        shots: Vec::new(),
+        shots: local::Shots::default(),
         quit_asked: false,
         waiting_desk: Vec::new(),
         desk_gave_up: false,

@@ -302,6 +302,51 @@ pub fn start_service() -> bool {
     socket_waits() && Places::here().systemctl(&["start", "--no-block", "prostir.service"])
 }
 
+/// The desktop session's variables a Prostir started elsewhere needs, passed on where
+/// this program has them.
+const SESSION_VARS: &[&str] = &[
+    "WAYLAND_DISPLAY",
+    "DISPLAY",
+    "XDG_CURRENT_DESKTOP",
+    "XDG_SESSION_TYPE",
+    "HYPRLAND_INSTANCE_SIGNATURE",
+    "DBUS_SESSION_BUS_ADDRESS",
+];
+
+/// Starts this program with `args` as a unit of the user's systemd manager
+/// (`systemd-run --user`), so nothing of it writes to this program's stdio and its log
+/// goes to the journal: whether it did. Not without a systemd user manager.
+pub fn start_in_user_manager(args: &[&str]) -> bool {
+    let places = Places::here();
+    if !places.systemd {
+        return false;
+    }
+    let mut cmd = Command::new("systemd-run");
+    cmd.args(["--user", "--quiet", "--collect", "--no-block"]);
+    for var in SESSION_VARS {
+        if std::env::var_os(var).is_some() {
+            // `NAME` alone: the value of systemd-run's own environment.
+            cmd.arg(format!("--setenv={var}"));
+        }
+    }
+    cmd.arg("--").arg(&places.exe).args(args);
+    match run(&mut cmd, Duration::from_secs(10)) {
+        Ok(out) if out.status.success() => true,
+        Ok(out) => {
+            warn!(
+                "systemd-run: {}: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            false
+        }
+        Err(e) => {
+            warn!("systemd-run: {e}");
+            false
+        }
+    }
+}
+
 /// Whether systemd's socket waits for the headset now (Prostir asleep).
 pub fn socket_waits() -> bool {
     Places::here().systemd

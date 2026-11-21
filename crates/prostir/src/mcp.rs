@@ -891,7 +891,7 @@ pub fn run() -> i32 {
         if client.running() {
             return Ok("Prostir is running already".to_owned());
         }
-        match ctl::open(&client, &crate::local::wake_for_window) {
+        match ctl::open(&client, &crate::local::wake_for_agent) {
             ctl::DONE => Ok("Prostir is running".to_owned()),
             _ => Err("Prostir did not start (its log says why)".to_owned()),
         }

@@ -10,6 +10,7 @@
 //! headset, so with only guests connected it is refused (`NotAllowed`).
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use log::{info, warn};
 use prostir_proto::Codec;
@@ -20,6 +21,7 @@ use crate::api::{self, ApiError, CodecChoice, CtlReply, Failure, Reply, Request}
 use crate::i18n::t;
 use crate::platform::{self, MonitorSpec};
 use crate::screen::ScreenId;
+use crate::worker::JobId;
 use crate::{Brain, brain, errors, pairing, publish, requests};
 
 /// The command for the headset a request is, if it is one.
@@ -124,6 +126,41 @@ fn hostname() -> &'static str {
     NAME.get_or_init(platform::hostname)
 }
 
+/// Screenshots asked for on the local API, waiting for the desktop's worker: each by
+/// the worker's generation and its job (job numbers start again with each worker), with
+/// its reply and until when it waits.
+#[derive(Default)]
+pub struct Shots(Vec<(u64, JobId, Reply, Instant)>);
+
+impl Shots {
+    pub fn push(&mut self, generation: u64, job: JobId, reply: Reply, until: Instant) {
+        self.0.push((generation, job, reply, until));
+    }
+
+    /// The reply waiting for job `job` of worker `generation`, taken.
+    pub fn take(&mut self, generation: u64, job: JobId) -> Option<Reply> {
+        let i = self
+            .0
+            .iter()
+            .position(|(g, j, ..)| *g == generation && *j == job)?;
+        Some(self.0.remove(i).2)
+    }
+
+    /// When the first one has waited long enough.
+    pub fn due(&self) -> Option<Instant> {
+        self.0.iter().map(|(.., until)| *until).min()
+    }
+
+    /// Those that waited until `now` (all of them with `all`), taken.
+    pub fn over(&mut self, now: Instant, all: bool) -> Vec<(u64, JobId, Reply)> {
+        let (over, still): (Vec<_>, Vec<_>) = std::mem::take(&mut self.0)
+            .into_iter()
+            .partition(|(.., until)| all || *until <= now);
+        self.0 = still;
+        over.into_iter().map(|(g, j, r, _)| (g, j, r)).collect()
+    }
+}
+
 impl Brain {
     /// One request of the local API.
     pub(crate) fn ctl(&mut self, request: Request, reply: Reply) {
@@ -218,25 +255,25 @@ impl Brain {
         }
         match displays.screenshot(ScreenId::from_wire(DisplayId(n))) {
             Ok(job) => {
-                let until = std::time::Instant::now() + crate::worker::answer_within();
-                self.shots.push((job, reply, until));
+                let until = Instant::now() + crate::worker::answer_within();
+                self.shots.push(displays.generation(), job, reply, until);
             }
             Err(e) => self.answer(reply, failed(&e)),
         }
     }
 
-    /// The answer to job `job` of the desktop's worker, if a screenshot of the local
-    /// API waits for it: whether one did.
+    /// The answer to job `job` of the desktop's worker `generation`, if a screenshot
+    /// of the local API waits for it: whether one did.
     pub(crate) fn shot_taken(
         &mut self,
-        job: crate::worker::JobId,
+        generation: u64,
+        job: JobId,
         result: &anyhow::Result<DisplayId>,
         answer: &crate::displays::JobAnswer,
     ) -> bool {
-        let Some(i) = self.shots.iter().position(|(j, ..)| *j == job) else {
+        let Some(reply) = self.shots.take(generation, job) else {
             return false;
         };
-        let (_, reply, _) = self.shots.remove(i);
         let result = match (result, answer) {
             (Err(e), _) => failed(e),
             (Ok(_), crate::displays::JobAnswer::Saved { path, whole }) => CtlReply::Saved {
@@ -250,24 +287,32 @@ impl Brain {
     }
 
     /// Screenshots that waited for the desktop until `now` (all of them with `all`:
-    /// the desktop does not respond, or its monitors are gone) fail with `Desktop`:
+    /// the desktop does not respond) fail with `Desktop`; the worker is told to drop
     /// their jobs, which nobody waits for now.
-    pub(crate) fn give_up_shots(
-        &mut self,
-        now: std::time::Instant,
-        all: bool,
-    ) -> Vec<crate::worker::JobId> {
-        let (over, still): (Vec<_>, Vec<_>) = std::mem::take(&mut self.shots)
-            .into_iter()
-            .partition(|(_, _, until)| all || *until <= now);
-        self.shots = still;
-        let mut jobs = Vec::new();
-        for (job, reply, _) in over {
+    pub(crate) fn give_up_shots(&mut self, now: Instant, all: bool) {
+        for (generation, job, reply) in self.shots.over(now, all) {
             let text = crate::session::desktop_not_responding();
             self.answer(reply, CtlReply::failed(ApiError::Desktop, text));
-            jobs.push(job);
+            if let Some(d) = self
+                .displays
+                .as_ref()
+                .filter(|d| d.generation() == generation)
+            {
+                d.desk().cancel(job);
+            }
         }
-        jobs
+    }
+
+    /// The monitors leave the desktop (their worker is let go): screenshots still
+    /// waiting for it are answered now, as no answer comes any more.
+    pub(crate) fn shots_without_monitors(&mut self) {
+        for (_, _, reply) in self.shots.over(Instant::now(), true) {
+            let text = t(
+                "Монітори зникли зі стільниці раніше, ніж знімок",
+                "The monitors left the desktop before the screenshot",
+            );
+            self.answer(reply, unsupported(text));
+        }
     }
 
     /// Shows the notice of a new headset nearby; its button opens the pairing window
@@ -277,7 +322,7 @@ impl Brain {
             return;
         };
         info!("a new headset asked for this PC: telling the person at the PC");
-        let now = std::time::Instant::now();
+        let now = Instant::now();
         self.door.notice_up(true, now);
         let until = now + crate::door::NOTICE_TIME;
         let events = self.events.clone();
@@ -285,7 +330,7 @@ impl Brain {
             .name("notice".into())
             .spawn(move || {
                 let mut pressed = false;
-                while let Some(left) = until.checked_duration_since(std::time::Instant::now()) {
+                while let Some(left) = until.checked_duration_since(Instant::now()) {
                     match platform::sockets::readable(&[notice.fd()], Some(left)) {
                         Ok(ready) if ready[0] => {
                             if let Some(p) = notice.check() {
@@ -443,7 +488,7 @@ impl Brain {
                 info!("pairing a new headset: from the local API");
                 CtlReply::Pairing(
                     self.door
-                        .open_pairing(std::time::Instant::now(), crate::door::pairing_time()),
+                        .open_pairing(Instant::now(), crate::door::pairing_time()),
                 )
             }
             Request::StopPairing => {
@@ -974,7 +1019,7 @@ impl Brain {
                 mic_failure,
             },
             pairing: self.door.pairing_state(
-                std::time::Instant::now(),
+                Instant::now(),
                 pairing::code_shown(),
                 pairing::code_for(),
             ),
@@ -1104,8 +1149,42 @@ pub fn open_settings() -> Result<(), Failure> {
 
 /// Wakes Prostir for the settings window (`prostir`, Prostir not on the bus): the
 /// sockets' watcher starts it for the window (SIGUSR1); else systemd starts it, when
-/// its socket waits for the headset; else it starts anew.
+/// its socket waits for the headset; else it starts anew, its errors where this
+/// program's go.
 pub fn wake_for_window() -> std::io::Result<crate::ctl::Woken> {
+    wake(|| start_detached(std::process::Stdio::inherit()).map(crate::ctl::Woken::Started))
+}
+
+/// Wakes Prostir for an agent (the tool `start` of `prostir mcp`), as for the window,
+/// but nothing it starts writes to the agent's pipes: a new Prostir starts in the
+/// user's systemd manager (`systemd-run --user`, its log in the journal) where there
+/// is one, else on its own with nothing on its stdio. Without a systemd user manager
+/// and without the desktop session's variables, nothing could show its monitors, so
+/// it is not started at all.
+pub fn wake_for_agent() -> std::io::Result<crate::ctl::Woken> {
+    use crate::ctl::Woken;
+    wake(|| {
+        if platform::autostart::start_in_user_manager(&["serve", "--open-settings"]) {
+            return Ok(Woken::Asleep { opens_window: true });
+        }
+        let has = |var: &str| std::env::var_os(var).is_some_and(|v| !v.is_empty());
+        if !has("XDG_RUNTIME_DIR") || !(has("WAYLAND_DISPLAY") || has("DISPLAY")) {
+            return Err(std::io::Error::other(
+                "this program has no desktop session (no XDG_RUNTIME_DIR, or no \
+                 WAYLAND_DISPLAY nor DISPLAY) and there is no systemd user manager: \
+                 give the MCP server the session's variables, or start Prostir from the \
+                 desktop",
+            ));
+        }
+        start_detached(std::process::Stdio::null()).map(Woken::Started)
+    })
+}
+
+/// Wakes a sleeping Prostir (its sockets' watcher, systemd's socket), else `start`s
+/// it.
+fn wake(
+    start: impl FnOnce() -> std::io::Result<crate::ctl::Woken>,
+) -> std::io::Result<crate::ctl::Woken> {
     use crate::ctl::Woken;
     if let Some(pid) = platform::watcher() {
         // SAFETY: a signal to a process of this user, which takes it.
@@ -1118,19 +1197,19 @@ pub fn wake_for_window() -> std::io::Result<crate::ctl::Woken> {
             opens_window: false,
         });
     }
-    start_detached().map(Woken::Started)
+    start()
 }
 
-/// Starts `prostir serve --open-settings` on its own, apart from this terminal
-/// (`prostir`). What it says goes where this program's errors go (the journal,
-/// when the desktop started it).
-fn start_detached() -> std::io::Result<std::process::Child> {
+/// Starts `prostir serve --open-settings` on its own, apart from this terminal, its
+/// stderr to `errors` (nothing goes to stdin and stdout).
+fn start_detached(errors: std::process::Stdio) -> std::io::Result<std::process::Child> {
     use std::os::unix::process::CommandExt;
     let mut command = std::process::Command::new(this_program()?);
     command
         .args(["serve", "--open-settings"])
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null());
+        .stdout(std::process::Stdio::null())
+        .stderr(errors);
     // SAFETY: setsid is async-signal-safe and touches nothing of the parent's.
     unsafe {
         command.pre_exec(|| {
@@ -1158,6 +1237,40 @@ mod tests {
             code.contains("pairing_code") && !code.contains("482913"),
             "{code}"
         );
+    }
+
+    /// A screenshot waits for its job of its own worker: the same job number of the
+    /// next worker is another job. Those over their time are taken, then all.
+    #[test]
+    fn screenshots_wait_for_their_own_worker() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reply = |n: u32| {
+            let tx = tx.clone();
+            Reply::new(move |_| tx.send(n).unwrap())
+        };
+        let now = Instant::now();
+        let later = now + std::time::Duration::from_secs(20);
+        let mut shots = Shots::default();
+        shots.push(1, JobId(5), reply(1), later);
+        shots.push(2, JobId(6), reply(2), now);
+        shots.push(2, JobId(7), reply(3), later);
+        assert_eq!(shots.due(), Some(now));
+        assert!(
+            shots.take(2, JobId(5)).is_none(),
+            "worker 2 has no job 5 here"
+        );
+        shots.take(1, JobId(5)).unwrap().send(CtlReply::Done);
+        assert_eq!(rx.try_recv(), Ok(1));
+        assert!(shots.take(1, JobId(5)).is_none(), "answered once");
+        let over = shots.over(now, false);
+        assert_eq!(
+            over.iter().map(|(g, j, _)| (*g, j.0)).collect::<Vec<_>>(),
+            [(2, 6)]
+        );
+        drop(over);
+        assert_eq!(rx.try_recv(), Ok(2), "a reply dropped still answers");
+        assert_eq!(shots.over(now, true).len(), 1);
+        assert_eq!(shots.due(), None);
     }
 
     /// A command whose arguments the protocol does not carry is refused before it
