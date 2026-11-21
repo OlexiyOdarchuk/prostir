@@ -107,14 +107,16 @@
   time the settings window opens, it asks "Count this PC among Prostir's users?", says
   what would be sent (once a day one request with only the date in it, no ID, PC name
   or settings), links to the privacy policy and offers Yes and No, neither chosen.
-  Until you answer, nothing is sent, so a PC where nobody answered (one that only runs
-  `prostir serve`, a server, CI) never counts. The rest of the window works meanwhile.
+  Nothing is sent unless you answer Yes, so a PC where nobody answered (one that only
+  runs `prostir serve`, a server, CI) never counts. The rest of the window works meanwhile.
 - 0.1 counted until turned off and said so in a notification on the first start; that
   notification is gone. After an update from 0.1 the window asks once too, and nothing
   is sent until you answer; counting turned off in 0.1 stays off and is not asked
   about.
 - Change the answer at any time in the settings window, the tray ("Count this PC among
-  users") or with `prostir ctl count yes|no`. `PROSTIR_NO_COUNT=1` still turns it off.
+  users") or with `prostir ctl count yes|no` (`prostir ctl count status` shows it). An
+  AI agent over MCP can say no but never yes. `PROSTIR_NO_COUNT=1` still turns it
+  off.
 - As every build asks first, every release build may count, also one built from
   source: the key is in the source (`crates/prostir/count.key`), and
   `PROSTIR_COUNT_TOKEN` at build time still takes its place. Debug builds and the tests

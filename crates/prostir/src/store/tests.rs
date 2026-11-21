@@ -138,28 +138,39 @@ fn the_counting_answer_is_kept() {
 }
 
 /// 0.1 kept the counter's switch in `count`, written only when the person used it:
-/// an off stays no; an on, like no file at all, is no answer, so the question is
-/// asked once after the update.
+/// an off stays no, also where 0.1 kept no monitors; an on, like no file at all, is
+/// no answer, so the question is asked once after the update. Once `settings.txt`
+/// has the answer, 0.1's notice goes, and its switch unless it is off (a downgrade
+/// to 0.1 reads that).
 #[test]
 fn the_counting_answer_of_0_1() {
-    for (file, count) in [
-        (None, Counting::Unasked),
-        (Some("on\n"), Counting::Unasked),
-        (Some("off\n"), Counting::No),
-    ] {
-        let dir = temp_dir("count-0.1");
-        std::fs::write(dir.join("monitors.txt"), "row\n2560x1440\n").unwrap();
-        if let Some(text) = file {
-            std::fs::write(dir.join("count"), text).unwrap();
+    for monitors in [true, false] {
+        for (file, count) in [
+            (None, Counting::Unasked),
+            (Some("on\n"), Counting::Unasked),
+            (Some("off\n"), Counting::No),
+        ] {
+            let dir = temp_dir("count-0.1");
+            if monitors {
+                std::fs::write(dir.join("monitors.txt"), "row\n2560x1440\n").unwrap();
+            }
+            std::fs::write(dir.join("count-notice"), "2026-11-18\n").unwrap();
+            if let Some(text) = file {
+                std::fs::write(dir.join("count"), text).unwrap();
+            }
+            let store = Store::open(Some(dir.clone()), Run::default());
+            assert_eq!(store.wanted().count, count, "{file:?} {monitors}");
+            store.close();
+            let text = std::fs::read_to_string(dir.join("settings.txt")).unwrap_or_default();
+            let store = Store::open(Some(dir.clone()), Run::default());
+            assert_eq!(store.wanted().count, count, "{text}");
+            store.close();
+            if !text.is_empty() {
+                assert!(!dir.join("count-notice").exists());
+                assert_eq!(dir.join("count").exists(), count == Counting::No);
+            }
+            let _ = std::fs::remove_dir_all(dir);
         }
-        let store = Store::open(Some(dir.clone()), Run::default());
-        assert_eq!(store.wanted().count, count, "{file:?}");
-        store.close();
-        let text = std::fs::read_to_string(dir.join("settings.txt")).unwrap();
-        let store = Store::open(Some(dir.clone()), Run::default());
-        assert_eq!(store.wanted().count, count, "{text}");
-        store.close();
-        let _ = std::fs::remove_dir_all(dir);
     }
 }
 

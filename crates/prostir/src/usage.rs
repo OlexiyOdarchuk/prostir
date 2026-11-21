@@ -74,13 +74,14 @@ fn today() -> String {
 /// A headset connected: count this PC for today, at most once a day, if the person
 /// said yes (`count`, from the settings).
 pub fn headset_connected(count: Counting) {
-    if count != Counting::Yes || !possible() {
+    // Nothing to read before a yes.
+    if count != Counting::Yes {
         return;
     }
     let state = state_file();
     let date = today();
     let last = std::fs::read_to_string(&state).ok();
-    let Some(first) = to_send(count, true, last.as_deref(), &date) else {
+    let Some(first) = to_send(count, possible(), last.as_deref(), &date) else {
         return;
     };
     let _ = std::thread::Builder::new()
@@ -137,10 +138,12 @@ mod sender {
              header = \"Authorization: Bearer {token}\"\n\
              header = \"Content-Type: application/json\"\n\
              data = \"{}\"\n\
+             user-agent = \"\"\n\
              silent\nfail\nmax-time = 15\noutput = \"/dev/null\"\n",
             body.replace('\\', "\\\\").replace('"', "\\\"")
         );
         // -q first: the user's ~/.curlrc must not log the request or send it elsewhere.
+        // No User-Agent either (an empty one leaves the header out).
         let child = Command::new("curl")
             .args(["-q", "--config", "-"])
             .stdin(Stdio::piped())

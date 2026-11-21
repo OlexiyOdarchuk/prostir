@@ -749,16 +749,16 @@ fn the_counting_question_and_both_answers() {
     const SWITCH: &str = "Рахувати цей ПК серед користувачів";
     let unasked = |s: &mut prostir_window::api::State| s.counting = Some(Counting::Unasked);
     for (answer, counting, other) in [
-        ("Так", Counting::Yes, Counting::No),
-        ("Ні", Counting::No, Counting::Yes),
+        ("Так, рахувати цей ПК", Counting::Yes, Counting::No),
+        ("Ні, не рахувати цей ПК", Counting::No, Counting::Yes),
     ] {
         let (mut h, handle) = window(Mock::no_headsets().edit(unasked), Setup::default());
         assert_eq!(h.state().ui.page, Page::FirstRun);
         h.get_by_label(QUESTION);
         // Neither answer is favoured: buttons of the same size, Yes first, neither
         // focused; and the question comes before the page's own title.
-        let yes = h.get_by_role_and_label(Role::Button, "Так");
-        let no = h.get_by_role_and_label(Role::Button, "Ні");
+        let yes = h.get_by_role_and_label(Role::Button, "Так, рахувати цей ПК");
+        let no = h.get_by_role_and_label(Role::Button, "Ні, не рахувати цей ПК");
         assert_eq!(yes.rect().size(), no.rect().size());
         assert!(yes.rect().right() < no.rect().left());
         assert!(!yes.is_focused() && !no.is_focused());
@@ -788,14 +788,17 @@ fn the_counting_question_and_both_answers() {
             Some(&Request::SetCounting { counting: other })
         );
     }
-    // Where this build or run never counts, nothing is asked or shown.
-    let (mut h, _) = window(
-        Mock::connected().edit(|s| s.counting = None),
-        Setup::default(),
-    );
-    open(&mut h, Page::Overview);
-    assert!(h.query_by_label(QUESTION).is_none());
-    assert!(h.query_by_role_and_label(Role::Switch, SWITCH).is_none());
+    // Where this build or run never counts, nothing is asked or shown; nor for an
+    // answer this window does not know (an older Prostir's `true`).
+    for counting in [None, Some(Counting::Other)] {
+        let (mut h, _) = window(
+            Mock::connected().edit(|s| s.counting = counting),
+            Setup::default(),
+        );
+        open(&mut h, Page::Overview);
+        assert!(h.query_by_label(QUESTION).is_none());
+        assert!(h.query_by_role_and_label(Role::Switch, SWITCH).is_none());
+    }
 }
 
 /// The question's link opens the privacy policy in the window's language.
@@ -810,7 +813,10 @@ fn the_counting_question_links_the_privacy_policy() {
         },
     );
     h.get_by_label("Count this PC among Prostir's users?");
-    let link = h.get_by_label("Privacy policy").rect().center();
+    let link = h
+        .get_by_role_and_label(Role::Link, "Privacy policy")
+        .rect()
+        .center();
     h.hover_at(link);
     h.run_steps(2);
     for pressed in [true, false] {

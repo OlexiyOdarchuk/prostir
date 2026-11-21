@@ -144,7 +144,9 @@ fn counting_question(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
             Layout::left_to_right(Align::Center),
             |ui| {
                 let (yes, no) = (tk.t("count-ask-yes"), tk.t("count-ask-no"));
-                let counting = match w::equal_buttons(ui, tk, &[&yes, &no], Kind::Primary) {
+                let names = (tk.t("count-ask-yes-name"), tk.t("count-ask-no-name"));
+                let answers = [(yes.as_str(), names.0.as_str()), (&no, &names.1)];
+                let counting = match w::equal_buttons(ui, tk, &answers, Kind::Primary) {
                     Some(0) => Some(Counting::Yes),
                     Some(_) => Some(Counting::No),
                     None => None,
@@ -153,7 +155,7 @@ fn counting_question(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
                     v.out.push(Action::Send(Request::SetCounting { counting }));
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if w::button(ui, tk, &tk.t("count-ask-privacy"), Kind::Quiet, true).clicked() {
+                    if w::link(ui, tk, &tk.t("count-ask-privacy")).clicked() {
                         v.out.push(Action::OpenUrl(tk.t("count-ask-privacy-url")));
                     }
                 });

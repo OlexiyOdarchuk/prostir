@@ -299,7 +299,30 @@ fn errors_of_tools() {
     let (failed, content) = tool(&mut s, "call", &json!({"request": {"request": "fly"}}));
     assert!(failed);
     assert_eq!(said(&content)["error"], "Unsupported");
+    // Counting needs the person's own yes: an agent can say no or unasked only.
+    for asked in [
+        tool(&mut s, "set_counting", &json!({"counting": "yes"})),
+        tool(
+            &mut s,
+            "call",
+            &json!({"request": {"request": "set_counting", "counting": "yes"}}),
+        ),
+    ] {
+        let (failed, content) = asked;
+        assert!(failed);
+        let got = said(&content);
+        assert_eq!(got["error"], "BadArgument");
+        assert!(got["text"].as_str().unwrap().contains("person"), "{got}");
+    }
     assert!(fake.asked.borrow().is_empty());
+    let (failed, _) = tool(&mut s, "set_counting", &json!({"counting": "no"}));
+    assert!(!failed);
+    assert_eq!(
+        fake.asked.borrow_mut().drain(..).collect::<Vec<_>>(),
+        [Request::SetCounting {
+            counting: crate::api::Counting::No
+        }]
+    );
 
     fake.answer = Err(ClientError::Refused(crate::api::Failure::new(
         ApiError::NotConnected,

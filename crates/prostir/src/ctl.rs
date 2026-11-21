@@ -86,6 +86,7 @@ pub enum Ctl {
     Monitors,
     Headsets,
     AutostartStatus,
+    CountStatus,
     Help,
 }
 
@@ -263,14 +264,17 @@ pub fn parse(args: &[String]) -> Result<(Ctl, bool), String> {
         }
         "count" => {
             takes = 1;
-            let counting = match rest.first().copied() {
-                Some("yes" | "on") => api::Counting::Yes,
-                Some("no" | "off") => api::Counting::No,
-                Some("unasked") => api::Counting::Unasked,
-                Some(other) => return Err(format!("expected yes, no or unasked, not {other:?}")),
-                None => return Err("expected yes, no or unasked".to_owned()),
-            };
-            ask(Request::SetCounting { counting })
+            let counting = |counting| ask(Request::SetCounting { counting });
+            match rest.first().copied() {
+                Some("status") => Ok(Ctl::CountStatus),
+                Some("yes") => counting(api::Counting::Yes),
+                Some("no") => counting(api::Counting::No),
+                Some("unasked") => counting(api::Counting::Unasked),
+                Some(other) => Err(format!(
+                    "expected yes, no, unasked or status, not {other:?}"
+                )),
+                None => Err("expected yes, no, unasked or status".to_owned()),
+            }
         }
         "settings" => ask(Request::ShowSettings),
         "quit" => ask(Request::Quit),
@@ -327,7 +331,7 @@ prostir ctl COMMAND [--json]
   pair | pair stop
   headsets | forget HEADSET | forget --all
   autostart on|off|status
-  count yes|no|unasked           count this PC among users (unasked: ask again)
+  count yes|no|unasked|status    count this PC among users (unasked: ask again)
   settings
   quit
 
@@ -378,7 +382,7 @@ pub fn run(
                 Err(e) => failed(&e, json, io, for_headset),
             }
         }
-        Ctl::Status | Ctl::Monitors | Ctl::Headsets | Ctl::AutostartStatus => {
+        Ctl::Status | Ctl::Monitors | Ctl::Headsets | Ctl::AutostartStatus | Ctl::CountStatus => {
             match client.state() {
                 Ok((revision, text)) => show_state(&ctl, revision, &text, json, io),
                 Err(e @ ClientError::NotRunning) if ctl == Ctl::Status => {
@@ -516,6 +520,22 @@ fn show_state(ctl: &Ctl, revision: u32, text: &str, json: bool, io: &mut Output<
             }
             Ok(())
         }
+        (Ctl::CountStatus, true) => writeln!(
+            out,
+            r#"{{"counting":{},"revision":{revision}}}"#,
+            to_json(&state.counting)
+        ),
+        (Ctl::CountStatus, false) => writeln!(
+            out,
+            "{}",
+            match state.counting {
+                Some(api::Counting::Yes) => t("так", "yes"),
+                Some(api::Counting::No) => t("ні", "no"),
+                Some(api::Counting::Unasked) => t("ще не спитано", "not asked yet"),
+                Some(api::Counting::Other) => t("невідомо", "unknown"),
+                None => t("недоступно", "not available"),
+            }
+        ),
         (_, true) => writeln!(
             out,
             r#"{{"autostart":{},"revision":{revision}}}"#,

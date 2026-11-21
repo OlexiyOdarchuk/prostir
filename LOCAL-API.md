@@ -371,7 +371,7 @@ prostir ctl sound headset|pc
 prostir ctl pair | pair stop
 prostir ctl headsets | forget HEADSET | forget --all
 prostir ctl autostart on|off|status
-prostir ctl count yes|no|unasked          # count this PC among users (unasked: ask again)
+prostir ctl count yes|no|unasked|status   # count this PC among users (unasked: ask again)
 prostir ctl settings
 prostir ctl quit
 ```
@@ -441,7 +441,8 @@ a tool does not take is refused with `BadArgument`.
 | `set_scale` | `id`, `scale` | |
 | `show_pc_display` | `id`, `shown` | `show_physical` |
 | `recenter`, `line_up`, `show_mouse`, `reset_arrangement`, `profile`, `cinema`, `focus`, `follow`, `no_limits`, `distance`, `preset` | as the requests | commands for the headset |
-| `set_quality`, `set_sharp`, `set_codec`, `sound_to_headset`, `set_counting`, `autostart` | as the requests | |
+| `set_quality`, `set_sharp`, `set_codec`, `sound_to_headset`, `autostart` | as the requests | |
+| `set_counting` | `counting`: `no` or `unasked` | as the request, but never `yes`: counting needs the person's own yes (the settings window, the tray, `prostir ctl count yes`), so `yes` is `BadArgument`, also through `call` |
 | `pair_new_headset`, `stop_pairing`, `forget_headset`, `forget_all`, `show_settings`, `quit` | as the requests | |
 | `call` | `request`: a request object | any request as it is, also those no tool covers |
 | `screenshot_monitor` | `id`, `keep` (false) | `screenshot`; the picture as MCP `image` content (`image/png`), after a text `{"id", "whole", "bytes", "revision", "path"}`; the file is removed afterwards unless `keep` (then `path` names it). A picture over 5 MB is not sent: its file is kept and `path` names it. Only a picture Prostir saved is read: a regular file (no link) ending in `.png`, right in `Prostir` of the Pictures folder as this program finds it, that begins as a PNG; anything else is `Capture`, and the file is left as it is |

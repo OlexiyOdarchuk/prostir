@@ -399,6 +399,7 @@ impl Server {
                 fields.insert("request".into(), request.into());
                 let request = Request::from_json(&Value::Object(fields).to_string())
                     .map_err(|f| json!({"error": f.error.name(), "text": f.text}))?;
+                not_a_yes_to_counting(&request)?;
                 let answer = self.ask(&request)?;
                 Ok(vec![text(&answer.to_json())])
             }
@@ -408,6 +409,7 @@ impl Server {
                 };
                 let request = Request::from_json(&request.to_string())
                     .map_err(|f| json!({"error": f.error.name(), "text": f.text}))?;
+                not_a_yes_to_counting(&request)?;
                 let answer = self.ask(&request)?;
                 Ok(vec![text(&answer.to_json())])
             }
@@ -701,6 +703,20 @@ fn text(text: &str) -> Value {
 }
 
 /// Arguments that do not read.
+/// Counting this PC needs the person's own yes: an agent never gives it, by the
+/// tool or by `call`.
+fn not_a_yes_to_counting(request: &Request) -> Result<(), Value> {
+    match request {
+        Request::SetCounting {
+            counting: crate::api::Counting::Yes,
+        } => Err(bad(
+            "set_counting: yes is the person's own answer, given in the settings window, \
+             the tray or `prostir ctl count yes`; an agent can set no or unasked",
+        )),
+        _ => Ok(()),
+    }
+}
+
 fn bad(text: &str) -> Value {
     json!({"error": ApiError::BadArgument.name(), "text": text})
 }
@@ -1116,11 +1132,12 @@ static TOOLS: &[Tool] = &[
     ),
     asks(
         "set_counting",
-        "The person's answer to \"Count this PC among Prostir's users?\" (once a day one \
-         request with only the date). Set it only as the person says: nothing is counted \
-         until yes; unasked puts the question back in the settings window. The state's \
-         counting is null where this build or run never counts.",
-        &[Arg::of("counting", "string", "yes, no or unasked").one_of(&["yes", "no", "unasked"])],
+        "Counting this PC among Prostir's users (once a day one request with only the \
+         date) needs the person's own yes, given in the settings window, the tray or \
+         `prostir ctl count yes`: an agent can only say no, or put the question back in \
+         the settings window (unasked). The state's counting has the answer, null where \
+         this build or run never counts.",
+        &[Arg::of("counting", "string", "no or unasked").one_of(&["no", "unasked"])],
     ),
     asks(
         "autostart",

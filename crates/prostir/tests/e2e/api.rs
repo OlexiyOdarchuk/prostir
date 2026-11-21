@@ -1459,13 +1459,23 @@ fn counting_waits_for_the_answer() {
         }
     };
     saved("count yes");
+    // Not after a no, nor after unasked, also on a day not counted yet.
+    let counted_day = dir.path().join("config/prostir/counted");
     let no = pc.ctl(&["count", "no"]).unwrap();
     assert_eq!(no.code, 0, "{no:?}");
     assert_eq!(answer(), Some(Counting::No));
+    let status = pc.ctl(&["count", "status"]).unwrap();
+    assert_eq!(status.out.trim(), "no", "{status:?}");
     saved("count no");
+    std::fs::remove_file(&counted_day).unwrap();
+    session(&mut keys);
+    assert_eq!(paths(), day);
     ask("unasked").unwrap();
     assert_eq!(answer(), Some(Counting::Unasked));
     saved("count unasked");
+    session(&mut keys);
+    assert_eq!(paths(), day);
+    assert!(!counted_day.exists());
     let bad = ask("maybe").unwrap_err();
     assert_eq!(error_name(&bad), "BadArgument");
     assert_eq!(answer(), Some(Counting::Unasked));

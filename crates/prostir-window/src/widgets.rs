@@ -241,15 +241,21 @@ pub fn button_named(
 }
 
 /// Buttons side by side that are equal choices (Yes and No): the same `kind` and the
-/// same width, so none stands out over the other. Returns which one was clicked.
-pub fn equal_buttons(ui: &mut Ui, tk: &Tk<'_>, labels: &[&str], kind: Kind) -> Option<usize> {
-    let width = labels
+/// same width, so none stands out over the other. Each is a label and the accessible
+/// name that says more ("Yes, count this PC"). Returns which one was clicked.
+pub fn equal_buttons(
+    ui: &mut Ui,
+    tk: &Tk<'_>,
+    buttons: &[(&str, &str)],
+    kind: Kind,
+) -> Option<usize> {
+    let width = buttons
         .iter()
-        .map(|l| button_width(ui, tk, l))
+        .map(|(l, _)| button_width(ui, tk, l))
         .fold(0.0, f32::max);
     let mut clicked = None;
-    for (i, label) in labels.iter().enumerate() {
-        if button_at_least(ui, tk, label, label, width, kind, true).clicked() {
+    for (i, (label, name)) in buttons.iter().enumerate() {
+        if button_at_least(ui, tk, label, name, width, kind, true).clicked() {
             clicked = Some(i);
         }
     }
@@ -562,6 +568,27 @@ pub fn battery(ui: &mut Ui, tk: &Tk<'_>, level: f32, charging: bool) {
     };
     ui.painter()
         .rect_filled(fill, cr(tk.th.shape.radius_small * 0.5), color);
+}
+
+/// A link to a page on the web: the accent's ink, underlined while hovered or
+/// focused, named as a link.
+pub fn link(ui: &mut Ui, tk: &Tk<'_>, label: &str) -> Response {
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), tk.body_m(), Color32::PLACEHOLDER);
+    let (rect, resp) = ui.allocate_exact_size(galley.size(), Sense::click());
+    let color = tk.p.accent_ink;
+    ui.painter().galley(rect.min, galley, color);
+    if resp.hovered() || resp.has_focus() {
+        let y = rect.bottom() - 1.0;
+        ui.painter().line_segment(
+            [pos2(rect.left(), y), pos2(rect.right(), y)],
+            Stroke::new(tk.th.shape.stroke.max(1.0), color),
+        );
+    }
+    tk.focus_ring(ui, &resp, tk.th.shape.radius_small);
+    resp.widget_info(|| WidgetInfo::labeled(Role::Link, true, label));
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Counting: three rising bars in the accent's ink, `size` square.

@@ -15,7 +15,8 @@
 //!   is a `*.tmp` beside the old one, removed on the next start.
 //! - The first start of this version moves the settings of 0.1 over from
 //!   `monitors.txt` (and the counter switch from `count`), which stay as they are for
-//!   a downgrade to read.
+//!   a downgrade to read; 0.1's `count-notice`, and `count` unless it is off, go once
+//!   `settings.txt` is there.
 //! - Screens are numbered from a counter that never goes back ([`Store::new_id`]):
 //!   before the first number of each block of [`ID_BLOCK`] is given out, the end of the
 //!   block is written and on disk, so a crash can leave numbers unused but never give
@@ -303,17 +304,23 @@ impl Store {
         }
         let (settings, screens) = (read("settings.txt"), read("screens.txt"));
         if settings.is_none() && screens.is_none() {
+            // 0.1's counter switch had a file of its own, written only when the person
+            // used it, and 0.1 counted until turned off: so on was no answer to the
+            // question, and only an off stays (no, and not asked again), also where
+            // 0.1 kept no monitors.
+            let count = if read("count").is_some_and(|t| t.trim() == "off") {
+                Counting::No
+            } else {
+                Counting::Unasked
+            };
             // A first start: nothing to move over.
             let Some(old) = read("monitors.txt") else {
+                self.settings.count = count;
+                self.settings_changed = count == Counting::No;
                 return;
             };
             (self.settings, self.screens) = migrate(&old);
-            // The counter switch had a file of its own, written only when the person
-            // used it. 0.1 counted until turned off, so on was no answer to the
-            // question: only an off stays (no, and not asked again).
-            if read("count").is_some_and(|t| t.trim() == "off") {
-                self.settings.count = Counting::No;
-            }
+            self.settings.count = count;
             info!("settings moved over from monitors.txt");
             self.settings_changed = true;
             self.screens_changed = !self.screens.specs.is_empty();
@@ -322,6 +329,13 @@ impl Store {
         }
         if let Some(text) = settings {
             (self.settings, self.settings_kept) = parse_settings(&text);
+            // The answer is in settings.txt now: 0.1's notice of the counter goes, and
+            // its switch too, but for an off, kept so that a downgrade to 0.1 (which
+            // counts until turned off) does not count again.
+            let _ = std::fs::remove_file(dir.join("count-notice"));
+            if read("count").is_some_and(|t| t.trim() != "off") {
+                let _ = std::fs::remove_file(dir.join("count"));
+            }
         }
         let mut next = None;
         if let Some(text) = screens {

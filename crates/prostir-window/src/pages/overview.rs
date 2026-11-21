@@ -234,8 +234,12 @@ pub(super) fn overview(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
             });
         }
         // Once answered (until then the question at the top asks), and only where
-        // this build and run count at all.
-        if let Some(c) = s.counting.filter(|c| *c != Counting::Unasked) {
+        // this build and run count at all: not for an answer this window does not
+        // know (an older or newer Prostir).
+        if let Some(c) = s
+            .counting
+            .filter(|c| matches!(c, Counting::Yes | Counting::No))
+        {
             w::divider(ui, tk);
             let label = tk.t("ov-counting");
             let can = !v.ui.unsupported.contains("set_counting");
