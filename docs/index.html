@@ -216,7 +216,7 @@ sudo mkdir -p /etc/apt/keyrings
 curl -fsSL "$repo/Release.key" | sudo tee /etc/apt/keyrings/prostir.asc &gt; /dev/null
 echo "deb [signed-by=/etc/apt/keyrings/prostir.asc] $repo/ /" | sudo tee /etc/apt/sources.list.d/prostir.list
 sudo apt update &amp;&amp; sudo apt install prostir</code></pre>
-                  These repositories are built on the <a href="https://build.opensuse.org/package/show/home:iShawyha:prostir/prostir">openSUSE Build Service</a>, and Prostir then updates with the system. Each release also has a <code>.deb</code> and an <code>.rpm</code> to install by hand. ARM (aarch64) builds are experimental: on ARM without a VA-API H.264 or H.265 encoder (Asahi, Raspberry Pi 5) Prostir encodes on the CPU, which costs CPU time.</li>
+                  These repositories are built on the <a href="https://build.opensuse.org/package/show/home:iShawyha:prostir/prostir">openSUSE Build Service</a>, and Prostir then updates with the system. Each release also has a <code>.deb</code> and an <code>.rpm</code> to install by hand. ARM (aarch64) builds are experimental: on ARM without a VA-API H.264 or HEVC encoder (Asahi, Raspberry Pi 5) Prostir encodes on the CPU, which costs CPU time.</li>
                 <li><h4>Nix and NixOS</h4>The repository is a flake:
 <pre><code>nix run github:OlexiyOdarchuk/prostir</code></pre>
                   On NixOS, add it as a flake input and put <code>inputs.prostir.packages.${pkgs.system}.default</code> in <code>environment.systemPackages</code>.</li>

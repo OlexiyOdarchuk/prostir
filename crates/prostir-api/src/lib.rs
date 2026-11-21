@@ -162,7 +162,8 @@ pub enum Request {
     SoundToHeadset {
         on: bool,
     },
-    /// The headset's volume (with step 6.6; until then `Unsupported`).
+    /// The main headset's volume (0 to 100, unmuted), while the PC shares it
+    /// (`sound.volume` is not null); `Unsupported` otherwise, `BadArgument` above 100.
     Volume {
         level: u8,
     },
@@ -801,6 +802,10 @@ pub struct Display {
     pub shown: bool,
     pub mode: Mode,
     pub desk: Option<DeskRect>,
+    /// A monitor just added that the headset is placing: no `desk` until it stands
+    /// where the headset put it. Left out when false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub placing: bool,
     pub state: DisplayState,
     pub failure: Option<Problem>,
 }
@@ -1220,6 +1225,7 @@ mod tests {
                     w: 2048,
                     h: 1152,
                 }),
+                placing: false,
                 state: DisplayState::Failed,
                 failure: Some(Problem {
                     code: ApiError::Desktop,

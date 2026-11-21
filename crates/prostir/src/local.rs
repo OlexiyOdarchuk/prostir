@@ -519,10 +519,20 @@ impl Brain {
                     "Monitors are placed while they are on the desktop",
                 )),
             },
-            Request::Volume { .. } => unsupported(t(
-                "Гучність шолома з ПК буде з кроком звуку",
-                "The headset's volume from the PC comes with the sound step",
-            )),
+            Request::Volume { level } if level > 100 => {
+                CtlReply::failed(ApiError::BadArgument, "level: 0 to 100")
+            }
+            Request::Volume { level } => match self.lead_mut().map(|s| s.volume_from_pc(level)) {
+                None => unsupported(t(
+                    "Гучність шолома змінюється, поки він підключений",
+                    "The headset's volume is changed while it is connected",
+                )),
+                Some(true) => done(),
+                Some(false) => unsupported(t(
+                    "Гучність цього шолома з ПК не змінюється: лише його кнопками",
+                    "This headset's volume is not changed from the PC, only with its buttons",
+                )),
+            },
             // Handled above.
             Request::Recenter
             | Request::LineUp
@@ -873,11 +883,13 @@ impl Brain {
                 // told, failed (by its own decoders and streams, never by a stand-in).
                 let part = d.pc_view();
                 let lead_part = lead.map(|s| d.displays_part(s.caps()));
+                let now = Instant::now();
                 let list = part
                     .displays
                     .iter()
                     .map(|w| {
-                        let output = d.output_of(ScreenId::from_wire(w.id));
+                        let id = ScreenId::from_wire(w.id);
+                        let output = d.output_of(id);
                         let failed_there = lead_part
                             .as_ref()
                             .and_then(|p| p.get(w.id))
@@ -886,7 +898,16 @@ impl Brain {
                         if let Some(t) = failed_there {
                             w.state = t.state.clone();
                         }
-                        api_display(&w, output.unwrap_or_default())
+                        // A monitor just added stands nowhere until the headset placed
+                        // it: a map then shows it once, where it stays.
+                        let placing = !d.desk_known(id, now);
+                        if placing {
+                            w.desk = None;
+                        }
+                        api::Display {
+                            placing,
+                            ..api_display(&w, output.unwrap_or_default())
+                        }
                     })
                     .collect();
                 (list, part.primary.map(|p| p.0))
@@ -1121,6 +1142,7 @@ fn api_display(d: &wire::Display, output: String) -> api::Display {
             w: r.w,
             h: r.h,
         }),
+        placing: false,
         state,
         failure,
     }

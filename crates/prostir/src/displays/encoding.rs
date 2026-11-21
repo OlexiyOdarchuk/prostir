@@ -267,10 +267,11 @@ impl Displays {
 /// display, which the reader sees named already.
 pub(super) fn too_big_why((w, h): (u32, u32), codec: Codec) -> String {
     format!(
-        "{w}x{h} {} {codec:?}",
+        "{w}x{h} {} {}",
         t(
             "більше, ніж шолом декодує в",
             "is larger than the headset decodes in"
-        )
+        ),
+        crate::encoder::codec_label(codec)
     )
 }

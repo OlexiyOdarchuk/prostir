@@ -38,8 +38,8 @@ impl Displays {
     }
 
     /// Adds monitor `id` (a number never given before), at most `max` of them; its
-    /// output takes the lowest free `Prostir-N`, so KScreen keeps the position and
-    /// scale it remembers for that name. It is made by the desktop's worker: one that
+    /// output takes the lowest free `Prostir-N`, so KScreen finds what it remembers
+    /// for that name. It is made by the desktop's worker: one that
     /// cannot start stays, `Failed`, and keeps its place (it is tried again at the
     /// next session).
     pub fn add(&mut self, id: ScreenId, spec: MonitorSpec, max: usize) -> Result<()> {
@@ -51,7 +51,30 @@ impl Displays {
         }
         let number = self.free_number();
         self.add_as(id, number, spec);
+        // A headset that places the monitors gives this one its place once it shows
+        // it; meanwhile the desktop has it at a stand-in place.
+        if self.headset_places {
+            self.placing.add(id, Instant::now());
+        }
         Ok(())
+    }
+
+    /// Whether the desktop has monitor `id` where it stays (else at a stand-in place
+    /// until the headset placed it, for up to [`placing::PLACE_WAIT`]).
+    pub fn desk_known(&self, id: ScreenId, now: Instant) -> bool {
+        self.placing.known(id, now)
+    }
+
+    /// When a stand-in place starts to count, if one is waited for.
+    pub fn placing_due(&self, now: Instant) -> Option<Instant> {
+        self.placing.due(now)
+    }
+
+    /// No headset is connected any more: no monitor waits for its place, and the next
+    /// main headset places the monitors once it sends an arrangement.
+    pub fn no_headset(&mut self) {
+        self.headset_places = false;
+        self.placing.clear();
     }
 
     /// Adds monitor `id` (output `number`) to the set, at the end of the bottom row
@@ -125,6 +148,7 @@ impl Displays {
     /// arrangement.
     pub(super) fn forget(&mut self, id: ScreenId) {
         self.too_big.remove(&id);
+        self.placing.remove(id);
         for row in &mut self.rows {
             row.retain(|e| e.id != id);
         }
@@ -308,6 +332,18 @@ impl Displays {
                 None => rows.push(missing),
             }
         }
+        // A headset that sends where the monitors stand places a new one itself: where
+        // it stays once the desktop is laid out with it.
+        let placed = |id: ScreenId| {
+            rows.iter()
+                .flatten()
+                .any(|e| e.id == id && e.center.is_some() && e.middle.is_some())
+        };
+        self.headset_places |= rows
+            .iter()
+            .flatten()
+            .any(|e| e.center.is_some() && e.middle.is_some());
+        self.placing.arranged(placed);
         self.rows = rows;
     }
 

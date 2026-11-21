@@ -139,12 +139,13 @@ fn the_window_s_client_drives_the_service() {
         (ThemeMode::Dark, "graphite", Some("en"))
     );
 
-    // What the service does not do (yet) reads as Unsupported, which the window
-    // shows as a disabled control rather than a failure.
-    for request in [Request::Volume { level: 30 }, Request::SetMic { on: false }] {
-        let e = client.call(&request).unwrap_err();
-        assert!(e.unsupported(), "{request:?}: {e:?}");
-    }
+    // The volume, while the headset shares it.
+    assert!(client.get_state().unwrap().state.sound.volume.is_some());
+    client.call(&Request::Volume { level: 30 }).unwrap();
+    // What the service does not do reads as Unsupported, which the window shows as a
+    // disabled control rather than a failure.
+    let e = client.call(&Request::SetMic { on: false }).unwrap_err();
+    assert!(e.unsupported(), "{e:?}");
     // An error of its own kind, by name.
     assert!(matches!(
         client.call(&Request::RemoveMonitor { id: 9999 }),

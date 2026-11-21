@@ -21,7 +21,7 @@ fn written(pc: &Pc) -> Vec<String> {
 }
 
 /// Takes what the PC sends until the device was last set to `level`, for up to `SOON`.
-fn wait_written(pc: &Pc, headset: &mut FakeHeadset, level: u8) {
+pub(crate) fn wait_written(pc: &Pc, headset: &mut FakeHeadset, level: u8) {
     let until = Instant::now() + SOON;
     while written(pc).last().map(String::as_str) != Some(&level.to_string()) {
         assert!(
@@ -39,7 +39,7 @@ fn wait_written(pc: &Pc, headset: &mut FakeHeadset, level: u8) {
 /// follows it, so the level alone does not tell. Read before the PC set it, the device
 /// needs nothing more; else the PC puts the headset's level on it, and that is waited
 /// for too.
-fn wait_first_volume(pc: &mut Pc, headset: &mut FakeHeadset) {
+pub(crate) fn wait_first_volume(pc: &mut Pc, headset: &mut FakeHeadset) {
     const NEW_DEVICE: &str = "volume: a new device for the headset";
     const SET: &str = "fake desktop: volume set to";
     let line = pc.wait_log(SOON, NEW_DEVICE);

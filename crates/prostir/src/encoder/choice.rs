@@ -241,9 +241,26 @@ impl Choice {
     }
 }
 
+/// For the log: `VA-API H265`.
 impl std::fmt::Display for Choice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} {:?}", self.backend.label(), self.codec)
+    }
+}
+
+impl Choice {
+    /// What people see: `VA-API HEVC`.
+    pub fn label(&self) -> String {
+        format!("{} {}", self.backend.label(), codec_label(self.codec))
+    }
+}
+
+/// What people see a codec called: H.265 is HEVC, as in the headset's menu.
+pub fn codec_label(codec: Codec) -> &'static str {
+    match codec {
+        Codec::H264 => "H.264",
+        Codec::H265 => "HEVC",
+        Codec::Av1 => "AV1",
     }
 }
 
@@ -345,18 +362,20 @@ pub fn note(
     let why: Vec<String> = skipped
         .iter()
         .map(|((b, _), skip)| format!("{}: {}", b.label(), skip.text()))
-        .chain(
-            tried
-                .iter()
-                .map(|(c, why)| format!("{c}: {}: {why}", t("не запустився", "did not start"))),
-        )
+        .chain(tried.iter().map(|(c, why)| {
+            format!(
+                "{}: {}: {why}",
+                c.label(),
+                t("не запустився", "did not start")
+            )
+        }))
         .collect();
     let cpu = !chosen.backend.hardware() && !wanted.software;
     let copies = chosen.copies() && chosen.backend.hardware();
     if why.is_empty() && !cpu && !copies {
         return None;
     }
-    let mut text = chosen.to_string();
+    let mut text = chosen.label();
     if cpu {
         let _ = write!(
             text,

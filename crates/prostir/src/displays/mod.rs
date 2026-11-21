@@ -34,6 +34,7 @@ mod arrange;
 mod encoding;
 mod parts;
 mod physical;
+mod placing;
 mod sound;
 mod windows;
 
@@ -105,6 +106,9 @@ pub enum DeskNews {
     NoDesktop(anyhow::Error),
     /// The answer to a job someone waits for.
     Job(JobId, Result<state::DisplayId, anyhow::Error>, JobAnswer),
+    /// A monitor's scale was given in the desktop's own settings and taken: the set
+    /// kept for next time has it.
+    Rescaled,
 }
 
 /// What a job's answer carries for the headset (or the local API).
@@ -132,6 +136,13 @@ pub struct Displays {
     /// Where each output is on the desktop as laid out last, by name: Prostir's and the
     /// PC's own displays, shown or not.
     on_desk: BTreeMap<OutputKey, state::DeskRect>,
+    /// Monitors just added while the headset places the monitors itself: their place
+    /// on the desktop is a stand-in until the headset's arrangement has them and the
+    /// desktop was laid out with it (see [`Displays::desk_known`]).
+    placing: placing::Placings,
+    /// The main headset of these sessions sent where the monitors stand: it places a
+    /// monitor added later itself.
+    headset_places: bool,
     /// When each display of the PC was last connected, in seconds since 1970 (0: not
     /// known), to forget the least recently seen of those not connected.
     physical_seen: BTreeMap<ScreenId, u64>,
@@ -212,6 +223,8 @@ impl Displays {
             detaching: BTreeMap::new(),
             rows: set.rows.clone(),
             on_desk: BTreeMap::new(),
+            placing: placing::Placings::default(),
+            headset_places: false,
             physical_seen: set.physical.iter().map(|(id, p)| (*id, p.seen)).collect(),
             too_big: BTreeMap::new(),
             settings: settings.clone(),
@@ -331,6 +344,8 @@ impl Displays {
         if self.facts.is_some() {
             let wanted = self.wanted();
             self.desk.want(wanted);
+            self.placing.handed(self.desk.posted());
+            self.placing.prune(Instant::now());
         }
     }
 
@@ -522,7 +537,20 @@ impl Displays {
                     self.screens.remove(&id);
                 }
             }
-            Done::Placed(on_desk) => self.on_desk = on_desk,
+            Done::Placed { on_desk, upto } => {
+                self.on_desk = on_desk;
+                self.placing.laid_out(upto, Instant::now());
+            }
+            Done::Rescaled { id, percent } => {
+                if let Some(Screen {
+                    kind: ScreenKind::Virtual { spec },
+                    ..
+                }) = self.screens.get_mut(&id)
+                {
+                    spec.scale = f64::from(percent) / 100.0;
+                    return DeskNews::Rescaled;
+                }
+            }
             Done::Physical(seen) => self.sync_physical(&seen, new_id),
             Done::Focus(key) => self.focus = key.and_then(|k| self.id_of_output(&k)),
             Done::Job { job, result } => return self.job_done(job, result),

@@ -151,6 +151,8 @@ pub(super) struct Args {
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
 pub(super) enum CodecArg {
     H264,
+    /// HEVC, as the headset's menu calls it; `h265` is the same.
+    #[value(name = "hevc", alias = "h265")]
     H265,
 }
 

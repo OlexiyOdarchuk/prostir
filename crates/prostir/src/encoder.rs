@@ -27,7 +27,7 @@ mod choice;
 mod gpu;
 mod probe;
 
-pub use choice::{Backend, Choice, Kind, Wanted, note};
+pub use choice::{Backend, Choice, Kind, Wanted, codec_label, note};
 pub use gpu::GpuDevices;
 #[cfg(not(feature = "fake-desktop"))]
 pub use probe::file_identity;

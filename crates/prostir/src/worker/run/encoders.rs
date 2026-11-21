@@ -477,13 +477,9 @@ pub(super) fn restart_due(
 }
 
 /// What a screen's encoding says when it went on in `used` because `asked` did not
-/// start: "kept H.264: H.265 did not start".
+/// start: "kept H.264: HEVC did not start".
 pub(super) fn kept_note(used: Codec, asked: Codec) -> String {
-    let name = |c: Codec| match c {
-        Codec::H264 => "H.264",
-        Codec::H265 => "H.265",
-        Codec::Av1 => "AV1",
-    };
+    let name = crate::encoder::codec_label;
     format!(
         "{} {}: {} {}",
         t("лишився", "kept"),

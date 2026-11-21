@@ -8,13 +8,14 @@
 pub mod screencopy;
 pub mod windows;
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use log::{info, warn};
@@ -294,6 +295,14 @@ struct Watch {
 static LIVE: Mutex<Weak<Rules>> = Mutex::new(Weak::new());
 
 impl Rules {
+    /// Output `name` is at `scale` from now on, given with Hyprland's own means: the
+    /// rule put back after a config reload has it.
+    fn take_scale(&self, name: &str, scale: f64) {
+        if let Some(rule) = self.applied.lock().unwrap().get_mut(name) {
+            rule.scale = scale;
+        }
+    }
+
     /// Applies monitor rules in one request and remembers them.
     fn apply(&self, rules: &[Rule]) -> bool {
         let mut applied = self.applied.lock().unwrap();
@@ -707,6 +716,9 @@ impl Desktop for Hyprland {
     }
 }
 
+/// How long the scale Hyprland said for an output of ours is taken as it is.
+const SCALE_READ: Duration = Duration::from_secs(2);
+
 /// A headless output of ours, or a display of the PC, captured with wlr-screencopy.
 struct HyprOutput {
     key: OutputKey,
@@ -714,6 +726,8 @@ struct HyprOutput {
     /// Ours (removed when dropped, with its rule), not a display of the PC shown as it
     /// is.
     owned: Option<Arc<Rules>>,
+    /// When Hyprland was last asked for its scale, and what it said.
+    scale_read: Cell<(Option<Instant>, Option<u16>)>,
 }
 
 impl HyprOutput {
@@ -722,6 +736,7 @@ impl HyprOutput {
             key: OutputKey::new(name),
             capture: None,
             owned,
+            scale_read: Cell::new((None, None)),
         }
     }
 }
@@ -739,6 +754,27 @@ impl Drop for HyprOutput {
 impl Output for HyprOutput {
     fn key(&self) -> &OutputKey {
         &self.key
+    }
+
+    /// Asked of Hyprland's socket at most every [`SCALE_READ`], for an output of ours.
+    fn desk_scale(&self) -> Option<u16> {
+        self.owned.as_ref()?;
+        let (at, said) = self.scale_read.get();
+        if at.is_some_and(|t| t.elapsed() < SCALE_READ) {
+            return said;
+        }
+        let said = monitors()
+            .iter()
+            .find(|m| m.name == self.key.as_str())
+            .map(|m| (m.scale * 100.0).round() as u16);
+        self.scale_read.set((Some(Instant::now()), said));
+        said
+    }
+
+    fn scale_taken(&self, percent: u16) {
+        if let Some(rules) = &self.owned {
+            rules.take_scale(self.key.as_str(), f64::from(percent) / 100.0);
+        }
     }
 
     /// Its outputs change size only through monitor rules, not through capture.

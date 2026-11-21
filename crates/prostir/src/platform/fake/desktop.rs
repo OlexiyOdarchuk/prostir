@@ -7,6 +7,9 @@
 //!   size, as sharing a monitor in Discord does on KDE; starting Prostir's own stream
 //!   over puts its size back;
 //! - `resize-sticky Fake-2 320x240`: the same, but only making the output anew does;
+//! - `refuse-scale`: setting the next monitor's scale fails, as `kscreen-doctor` can;
+//! - `scale Fake-2 150`: the person gives the output another scale in the desktop's
+//!   display settings;
 //! - `unplug eDP-1`, `plug eDP-1`: a display of the PC goes away (the lid closed, the
 //!   cable out) and comes back;
 //! - `volume 40`, `volume 40 muted`: the slider of the headset's sound device moved;
@@ -19,6 +22,9 @@
 //!   the next monitor made, layout placed, encoder stopped or sound to the headset
 //!   started takes that many seconds, as a desktop, a driver or a sound system that
 //!   hangs.
+//!
+//! As KWin, it keeps each output's scale by name: an output made anew has the scale
+//! its name had last, until the platform layer sets another.
 //!
 //! The PC's own displays are `PROSTIR_FAKE_PHYSICAL`: `CONNECTOR=EDID@WxH` separated
 //! by `;` (an empty EDID: the display says nothing), all plugged in at the start.
@@ -37,7 +43,7 @@ use crate::encoder::{Encoder, Input};
 use crate::platform::{
     AddModel, Cursor, DeskPlan, Desktop, DesktopCaps, FrameSource, Geometry, GpuDevices, Memory,
     Origin, Output, OutputHealth, OutputKey, Outputs, PhysicalDisplay, Pointer, Scales,
-    VirtualSpec, Windows,
+    VirtualSpec, Windows, needs_scale, scale_of,
 };
 
 /// A display of the fake PC itself, and whether it is plugged in.
@@ -49,6 +55,28 @@ struct FakePhysical {
 /// The fake PC's own displays, shared with the thread that carries out the test's
 /// commands.
 static PHYSICAL: Mutex<Vec<FakePhysical>> = Mutex::new(Vec::new());
+
+/// The scale of each output by name, kept as KWin keeps it: an output made anew starts
+/// at it.
+static SCALES: Mutex<BTreeMap<String, f64>> = Mutex::new(BTreeMap::new());
+
+/// The desktop's layout, for the commands of other programs.
+static LAYOUT: Mutex<Option<Layout>> = Mutex::new(None);
+
+/// The next scale the platform layer sets is not set (`refuse-scale`), as when
+/// `kscreen-doctor` fails.
+static REFUSE_SCALE: AtomicBool = AtomicBool::new(false);
+
+/// Gives output `name` (`pixels` large) the scale `factor` on the desktop, and keeps
+/// it for the name.
+fn set_scale(layout: &Layout, name: &str, pixels: (u32, u32), factor: f64) {
+    if let Some(g) = layout.lock().unwrap().get_mut(name) {
+        let at = |px: u32| (f64::from(px) / factor).round() as i32;
+        (g.w, g.h) = (at(pixels.0), at(pixels.1));
+    }
+    SCALES.lock().unwrap().insert(name.to_owned(), factor);
+    info!("fake desktop: {name} at scale {factor}");
+}
 
 /// `CONNECTOR=EDID@WxH;…` (see the top of this file).
 fn parse_physical(text: &str) -> Result<Vec<FakePhysical>> {
@@ -145,6 +173,8 @@ impl FakeDesktop {
             physical.len()
         );
         *PHYSICAL.lock().unwrap() = physical;
+        let layout = Layout::default();
+        *LAYOUT.lock().unwrap() = Some(layout.clone());
         static WATCHED: Once = Once::new();
         WATCHED.call_once(watch_commands);
         Ok(Self {
@@ -159,7 +189,7 @@ impl FakeDesktop {
                 moves_pointer: false,
                 cleans_up_after_crash: true,
             },
-            layout: Layout::default(),
+            layout,
             fps,
             picture,
             slow: Duration::from_millis(slow),
@@ -182,15 +212,25 @@ impl Desktop for FakeDesktop {
             "fake monitor {number} is broken"
         );
         let name = format!("{PREFIX}{number}");
+        // At the scale its name had last, as KWin makes it.
+        let kept = SCALES.lock().unwrap().get(&name).copied().unwrap_or(1.0);
         let output = FakeOutput::start(
             name.clone(),
-            (spec.w, spec.h, spec.factor()),
+            (spec.w, spec.h, kept),
             self.fps,
             self.picture,
             self.layout.clone(),
             true,
         )?;
         info!("fake desktop: created {name} ({spec})");
+        let listed = self.layout.lock().unwrap().get(&name).map(|g| (g.w, g.h));
+        if needs_scale(spec, listed) {
+            if REFUSE_SCALE.swap(false, Ordering::Relaxed) {
+                warn!("fake desktop: setting the scale of {name} failed");
+            } else {
+                set_scale(&self.layout, &name, (spec.w, spec.h), spec.factor());
+            }
+        }
         Ok(Box::new(output))
     }
 
@@ -397,6 +437,12 @@ impl Output for FakeOutput {
         &self.key
     }
 
+    /// From the layout in memory, as KWin's events tell it.
+    fn desk_scale(&self) -> Option<u16> {
+        let g = *self.layout.lock().unwrap().get(&self.name)?;
+        scale_of(self.screen.size(), (g.w, g.h))
+    }
+
     /// A display of the PC is closed once it is unplugged.
     fn health(&self) -> OutputHealth {
         if !self.owned && !plugged(&self.name) {
@@ -528,6 +574,18 @@ fn command(line: &str) -> Result<()> {
             .with_context(|| format!("no display {name}"))?;
         p.plugged = verb == "plug";
         info!("fake desktop: {name} {verb}ged");
+        return Ok(());
+    }
+    if let ["refuse-scale"] = words[..] {
+        REFUSE_SCALE.store(true, Ordering::Relaxed);
+        info!("fake desktop: the next scale set fails");
+        return Ok(());
+    }
+    if let ["scale", name, percent] = words[..] {
+        let percent: u16 = percent.parse()?;
+        let screen = Screen::find(name).with_context(|| format!("no output {name}"))?;
+        let layout = LAYOUT.lock().unwrap().clone().context("no desktop")?;
+        set_scale(&layout, name, screen.size(), f64::from(percent) / 100.0);
         return Ok(());
     }
     let [verb @ ("resize" | "resize-sticky"), name, size] = words[..] else {

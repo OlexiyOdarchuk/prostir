@@ -1096,6 +1096,14 @@ mod tests {
         ] {
             assert!(!read(args).unwrap().old_options, "{args:?}");
         }
+        // HEVC as people read it, h265 as before.
+        for codec in ["hevc", "h265"] {
+            let cli = read(&["serve", "--codec", codec]).unwrap();
+            assert!(
+                matches!(&cli.command, Some(Sub::Serve(a)) if matches!(a.codec, Some(super::CodecArg::H265))),
+                "{codec}"
+            );
+        }
         let serve = read(&["serve", "--port", "1"]).unwrap();
         assert!(matches!(serve.command, Some(Sub::Serve(a)) if a.port == 1));
         assert!(

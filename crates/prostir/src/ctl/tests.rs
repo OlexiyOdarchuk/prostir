@@ -68,6 +68,16 @@ fn commands_read_as_requests() {
             cpu: true
         }
     );
+    // HEVC as people read it, h265 as before.
+    for word in ["hevc", "h265"] {
+        assert_eq!(
+            asks(&format!("codec {word}")),
+            Request::SetCodec {
+                codec: CodecChoice::H265,
+                cpu: false
+            }
+        );
+    }
     assert_eq!(
         asks("codec auto"),
         Request::SetCodec {
