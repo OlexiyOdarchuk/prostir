@@ -8,7 +8,7 @@ use glam::Vec3;
 use prostir_layout::space::Frame;
 use prostir_proto::state::Mode;
 
-use crate::ids::DisplayKey;
+use crate::ids::{DisplayKey, PcId};
 use crate::layout::{self, Arrangement, Key, Placement};
 use crate::persist::{self, LoadError};
 
@@ -134,6 +134,18 @@ impl Profile {
             out.push('\n');
         }
     }
+}
+
+/// PC `pc` was forgotten: no profile shows its displays any more. True when one did,
+/// and `profiles.txt` is to be written.
+pub fn forget_pc(profiles: &mut Slots, pc: PcId) -> bool {
+    let mut changed = false;
+    for p in profiles.iter_mut().flatten() {
+        let before = p.shown.len();
+        p.shown.retain(|k| k.pc != pc);
+        changed |= p.shown.len() != before;
+    }
+    changed
 }
 
 /// A profile's lines as they are read, before they are checked together.
@@ -370,7 +382,7 @@ mod tests {
     }
 
     fn sample() -> Profile {
-        let laptop = DisplayKey::new(crate::ids::PcId([0xab; 8]), DisplayId(100));
+        let laptop = DisplayKey::new(PcId([0xab; 8]), DisplayId(100));
         Profile {
             monitors: vec![
                 Mode::new(2560, 1440),
@@ -489,6 +501,19 @@ mod tests {
             Some(LoadError::Line(2)),
             "before any slot"
         );
+    }
+
+    /// A PC forgotten leaves the profiles that showed its displays, and only its own.
+    #[test]
+    fn a_forgotten_pc_leaves_the_profiles() {
+        let mut profiles = empty();
+        let mut p = sample();
+        let other = DisplayKey::new(PcId([1; 8]), DisplayId(100));
+        p.shown.push(other);
+        profiles[2] = Some(p);
+        assert!(forget_pc(&mut profiles, PcId([0xab; 8])));
+        assert_eq!(profiles[2].as_ref().unwrap().shown, [other]);
+        assert!(!forget_pc(&mut profiles, PcId([0xab; 8])));
     }
 
     /// Saved in its own frame, a profile comes back around wherever the user is

@@ -1081,6 +1081,31 @@ impl Scene {
         self.put_error(text);
     }
 
+    /// PC `pc` was forgotten: the places of its displays go (from the arrangement, and
+    /// from the desk arrangement kept aside in cinema), so does the cinema's pick of
+    /// one, and no profile shows its displays any more. Paired again later, its
+    /// displays are laid out afresh.
+    fn forget_pc(&mut self, pc: PcId) {
+        let of_pc = |k: &DisplayKey| k.pc == pc;
+        self.placements.retain(|k, _| !of_pc(k));
+        self.placed_for.retain(|k, _| !of_pc(k));
+        let gone: Vec<DisplayKey> = self
+            .desk
+            .arrangement()
+            .placements
+            .keys()
+            .copied()
+            .chain(self.desk.cinema())
+            .filter(of_pc)
+            .collect();
+        if self.desk.forget(&gone) {
+            self.saves.mark(persist::File::Desk);
+        }
+        if profiles::forget_pc(&mut self.profiles, pc) {
+            self.saves.mark(persist::File::Profiles);
+        }
+    }
+
     /// Takes `saved` as the desk arrangement. Window panels stay where they are; a
     /// monitor whose stream changed size since keeps the size of its pixels; layouts
     /// keep facing the way this one was laid out (from a file that does not say, the
@@ -4725,6 +4750,7 @@ fn handle_action(
                 match store.remove(&key) {
                     Ok(()) => {
                         info!("forgot PC {name:?}");
+                        scene.forget_pc(PcId::of(&key));
                         scene.steering.trust_changed();
                         // Connected to it: leave, and do not come back on our own.
                         if scene.host.as_deref() == Some(name.as_str()) {
