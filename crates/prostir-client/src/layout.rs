@@ -1112,6 +1112,44 @@ pub fn facing_yaw(placements: &HashMap<ScreenId, Placement>, eye: Vec3) -> Optio
     (sin.abs() > 1e-6 || cos.abs() > 1e-6).then(|| sin.atan2(cos))
 }
 
+/// A monitor drawn after another (over it, where they overlap as seen) is drawn before
+/// it only once it is further from the head than that one by more than this (5 cm): two
+/// at about one distance, as a monitor glued over a row and that row, keep their order,
+/// so the strip where they overlap never flickers from one to the other as the head
+/// moves.
+pub const DRAW_HOLD: f32 = 0.05;
+
+/// The order the monitors are drawn in, far to near (the nearest last, over the others):
+/// `order` holds each one's distance from the head (one held in a hand at -1, last of
+/// all) and is put in order in place; `before` is the order of the frame before. It
+/// starts from that order, the new ones after it, and two next to each other swap only
+/// where the one drawn later is further by more than [`DRAW_HOLD`]. Nothing is
+/// allocated.
+pub fn draw_order(order: &mut [(f32, ScreenId)], before: &[ScreenId]) {
+    let rank = |id: ScreenId| before.iter().position(|b| *b == id).unwrap_or(usize::MAX);
+    // As drawn before, the new ones after, far to near (an insertion sort: in place).
+    let first = |a: &(f32, ScreenId), b: &(f32, ScreenId)| (rank(a.1), b.0) < (rank(b.1), a.0);
+    for i in 1..order.len() {
+        let mut j = i;
+        while j > 0 && first(&order[j], &order[j - 1]) {
+            order.swap(j - 1, j);
+            j -= 1;
+        }
+    }
+    for _ in 0..order.len() {
+        let mut swapped = false;
+        for i in 1..order.len() {
+            if order[i].0 > order[i - 1].0 + DRAW_HOLD {
+                order.swap(i - 1, i);
+                swapped = true;
+            }
+        }
+        if !swapped {
+            break;
+        }
+    }
+}
+
 /// `p`, laid out around `from` (eye and yaw, as the headset's `center`), standing the
 /// same way around `to`: turned about the vertical by the difference of the yaws, the
 /// eye carried to the eye. What is worked out as seen from the eye (rows, the desktop,
@@ -2849,7 +2887,37 @@ mod tests {
                 twice[&6].position.distance(once[&6].position) < 1e-4,
                 "{name}"
             );
-            eprintln!("{name}: rose {rise:.3} m, seams {seams:.4?}");
+            // Its ends overlap the two as seen, by no more than OVERLAP_MAX.
+            let all = placed(&once, &owner);
+            let of = |id: ScreenId| *all.iter().find(|m| m.id == id).unwrap();
+            let deepest = [1, 3]
+                .iter()
+                .flat_map(|&below| {
+                    [
+                        prostir_layout::view::reach_pair(
+                            &of(below),
+                            &of(6),
+                            prostir_layout::space::Side::Above,
+                            17,
+                        ),
+                        prostir_layout::view::reach_pair(
+                            &of(6),
+                            &of(below),
+                            prostir_layout::space::Side::Below,
+                            17,
+                        ),
+                    ]
+                })
+                .flatten()
+                .fold(0.0f64, f64::max);
+            assert!(
+                deepest <= f64::from(tidy::OVERLAP_MAX),
+                "{name}: overlaps {deepest}"
+            );
+            eprintln!(
+                "{name}: rose {rise:.3} m, seams {seams:.4?}, overlapping {:.1} % at most",
+                deepest * 100.0
+            );
         }
         // Not glued: pushed clear as before, covering neither.
         let once = lined(&upright);
@@ -2879,5 +2947,98 @@ mod tests {
             seams.iter().all(|s| *s > 0.0),
             "a gap in the middle: {seams:?}"
         );
+    }
+
+    /// The farthest any corner of `a` is from the same corner in `b` (metres).
+    fn farthest_corner(a: &Placements, b: &Placements, m: &[(ScreenId, u32, u32)]) -> f32 {
+        m.iter()
+            .map(|&(id, w, h)| {
+                let (p, q) = (a[&id], b[&id]);
+                corners(&p, p.width * h as f32 / w as f32)
+                    .iter()
+                    .zip(corners(&q, q.width * h as f32 / w as f32))
+                    .map(|(x, y)| x.distance(y))
+                    .fold(0.0f32, f32::max)
+            })
+            .fold(0.0f32, f32::max)
+    }
+
+    /// The draw order keeps two monitors at about one distance from the head in the
+    /// order they had (a monitor glued over a row and that row): the head moving so
+    /// their distances cross back and forth within DRAW_HOLD never swaps them, so where
+    /// they overlap never flickers; one clearly nearer goes last; one held goes last of
+    /// all, and new ones go by distance.
+    #[test]
+    fn the_draw_order_holds_for_monitors_at_one_distance() {
+        let mut before: Vec<ScreenId> = Vec::new();
+        let mut order: Vec<(f32, ScreenId)> = Vec::new();
+        let mut draw = |d: &[(f32, ScreenId)], before: &mut Vec<ScreenId>| {
+            order.clear();
+            order.extend_from_slice(d);
+            draw_order(&mut order, before);
+            before.clear();
+            before.extend(order.iter().map(|o| o.1));
+            before.clone()
+        };
+        // New: far to near.
+        assert_eq!(
+            draw(&[(0.8, 6), (1.2, 1), (1.0, 3)], &mut before),
+            vec![1, 3, 6]
+        );
+        // 6 and 3 crossing by up to 4 cm each way, frame after frame: no swap.
+        for f in 0..200 {
+            let wobble = if f % 2 == 0 { 0.02 } else { -0.02 };
+            let got = draw(
+                &[(1.0 + wobble, 6), (1.2, 1), (1.0 - wobble, 3)],
+                &mut before,
+            );
+            assert_eq!(got, vec![1, 3, 6], "frame {f}");
+        }
+        // 3 clearly nearer: it goes last.
+        assert_eq!(
+            draw(&[(1.0, 6), (1.2, 1), (0.9, 3)], &mut before),
+            vec![1, 6, 3]
+        );
+        // Held in a hand: last of all.
+        assert_eq!(
+            draw(&[(1.0, 6), (-1.0, 1), (0.9, 3)], &mut before),
+            vec![6, 3, 1]
+        );
+        // A new one far away: first.
+        assert_eq!(
+            draw(&[(1.0, 6), (1.2, 1), (0.9, 3), (2.0, 9)], &mut before),
+            vec![9, 1, 6, 3]
+        );
+    }
+
+    /// Follow mode carries the arrangement after the head a little every frame: after
+    /// a long while of it (60 000 frames, about 14 minutes at 72 Hz, turning and moving
+    /// back and forth) the owner's 3840x2160 glued over the two is still seen glued, and
+    /// "Line up" moves nothing, the last bits of the floats notwithstanding.
+    #[test]
+    fn a_long_follow_leaves_a_glued_seam_glued() {
+        let origin = (Vec3::ZERO, 0.0);
+        let (owner, by_hand) = owners_stack();
+        let rows = Desktop::of(&by_hand, &owner, origin, Preset::Arc, Some(1), None).rows;
+        let kept = line_up(&by_hand, &owner, origin, Preset::Arc, Some(1), &rows, None);
+        let (mut p, mut center) = (kept.clone(), origin);
+        let mut rng = Rng(0xf011);
+        for _ in 0..60_000 {
+            // As `Scene::follow_head` steps: a turn and a shift of a frame's easing.
+            let turn = rng.float(-0.01, 0.01);
+            let shift = Vec3::new(rng.float(-0.003, 0.003), 0.0, rng.float(-0.003, 0.003));
+            let next = (center.0 + shift, center.1 + turn);
+            for q in p.values_mut() {
+                *q = carried(q, (center.0, 0.0), (next.0, turn));
+            }
+            center = next;
+        }
+        assert!(
+            seen_apart(&p, center, &kept, origin, &owner) < 1e-3,
+            "followed as one piece"
+        );
+        let lined = line_up(&p, &owner, center, Preset::Arc, Some(1), &rows, None);
+        let moved = farthest_corner(&p, &lined, &owner);
+        assert!(moved < 1e-4, "Line up after following moves {moved} m");
     }
 }
