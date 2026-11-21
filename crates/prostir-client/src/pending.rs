@@ -165,12 +165,17 @@ impl Asks {
     }
 }
 
-/// A profile being switched to: its request, its places by its monitors' order, and
-/// the numbers the PC gave them.
+/// A profile being switched to: its request, its places by its monitors' order (as
+/// saved: see `profiles::standing`), and the numbers the PC gave them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProfileSwitch {
     pub req: ReqId,
     pub places: Vec<Placement>,
+    /// What the places were laid out around and the rows they were in, as the
+    /// profile keeps them (see `profiles::Profile`).
+    pub center: Option<(glam::Vec3, f32)>,
+    pub radius: Option<f32>,
+    pub rows: Vec<Vec<usize>>,
     pub ids: Option<Vec<ScreenId>>,
     /// Until when it waits for its monitors to stream, once the PC made them.
     pub until: Option<Instant>,
@@ -191,6 +196,9 @@ impl ProfileSwitch {
         Self {
             req,
             places,
+            center: None,
+            radius: None,
+            rows: Vec::new(),
             ids: None,
             until: None,
         }

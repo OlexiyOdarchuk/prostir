@@ -674,30 +674,23 @@ impl Scene {
     }
 
     /// The setup as it is now: monitors left to right, the primary, the laptop screen,
-    /// layout and look.
+    /// layout and look, and the desk arrangement (in cinema, as saved before it).
     fn current_profile(&self) -> Profile {
-        let sizes = self.quest_sizes();
-        // Where the monitors stand on the desk (in cinema, as saved before it), and the
-        // eye and the way they were laid out around.
-        let (desk, center) = if self.settings.cinema {
-            let saved = self.desk.load();
-            (saved.placements, saved.center)
-        } else {
-            (self.placements.clone(), Some(self.center))
+        let live = layout::Arrangement {
+            placements: self.placements.clone(),
+            sizes: self.placed_for.clone(),
+            center: Some(self.center),
+            radius: Some(self.radius),
         };
-        let places: Option<Vec<Placement>> =
-            sizes.iter().map(|m| desk.get(&m.0).copied()).collect();
-        Profile {
-            primary: sizes
-                .iter()
-                .position(|m| Some(m.0) == self.primary)
-                .unwrap_or(0) as u8,
-            sizes: sizes.iter().map(|m| (m.1, m.2)).collect(),
-            mirror: self.mirror_wanted,
-            settings: self.settings,
-            center: center.filter(|_| places.is_some()),
-            places: places.unwrap_or_default(),
-        }
+        Profile::of(
+            &self.quest_sizes(),
+            self.primary,
+            self.mirror_wanted,
+            self.settings,
+            live,
+            &self.sent_rows(),
+            &self.desk,
+        )
     }
 
     /// Monitors without a place get one: all by the preset when none has any (the
@@ -831,16 +824,23 @@ impl Scene {
         if self.settings.cinema {
             switch.places.clear();
         }
+        let (center, radius, rows) = (switch.center, switch.radius, switch.rows.clone());
         match switch.made(ids, Instant::now()) {
-            Made::Places(places) => {
-                // Around the user as they stood around the user when saved (see
-                // `Profile::local_places`).
-                for (id, p) in self.around_user(places.into_iter().collect()) {
+            Made::Places(made) => {
+                // Seen from the user's eye now as they were from the eye they were
+                // saved around. Worked out here, once the monitors are made: leaving
+                // cinema for the profile, or following the head meanwhile, moves the
+                // center.
+                let (placed, rows) = profiles::standing(&made, center, &rows, self.center);
+                for (id, p) in placed {
                     self.placements.insert(id, p);
                     self.placed_for.remove(&id);
                 }
+                if let Some(r) = radius {
+                    self.radius = r;
+                }
                 self.profile_switch = None;
-                self.forget_rows();
+                self.rows_from(rows);
                 self.save_layout();
                 self.place_missing();
             }
@@ -865,17 +865,16 @@ impl Scene {
             .is_some_and(|s| s.stands(Instant::now(), settled));
         if stands {
             self.profile_switch = None;
-            self.forget_rows();
+            self.rows_from(Vec::new());
             self.arrange_all();
         }
     }
 
-    /// A profile switched to is another arrangement: its rows start afresh. The rows
-    /// the PC had were of the one before, and the PC numbers a monitor of the same size
-    /// as it did there, so their history would keep pairs of neighbours that stand
-    /// otherwise now (a monitor glued over another taken into the row beside it).
-    fn forget_rows(&mut self) {
-        self.sent_layout = None;
+    /// A profile switched to is another arrangement: its rows are those it was saved
+    /// with (by the PC's numbers now), or, for a profile without them, start afresh
+    /// (see `layout::Desktop::history`).
+    fn rows_from(&mut self, rows: Vec<Vec<ScreenId>>) {
+        self.sent_layout = layout::Desktop::history(rows);
         self.pending_layout = None;
     }
 
@@ -952,11 +951,8 @@ impl Scene {
         &self,
         mut placements: HashMap<ScreenId, Placement>,
     ) -> HashMap<ScreenId, Placement> {
-        let (center, yaw) = self.center;
-        let turn = glam::Quat::from_rotation_y(yaw);
         for p in placements.values_mut() {
-            p.position = center + turn * p.position;
-            p.rotation = turn * p.rotation;
+            *p = layout::carried(p, (Vec3::ZERO, 0.0), self.center);
         }
         placements
     }
@@ -4136,12 +4132,15 @@ fn handle_action(
             );
             // Placed once the PC answers with its monitors' numbers.
             scene.profile_switch = req.map(|req| {
-                let places = if p.settings.cinema {
-                    Vec::new()
-                } else {
-                    p.local_places(scene.center)
-                };
-                ProfileSwitch::new(req, places)
+                if p.settings.cinema {
+                    return ProfileSwitch::new(req, Vec::new());
+                }
+                ProfileSwitch {
+                    center: p.center,
+                    radius: p.radius,
+                    rows: p.rows.clone(),
+                    ..ProfileSwitch::new(req, p.places.clone())
+                }
             });
             let s = &mut scene.settings;
             s.preset = p.settings.preset;
