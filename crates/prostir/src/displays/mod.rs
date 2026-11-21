@@ -345,6 +345,7 @@ impl Displays {
             let wanted = self.wanted();
             self.desk.want(wanted);
             self.placing.handed(self.desk.posted());
+            self.placing.prune(Instant::now());
         }
     }
 

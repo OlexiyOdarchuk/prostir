@@ -858,6 +858,32 @@ fn a_monitor_added_from_the_pc_shows_where_the_headset_puts_it() {
             && after < PLACE_WAIT + Duration::from_secs(1),
         "shown after {after:?}"
     );
+    // The wait over with no layout after it, the control loop sleeps between its
+    // clocks: it does not wake at once again and again.
+    let busy = control_loop_cpu(&pc);
+    headset.take_for(Duration::from_secs(2)).unwrap();
+    let spent = control_loop_cpu(&pc) - busy;
+    assert!(
+        spent < Duration::from_millis(500),
+        "the control loop ran {spent:?} of 2 s"
+    );
+}
+
+/// The processor time the PC app's control loop (its main thread) took so far.
+fn control_loop_cpu(pc: &Pc) -> Duration {
+    let pid = pc.pid();
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/stat")).unwrap();
+    // After the name in parentheses: state is field 3, utime and stime 14 and 15.
+    let fields: Vec<&str> = stat
+        .rsplit_once(')')
+        .unwrap()
+        .1
+        .split_whitespace()
+        .collect();
+    let ticks: u64 = fields[11].parse::<u64>().unwrap() + fields[12].parse::<u64>().unwrap();
+    // SAFETY: sysconf has no preconditions.
+    let per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as u64;
+    Duration::from_millis(ticks * 1000 / per_second)
 }
 
 /// The headset leaves before it placed a monitor added from the PC: the monitors stay

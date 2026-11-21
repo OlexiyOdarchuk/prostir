@@ -197,7 +197,7 @@ impl Brain {
             .filter_map(|r| r.dog.due(r.step().map(|(t, _)| t), now))
             .min();
         // A monitor's stand-in place counts: the local API shows it.
-        let placing = self.displays.as_ref().and_then(Displays::placing_due);
+        let placing = self.displays.as_ref().and_then(|d| d.placing_due(now));
         crate::brain::earliest([dog, answers, retiring, placing])
     }
 

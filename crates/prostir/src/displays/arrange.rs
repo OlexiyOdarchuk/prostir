@@ -66,8 +66,8 @@ impl Displays {
     }
 
     /// When a stand-in place starts to count, if one is waited for.
-    pub fn placing_due(&self) -> Option<Instant> {
-        self.placing.due()
+    pub fn placing_due(&self, now: Instant) -> Option<Instant> {
+        self.placing.due(now)
     }
 
     /// No headset is connected any more: no monitor waits for its place, and the next

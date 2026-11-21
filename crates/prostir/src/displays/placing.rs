@@ -87,9 +87,15 @@ impl Placings {
         self.0.get(&id).is_none_or(|p| now >= p.until)
     }
 
-    /// When the next stand-in place starts to count, if any.
-    pub fn due(&self) -> Option<Instant> {
-        self.0.values().map(|p| p.until).min()
+    /// When the next stand-in place starts to count, if any is still to (one whose time
+    /// passed is due no more: the control loop would wake at once, again and again).
+    pub fn due(&self, now: Instant) -> Option<Instant> {
+        self.0.values().map(|p| p.until).filter(|&u| u > now).min()
+    }
+
+    /// Forgets the monitors whose stand-in place counts by `now`.
+    pub fn prune(&mut self, now: Instant) {
+        self.0.retain(|_, p| now < p.until);
     }
 }
 
@@ -127,11 +133,15 @@ mod tests {
         let t0 = Instant::now();
         let mut p = Placings::default();
         p.add(id(), t0);
-        assert_eq!(p.due(), Some(t0 + PLACE_WAIT));
+        assert_eq!(p.due(t0), Some(t0 + PLACE_WAIT));
         assert!(!p.known(id(), t0 + PLACE_WAIT - Duration::from_millis(1)));
         assert!(p.known(id(), t0 + PLACE_WAIT));
-        p.laid_out(0, t0 + PLACE_WAIT);
-        assert_eq!(p.due(), None);
+        // Its time passed without a layout: nothing is due any more, before or after
+        // it is forgotten.
+        assert_eq!(p.due(t0 + PLACE_WAIT), None);
+        assert_eq!(p.due(t0 + PLACE_WAIT * 2), None);
+        p.prune(t0 + PLACE_WAIT);
+        assert_eq!(p.due(t0), None);
     }
 
     #[test]
@@ -141,6 +151,6 @@ mod tests {
         p.add(id(), t0);
         p.clear();
         assert!(p.known(id(), t0));
-        assert_eq!(p.due(), None);
+        assert_eq!(p.due(t0), None);
     }
 }
