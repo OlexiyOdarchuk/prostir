@@ -1,5 +1,10 @@
 //! Finds the PC host, keeps the TCP connection alive and fans frames out to decoders.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the network thread is part of the shell: its sockets, files and clock are its own"
+)]
+
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpStream, UdpSocket};
 use std::path::PathBuf;

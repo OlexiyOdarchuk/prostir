@@ -1,5 +1,10 @@
 //! Hardware decoding with MediaCodec straight into the compositor's surface.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the decoder threads are part of the shell"
+)]
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

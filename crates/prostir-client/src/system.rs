@@ -3,6 +3,11 @@
 //! every 15 s while the palm menu shows, read afresh when it appears. What does not
 //! change (the headset's model) is asked once at the start.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the system thread is part of the shell"
+)]
+
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};

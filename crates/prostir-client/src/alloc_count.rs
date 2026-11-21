@@ -2,6 +2,11 @@
 //! threads together, and the main thread's alone, so the main loop can say how many
 //! a frame makes (in the log every 10 s, and the selftest's `alloc_per_frame`).
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "part of the shell: the frame loop logs its count by the clock"
+)]
+
 #[cfg(not(feature = "store"))]
 mod counting {
     use std::alloc::{GlobalAlloc, Layout, System};

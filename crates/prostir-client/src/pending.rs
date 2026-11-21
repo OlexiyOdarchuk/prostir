@@ -227,6 +227,10 @@ impl ProfileSwitch {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a test's own starting time; the code under test takes the time as a parameter"
+)]
 mod tests {
     use super::*;
     use prostir_proto::state::ErrorCode;

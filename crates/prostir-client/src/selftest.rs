@@ -5,6 +5,11 @@
 //! What is here builds and is tested on any system: the options, the numbers and the
 //! verdict. Running it on the headset is in `device` (Android only).
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the selftest is part of the shell: it measures time and reads its clips"
+)]
+
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering};

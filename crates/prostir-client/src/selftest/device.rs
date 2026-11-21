@@ -8,6 +8,11 @@
 //! times) and, at set moments, asks for what a person would do in the menu
 //! ([`Act`]), while the fake PC breaks things on purpose.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the selftest is part of the shell: it measures time, starts its fake PC and writes its report"
+)]
+
 use std::collections::BTreeMap;
 use std::ffi::{CStr, CString};
 use std::path::{Path, PathBuf};

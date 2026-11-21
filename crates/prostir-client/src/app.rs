@@ -5,6 +5,11 @@
 //! a quad or cylinder layer. The menu, its button, pointer dots and the
 //! panorama are small CPU-drawn images; nothing is rendered per frame.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the frame loop, part of the shell, still holds the model: until step 7.7 passes the time in, it reads the clock, starts threads and reads the trusted PCs itself"
+)]
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::ptr;

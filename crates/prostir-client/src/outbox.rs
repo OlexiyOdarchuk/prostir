@@ -10,6 +10,11 @@
 //!   the start and end of an up stream go in the same lane, in order, and are never
 //!   dropped.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the queue to the PC belongs to the network thread, part of the shell: it keeps the clock of its pings"
+)]
+
 use std::collections::VecDeque;
 use std::io;
 use std::sync::{Condvar, Mutex};

@@ -1,5 +1,10 @@
 //! Plays PC sound received over the connection through AAudio (low-latency mode).
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the audio thread is part of the shell"
+)]
+
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};

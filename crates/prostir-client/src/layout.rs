@@ -953,6 +953,10 @@ impl Desk {
 
     /// The saved arrangement (of monitors and the PC's displays: window panels are
     /// placed afresh when they appear, and never saved).
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the core's own file access, until step 7.3 hands it to persist"
+    )]
     pub fn load(&self) -> Arrangement {
         let Ok(text) = std::fs::read_to_string(&self.path) else {
             return Arrangement::default();
@@ -1004,6 +1008,10 @@ impl Desk {
     }
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the core's own file access, until step 7.3 hands it to persist"
+)]
 pub fn load(path: &Path) -> HashMap<ScreenId, Placement> {
     let Ok(text) = std::fs::read_to_string(path) else {
         return HashMap::new();
@@ -1024,6 +1032,10 @@ pub fn save(path: &Path, placements: &HashMap<ScreenId, Placement>) {
     write(path, &text);
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the core's own file access, until step 7.3 hands it to persist"
+)]
 fn write(path: &Path, text: &str) {
     if let Err(e) = prostir_proto::secure::write_atomic(path, text.as_bytes()) {
         log::warn!("cannot save layout to {}: {e}", path.display());
@@ -1190,6 +1202,10 @@ pub fn ahead(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "tests make and read the files the code under test reads and writes"
+)]
 mod tests {
     use super::*;
 

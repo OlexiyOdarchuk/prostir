@@ -1,6 +1,11 @@
 //! Headset microphone to the PC: captured with AAudio only while a PC app is
 //! recording, in 10 ms slices, as an up stream (`UpStart`, `Up`, `UpEnd`).
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the microphone thread is part of the shell"
+)]
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
