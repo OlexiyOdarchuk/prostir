@@ -608,42 +608,32 @@ fn a_ray_hits_a_monitor_where_it_is_drawn() {
     assert_eq!(pick(&sim, a.position), Some(Thing::Display(other)));
 }
 
-/// What a ray hits first among things as near: the order of 4.2 (the menu, its
-/// button, the palm menu, "Attach", the keyboard window, the placeholder, the
-/// monitors). A placeholder in front of a monitor is hit, not the monitor behind.
+/// What a ray hits first among things as near: the one higher in the compositor's
+/// stack (the palm menu, "Attach", the menu, its button, the placeholder, the
+/// monitors, the keyboard window). A placeholder in front of a monitor is hit, not
+/// the monitor behind.
 #[test]
-fn of_two_as_near_the_first_is_hit() {
+fn of_two_as_near_the_higher_is_hit() {
     let mut sim = Sim::at_desk();
     let button = sim.world.button().expect("under the first monitor");
-    sim.world.set_wrist(Some(button));
-    let hit = sim
-        .world
-        .pick(
-            towards(button.position),
-            &sim.s,
-            Pickable::default(),
-            |_| false,
-        )
-        .unwrap();
-    assert_eq!(
-        hit.thing,
-        Thing::MenuButton,
-        "the button before the palm menu"
-    );
-    let menu = Placement {
-        width: panel_width(false),
-        ..button
+    let at = |sim: &Sim, can: Pickable| {
+        sim.world
+            .pick(towards(button.position), &sim.s, can, |_| false)
+            .unwrap()
+            .thing
     };
-    sim.world.menu = menu;
     let open = Pickable {
         menu: true,
         attach: None,
     };
-    let hit = sim
-        .world
-        .pick(towards(button.position), &sim.s, open, |_| false)
-        .unwrap();
-    assert_eq!(hit.thing, Thing::Menu, "the menu before all");
+    sim.world.menu = Placement {
+        width: panel_width(false),
+        ..button
+    };
+    assert_eq!(at(&sim, Pickable::default()), Thing::MenuButton);
+    assert_eq!(at(&sim, open), Thing::Menu, "the menu over its button");
+    sim.world.set_wrist(Some(button));
+    assert_eq!(at(&sim, open), Thing::Wrist, "the palm menu over all");
 
     // A placeholder right in front of a monitor.
     let mut sim = Sim::at_desk();
@@ -666,6 +656,78 @@ fn of_two_as_near_the_first_is_hit() {
             pc: PC,
             req: ReqId(9)
         }
+    );
+}
+
+/// Two monitors overlapping, the one drawn over the other 4 cm further away (a
+/// monitor glued over a row stays drawn over it, see `layout::DRAW_HOLD`): where they
+/// overlap the person sees the one on top, and that is what the ray and the gaze hit,
+/// not the nearer one under it. Window panels, flat, are stacked over curved monitors.
+#[test]
+fn of_monitors_the_one_on_top_is_hit() {
+    let mut sim = Sim::new(None);
+    sim.connect(PC);
+    let panel = Display {
+        kind: DisplayKind::Window {
+            title: String::new(),
+        },
+        ..monitor(3, (1280, 720))
+    };
+    sim.list(vec![monitor(1, QHD), monitor(2, QHD), panel]);
+    for (n, size) in [(1, QHD), (2, QHD), (3, (1280, 720))] {
+        sim.stream(n, size);
+    }
+    sim.settled();
+    let flat = |x: f32, z: f32| Placement {
+        position: Vec3::new(x, 0.0, z),
+        rotation: Quat::IDENTITY,
+        width: 1.25,
+    };
+    let stand = |sim: &mut Sim, n: u32, p: Placement| {
+        sim.world.placements.insert(k(n), p);
+        sim.world.shown.insert(k(n), p);
+    };
+    stand(&mut sim, 1, flat(0.0, -1.0));
+    stand(&mut sim, 2, flat(0.5, -1.04));
+    stand(&mut sim, 3, flat(1.0, -2.0));
+    // Through where 1 and 2 overlap.
+    let ray = towards(Vec3::new(0.3, 0.0, -1.0));
+    let hit = |sim: &Sim| {
+        let picked = sim
+            .world
+            .pick(ray, &sim.s, Pickable::default(), |_| false)
+            .map(|t| t.thing);
+        let looked = sim
+            .world
+            .looked_at(ray, &sim.s, false, |_| false)
+            .map(|l| Thing::Display(l.0));
+        assert_eq!(picked, looked, "the ray and the gaze agree");
+        picked
+    };
+    sim.world.drawn = vec![k(3), k(1), k(2)];
+    assert_eq!(
+        hit(&sim),
+        Some(Thing::Display(k(2))),
+        "on top, though further"
+    );
+    sim.world.drawn = vec![k(3), k(2), k(1)];
+    assert_eq!(hit(&sim), Some(Thing::Display(k(1))));
+    // A monitor asked to go is not drawn: the one under it is hit.
+    assert_eq!(
+        sim.world
+            .pick(ray, &sim.s, Pickable::default(), |id| id == k(1))
+            .map(|t| t.thing),
+        Some(Thing::Display(k(2)))
+    );
+
+    // Curved monitors: the window panel, flat, is over them, wherever it is drawn.
+    sim.s.curve = crate::settings::Curve::Gentle;
+    stand(&mut sim, 3, flat(0.3, -1.1));
+    sim.world.drawn = vec![k(3), k(2), k(1)];
+    assert_eq!(
+        hit(&sim),
+        Some(Thing::Display(k(3))),
+        "the window, over both"
     );
 }
 

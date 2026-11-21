@@ -131,6 +131,16 @@ impl Adding {
     }
 }
 
+/// A monitor a ray meets, as drawn: where, how high, on which cylinder (none: flat).
+#[derive(Debug, Clone, Copy)]
+struct Seen {
+    id: DisplayKey,
+    hit: Hit,
+    place: Placement,
+    height: f32,
+    curve: Option<f32>,
+}
+
 /// What a ray may point at besides what always stands: the menu while it is open, and
 /// the "Attach" button of a detached window while it shows.
 #[derive(Debug, Clone, Copy, Default)]
@@ -1746,12 +1756,15 @@ impl World {
 
     // ---- What is seen and pointed at ----
 
-    /// The nearest thing the ray points at, as drawn: the menu, its button, the palm
-    /// menu, "Attach", the keyboard window, the placeholder, the monitors; the nearest
-    /// hit wins, and of two as near the first in that list (of two monitors, the one
-    /// drawn over the other). A monitor is hit where it is drawn (see `shown`), so one
-    /// easing to another place is hit where the person sees it. `hidden`: monitors
-    /// not shown (asked to go). Nothing is allocated.
+    /// What the ray points at, as drawn. The compositor stacks its layers with no
+    /// depth of their own, so of the monitors the one on top is what the person sees
+    /// where they overlap, even a little further away (one glued over a row and kept
+    /// over it, see `layout::DRAW_HOLD`): the first hit from the top of the stack wins.
+    /// Of the rest and that monitor the nearest hit wins, and of two as near the one
+    /// higher in the stack: the palm menu, "Attach", the menu, its button, the
+    /// placeholder, the monitors (flat ones over curved ones, each far to near), the
+    /// keyboard window (under the monitors). A monitor is hit where it is drawn (see
+    /// `shown`). `hidden`: monitors not shown (asked to go). Nothing is allocated.
     pub fn pick(
         &self,
         ray: Ray,
@@ -1767,18 +1780,6 @@ impl World {
                 best = Some(Target { thing, hit });
             }
         };
-        if can.menu {
-            consider(
-                Thing::Menu,
-                layout::hit_surface(ray, &self.menu, panel_height(s.large_menu), None),
-            );
-        }
-        if let Some(b) = &self.button {
-            consider(
-                Thing::MenuButton,
-                layout::hit_surface(ray, b, BUTTON_SIZE, None),
-            );
-        }
         if let Some(w) = &self.wrist {
             consider(
                 Thing::Wrist,
@@ -1793,12 +1794,16 @@ impl World {
                 layout::hit_surface(ray, &b, attach_height(), None),
             );
         }
-        if s.keyboard_window
-            && let Some(k) = &self.keyboard
-        {
+        if can.menu {
             consider(
-                Thing::Keyboard,
-                layout::hit_surface(ray, k, k.width * KEYBOARD_ASPECT, None),
+                Thing::Menu,
+                layout::hit_surface(ray, &self.menu, panel_height(s.large_menu), None),
+            );
+        }
+        if let Some(b) = &self.button {
+            consider(
+                Thing::MenuButton,
+                layout::hit_surface(ray, b, BUTTON_SIZE, None),
             );
         }
         if let Some(a) = &self.adding {
@@ -1807,14 +1812,50 @@ impl World {
                 layout::hit_surface(ray, &a.place, a.height(), None),
             );
         }
-        let curve = self.curve_radius(s);
-        for &id in self.drawn.iter().rev() {
-            if let Some((p, height)) = self.drawn_at(id, &hidden) {
-                let c = curve.filter(|_| !self.is_window(id));
-                consider(Thing::Display(id), layout::hit_surface(ray, p, height, c));
-            }
+        if let Some(m) = self.top_monitor(ray, s, &hidden) {
+            consider(Thing::Display(m.id), Some(m.hit));
+        }
+        if s.keyboard_window
+            && let Some(k) = &self.keyboard
+        {
+            consider(
+                Thing::Keyboard,
+                layout::hit_surface(ray, k, k.width * KEYBOARD_ASPECT, None),
+            );
         }
         best
+    }
+
+    /// The monitor the ray meets highest in the compositor's stack: the flat ones (all
+    /// of them, or the window panels when the monitors are curved) over the curved
+    /// ones, each drawn far to near (see `order_drawing`), so walked from the last
+    /// drawn. As drawn last (see `drawn_at`). Nothing is allocated.
+    fn top_monitor(
+        &self,
+        ray: Ray,
+        s: &Settings,
+        hidden: impl Fn(DisplayKey) -> bool,
+    ) -> Option<Seen> {
+        let curve = self.curve_radius(s);
+        let flat = |id: DisplayKey| curve.is_none() || self.is_window(id);
+        [true, false].into_iter().find_map(|quads| {
+            self.drawn
+                .iter()
+                .rev()
+                .filter(|id| flat(**id) == quads)
+                .find_map(|&id| {
+                    let (p, height) = self.drawn_at(id, &hidden)?;
+                    let curve = curve.filter(|_| !quads);
+                    let hit = layout::hit_surface(ray, p, height, curve)?;
+                    Some(Seen {
+                        id,
+                        hit,
+                        place: *p,
+                        height,
+                        curve,
+                    })
+                })
+        })
     }
 
     /// Monitor `id` as drawn last, if it still stands (streams, has a place, is not
@@ -1831,9 +1872,10 @@ impl World {
         Some((p, self.height_at(id, p)?))
     }
 
-    /// The monitor looked at along `ray` (the gaze), as drawn, and the point looked at
-    /// across its image (0..=1 from the top left); none when the open menu (`menu`) is
-    /// in front of it. Nothing is allocated.
+    /// The monitor looked at along `ray` (the gaze), as drawn and stacked (see
+    /// `top_monitor`), and the point looked at across its image (0..=1 from the top
+    /// left); none when the open menu (`menu`) is in front of it. Nothing is
+    /// allocated.
     pub fn looked_at(
         &self,
         ray: Ray,
@@ -1841,25 +1883,16 @@ impl World {
         menu: bool,
         hidden: impl Fn(DisplayKey) -> bool,
     ) -> Option<(DisplayKey, Vec2)> {
-        let curve = self.curve_radius(s);
-        let mut looked: Option<(DisplayKey, Hit, Placement, f32, Option<f32>)> = None;
-        for &id in self.drawn.iter().rev() {
-            let Some((p, height)) = self.drawn_at(id, &hidden) else {
-                continue;
-            };
-            let c = curve.filter(|_| !self.is_window(id));
-            if let Some(hit) = layout::hit_surface(ray, p, height, c)
-                && looked.is_none_or(|l| hit.t < l.1.t)
-            {
-                looked = Some((id, hit, *p, height, c));
-            }
-        }
+        let looked = self.top_monitor(ray, s, &hidden);
         // Looking at the menu, not past it.
         let at_menu = menu
             && layout::hit_surface(ray, &self.menu, panel_height(s.large_menu), None)
-                .is_some_and(|m| looked.is_none_or(|l| m.t < l.1.t));
-        let (id, hit, p, height, c) = looked.filter(|_| !at_menu)?;
-        Some((id, layout::image_uv(&p, height, c, hit.local)))
+                .is_some_and(|m| looked.is_none_or(|l| m.t < l.hit.t));
+        let m = looked.filter(|_| !at_menu)?;
+        Some((
+            m.id,
+            layout::image_uv(&m.place, m.height, m.curve, m.hit.local),
+        ))
     }
 
     /// The monitor most straight ahead of the head (not a window panel, nor one
