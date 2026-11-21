@@ -7,6 +7,7 @@ const STEPS: usize = 4;
 pub(super) fn first_run(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
     let tk = v.tk;
     let p = tk.p;
+    counting_question(ui, v, s);
     header(ui, v, Page::FirstRun);
     let step = v.ui.fr_step.min(STEPS - 1);
     text(

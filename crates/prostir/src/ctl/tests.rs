@@ -97,7 +97,10 @@ fn commands_read_as_requests() {
     );
     assert_eq!(asks("forget --all"), Request::ForgetAll);
     assert_eq!(asks("autostart on"), Request::Autostart { on: true });
-    assert_eq!(asks("count off"), Request::SetCounting { on: false });
+    let counting = |counting| Request::SetCounting { counting };
+    assert_eq!(asks("count yes"), counting(api::Counting::Yes));
+    assert_eq!(asks("count no"), counting(api::Counting::No));
+    assert_eq!(asks("count unasked"), counting(api::Counting::Unasked));
     assert_eq!(asks("settings"), Request::ShowSettings);
     assert_eq!(asks("quit"), Request::Quit);
 }
@@ -112,6 +115,7 @@ fn reading_commands_and_flags() {
     assert_eq!(read("monitor list"), (Ctl::Monitors, false));
     assert_eq!(read("headsets --json"), (Ctl::Headsets, true));
     assert_eq!(read("autostart status"), (Ctl::AutostartStatus, false));
+    assert_eq!(read("count status --json"), (Ctl::CountStatus, true));
     assert_eq!(read(""), (Ctl::Help, false));
     assert_eq!(read("--help"), (Ctl::Help, false));
 }
@@ -136,6 +140,11 @@ fn wrong_arguments() {
         "quality fast",
         "codec vp9",
         "sound loud",
+        "count",
+        "count maybe",
+        "count off",
+        "count on",
+        "count status now",
         "pair now",
         "forget",
         "profile",

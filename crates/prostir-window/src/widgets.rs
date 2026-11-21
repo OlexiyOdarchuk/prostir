@@ -118,10 +118,20 @@ pub fn section_title(ui: &mut Ui, tk: &Tk<'_>, title: &str) {
 
 /// A group of settings that belong together.
 pub fn card<R>(ui: &mut Ui, tk: &Tk<'_>, add: impl FnOnce(&mut Ui) -> R) -> R {
+    card_framed(ui, tk, Stroke::new(tk.th.shape.stroke, tk.p.border), add)
+}
+
+/// A card that asks for the person's attention: its border in the accent colour.
+pub fn card_accent<R>(ui: &mut Ui, tk: &Tk<'_>, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let width = (tk.th.shape.stroke * 2.0).max(1.5);
+    card_framed(ui, tk, Stroke::new(width, tk.p.accent), add)
+}
+
+fn card_framed<R>(ui: &mut Ui, tk: &Tk<'_>, border: Stroke, add: impl FnOnce(&mut Ui) -> R) -> R {
     let pad = tk.th.shape.padding.round().clamp(0.0, 127.0) as i8;
     egui::Frame::new()
         .fill(tk.p.surface)
-        .stroke(Stroke::new(tk.th.shape.stroke, tk.p.border))
+        .stroke(border)
         .corner_radius(tk.r_large())
         .inner_margin(egui::Margin::same(pad))
         .show(ui, |ui| {
@@ -227,11 +237,49 @@ pub fn button_named(
     kind: Kind,
     enabled: bool,
 ) -> Response {
+    button_at_least(ui, tk, label, name, 0.0, kind, enabled)
+}
+
+/// Buttons side by side that are equal choices (Yes and No): the same `kind` and the
+/// same width, so none stands out over the other. Each is a label and the accessible
+/// name that says more ("Yes, count this PC"). Returns which one was clicked.
+pub fn equal_buttons(
+    ui: &mut Ui,
+    tk: &Tk<'_>,
+    buttons: &[(&str, &str)],
+    kind: Kind,
+) -> Option<usize> {
+    let width = buttons
+        .iter()
+        .map(|(l, _)| button_width(ui, tk, l))
+        .fold(0.0, f32::max);
+    let mut clicked = None;
+    for (i, (label, name)) in buttons.iter().enumerate() {
+        if button_at_least(ui, tk, label, name, width, kind, true).clicked() {
+            clicked = Some(i);
+        }
+    }
+    clicked
+}
+
+/// [`button_named`] at least `width` wide.
+fn button_at_least(
+    ui: &mut Ui,
+    tk: &Tk<'_>,
+    label: &str,
+    name: &str,
+    width: f32,
+    kind: Kind,
+    enabled: bool,
+) -> Response {
     let galley = ui
         .painter()
         .layout_no_wrap(label.to_owned(), tk.body_m(), Color32::PLACEHOLDER);
     let pad = tk.th.shape.padding;
-    let size = vec2(galley.size().x + pad * 2.0, tk.th.shape.control_height);
+    let size = vec2(
+        (galley.size().x + pad * 2.0).max(width),
+        tk.th.shape.control_height,
+    );
     let sense = if enabled {
         Sense::click()
     } else {
@@ -520,6 +568,43 @@ pub fn battery(ui: &mut Ui, tk: &Tk<'_>, level: f32, charging: bool) {
     };
     ui.painter()
         .rect_filled(fill, cr(tk.th.shape.radius_small * 0.5), color);
+}
+
+/// A link to a page on the web: the accent's ink, underlined while hovered or
+/// focused, named as a link.
+pub fn link(ui: &mut Ui, tk: &Tk<'_>, label: &str) -> Response {
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), tk.body_m(), Color32::PLACEHOLDER);
+    let (rect, resp) = ui.allocate_exact_size(galley.size(), Sense::click());
+    let color = tk.p.accent_ink;
+    ui.painter().galley(rect.min, galley, color);
+    if resp.hovered() || resp.has_focus() {
+        let y = rect.bottom() - 1.0;
+        ui.painter().line_segment(
+            [pos2(rect.left(), y), pos2(rect.right(), y)],
+            Stroke::new(tk.th.shape.stroke.max(1.0), color),
+        );
+    }
+    tk.focus_ring(ui, &resp, tk.th.shape.radius_small);
+    resp.widget_info(|| WidgetInfo::labeled(Role::Link, true, label));
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Counting: three rising bars in the accent's ink, `size` square.
+pub fn count_icon(ui: &mut Ui, tk: &Tk<'_>, size: f32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    let bar = size * 0.22;
+    let gap = (size - bar * 3.0) / 2.0;
+    let radius = cr(bar * 0.3);
+    for (i, height) in [0.45, 0.7, 1.0].into_iter().enumerate() {
+        let left = rect.left() + i as f32 * (bar + gap);
+        let r = Rect::from_min_max(
+            pos2(left, rect.bottom() - size * height),
+            pos2(left + bar, rect.bottom()),
+        );
+        ui.painter().rect_filled(r, radius, tk.p.accent_ink);
+    }
 }
 
 /// The app icon (packaging/prostir.svg): three screens on an arc around you.

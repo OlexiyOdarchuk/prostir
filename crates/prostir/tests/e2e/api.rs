@@ -264,6 +264,8 @@ fn the_state_and_its_changes() {
     assert_eq!(state.v, prostir_api::STATE_VERSION);
     assert_eq!(state.pc.phase, prostir_api::Phase::Live);
     assert_eq!(state.pc.name, "fake-pc");
+    // `PROSTIR_NO_COUNT=1`, as every test runs: nothing to ask.
+    assert_eq!(state.counting, None);
     let (h, s) = state.connected().expect("the headset's session");
     assert_eq!(h.name, "headset");
     assert!(s.main && s.worn);
@@ -1386,4 +1388,97 @@ fn when_each_headset_was_seen() {
         saved.starts_with("seen ") && saved.lines().count() == 1,
         "{saved}"
     );
+}
+
+/// Counting this PC among users waits for the person's answer, through the local
+/// API: unasked at first, a headset that connects meanwhile is not counted, a yes
+/// counts the next one (the first time with `/install`), once a day, and the answer
+/// is kept in `settings.txt`; `unasked` puts the question back, and an answer that is
+/// none of the three is refused. The build with the fake desktop counts into a file
+/// (`PROSTIR_FAKE_COUNT`) instead of sending anything.
+#[test]
+fn counting_waits_for_the_answer() {
+    use prostir_api::Counting;
+    let dir = TestDir::new("api-counting");
+    dir.save_monitors(TWO_MONITORS);
+    let mut keys = dir.pair();
+    let counted = dir.path().join("counted-paths");
+    let options = Options {
+        env: vec![
+            ("PROSTIR_FAKE_COUNT".into(), counted.display().to_string()),
+            ("PROSTIR_NO_COUNT".into(), "0".into()),
+        ],
+        ..Options::default()
+    };
+    let pc = Pc::start(&dir, &options);
+    let Some(bus) = &pc.bus else {
+        return;
+    };
+    let bus = bus.connect();
+    let session = |keys: &mut prostir_testkit::Keys| {
+        let mut headset = connect(&pc, keys);
+        headset
+            .wait(START, "every monitor showing", View::all_monitors_show)
+            .unwrap();
+        // Time for a count to be written, were one sent.
+        headset.take_for(Duration::from_millis(500)).unwrap();
+        headset.disconnect();
+    };
+    let ask = |answer: &str| {
+        let request = format!(r#"{{"request":"set_counting","counting":"{answer}"}}"#);
+        call(&bus, "Call", &(request.as_str(),))
+    };
+    let answer = || get_state(&bus).1.counting;
+    let paths = || std::fs::read_to_string(&counted).unwrap_or_default();
+    assert_eq!(answer(), Some(Counting::Unasked));
+    session(&mut keys);
+    assert_eq!(paths(), "", "counted before the answer");
+
+    ask("yes").unwrap();
+    assert_eq!(answer(), Some(Counting::Yes));
+    session(&mut keys);
+    let day = paths();
+    let lines: Vec<&str> = day.lines().collect();
+    assert!(
+        lines.len() == 2 && lines[0].starts_with("/day/20") && lines[1] == "/install",
+        "{day}"
+    );
+    // Once a day.
+    session(&mut keys);
+    assert_eq!(paths(), day);
+
+    let saved = |line: &str| {
+        let started = Instant::now();
+        while !dir.saved("settings.txt").lines().any(|l| l == line) {
+            assert!(
+                started.elapsed() < SOON,
+                "{line:?} not in settings.txt:\n{}",
+                dir.saved("settings.txt")
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    saved("count yes");
+    // Not after a no, nor after unasked, also on a day not counted yet.
+    let counted_day = dir.path().join("config/prostir/counted");
+    let no = pc.ctl(&["count", "no"]).unwrap();
+    assert_eq!(no.code, 0, "{no:?}");
+    assert_eq!(answer(), Some(Counting::No));
+    let status = pc.ctl(&["count", "status"]).unwrap();
+    assert_eq!(status.out.trim(), "no", "{status:?}");
+    saved("count no");
+    std::fs::remove_file(&counted_day).unwrap();
+    session(&mut keys);
+    assert_eq!(paths(), day);
+    ask("unasked").unwrap();
+    assert_eq!(answer(), Some(Counting::Unasked));
+    saved("count unasked");
+    session(&mut keys);
+    assert_eq!(paths(), day);
+    assert!(!counted_day.exists());
+    let bad = ask("maybe").unwrap_err();
+    assert_eq!(error_name(&bad), "BadArgument");
+    assert_eq!(answer(), Some(Counting::Unasked));
+    pc.quit();
+    assert_eq!(paths(), day);
 }

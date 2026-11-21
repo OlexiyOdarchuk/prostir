@@ -5,63 +5,51 @@
 //! that used Prostir on it. The first time ever it also sends `/install`. Nothing else
 //! goes along: no id, no host name, no settings. GoatCounter keeps no IP addresses.
 //!
-//! On by default, off with the tray item (`count` in the settings) or
-//! `PROSTIR_NO_COUNT=1`. The first start says
-//! so in a notification, and nothing is sent before the next day, so there is time to
-//! turn it off before anything leaves the PC. Only official builds
-//! count: the key is set at build time (`PROSTIR_COUNT_TOKEN`), so builds from source
-//! and forks never send anything.
+//! Only with the person's yes: the settings window asks once ("Count this PC among
+//! users?"), and the answer is kept in the settings (`count unasked|yes|no`), changed
+//! later in the window, the tray or `prostir ctl count`. Until the answer is yes
+//! nothing is sent, so a PC where nobody opened the window (only `prostir serve`, a
+//! server, CI) never counts. `PROSTIR_NO_COUNT=1` turns it off whatever the answer.
+//! Every build may count, as it asks first. The key, GoatCounter's, which can only add
+//! counts, is in the source (`crates/prostir/count.key`, read when the program is
+//! built; empty: that build never counts); `PROSTIR_COUNT_TOKEN` at build time takes
+//! its place when set. A build without the `count` feature (a distribution that does
+//! not want it), a debug build and the tests never count, and never ask.
 
-use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::i18n::t;
+use prostir_api::Counting;
+
 use crate::pairing::config_dir;
 
-const TOKEN: Option<&str> = option_env!("PROSTIR_COUNT_TOKEN");
-const SITE: &str = match option_env!("PROSTIR_COUNT_SITE") {
-    Some(s) => s,
-    None => "ishawyha",
-};
-
-fn state_file() -> Option<PathBuf> {
-    Some(config_dir().join("counted"))
-}
-
-/// The day the user was told about the counter (`YYYY-MM-DD`).
-fn notice_file() -> Option<PathBuf> {
-    Some(config_dir().join("count-notice"))
-}
-
-/// On the first start: says that Prostir counts its users and how to turn it off.
-/// Counting starts the day after this. `count`: the person's choice.
-pub fn announce_once(count: bool) {
-    if !available() || !enabled(count) {
-        return;
-    }
-    let Some(notice) = notice_file() else { return };
-    if notice.exists() {
-        return;
-    }
-    // Remembered only once the notification was really shown: without a notification
-    // daemon nothing is counted, since the user was never told.
-    if notify_first_time() {
-        let _ = std::fs::create_dir_all(notice.parent().unwrap_or(&notice));
-        let _ = std::fs::write(&notice, format!("{}\n", today()));
-    }
+/// The day this PC was last counted (`YYYY-MM-DD`).
+fn state_file() -> PathBuf {
+    config_dir().join("counted")
 }
 
 /// Whether this build counts at all.
 pub fn available() -> bool {
-    TOKEN.is_some_and(|t| !t.is_empty())
+    sender::available()
 }
 
-/// Whether to count: the person's choice (`count`, in the settings), unless
-/// `PROSTIR_NO_COUNT` says no.
-pub fn enabled(count: bool) -> bool {
-    count && std::env::var_os("PROSTIR_NO_COUNT").is_none_or(|v| v == "0")
+/// Whether this run may count: the build counts and `PROSTIR_NO_COUNT` does not say
+/// no. Otherwise there is nothing to ask the person either.
+pub fn possible() -> bool {
+    available() && std::env::var_os("PROSTIR_NO_COUNT").is_none_or(|v| v == "0")
+}
+
+/// What to send now, if anything: `Some(first)` (`first`: `/install` too) only for a
+/// yes on a run that may count, and only once a day (`last`: the day counted last,
+/// none before the first time).
+fn to_send(count: Counting, possible: bool, last: Option<&str>, today: &str) -> Option<bool> {
+    if count != Counting::Yes || !possible {
+        return None;
+    }
+    match last.map(str::trim) {
+        Some(day) if day == today => None,
+        last => Some(last.is_none()),
+    }
 }
 
 /// Today's date in UTC as `YYYY-MM-DD` (days since the epoch to a civil date).
@@ -83,28 +71,19 @@ fn today() -> String {
     format!("{year:04}-{month:02}-{day:02}")
 }
 
-/// A headset connected: count this PC for today, at most once a day.
-pub fn headset_connected(count: bool) {
-    if !available() || !enabled(count) {
+/// A headset connected: count this PC for today, at most once a day, if the person
+/// said yes (`count`, from the settings).
+pub fn headset_connected(count: Counting) {
+    // Nothing to read before a yes.
+    if count != Counting::Yes {
         return;
     }
-    let Some(state) = state_file() else { return };
+    let state = state_file();
     let date = today();
-    // Not before the day after the user was told (and could turn it off).
-    let told = notice_file().and_then(|p| std::fs::read_to_string(p).ok());
-    match told.as_deref().map(str::trim) {
-        None => {
-            announce_once(count);
-            return;
-        }
-        Some(day) if day >= date.as_str() => return,
-        Some(_) => {}
-    }
     let last = std::fs::read_to_string(&state).ok();
-    if last.as_deref().map(str::trim) == Some(date.as_str()) {
+    let Some(first) = to_send(count, possible(), last.as_deref(), &date) else {
         return;
-    }
-    let first = last.is_none();
+    };
     let _ = std::thread::Builder::new()
         .name("usage".into())
         .spawn(move || {
@@ -112,63 +91,162 @@ pub fn headset_connected(count: bool) {
             if first {
                 paths.push("/install".into());
             }
-            if send(&paths) {
+            if sender::send(&paths) {
                 let _ = std::fs::write(&state, format!("{date}\n"));
             }
         });
 }
 
-/// One POST through curl (always present on desktops), with the key passed on stdin
-/// so it never shows up in the process list.
-fn send(paths: &[String]) -> bool {
-    let Some(token) = TOKEN else { return false };
-    let hits: Vec<String> = paths
-        .iter()
-        .map(|p| format!(r#"{{"path":"{p}"}}"#))
-        .collect();
-    let body = format!(r#"{{"no_sessions":true,"hits":[{}]}}"#, hits.join(","));
-    let config = format!(
-        "url = \"https://{SITE}.goatcounter.com/api/v0/count\"\n\
-         request = \"POST\"\n\
-         header = \"Authorization: Bearer {token}\"\n\
-         header = \"Content-Type: application/json\"\n\
-         data = \"{}\"\n\
-         silent\nfail\nmax-time = 15\noutput = \"/dev/null\"\n",
-        body.replace('\\', "\\\\").replace('"', "\\\"")
-    );
-    // -q first: the user's ~/.curlrc must not log the request or send it elsewhere.
-    let child = Command::new("curl")
-        .args(["-q", "--config", "-"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
-    let Ok(mut child) = child else { return false };
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(config.as_bytes());
+/// The real counter: GoatCounter, with the `count` feature; it counts only in a
+/// release build, never in a debug build or the tests.
+#[cfg(all(feature = "count", not(feature = "fake-desktop")))]
+mod sender {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    /// The key: `PROSTIR_COUNT_TOKEN` at build time, else `count.key`; none when
+    /// empty.
+    const TOKEN: Option<&str> = {
+        let key = match option_env!("PROSTIR_COUNT_TOKEN") {
+            Some(t) if !t.trim_ascii().is_empty() => t,
+            _ => include_str!("../count.key"),
+        };
+        let key = key.trim_ascii();
+        if key.is_empty() { None } else { Some(key) }
+    };
+    const SITE: &str = match option_env!("PROSTIR_COUNT_SITE") {
+        Some(s) => s,
+        None => "ishawyha",
+    };
+
+    pub fn available() -> bool {
+        cfg!(not(any(debug_assertions, test))) && TOKEN.is_some()
     }
-    child.wait().is_ok_and(|s| s.success())
+
+    /// One POST through curl (always present on desktops), with the key passed on
+    /// stdin so it never shows up in the process list.
+    pub fn send(paths: &[String]) -> bool {
+        let Some(token) = TOKEN else { return false };
+        let hits: Vec<String> = paths
+            .iter()
+            .map(|p| format!(r#"{{"path":"{p}"}}"#))
+            .collect();
+        let body = format!(r#"{{"no_sessions":true,"hits":[{}]}}"#, hits.join(","));
+        let config = format!(
+            "url = \"https://{SITE}.goatcounter.com/api/v0/count\"\n\
+             request = \"POST\"\n\
+             header = \"Authorization: Bearer {token}\"\n\
+             header = \"Content-Type: application/json\"\n\
+             data = \"{}\"\n\
+             user-agent = \"\"\n\
+             silent\nfail\nmax-time = 15\noutput = \"/dev/null\"\n",
+            body.replace('\\', "\\\\").replace('"', "\\\"")
+        );
+        // -q first: the user's ~/.curlrc must not log the request or send it elsewhere.
+        // No User-Agent either (an empty one leaves the header out).
+        let child = Command::new("curl")
+            .args(["-q", "--config", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        let Ok(mut child) = child else { return false };
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(config.as_bytes());
+        }
+        child.wait().is_ok_and(|s| s.success())
+    }
 }
 
-/// Shows the notice; `true` when the notification was shown.
-fn notify_first_time() -> bool {
-    crate::platform::dialogs::notify_and_wait(
-        t("Prostir рахує користувачів", "Prostir counts its users"),
-        t(
-            "Починаючи із завтра, раз на день ПК надсилатиме анонімний запит без даних про вас, щоб було видно, скільки людей користується Prostir. Вимкнути: пункт трею «Рахувати цей ПК серед користувачів» або PROSTIR_NO_COUNT=1.",
-            "From tomorrow, once a day the PC sends an anonymous request with nothing about you, to show how many people use Prostir. To turn it off: the tray item \"Count this PC among users\" or PROSTIR_NO_COUNT=1.",
-        ),
-    )
+/// The end-to-end tests' counter: a build with the fake desktop counts only when
+/// `PROSTIR_FAKE_COUNT` names a file, and writes each path it would send there, a
+/// line each, instead of sending anything.
+#[cfg(feature = "fake-desktop")]
+mod sender {
+    use std::io::Write;
+
+    fn file() -> Option<std::path::PathBuf> {
+        std::env::var_os("PROSTIR_FAKE_COUNT")
+            .filter(|f| !f.is_empty())
+            .map(Into::into)
+    }
+
+    pub fn available() -> bool {
+        file().is_some()
+    }
+
+    pub fn send(paths: &[String]) -> bool {
+        let Some(file) = file() else { return false };
+        let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(file)
+        else {
+            return false;
+        };
+        paths.iter().all(|p| writeln!(f, "{p}").is_ok())
+    }
+}
+
+/// A build without the `count` feature: it never counts.
+#[cfg(all(not(feature = "count"), not(feature = "fake-desktop")))]
+mod sender {
+    pub fn available() -> bool {
+        false
+    }
+
+    pub fn send(_paths: &[String]) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn date_has_the_right_shape() {
-        let d = super::today();
+        let d = today();
         assert_eq!(d.len(), 10);
         assert!(d.starts_with("20"));
         assert_eq!(&d[4..5], "-");
         assert_eq!(&d[7..8], "-");
+    }
+
+    /// Nothing is sent without a yes: not while unasked, not after a no, not for an
+    /// answer this build does not know, and not where the run may not count.
+    #[test]
+    fn nothing_is_sent_without_a_yes() {
+        let today = "2026-11-21";
+        for count in [Counting::Unasked, Counting::No, Counting::Other] {
+            for last in [None, Some("2026-11-20\n")] {
+                assert_eq!(to_send(count, true, last, today), None, "{count:?}");
+            }
+        }
+        assert_eq!(to_send(Counting::Yes, false, None, today), None);
+    }
+
+    /// A yes counts once a day, the first time ever with `/install`.
+    #[test]
+    fn a_yes_counts_once_a_day() {
+        let today = "2026-11-21";
+        assert_eq!(to_send(Counting::Yes, true, None, today), Some(true));
+        assert_eq!(
+            to_send(Counting::Yes, true, Some("2026-11-20\n"), today),
+            Some(false)
+        );
+        assert_eq!(
+            to_send(Counting::Yes, true, Some("2026-11-21\n"), today),
+            None
+        );
+    }
+
+    /// A run that may count only in a build that counts; the tests never do (but for
+    /// the fake desktop's file, `PROSTIR_FAKE_COUNT`).
+    #[test]
+    fn only_a_build_that_counts_may() {
+        assert!(!possible() || available());
+        #[cfg(not(feature = "fake-desktop"))]
+        assert!(!available() && !possible());
     }
 }

@@ -14,7 +14,11 @@ name = "prostir"
 path = "src/main.rs"
 
 [features]
-default = ["desktop"]
+default = ["desktop", "count"]
+# Counting this PC among Prostir's users, once the person says yes (see src/usage.rs):
+# with the key in `count.key`. A distribution that does not want it builds without it
+# (`--no-default-features --features desktop`); the settings window then never asks.
+count = []
 # The real desktops (KDE Plasma, Hyprland): what only they use, so a build with the
 # fake desktop has no dependency it does not use.
 desktop = [

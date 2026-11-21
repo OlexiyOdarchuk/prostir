@@ -5,10 +5,10 @@
 //! revision, and the changes the service tells about.
 
 pub use prostir_api::{
-    Answer, ApiError, BUS_NAME, Battery, CALL_SECONDS, Codec, CodecChoice, DeskRect, Display,
-    DisplayKind, DisplayState, ERROR_PREFIX, Encoding, Headset, INTERFACE, Limits, MicState, Mode,
-    OBJECT_PATH, PairResult, Pairing, Pc, Phase, Problem, Request, Role, STATE_VERSION, Session,
-    Sound, State, ThemeMode, Using, Via, Volume, WindowLook,
+    Answer, ApiError, BUS_NAME, Battery, CALL_SECONDS, Codec, CodecChoice, Counting, DeskRect,
+    Display, DisplayKind, DisplayState, ERROR_PREFIX, Encoding, Headset, INTERFACE, Limits,
+    MicState, Mode, OBJECT_PATH, PairResult, Pairing, Pc, Phase, Problem, Request, Role,
+    STATE_VERSION, Session, Sound, State, ThemeMode, Using, Via, Volume, WindowLook,
 };
 
 /// A state and its number: a newer state has a larger revision (counted from 1 each

@@ -212,6 +212,13 @@ impl Brain {
         self.store.change(|s| s.autostart = Some(on));
     }
 
+    /// The answer to "Count this PC among users?" (the settings window, the tray,
+    /// `ctl`), kept; `unasked` puts the question back.
+    pub(crate) fn set_counting(&mut self, count: prostir_api::Counting) {
+        info!("counting this PC among users: {count:?}");
+        self.store.change(|s| s.count = count);
+    }
+
     fn code_typed(&mut self, code: &str, reply: Reply) {
         let digits = code
             .chars()
@@ -432,8 +439,8 @@ impl Brain {
                 self.store.change(|s| s.audio = on);
                 done()
             }
-            Request::SetCounting { on } => {
-                self.store.change(|s| s.count = on);
+            Request::SetCounting { counting } => {
+                self.set_counting(counting);
                 done()
             }
             Request::Autostart { on } => {
@@ -1045,7 +1052,7 @@ impl Brain {
                 pairing::code_for(),
             ),
             nearby: self.door.nearby(),
-            counting: wanted.count,
+            counting: crate::usage::possible().then_some(wanted.count),
             problems,
         }
     }
