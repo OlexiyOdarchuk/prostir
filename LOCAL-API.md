@@ -199,7 +199,7 @@ exist, monitor requests change the set kept for the next headset (its monitors s
 | `set_primary` | `id` | the desktop's primary display |
 | `set_quality` | `mbit` (5 to 100) | per monitor |
 | `set_sharp` | `on` | the slower encoder preset for clearer small text |
-| `set_codec` | `codec` (`h264`, `h265`, `auto`), `cpu` (bool, default false) | `auto` is the same as `h265` (H.265 where the PC and every headset can, else H.264), and the state shows it as `h265` |
+| `set_codec` | `codec` (`h264`, `h265`, `auto`), `cpu` (bool, default false) | `auto` is the same as `h265` (HEVC where the PC and every headset can, else H.264), and the state shows it as `h265` |
 | `sound_to_headset` | `on` | the PC's sound in the headset, or on the PC |
 | `volume` | `level` (0 to 100) | the main headset's volume, as a slider of it on the PC: the headset's sound device goes to that level, unmuted (as moving a volume slider in Plasma unmutes), and the headset is asked for it, as when the device's own slider moves; `sound.volume` then shows the level the headset took (its nearest step). `BadArgument` above 100; `Unsupported` while `sound.volume` is `null` (no headset connected, or one that does not tell its volume) |
 | `set_counting` | `on` | count this PC among users |

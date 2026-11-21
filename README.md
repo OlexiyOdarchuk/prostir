@@ -185,7 +185,7 @@ has not been paired with.
   `pactl` and `pacat`.
 - GStreamer 1.24 or newer with the `va` plugin (hardware encoding), `h264parse` and
   `h265parse`, and the PipeWire and PulseAudio plugins.
-- For hardware encoding, a GPU with a VA-API H.265 or H.264 encoder and its VA driver:
+- For hardware encoding, a GPU with a VA-API HEVC or H.264 encoder and its VA driver:
   Intel is tested, AMD should work but is untested. NVIDIA goes through NVENC
   (GStreamer's `nvcodec` plugin), which is experimental and untested. Without a GPU
   encoder, Prostir encodes on the CPU with x264, which needs the `x264enc` plugin from
@@ -203,12 +203,12 @@ install these first:
 | Distribution | Packages |
 |---|---|
 | Arch | `gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad-libs gst-plugin-va gst-plugin-pipewire pipewire-audio pipewire-pulse libpulse`, plus `intel-media-driver` on Intel (the AMD driver comes with `mesa`). CPU encoding: `gst-plugins-ugly` |
-| Fedora | `gstreamer1-plugins-base gstreamer1-plugins-good gstreamer1-plugins-bad-free pipewire-gstreamer pipewire-utils pipewire-pulseaudio pulseaudio-utils`, plus a VA driver with H.264/H.265 encoding (see below). CPU encoding: `gstreamer1-plugins-ugly` from RPM Fusion |
+| Fedora | `gstreamer1-plugins-base gstreamer1-plugins-good gstreamer1-plugins-bad-free pipewire-gstreamer pipewire-utils pipewire-pulseaudio pulseaudio-utils`, plus a VA driver with H.264/HEVC encoding (see below). CPU encoding: `gstreamer1-plugins-ugly` from RPM Fusion |
 | Debian 13, Ubuntu 25.04 or newer | `gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-pipewire pipewire-bin pipewire-pulse pulseaudio-utils`, plus `mesa-va-drivers` (AMD) or `intel-media-va-driver-non-free` (Intel). CPU encoding: `gstreamer1.0-plugins-ugly` |
 
 Debian 12 and Ubuntu 24.04 ship Plasma 5, which Prostir does not support.
 
-**Fedora and openSUSE.** Their Mesa is built without H.264 and H.265 encoding, so AMD
+**Fedora and openSUSE.** Their Mesa is built without H.264 and HEVC encoding, so AMD
 graphics have no hardware encoder out of the box. On Fedora, enable
 [RPM Fusion](https://rpmfusion.org/Configuration) and run
 `sudo dnf swap mesa-va-drivers mesa-va-drivers-freeworld`. On Intel, `intel-media-driver`
@@ -276,7 +276,7 @@ hand, without updates: `sudo apt install ./prostir_<version>-1_amd64.deb`, or
 **ARM (aarch64), experimental.** The repositories also build Prostir for 64-bit ARM, for
 example Fedora Asahi Remix on Apple Silicon or a Snapdragon X laptop. On Tumbleweed for
 ARM, use `openSUSE_Factory_ARM` in the address above. These builds are untested. A PC
-without a VA-API H.265 or H.264 encoder (Asahi, Raspberry Pi 5) encodes on the CPU with
+without a VA-API HEVC or H.264 encoder (Asahi, Raspberry Pi 5) encodes on the CPU with
 x264, which costs CPU time and needs `x264enc` (see
 [NVIDIA and CPU encoding](#nvidia-and-cpu-encoding)).
 
@@ -504,7 +504,7 @@ settings, turn the usage counter on or off, forget paired headsets, and quit.
 
 ```
 prostir
-prostir serve [--monitor WxH[@scale]]... [--codec h265|h264] [--bitrate MBPS] [--software]
+prostir serve [--monitor WxH[@scale]]... [--codec hevc|h264] [--bitrate MBPS] [--software]
               [--keep-primary] [--linger SECONDS] [--port PORT] [--no-discovery] [--no-adb]
 prostir ctl COMMAND [--json]
 ```

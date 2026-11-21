@@ -183,7 +183,7 @@ Prostir кодує процесором через x264, і це працює б
   `pactl` і `pacat`.
 - GStreamer 1.24 або новіший із плагіном `va` (апаратне кодування), `h264parse` і
   `h265parse` та плагінами PipeWire і PulseAudio.
-- Для апаратного кодування відеокарта з VA-API-кодером H.265 або H.264 і її драйвер
+- Для апаратного кодування відеокарта з VA-API-кодером HEVC або H.264 і її драйвер
   VA: Intel перевірено, AMD має працювати, але не перевірялася. NVIDIA кодує через NVENC
   (плагін GStreamer `nvcodec`), експериментально й без перевірки. Без кодера
   відеокарти Prostir кодує на процесорі через x264, для цього потрібен плагін
@@ -202,12 +202,12 @@ Prostir кодує процесором через x264, і це працює б
 | Дистрибутив | Пакети |
 |---|---|
 | Arch | `gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad-libs gst-plugin-va gst-plugin-pipewire pipewire-audio pipewire-pulse libpulse`, а на Intel ще `intel-media-driver` (драйвер AMD іде з `mesa`). Кодування на процесорі: `gst-plugins-ugly` |
-| Fedora | `gstreamer1-plugins-base gstreamer1-plugins-good gstreamer1-plugins-bad-free pipewire-gstreamer pipewire-utils pipewire-pulseaudio pulseaudio-utils` і драйвер VA з кодуванням H.264/H.265 (див. нижче). Кодування на процесорі: `gstreamer1-plugins-ugly` з RPM Fusion |
+| Fedora | `gstreamer1-plugins-base gstreamer1-plugins-good gstreamer1-plugins-bad-free pipewire-gstreamer pipewire-utils pipewire-pulseaudio pulseaudio-utils` і драйвер VA з кодуванням H.264/HEVC (див. нижче). Кодування на процесорі: `gstreamer1-plugins-ugly` з RPM Fusion |
 | Debian 13, Ubuntu 25.04 чи новіші | `gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-pipewire pipewire-bin pipewire-pulse pulseaudio-utils` і `mesa-va-drivers` (AMD) або `intel-media-va-driver-non-free` (Intel). Кодування на процесорі: `gstreamer1.0-plugins-ugly` |
 
 Debian 12 і Ubuntu 24.04 мають Plasma 5, яку Prostir не підтримує.
 
-**Fedora й openSUSE.** Їхня Mesa зібрана без кодування H.264 і H.265, тож графіка AMD
+**Fedora й openSUSE.** Їхня Mesa зібрана без кодування H.264 і HEVC, тож графіка AMD
 одразу апаратного кодера не має. У Fedora ввімкніть
 [RPM Fusion](https://rpmfusion.org/Configuration) і виконайте
 `sudo dnf swap mesa-va-drivers mesa-va-drivers-freeworld`. На Intel `intel-media-driver`
@@ -277,7 +277,7 @@ sudo apt update && sudo apt install prostir
 **ARM (aarch64), експериментально.** Сховища збирають Prostir і для 64-бітного ARM,
 наприклад для Fedora Asahi Remix на Apple Silicon чи ноутбука зі Snapdragon X. У
 Tumbleweed для ARM пишіть в адресі вище `openSUSE_Factory_ARM`. Ці збірки не
-перевірені. ПК без кодувальника H.265 чи H.264 у VA-API (Asahi, Raspberry Pi 5) кодує
+перевірені. ПК без кодувальника HEVC чи H.264 у VA-API (Asahi, Raspberry Pi 5) кодує
 процесором через x264, а це навантажує процесор і потребує `x264enc` (див.
 [NVIDIA і кодування на процесорі](#nvidia-і-кодування-на-процесорі)).
 
@@ -496,7 +496,7 @@ Wi-Fi і дає найстабільнішу картинку. Для нього
 
 ```
 prostir
-prostir serve [--monitor WxH[@scale]]... [--codec h265|h264] [--bitrate MBPS] [--software]
+prostir serve [--monitor WxH[@scale]]... [--codec hevc|h264] [--bitrate MBPS] [--software]
               [--keep-primary] [--linger SECONDS] [--port PORT] [--no-discovery] [--no-adb]
 prostir ctl КОМАНДА [--json]
 ```
