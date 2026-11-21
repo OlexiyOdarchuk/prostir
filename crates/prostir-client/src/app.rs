@@ -840,6 +840,7 @@ impl Scene {
                     self.placed_for.remove(&id);
                 }
                 self.profile_switch = None;
+                self.forget_rows();
                 self.save_layout();
                 self.place_missing();
             }
@@ -864,8 +865,18 @@ impl Scene {
             .is_some_and(|s| s.stands(Instant::now(), settled));
         if stands {
             self.profile_switch = None;
+            self.forget_rows();
             self.arrange_all();
         }
+    }
+
+    /// A profile switched to is another arrangement: its rows start afresh. The rows
+    /// the PC had were of the one before, and the PC numbers a monitor of the same size
+    /// as it did there, so their history would keep pairs of neighbours that stand
+    /// otherwise now (a monitor glued over another taken into the row beside it).
+    fn forget_rows(&mut self) {
+        self.sent_layout = None;
+        self.pending_layout = None;
     }
 
     /// Saves the arrangement as the desk layout. In cinema mode `placements` is the

@@ -47,7 +47,8 @@
   after switching to a profile no longer send monitors stacked one over another flying
   apart (monitors side by side held together), and the PC desktop is the one the
   profile had. A profile saved by an earlier 0.2.0 build has its monitors where they
-  were in the room, as before: save it again once it stands as you like.
+  were in the room, as before: save it again once it stands as you like. The rows of
+  the profile before no longer decide which monitors share a row in the new one.
 - The PC desktop matches the headset in every direction: the mouse, and a window you
   drag across, go from one monitor to the next where the two meet in the headset,
   sideways and up or down. A monitor you hung higher on purpose is just as much higher
