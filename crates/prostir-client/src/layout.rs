@@ -2774,53 +2774,110 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Reported (`--ignored`): what the first "Line up" does to the owner's 3840x2160
-    /// over the two landscape ones of an arc, let go by the magnet (hinged to the left
-    /// one, leaning towards the eye) and stood upright facing the axis on their tops:
-    /// how far it rises, and the gap as seen between it and each of the two (a share of
-    /// that one's height) before and after. A flat monitor over an arc of flat ones meets
-    /// them where it would cover them first, at its corners, so in the middle a gap
-    /// opens; whether "Line up" should then rest it on them is the owner's to decide.
-    #[test]
-    #[ignore = "a report, not a check"]
-    fn report_first_line_up_of_a_3840_over_two() {
+    /// The gaps as seen between the owner's 3840x2160 (6) and each of the two landscape
+    /// monitors under it (1, 3), in the middle of the edge each shares with it, as a
+    /// share of that one's height (negative where they overlap).
+    fn seams_of_6(p: &Placements, owner: &[(ScreenId, u32, u32)]) -> Vec<f64> {
         use prostir_layout::desk::View;
+        let all = placed(p, owner);
+        let room = Room::new(&frame((Vec3::ZERO, 0.0), Preset::Arc), &all);
+        [1, 3]
+            .iter()
+            .map(|&below| {
+                room.relate(below, 6, prostir_layout::space::Side::Above)
+                    .filter(|r| r.shared > 0.0)
+                    .expect("6 over it")
+                    .apart
+            })
+            .collect()
+    }
+
+    /// 2026-11-21, the owner's decision: a monitor glued by the magnet over or under a
+    /// row stays glued when "Line up" straightens it. The owner's 3840x2160 over the
+    /// two landscape monitors of an arc, let go as the hand leaves it (turned to face the
+    /// axis) and stood upright on their tops, each time glued by the magnet: the first
+    /// "Line up" leaves the middle of the wider seam closed and the other overlapping a
+    /// little (before, let go by hand, it lifted it 13 cm and opened both by 3.8 and 5 %
+    /// of their height), the ends of the flat monitor overlapping the two a little as seen, and
+    /// a second changes nothing. Stood upright on their tops without the magnet it is not
+    /// glued, and is pushed clear of them as before, a gap in the middle of both seams.
+    #[test]
+    fn line_up_keeps_a_monitor_glued_over_two_glued() {
         let center = (Vec3::ZERO, 0.0);
-        let (owner, magnet) = owners_stack();
-        let mut upright = magnet.clone();
+        let (owner, by_hand) = owners_stack();
+        let row = arrange(Preset::Arc, &owner[..4], Some(1), None, None);
+        let mut upright = row.clone();
         {
-            let (one, three) = (upright[&1], upright[&3]);
+            let (one, three) = (row[&1], row[&3]);
             let shelf = one.position.y + one.width * 1440.0 / 2560.0 / 2.0;
             let mid = (one.position + three.position) / 2.0;
             let h = 3840.0 * METRES_PER_PIXEL * 2160.0 / 3840.0;
             let at = Vec3::new(mid.x, shelf + h / 2.0, mid.z);
-            let p = upright.get_mut(&6).unwrap();
-            p.position = at;
-            p.rotation = facing(at, Vec3::new(0.0, at.y, 0.0));
-        }
-        let gaps = |p: &HashMap<ScreenId, Placement>| -> Vec<String> {
-            let all = placed(p, &owner);
-            let room = Room::new(&frame(center, Preset::Arc), &all);
-            [1, 3]
-                .iter()
-                .map(|&below| {
-                    room.relate(below, 6, prostir_layout::space::Side::Above)
-                        .map_or_else(
-                            || "none".into(),
-                            |r| format!("{below}: {:.1} %", r.apart * 100.0),
-                        )
-                })
-                .collect()
-        };
-        for (name, p) in [("magnet", magnet), ("upright", upright)] {
-            let rows = Desktop::of(&p, &owner, center, Preset::Arc, Some(1), None).rows;
-            let lined = line_up(&p, &owner, center, Preset::Arc, Some(1), &rows, None);
-            eprintln!(
-                "{name}: the 3840x2160 rises {:.3} m; gaps {:?} -> {:?}",
-                lined[&6].position.y - p[&6].position.y,
-                gaps(&p),
-                gaps(&lined)
+            upright.insert(
+                6,
+                Placement {
+                    position: at,
+                    rotation: facing(at, Vec3::new(0.0, at.y, 0.0)),
+                    width: 3840.0 * METRES_PER_PIXEL,
+                },
             );
         }
+        let mut glued_upright = upright.clone();
+        let s = stick(&glued_upright, &owner, Vec3::ZERO, 6).expect("sticks");
+        assert!(!s.across);
+        glued_upright.insert(6, s.placement);
+        let lined = |p: &Placements| {
+            let rows = Desktop::of(p, &owner, center, Preset::Arc, Some(1), None).rows;
+            assert_eq!(rows, vec![vec![6], vec![2, 1, 3, 4]]);
+            line_up(p, &owner, center, Preset::Arc, Some(1), &rows, None)
+        };
+        for (name, p) in [("let go by hand", by_hand), ("upright", glued_upright)] {
+            let once = lined(&p);
+            let seams = seams_of_6(&once, &owner);
+            let widest = seams.iter().copied().fold(f64::MIN, f64::max);
+            assert!(widest.abs() < 1e-3, "{name}: seams {seams:?}");
+            assert!(seams.iter().all(|s| *s > -0.03), "{name}: seams {seams:?}");
+            let rise = once[&6].position.y - p[&6].position.y;
+            // Only as far as closing the seam takes it (the magnet left it over the right
+            // one, as seen): it was 13 cm, with the seams open.
+            assert!(rise.abs() < 0.1, "{name}: rose {rise} m");
+            for id in [2, 1, 3, 4] {
+                assert!(once[&id].position.distance(p[&id].position) < 1e-4);
+            }
+            let twice = lined(&once);
+            assert!(
+                twice[&6].position.distance(once[&6].position) < 1e-4,
+                "{name}"
+            );
+            eprintln!("{name}: rose {rise:.3} m, seams {seams:.4?}");
+        }
+        // Not glued: pushed clear as before, covering neither.
+        let once = lined(&upright);
+        let corners = |p: &Placements, id: ScreenId| {
+            let &(_, w, h) = owner.iter().find(|m| m.0 == id).unwrap();
+            let q = p[&id];
+            Placement {
+                position: q.position,
+                rotation: q.rotation,
+                width: q.width,
+            }
+            .corners(q.width * h as f32 / w as f32)
+        };
+        for below in [1, 3] {
+            assert!(!prostir_layout::space::covers(
+                &corners(&once, below),
+                &corners(&once, 6),
+                0.001
+            ));
+        }
+        assert!(
+            once[&6].position.y > upright[&6].position.y,
+            "pushed up clear"
+        );
+        let seams = seams_of_6(&once, &owner);
+        assert!(
+            seams.iter().all(|s| *s > 0.0),
+            "a gap in the middle: {seams:?}"
+        );
     }
 }

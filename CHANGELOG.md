@@ -36,7 +36,10 @@
   stays where it was and keeps how it stands: tilted back for a reclined pose,
   overhead for lying down (Line up now works there too), or turned a little as a
   whole. Two monitors placed as mirror images stay mirror images. Rows never merge, and
-  a gap you left between two rows stays.
+  a gap you left between two rows stays. A monitor the magnet glued over or under
+  another stays glued: Line up closes the middle of the seam as you see it instead of
+  lifting the monitor clear and leaving a gap (a wide flat monitor over a curved row
+  overlaps the row a little at its ends, the nearer monitor in front).
 - A monitor stays in its row while you move it about. A portrait monitor between two
   others no longer jumps into a row of its own when one of them is nudged; a monitor
   leaves its row only when you clearly move it out.

@@ -12,7 +12,7 @@ use prostir_layout::desk::{self, Desk, Spot, View};
 use prostir_layout::place::place_new;
 use prostir_layout::rows::rows_of;
 use prostir_layout::space::{Monitor, Placement, covers};
-use prostir_layout::tidy::line_up;
+use prostir_layout::tidy::{glued_pairs, line_up};
 
 /// The headset's pipeline with history: rows kept as they were within the hysteresis,
 /// the plan kept while it is the same in all but a hand's tremor.
@@ -638,7 +638,16 @@ fn lining_up_counts(jitter: Option<(f32, u64)>) -> usize {
             });
         }
         // T2: lining up makes no monitor cover one of another row as seen (one that
-        // covered it as the user left them may still).
+        // covered it as the user left them may still, and a row glued to another
+        // overlaps it a little at the ends of its seams, as the owner chose).
+        let glued = glued_pairs(&scene.monitors, &scene.frame, scene.main, Some(&rows), lid);
+        let row_of = |k: &u8| rows.iter().position(|r| r.contains(k));
+        let glued_rows = |a: &u8, b: &u8| {
+            glued.iter().any(|(p, u)| {
+                let (rp, ru) = (row_of(p), row_of(u));
+                (row_of(a) == rp && row_of(b) == ru) || (row_of(a) == ru && row_of(b) == rp)
+            })
+        };
         let corners_of = |s: &Scene| -> Vec<(u8, [Vec3; 4])> {
             s.monitors
                 .iter()
@@ -650,7 +659,7 @@ fn lining_up_counts(jitter: Option<(f32, u64)>) -> usize {
             for (b, (ib, cb)) in corners.iter().enumerate().skip(a + 1) {
                 let same_row = rows.iter().any(|r| r.contains(ia) && r.contains(ib));
                 let was = covers(&before[a].1, &before[b].1, 0.01);
-                if !same_row && !was && covers(ca, cb, 0.01) {
+                if !same_row && !was && !glued_rows(ia, ib) && covers(ca, cb, 0.01) {
                     t2 += 1;
                     first.get_or_insert_with(|| {
                         format!("case {i}: T2 {ia} covers {ib}\n{}", scene.describe())
