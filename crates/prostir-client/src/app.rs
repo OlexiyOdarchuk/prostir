@@ -1,6 +1,6 @@
 //! OpenXR main loop.
 //!
-//! Each KDE monitor is decoded by MediaCodec straight into an Android surface
+//! Each monitor of the PC is decoded by MediaCodec straight into an Android surface
 //! owned by the Quest compositor (XR_KHR_android_surface_swapchain) and shown as
 //! a quad or cylinder layer. The menu, its button, pointer dots and the
 //! panorama are small CPU-drawn images; nothing is rendered per frame.
@@ -380,7 +380,7 @@ fn lying_flat(position: Vec3, head: Vec3) -> glam::Quat {
 /// Everything shown in the headset and how it is arranged.
 struct Scene {
     monitors: HashMap<ScreenId, Monitor>,
-    /// Left-to-right order of the Quest monitors, shared with the host and KDE.
+    /// Left-to-right order of the Quest monitors, shared with the host and its desktop.
     order: Vec<ScreenId>,
     placements: HashMap<ScreenId, Placement>,
     primary: Option<ScreenId>,
@@ -594,9 +594,9 @@ impl Scene {
             .collect()
     }
 
-    /// Sends a new left-to-right order to the host (which re-arranges KDE to match).
+    /// Sends a new left-to-right order to the host (which re-arranges its desktop to match).
     /// Tells the PC how the monitors stand around the user (rows, left to right), so
-    /// KDE's arrangement matches: the mouse leaves a monitor where the next one is,
+    /// the desktop's arrangement matches: the mouse leaves a monitor where the next one is,
     /// sideways, up or down. Only sent when it changed.
     #[expect(
         clippy::disallowed_methods,
@@ -607,7 +607,7 @@ impl Scene {
             return;
         }
         // Wait until every monitor the PC has is placed: a partial picture would make
-        // KDE rearrange (and blink) once per arriving monitor. One whose stream could
+        // the desktop rearrange (and blink) once per arriving monitor. One whose stream could
         // not start keeps its place and does not hold the others up.
         let complete = self.order.iter().any(|id| self.monitors.contains_key(id))
             && self.order.iter().all(|id| self.placements.contains_key(id));
@@ -623,7 +623,7 @@ impl Scene {
             return;
         }
         // Only an arrangement that has held for a moment: monitors arriving one by one
-        // or being laid out again pass through states KDE should not be shown.
+        // or being laid out again pass through states the desktop should not be shown.
         match &self.pending_layout {
             Some((pending, since)) if *pending == desktop => {
                 if since.elapsed() < Duration::from_millis(800) {
@@ -638,7 +638,7 @@ impl Scene {
         self.pending_layout = None;
         let rows = desktop.wire();
         info!(
-            "KDE arrangement: {}",
+            "desktop arrangement: {}",
             rows.iter()
                 .map(|r| {
                     let ids: Vec<u32> = r.ids().map(|id| id.0).collect();
@@ -3046,7 +3046,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                             controls.pulse(&session, hand);
                         }
                         scene.save_layout();
-                        // Dropped somewhere else: KDE's arrangement follows what the
+                        // Dropped somewhere else: the desktop's arrangement follows what the
                         // eyes see.
                         scene.send_layout();
                     }
@@ -3443,7 +3443,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             .collect();
         let moving = scene.moving_now(&grabbed);
         scene.animate(dt, &moving);
-        // Keep KDE's arrangement in step once nothing is being moved.
+        // Keep the desktop's arrangement in step once nothing is being moved.
         if grabbed.is_empty() && scene.scaling.is_none() && !scene.relayout_pending() {
             scene.send_layout();
         }

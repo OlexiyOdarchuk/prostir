@@ -287,7 +287,7 @@ mod tests {
         assert_eq!(got.command, Some((ReqId(9), Outcome::Done)));
         let req = asks.ask(Asked::Profile(2), t);
         asks.answer_command_after(req, ReqId(10));
-        let failed = Outcome::failed(ErrorCode::DESKTOP, "kscreen");
+        let failed = Outcome::failed(ErrorCode::DESKTOP, "the desktop refused");
         let got = asks.answered(req, &failed, t);
         assert_eq!(got.command, Some((ReqId(10), failed)));
     }
