@@ -1,12 +1,14 @@
-//! The `system` thread: what the app asks Android now and then, away from the frame
-//! (a call into Java takes its time). For now the battery: once a minute, and every
-//! 15 s while the palm menu shows, read afresh when it appears.
+//! What the app asks the system. The `system` thread asks now and then, away from the
+//! frame (a call into Java takes its time): for now the battery, once a minute and
+//! every 15 s while the palm menu shows, read afresh when it appears. What does not
+//! change (the headset's model) is asked once at the start.
 
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use jni::objects::JValue;
+use jni::objects::{JString, JValue};
+use jni::strings::JNIStr;
 use jni::{jni_sig, jni_str};
 use log::warn;
 
@@ -121,6 +123,29 @@ pub fn join_within(name: &str, thread: JoinHandle<()>, limit: Duration) {
     } else if thread.join().is_err() {
         warn!("the {name} thread panicked");
     }
+}
+
+/// What the headset is, as the system names it (`Build.MANUFACTURER` and
+/// `Build.MODEL`, see [`crate::device::model_name`]); empty when it does not say.
+pub fn model() -> String {
+    let said = with_activity(|env, _| {
+        let mut field = |name: &JNIStr| -> jni::errors::Result<String> {
+            let value = env
+                .get_static_field(
+                    jni_str!("android/os/Build"),
+                    name,
+                    jni_sig!("Ljava/lang/String;"),
+                )?
+                .l()?;
+            if value.is_null() {
+                return Ok(String::new());
+            }
+            env.cast_local::<JString<'_>>(value)?.try_to_string(env)
+        };
+        Ok((field(jni_str!("MANUFACTURER"))?, field(jni_str!("MODEL"))?))
+    });
+    let (manufacturer, model) = said.unwrap_or_default();
+    crate::device::model_name(&manufacturer, &model)
 }
 
 /// The headset's battery: percent and whether it is charging (`BatteryManager`).

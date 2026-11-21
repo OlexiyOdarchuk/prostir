@@ -457,6 +457,8 @@ struct Scene {
     selected: Option<ScreenId>,
     /// The headset's battery (percent, charging), read once a minute.
     headset_battery: Option<(u8, bool)>,
+    /// The headset's model as the system names it, for `HeadsetCaps`.
+    model: String,
     /// The monitor the sound comes from, as the PC says.
     sound_from: Option<ScreenId>,
     /// The display rate setting changed: apply it.
@@ -1662,7 +1664,13 @@ impl Scene {
 
     /// What the headset says about itself when it opens a session.
     fn headset_state(&self) -> HeadsetState {
-        headset_state(&self.settings, self.worn, self.headset_battery, &self.mic)
+        headset_state(
+            &self.settings,
+            self.worn,
+            self.headset_battery,
+            &self.mic,
+            &self.model,
+        )
     }
 
     /// The microphone's switch or permission changed: the PC hears at once (it makes
@@ -2040,9 +2048,13 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     );
     let system = instance.system(xr::FormFactor::HEAD_MOUNTED_DISPLAY)?;
     let _ = instance.graphics_requirements::<Gfx>(system)?;
+    // As the system names the headset: only shown (the PC's list of headsets,
+    // pairing) and logged.
+    let model = crate::system::model();
+    info!("headset: {model:?}");
     if let Some(t) = test.as_deref_mut() {
         t.runtime(app, &instance, system, &available);
-        t.headset_caps(&headset_caps());
+        t.headset_caps(&headset_caps(&model));
     }
 
     let egl = egl::EglContext::new()?;
@@ -2145,12 +2157,12 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     // The battery once now, for the first `Open`; from here on the system thread reads
     // it, away from the frame.
     let battery = crate::system::battery();
-    let system = crate::system::System::start();
+    let system_thread = crate::system::System::start();
 
     let (net_tx, net_rx) = mpsc::channel();
     let steering = net::Steering::default();
     // What the first `Open` says, before the network thread can connect.
-    steering.set_headset(headset_state(&settings, true, battery, &mic));
+    steering.set_headset(headset_state(&settings, true, battery, &mic, &model));
     // However this function ends, the network thread and its session end with it, and
     // the thread is waited for (up to a second): a new start in the same process must
     // not find this one's still connected to the PC.
@@ -2173,6 +2185,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             host_file: external_dir.as_ref().map(|p| p.join("host.txt")),
             last_host_file: data_dir.join("last_host"),
             only: fake_pc,
+            name: model.clone(),
         },
         steering.clone(),
         net::Sound {
@@ -2245,6 +2258,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         wrist: None,
         selected: None,
         headset_battery: battery,
+        model,
         sound_from: None,
         refresh_due: false,
         worn_for: Duration::ZERO,
@@ -2438,7 +2452,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                 event => handle_net_event(&mut scene, &session, &vm, event),
             }
         }
-        while let Some(event) = system.try_recv() {
+        while let Some(event) = system_thread.try_recv() {
             match event {
                 SystemEvent::Battery(battery) => scene.battery_read(battery),
             }
@@ -2630,7 +2644,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         // menu appears, and more often while it shows.
         if scene.wrist.is_some() != palm_was_shown {
             palm_was_shown = scene.wrist.is_some();
-            system.palm_menu(palm_was_shown);
+            system_thread.palm_menu(palm_was_shown);
         }
 
         // Pointing, clicking and dragging.
@@ -3893,16 +3907,17 @@ fn prefs_of(s: &Settings) -> Prefs {
 }
 
 /// What the headset says about itself when it opens a session: what it can do, its
-/// settings, whether it is worn, its battery.
+/// settings, whether it is worn, its battery; `model` as the system names it.
 fn headset_state(
     settings: &Settings,
     worn: bool,
     battery: Option<(u8, bool)>,
     mic: &Mic,
+    model: &str,
 ) -> HeadsetState {
     let mic = mic_state(settings, mic);
     HeadsetState {
-        caps: Some(headset_caps()),
+        caps: Some(headset_caps(model)),
         prefs: Some(prefs_of(settings)),
         presence: Some(Presence { worn }),
         battery: battery.map(|(percent, charging)| Battery { percent, charging }),
@@ -3923,8 +3938,8 @@ fn mic_state(settings: &Settings, mic: &Mic) -> state::UpState {
 
 /// What this headset can do, for the PC: the displays it shows, the codecs it decodes
 /// and how large (Quest 3: H.264 up to 4K, HEVC up to 8K), how many streams and
-/// compositor layers at once.
-fn headset_caps() -> HeadsetCaps {
+/// compositor layers at once; and its model, as the system names it.
+fn headset_caps(model: &str) -> HeadsetCaps {
     let decoder = |codec: Codec, max_w, max_h| state::Decoder {
         codec: prostir_proto::wire::encode(&codec).map_or(0, |b| b[0]),
         max_w,
@@ -3943,7 +3958,7 @@ fn headset_caps() -> HeadsetCaps {
         ],
         streams_max: 16,
         layers_max: 16,
-        model: "Meta Quest".into(),
+        model: model.to_owned(),
     }
 }
 

@@ -251,6 +251,8 @@ pub struct Discovery {
     /// The selftest's fake PC: connect to this address and nothing else (no USB, no
     /// `host.txt`, no last host, no listening for PCs, no probing the network).
     pub only: Option<SocketAddr>,
+    /// This headset's name for pairing (its model, as the system names it).
+    pub name: String,
 }
 
 /// What sessions play the PC's sound and record the microphone with: made once for
@@ -264,6 +266,8 @@ pub struct Sound {
 /// This headset, as its sessions need it.
 struct Headset {
     identity: Identity,
+    /// What the PC calls it when they pair.
+    name: String,
     sound: Sound,
 }
 
@@ -547,7 +551,11 @@ pub fn spawn(
                 }
             };
             info!("headset key {}", secure::fingerprint(&identity.public));
-            let me = Headset { identity, sound };
+            let me = Headset {
+                identity,
+                name: discovery.name.clone(),
+                sound,
+            };
             let mut trusted = TrustStore::load(&discovery.trust_file);
             let mut finder = Finder::default();
             let mut round = 0u32;
@@ -837,6 +845,8 @@ struct Session<'a> {
     events: &'a Sender<NetEvent>,
     steering: &'a Steering,
     identity: &'a Identity,
+    /// What the PC calls this headset (`PairBegin`).
+    name: &'a str,
     peer: &'a PeerInfo,
     host: &'a str,
 }
@@ -903,7 +913,7 @@ impl Session<'_> {
             // the user to type what it shows.
             self.feedback.send(ClientMsg::PairBegin {
                 headset_shows: !pc_shows,
-                name: "Meta Quest".into(),
+                name: self.name.to_owned(),
             })?;
             let code = if pc_shows {
                 let _ = self.events.send(NetEvent::Pairing {
@@ -1077,6 +1087,7 @@ fn run_session(
             events,
             steering,
             identity,
+            name: &me.name,
             peer: &peer,
             host: &host,
         };
