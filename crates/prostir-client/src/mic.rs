@@ -314,34 +314,3 @@ impl Drop for Input {
 fn check(result: i32) -> Result<(), i32> {
     if result < 0 { Err(result) } else { Ok(()) }
 }
-
-/// The headset's battery: percent and whether it is charging (`BatteryManager`).
-pub fn battery() -> Option<(u8, bool)> {
-    with_activity(|env, activity| {
-        let name = env.new_string("batterymanager")?;
-        let manager = env
-            .call_method(
-                activity,
-                jni_str!("getSystemService"),
-                jni_sig!("(Ljava/lang/String;)Ljava/lang/Object;"),
-                &[JValue::Object(&name)],
-            )?
-            .l()?;
-        let property = |env: &mut jni::Env<'_>, id| {
-            env.call_method(
-                &manager,
-                jni_str!("getIntProperty"),
-                jni_sig!("(I)I"),
-                &[JValue::Int(id)],
-            )?
-            .i()
-        };
-        // BatteryManager.BATTERY_PROPERTY_CAPACITY
-        let percent = property(env, 4)?;
-        // BATTERY_PROPERTY_STATUS: 2 is charging (isCharging also says yes when full
-        // and plugged in).
-        let status = property(env, 6)?;
-        let charging = status == 2;
-        Ok((percent.clamp(0, 100) as u8, charging))
-    })
-}

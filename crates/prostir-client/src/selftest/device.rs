@@ -411,7 +411,7 @@ fn ms(d: Duration) -> f64 {
 }
 
 fn battery() -> String {
-    crate::mic::battery().map_or_else(|| "none".into(), |(p, _)| p.to_string())
+    crate::system::battery().map_or_else(|| "none".into(), |(p, _)| p.to_string())
 }
 
 impl Selftest {

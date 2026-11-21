@@ -39,6 +39,7 @@ use crate::profiles::{self, Profile};
 #[cfg(all(feature = "selftest", not(feature = "store")))]
 use crate::selftest::device::{self as selftest, Act, Selftest};
 use crate::settings::{Background, HandMode, Settings};
+use crate::system::SystemEvent;
 use crate::ui::{self, Action, MonitorEntry, Panel, Tab, UiState};
 use crate::xrutil::{self, Gfx, ImageLayer, as_layer, pose, posef, vec3};
 use crate::{background, decoder, egl, net, passthrough, physical};
@@ -1638,6 +1639,20 @@ impl Scene {
         }
     }
 
+    /// The battery was read (once a minute, more often on the palm menu): the menu
+    /// shows it, the PC's tray hears it, and the next `Open` says it.
+    fn battery_read(&mut self, battery: Option<(u8, bool)>) {
+        self.headset_battery = battery;
+        self.steering.set_headset(self.headset_state());
+        if let Some((percent, charging)) = battery
+            && self.feedback.is_some()
+        {
+            self.send(ClientMsg::Battery {
+                part: Battery { percent, charging },
+            });
+        }
+    }
+
     /// The headset's settings the PC acts on.
     fn prefs(&self) -> Prefs {
         prefs_of(&self.settings)
@@ -2091,8 +2106,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     let mut button_hovered = false;
     // The left hand's menu gesture as last seen, to act once per gesture.
     let mut menu_gesture_held = false;
-    // When the battery was last read, and whether the palm menu showed last frame.
-    let mut last_battery: Option<Instant> = None;
+    // Whether the palm menu showed last frame (it shows the battery).
     let mut palm_was_shown = false;
     button_layer.upload(&gl, &ui::menu_button_image(BUTTON_PX, false))?;
     let mut panel = Panel::new();
@@ -2126,10 +2140,15 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     // The language the network thread was last told (it starts with the default).
     let mut told_lang = Lang::default();
 
+    // The battery once now, for the first `Open`; from here on the system thread reads
+    // it, away from the frame.
+    let battery = crate::system::battery();
+    let system = crate::system::System::start();
+
     let (net_tx, net_rx) = mpsc::channel();
     let steering = net::Steering::default();
     // What the first `Open` says, before the network thread can connect.
-    steering.set_headset(headset_state(&settings, true, crate::mic::battery(), &mic));
+    steering.set_headset(headset_state(&settings, true, battery, &mic));
     // However this function ends, the network thread and its session end with it.
     struct StopNetwork(net::Steering);
     impl Drop for StopNetwork {
@@ -2218,7 +2237,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         attach_for: None,
         wrist: None,
         selected: None,
-        headset_battery: crate::mic::battery(),
+        headset_battery: battery,
         sound_from: None,
         refresh_due: false,
         worn_for: Duration::ZERO,
@@ -2412,6 +2431,11 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                 event => handle_net_event(&mut scene, &session, &vm, event),
             }
         }
+        while let Some(event) = system.try_recv() {
+            match event {
+                SystemEvent::Battery(battery) => scene.battery_read(battery),
+            }
+        }
 
         // Panorama: generated or decoded off the main thread, uploaded once per choice.
         let wanted = scene.settings.background;
@@ -2595,24 +2619,11 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         if scene.mic.permission() != scene.mic_permission {
             scene.mic_changed();
         }
-        // The headset's battery: on the palm menu (fresh when it appears, then every 15 s)
-        // and for the PC's tray (once a minute).
-        let palm_opened = scene.wrist.is_some() && !palm_was_shown;
-        palm_was_shown = scene.wrist.is_some();
-        let every = if scene.wrist.is_some() { 15 } else { 60 };
-        if palm_opened
-            || last_battery.is_none_or(|t: Instant| t.elapsed() >= Duration::from_secs(every))
-        {
-            last_battery = Some(Instant::now());
-            scene.headset_battery = crate::mic::battery();
-            scene.steering.set_headset(scene.headset_state());
-            if let Some((percent, charging)) = scene.headset_battery
-                && scene.feedback.is_some()
-            {
-                scene.send(ClientMsg::Battery {
-                    part: Battery { percent, charging },
-                });
-            }
+        // The palm menu shows the battery: the system thread reads it afresh when the
+        // menu appears, and more often while it shows.
+        if scene.wrist.is_some() != palm_was_shown {
+            palm_was_shown = scene.wrist.is_some();
+            system.palm_menu(palm_was_shown);
         }
 
         // Pointing, clicking and dragging.
