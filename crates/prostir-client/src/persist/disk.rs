@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 
 use log::warn;
 
-use super::File;
+use super::{File, LoadError};
 use crate::layout::{self, Desk, Placement};
 use crate::profiles::{self, Profile};
 use crate::settings::Settings;
@@ -113,21 +113,57 @@ pub struct Loaded {
 
 impl Loaded {
     /// Reads the files in `dir`; one that is not there, or cannot be read, is as if
-    /// empty.
+    /// empty. One this version does not read (an older version's, or one cut short)
+    /// is set aside as `*.old` (see [`readable`]).
     fn read(dir: &Path) -> Self {
         let text = |file: File| std::fs::read_to_string(dir.join(file.name())).ok();
         Self {
             settings: text(File::Settings)
                 .map(|t| Settings::parse(&t))
                 .unwrap_or_default(),
-            desk: text(File::Desk)
-                .map(|t| Desk::parse(&t))
-                .unwrap_or_default(),
+            desk: readable(dir, File::Desk, Desk::parse).unwrap_or_default(),
             profiles: profiles::parse(&text(File::Profiles).unwrap_or_default()),
             profiles_saved: dir.join(File::Profiles.name()).exists(),
-            keyboard: text(File::Keyboard).and_then(|t| layout::parse_keyboard(&t)),
+            keyboard: readable(dir, File::Keyboard, layout::parse_keyboard),
         }
     }
+}
+
+/// What `file` in `dir` holds, read by `parse`; `None` when it is not there or cannot
+/// be read. A file `parse` does not read (an older version's, an empty one, one cut
+/// short) is renamed to `<name>.old` in its place, replacing an older one, and the app
+/// starts as if it were not there: the log says so, once.
+fn readable<T>(
+    dir: &Path,
+    file: File,
+    parse: impl FnOnce(&str) -> Result<T, LoadError>,
+) -> Option<T> {
+    let path = dir.join(file.name());
+    let why = match std::fs::read_to_string(&path) {
+        Ok(text) => match parse(&text) {
+            Ok(read) => return Some(read),
+            Err(e) => e.to_string(),
+        },
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return None,
+        Err(e) if e.kind() == io::ErrorKind::InvalidData => "not text".to_owned(),
+        Err(e) => {
+            warn!("cannot read {}: {e}", path.display());
+            return None;
+        }
+    };
+    let old = dir.join(format!("{}.old", file.name()));
+    match std::fs::rename(&path, &old) {
+        Ok(()) => warn!(
+            "{} is not read ({why}): set aside as {}, the app starts without it",
+            path.display(),
+            old.display()
+        ),
+        Err(e) => warn!(
+            "{} is not read ({why}), and cannot be set aside: {e}",
+            path.display()
+        ),
+    }
+    None
 }
 
 /// What the thread says back.
@@ -466,6 +502,8 @@ fn write_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ids::{DisplayKey, PcId};
+    use prostir_proto::state::DisplayId;
 
     /// A folder of its own for each test, empty.
     fn folder(name: &str) -> PathBuf {
@@ -725,8 +763,9 @@ mod tests {
         };
         saver.save(File::Keyboard, |out| layout::write_keyboard(out, &place));
         let mut desk = Desk::default();
+        let three = DisplayKey::new(PcId([3; 8]), DisplayId(3));
         desk.keep(
-            [(3, place)],
+            [(three, place)],
             &std::collections::HashMap::new(),
             ((glam::Vec3::ZERO, 0.0), layout::RADIUS),
             false,
@@ -739,7 +778,64 @@ mod tests {
         assert!(back.profiles_saved);
         assert_eq!(back.profiles, profiles);
         assert_eq!(back.keyboard, Some(place));
-        assert_eq!(back.desk.arrangement().placements[&3], place);
+        assert_eq!(back.desk.arrangement().placements[&three], place);
+        for file in [File::Desk, File::Keyboard] {
+            assert!(!dir.join(format!("{}.old", file.name())).exists(), "read");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file this version does not read (0.1's, one without `format 2`, an empty
+    /// one, one cut in the middle of a line, rubbish, one with a line it does not
+    /// write) is set aside as `*.old`, whole, an older `*.old` replaced, and the start
+    /// goes on as without it.
+    #[test]
+    fn files_not_read_are_set_aside() {
+        let dir = folder("aside");
+        let desk = "format 2\ncenter 0 1.6 0 0\nradius 1.3\n\
+                    0123456789abcdef:3 0 1.6 -1.2 0 0 0 1 0.8 2560x1440\n";
+        let keyboard = "format 2\nkeyboard 0 0.8 -0.4 -0.7071 0 0 0.7071 0.42\n";
+        let not_read: [&[u8]; 6] = [
+            b"center 0 1.6 0 0\n3 0 1.6 -1.2 0 0 0 1 0.8 2560x1440\n",
+            b"",
+            b"format 2\ncenter 0 1.6 0 0\n0123456789abcdef:3 0 1.6 -1.2 0 0",
+            b"\xff\xfe\x00rubbish",
+            b"format 2\nmirror on\n",
+            b"format 2\n3 0 1.6 -1.2 0 0 0 1 0.8\n",
+        ];
+        for (n, text) in not_read.iter().enumerate() {
+            for file in [File::Desk, File::Keyboard] {
+                std::fs::write(dir.join(file.name()), text).unwrap();
+            }
+            let (loaded, saver) = start_after(&dir, Duration::ZERO);
+            drop(saver);
+            assert!(loaded.desk.arrangement().placements.is_empty(), "case {n}");
+            assert!(loaded.desk.arrangement().center.is_none(), "case {n}");
+            assert!(loaded.keyboard.is_none(), "case {n}");
+            for file in [File::Desk, File::Keyboard] {
+                assert!(!dir.join(file.name()).exists(), "case {n}: moved");
+                let old = std::fs::read(dir.join(format!("{}.old", file.name()))).unwrap();
+                assert_eq!(old, *text, "case {n}: whole");
+            }
+        }
+        // Files of this version are read, and the `*.old` ones stay as they are.
+        std::fs::write(dir.join(File::Desk.name()), desk).unwrap();
+        std::fs::write(dir.join(File::Keyboard.name()), keyboard).unwrap();
+        let (loaded, saver) = start_after(&dir, Duration::ZERO);
+        drop(saver);
+        let three = DisplayKey::new(
+            PcId([0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef]),
+            DisplayId(3),
+        );
+        assert!(loaded.desk.arrangement().placements.contains_key(&three));
+        assert_eq!(loaded.desk.arrangement().sizes[&three], (2560, 1440));
+        assert_eq!(loaded.desk.arrangement().radius, Some(1.3));
+        assert!((loaded.keyboard.unwrap().width - 0.42).abs() < 1e-6);
+        assert_eq!(
+            std::fs::read_to_string(dir.join(File::Desk.name())).unwrap(),
+            desk
+        );
+        assert!(dir.join("layout.txt.old").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

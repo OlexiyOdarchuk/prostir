@@ -1,4 +1,5 @@
-//! Where monitors float in the room, how controllers move them, and persistence.
+//! Where monitors float in the room, how controllers move them, and the files of the
+//! arrangement.
 //!
 //! How the monitors are arranged (the presets, a new monitor, "Line up"), the rows they
 //! make and the PC desktop made of those is `prostir_layout`, the code the PC runs too;
@@ -15,13 +16,17 @@ use prostir_layout::view::Room;
 use prostir_layout::{place, rows, tidy};
 use prostir_proto::state::{DisplayId, Placed, Row};
 
+use crate::ids::{DisplayKey, Thing};
+use crate::persist::{self, LoadError};
 use crate::settings::Preset;
 
 pub use prostir_layout::circle::{OVERHEAD_PITCH, RADIUS};
 
-/// A display of the PC, by the number the PC gives it (see `DisplayId`): a monitor, a
-/// window panel or a display of the PC itself.
-pub type ScreenId = u32;
+/// What the arrangement's rules take a monitor's number to be: a display of a PC in
+/// the headset ([`DisplayKey`]), any number in the tests. The rules never look into it.
+pub trait Key: Copy + Ord + std::hash::Hash {}
+
+impl<K: Copy + Ord + std::hash::Hash> Key for K {}
 pub use prostir_layout::space::{METRES_PER_PIXEL, Placement, facing};
 
 /// Lines `value` (half size `half`) up with a neighbour at `other` (half size
@@ -145,12 +150,9 @@ fn hinge(n: &Placement, nh: f32, mw: f32, mh: f32, b: &Beside, eye: Vec3) -> Pla
 }
 
 /// A monitor of the arrangement: placement, height, width in pixels.
-type Part = (ScreenId, Placement, f32, f32);
+type Part<K> = (K, Placement, f32, f32);
 
-fn parts(
-    placements: &HashMap<ScreenId, Placement>,
-    monitors: &[(ScreenId, u32, u32)],
-) -> Vec<Part> {
+fn parts<K: Key>(placements: &HashMap<K, Placement>, monitors: &[(K, u32, u32)]) -> Vec<Part<K>> {
     monitors
         .iter()
         .filter_map(|&(id, w, h)| {
@@ -162,7 +164,7 @@ fn parts(
 
 /// The neighbour `m` would join among `others`, and how: the nearest as seen from
 /// `eye` (between two it touches equally, the one its centre is closer to).
-fn nearest(m: &Part, others: &[Part], eye: Vec3) -> Option<(Part, Beside)> {
+fn nearest<K: Key>(m: &Part<K>, others: &[Part<K>], eye: Vec3) -> Option<(Part<K>, Beside)> {
     others
         .iter()
         .filter(|o| o.0 != m.0)
@@ -178,7 +180,7 @@ fn nearest(m: &Part, others: &[Part], eye: Vec3) -> Option<(Part, Beside)> {
 
 /// Where along `n`'s edge `m` goes: where the user put it (lined up only when it all
 /// but is), keeping some of the edges shared so the mouse can cross.
-fn settle_along(b: &Beside, n: &Part, mw: f32, mh: f32) -> f32 {
+fn settle_along<K: Key>(b: &Beside, n: &Part<K>, mw: f32, mh: f32) -> f32 {
     let (half_m, half_n) = if b.across {
         (mh / 2.0, n.2 / 2.0)
     } else {
@@ -190,9 +192,9 @@ fn settle_along(b: &Beside, n: &Part, mw: f32, mh: f32) -> f32 {
 
 /// Where a monitor being let go of would stick: the monitor it joins and the edge.
 #[derive(Debug, Clone, Copy)]
-pub struct Stick {
+pub struct Stick<K> {
     pub placement: Placement,
-    pub neighbour: ScreenId,
+    pub neighbour: K,
     /// Side by side (else above or below).
     pub across: bool,
     /// Which side of the neighbour: 1 right or above, -1 left or below.
@@ -202,12 +204,12 @@ pub struct Stick {
 /// The magnet for one monitor: let go almost against another (within 15 % of a
 /// monitor, as seen from `eye`) and at about the same distance, where it would stick
 /// to it, edge to edge, where along the edge it is (see [`hinge`]); `None` otherwise.
-pub fn stick(
-    placements: &HashMap<ScreenId, Placement>,
-    monitors: &[(ScreenId, u32, u32)],
+pub fn stick<K: Key>(
+    placements: &HashMap<K, Placement>,
+    monitors: &[(K, u32, u32)],
     eye: Vec3,
-    id: ScreenId,
-) -> Option<Stick> {
+    id: K,
+) -> Option<Stick<K>> {
     let all = parts(placements, monitors);
     let m = *all.iter().find(|m| m.0 == id)?;
     let (n, b) = nearest(&m, &all, eye)?;
@@ -234,16 +236,16 @@ pub fn stick(
 
 /// The magnet on a wall: like [`stick`], but in the wall's plane (monitors there are
 /// flat in one plane, facing the same way).
-pub fn stick_on_wall(
-    placements: &HashMap<ScreenId, Placement>,
-    monitors: &[(ScreenId, u32, u32)],
+pub fn stick_on_wall<K: Key>(
+    placements: &HashMap<K, Placement>,
+    monitors: &[(K, u32, u32)],
     center: (Vec3, f32),
-    id: ScreenId,
-) -> Option<Stick> {
+    id: K,
+) -> Option<Stick<K>> {
     let unturn = Quat::from_rotation_y(-center.1);
     let turn = Quat::from_rotation_y(center.1);
     // (id, local centre, width, height)
-    let all: Vec<(ScreenId, Vec3, f32, f32)> = monitors
+    let all: Vec<(K, Vec3, f32, f32)> = monitors
         .iter()
         .filter_map(|&(oid, w, h)| {
             let p = placements.get(&oid)?;
@@ -262,12 +264,11 @@ pub fn stick_on_wall(
             (a.y - b.y).abs() - (ah + bh) / 2.0,
         )
     };
-    let sep = |o: &(ScreenId, Vec3, f32, f32)| {
+    let sep = |o: &(K, Vec3, f32, f32)| {
         let (gx, gy) = gaps(at, mw, mh, o.1, o.2, o.3);
         (gx.max(gy).max(0.0), at.distance(o.1))
     };
-    let others: Vec<(ScreenId, Vec3, f32, f32)> =
-        all.iter().filter(|o| o.0 != id).copied().collect();
+    let others: Vec<(K, Vec3, f32, f32)> = all.iter().filter(|o| o.0 != id).copied().collect();
     let n = *others.iter().min_by(|a, b| {
         let (sa, da) = sep(a);
         let (sb, db) = sep(b);
@@ -321,7 +322,7 @@ pub fn stick_on_wall(
 
 /// The monitor shown in cinema mode: the one at position `pick` in the row, else the
 /// largest landscape one (films are wide), else the first.
-pub fn cinema_choice(monitors: &[(ScreenId, u32, u32)], pick: Option<u8>) -> Option<ScreenId> {
+pub fn cinema_choice<K: Key>(monitors: &[(K, u32, u32)], pick: Option<u8>) -> Option<K> {
     pick.and_then(|i| monitors.get(i as usize))
         .or_else(|| {
             monitors
@@ -335,7 +336,7 @@ pub fn cinema_choice(monitors: &[(ScreenId, u32, u32)], pick: Option<u8>) -> Opt
 
 /// Cinema: one monitor big and further away, straight ahead at eye level; the others
 /// are not shown.
-pub fn cinema(monitors: &[(ScreenId, u32, u32)], pick: Option<u8>) -> HashMap<ScreenId, Placement> {
+pub fn cinema<K: Key>(monitors: &[(K, u32, u32)], pick: Option<u8>) -> HashMap<K, Placement> {
     const DISTANCE: f32 = 3.0;
     /// About 56° wide, like a good seat in a cinema.
     const WIDTH: f32 = 3.2;
@@ -365,9 +366,7 @@ fn shape(preset: Preset) -> circle::Preset {
 }
 
 /// `(id, width, height)` as the layout takes them.
-fn pixel_sizes(
-    monitors: &[(ScreenId, u32, u32)],
-) -> Vec<(ScreenId, prostir_layout::space::PixelSize)> {
+fn pixel_sizes<K: Key>(monitors: &[(K, u32, u32)]) -> Vec<(K, prostir_layout::space::PixelSize)> {
     monitors
         .iter()
         .map(|&(id, w, h)| (id, prostir_layout::space::PixelSize::new(w, h)))
@@ -376,7 +375,7 @@ fn pixel_sizes(
 
 /// How far from the head `preset` puts `monitors` (a wall's distance): the circle
 /// grows when they do not fit around the user (see `prostir_layout::circle`).
-pub fn preset_radius(preset: Preset, monitors: &[(ScreenId, u32, u32)]) -> f32 {
+pub fn preset_radius<K: Key>(preset: Preset, monitors: &[(K, u32, u32)]) -> f32 {
     circle::radius_of(shape(preset), &pixel_sizes(monitors), &Limits::default())
 }
 
@@ -387,13 +386,13 @@ pub fn preset_radius(preset: Preset, monitors: &[(ScreenId, u32, u32)]) -> f32 {
 /// the primary monitor. `curve`: the monitors are drawn curved, on a cylinder this many
 /// times the arrangement's radius (`None`: flat); the mirror then continues the
 /// cylinder of the monitor above it.
-pub fn arrange(
+pub fn arrange<K: Key>(
     preset: Preset,
-    monitors: &[(ScreenId, u32, u32)],
-    primary: Option<ScreenId>,
-    mirror: Option<(ScreenId, u32, u32)>,
+    monitors: &[(K, u32, u32)],
+    primary: Option<K>,
+    mirror: Option<(K, u32, u32)>,
     curve: Option<f32>,
-) -> HashMap<ScreenId, Placement> {
+) -> HashMap<K, Placement> {
     circle::arrange(
         shape(preset),
         &pixel_sizes(monitors),
@@ -418,10 +417,10 @@ pub fn frame(center: (Vec3, f32), preset: Preset) -> Frame {
 }
 
 /// Every one of `monitors` (id, pixel size) that has a placement.
-fn placed(
-    placements: &HashMap<ScreenId, Placement>,
-    monitors: &[(ScreenId, u32, u32)],
-) -> Vec<Monitor<ScreenId>> {
+fn placed<K: Key>(
+    placements: &HashMap<K, Placement>,
+    monitors: &[(K, u32, u32)],
+) -> Vec<Monitor<K>> {
     pixel_sizes(monitors)
         .into_iter()
         .filter_map(|(id, px)| {
@@ -438,12 +437,8 @@ fn placed(
 /// monitors side by side as the eye sees them. Two neighbours in `previous` (the rows
 /// the PC has) stay neighbours until one is clearly moved away, so a hand's tremor
 /// never moves a monitor from one row to another (see `prostir_layout::rows`).
-fn rows_seen(
-    room: &Room<ScreenId>,
-    monitors: &[Monitor<ScreenId>],
-    previous: &[Vec<ScreenId>],
-) -> Vec<Vec<ScreenId>> {
-    let ids: Vec<ScreenId> = monitors.iter().map(|m| m.id).collect();
+fn rows_seen<K: Key>(room: &Room<K>, monitors: &[Monitor<K>], previous: &[Vec<K>]) -> Vec<Vec<K>> {
+    let ids: Vec<K> = monitors.iter().map(|m| m.id).collect();
     rows::rows_of(&ids, room, Some(previous))
 }
 
@@ -451,30 +446,30 @@ fn rows_seen(
 /// desktop made of them, in the pixels of the streams. The PC makes the same desktop of
 /// it, to the pixel, and the map in the menu shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Desktop {
+pub struct Desktop<K> {
     /// Top to bottom, each left to right.
-    pub rows: Vec<Vec<ScreenId>>,
-    pub plan: Vec<Spot<ScreenId>>,
+    pub rows: Vec<Vec<K>>,
+    pub plan: Vec<Spot<K>>,
 }
 
-impl Desktop {
+impl<K: Key> Desktop<K> {
     /// The desktop for `monitors` as they stand in `placements`, seen from `center`,
     /// the `primary` monitor's row first. `sent`: the desktop the PC has. Its rows keep
     /// their monitors until one is clearly moved out, and while the rows stay its plan
     /// does as long as it fits what is seen as well, give or take a hand's tremor (see
     /// `prostir_layout::desk::settled`): a nudge changes nothing on the PC.
     pub fn of(
-        placements: &HashMap<ScreenId, Placement>,
-        monitors: &[(ScreenId, u32, u32)],
+        placements: &HashMap<K, Placement>,
+        monitors: &[(K, u32, u32)],
         center: (Vec3, f32),
         preset: Preset,
-        primary: Option<ScreenId>,
-        sent: Option<&Desktop>,
+        primary: Option<K>,
+        sent: Option<&Desktop<K>>,
     ) -> Self {
         let all = placed(placements, monitors);
         let room = Room::new(&frame(center, preset), &all);
         let rows = rows_seen(&room, &all, sent.map_or(&[], |d| &d.rows));
-        let size = |id: ScreenId| {
+        let size = |id: K| {
             let m = all.iter().find(|m| m.id == id)?;
             Some(desk::Size {
                 w: i32::try_from(m.px.w).ok()?,
@@ -498,37 +493,39 @@ impl Desktop {
     /// profile switched to keeps its rows, not its plan): their pairs of neighbours stay
     /// pairs until one is clearly moved away, and the plan is made afresh. `None` for no
     /// rows: rows then start afresh too.
-    pub fn history(rows: Vec<Vec<ScreenId>>) -> Option<Self> {
+    pub fn history(rows: Vec<Vec<K>>) -> Option<Self> {
         (!rows.is_empty()).then(|| Self {
             rows,
             plan: Vec::new(),
         })
     }
 
-    /// As `SetLayout` carries it: the rows, and where each monitor's spot is centred
-    /// (see `PROTOCOL.md`, "Layout").
-    pub fn wire(&self) -> Vec<Row> {
+    /// As `Arrange` carries it: the rows, and where each monitor's spot is centred
+    /// (see `PROTOCOL.md`, "Layout"), of the monitors `number` gives a number on the
+    /// PC it goes to (a PC hears of its own displays only).
+    pub fn wire(&self, number: impl Fn(K) -> Option<DisplayId>) -> Vec<Row> {
         self.rows
             .iter()
             .map(|row| Row {
                 entries: row
                     .iter()
-                    .map(|&id| {
-                        let at = self.plan.iter().find(|s| s.id == id).map(Spot::wire);
-                        Placed {
-                            id: DisplayId(id),
+                    .filter_map(|&k| {
+                        let at = self.plan.iter().find(|s| s.id == k).map(Spot::wire);
+                        Some(Placed {
+                            id: number(k)?,
                             center: at.map(|a| a.0),
                             middle: at.map(|a| a.1),
-                        }
+                        })
                     })
                     .collect(),
             })
+            .filter(|row| !row.entries.is_empty())
             .collect()
     }
 
     /// The monitors for the map in the menu: centre and half size in pixels, up
     /// positive.
-    pub fn spots(&self) -> HashMap<ScreenId, [f32; 4]> {
+    pub fn spots(&self) -> HashMap<K, [f32; 4]> {
         self.plan
             .iter()
             .map(|s| {
@@ -542,30 +539,36 @@ impl Desktop {
 
 /// What a [`Desktop`] is made of.
 #[derive(Debug, Clone, PartialEq)]
-struct DesktopInputs {
-    placed: Vec<(ScreenId, Placement, u32, u32)>,
+struct DesktopInputs<K> {
+    placed: Vec<(K, Placement, u32, u32)>,
     center: (Vec3, f32),
     preset: Preset,
-    primary: Option<ScreenId>,
-    sent: Option<Desktop>,
+    primary: Option<K>,
+    sent: Option<Desktop<K>>,
 }
 
 /// [`Desktop::of`], made again only when what it is made of changes: the headset asks
 /// for it every frame, and planning takes about a millisecond for six monitors.
-#[derive(Debug, Default)]
-pub struct DesktopMemo(RefCell<Option<(DesktopInputs, Desktop)>>);
+#[derive(Debug)]
+pub struct DesktopMemo<K>(RefCell<Option<(DesktopInputs<K>, Desktop<K>)>>);
 
-impl DesktopMemo {
+impl<K> Default for DesktopMemo<K> {
+    fn default() -> Self {
+        Self(RefCell::new(None))
+    }
+}
+
+impl<K: Key> DesktopMemo<K> {
     /// [`Desktop::of`] these.
     pub fn get(
         &self,
-        placements: &HashMap<ScreenId, Placement>,
-        monitors: &[(ScreenId, u32, u32)],
+        placements: &HashMap<K, Placement>,
+        monitors: &[(K, u32, u32)],
         center: (Vec3, f32),
         preset: Preset,
-        primary: Option<ScreenId>,
-        sent: Option<&Desktop>,
-    ) -> Desktop {
+        primary: Option<K>,
+        sent: Option<&Desktop<K>>,
+    ) -> Desktop<K> {
         let inputs = DesktopInputs {
             placed: monitors
                 .iter()
@@ -593,15 +596,15 @@ impl DesktopMemo {
 /// `prostir_layout::tidy`). `previous`: the rows the PC has. `lid`: the laptop screen,
 /// which is not lined up and moves only down out of the way of a monitor lined up over
 /// it.
-pub fn line_up(
-    placements: &HashMap<ScreenId, Placement>,
-    monitors: &[(ScreenId, u32, u32)],
+pub fn line_up<K: Key>(
+    placements: &HashMap<K, Placement>,
+    monitors: &[(K, u32, u32)],
     center: (Vec3, f32),
     preset: Preset,
-    primary: Option<ScreenId>,
-    previous: &[Vec<ScreenId>],
-    lid: Option<ScreenId>,
-) -> HashMap<ScreenId, Placement> {
+    primary: Option<K>,
+    previous: &[Vec<K>],
+    lid: Option<K>,
+) -> HashMap<K, Placement> {
     let all = placed(placements, monitors);
     let frame = frame(center, preset);
     let rows = rows_seen(&Room::new(&frame, &all), &all, previous);
@@ -610,33 +613,31 @@ pub fn line_up(
         .collect()
 }
 
-/// Where a new monitor `new` (id, pixel size) goes next to the placed ones of
-/// `monitors`, which do not move: at the end of the longest row with room, the end
-/// nearest the gaze (a direction in the room); over the top row or under the bottom
-/// one only when no row has room; covering nothing (see `prostir_layout::place`). The first one goes straight ahead on a circle of
+/// Where a new monitor of `size` pixels goes next to the placed ones of `monitors`
+/// (it is not among them), which do not move: at the end of the longest row with
+/// room, the end nearest the gaze (a direction in the room); over the top row or under
+/// the bottom one only when no row has room; covering nothing (see
+/// `prostir_layout::place`). The first one goes straight ahead on a circle of
 /// `radius`. `previous`: the rows the PC has.
 #[allow(clippy::too_many_arguments)]
-pub fn place_new(
-    placements: &HashMap<ScreenId, Placement>,
-    monitors: &[(ScreenId, u32, u32)],
-    new: (ScreenId, u32, u32),
+pub fn place_new<K: Key>(
+    placements: &HashMap<K, Placement>,
+    monitors: &[(K, u32, u32)],
+    size: (u32, u32),
     center: (Vec3, f32),
     preset: Preset,
     gaze: Vec3,
-    previous: &[Vec<ScreenId>],
+    previous: &[Vec<K>],
     radius: f32,
 ) -> Placement {
-    let all: Vec<Monitor<ScreenId>> = placed(placements, monitors)
-        .into_iter()
-        .filter(|m| m.id != new.0)
-        .collect();
+    let all = placed(placements, monitors);
     let frame = frame(center, preset);
     let rows = rows_seen(&Room::new(&frame, &all), &all, previous);
     place::place_new(
         &all,
         &frame,
         gaze,
-        pixel_sizes(&[new])[0].1,
+        prostir_layout::space::PixelSize::new(size.0, size.1),
         Some(&rows),
         &Limits {
             radius,
@@ -793,28 +794,11 @@ pub fn image_point(
     }
 }
 
-/// What a hand can hold: a display, the menu or the keyboard window.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Held {
-    Screen(ScreenId),
-    Menu,
-    Keyboard,
-}
-
-impl Held {
-    /// The display held, if a display is.
-    pub fn screen(self) -> Option<ScreenId> {
-        match self {
-            Self::Screen(id) => Some(id),
-            Self::Menu | Self::Keyboard => None,
-        }
-    }
-}
-
-/// A monitor held by one controller.
+/// A thing held by one controller or hand: a display, the menu or the keyboard
+/// window.
 #[derive(Debug, Clone, Copy)]
 pub struct Grab {
-    pub id: Held,
+    pub id: Thing,
     /// Distance from the controller to the grabbed point.
     pub distance: f32,
     /// Grabbed point relative to the monitor centre, in the monitor's plane, as a
@@ -834,7 +818,7 @@ pub struct Grab {
 const NEAR_GRAB: f32 = 0.35;
 
 impl Grab {
-    pub fn start(id: Held, distance: f32, local_hit: Vec2, placement: &Placement) -> Self {
+    pub fn start(id: Thing, distance: f32, local_hit: Vec2, placement: &Placement) -> Self {
         Self {
             id,
             distance,
@@ -904,7 +888,7 @@ mod grab_tests {
             width: 0.6,
         };
         let hand = Vec3::new(0.05, 1.35, -0.4);
-        let mut g = Grab::start(Held::Screen(1), 0.2, Vec2::ZERO, &p).with_reach(hand, head);
+        let mut g = Grab::start(Thing::Menu, 0.2, Vec2::ZERO, &p).with_reach(hand, head);
         let ray = |o: Vec3| Ray {
             origin: o,
             dir: -Vec3::Z,
@@ -922,8 +906,8 @@ mod grab_tests {
     }
 }
 
-/// The desk arrangement: where the user put the monitors and the laptop screen. Read
-/// from `layout.txt` once at the start and held in memory from then on (the file
+/// The desk arrangement: where the user put the monitors and the PCs' own displays.
+/// Read from `layout.txt` once at the start and held in memory from then on (the file
 /// follows it and is never read again). Cinema mode shows its own one-screen view
 /// instead, and that view never takes the desk arrangement's place here.
 #[derive(Default)]
@@ -934,41 +918,66 @@ pub struct Desk {
 /// A stream's size in pixels, width then height.
 pub type PixelSize = (u32, u32);
 
-/// The desk arrangement as `layout.txt` keeps it.
-#[derive(Default, Clone)]
-pub struct Arrangement {
-    pub placements: HashMap<ScreenId, Placement>,
-    /// The stream size each placement was made for. Files from 0.1.0 have none.
-    pub sizes: HashMap<ScreenId, PixelSize>,
-    /// The eye and the yaw the arrangement was laid out around. Files from 0.1.0 have
-    /// none.
+/// An arrangement as `layout.txt` keeps the desk one, of the displays of every PC.
+#[derive(Clone)]
+pub struct Arrangement<K = DisplayKey> {
+    pub placements: HashMap<K, Placement>,
+    /// The stream size each placement was made for.
+    pub sizes: HashMap<K, PixelSize>,
+    /// The eye and the yaw the arrangement was laid out around.
     pub center: Option<(Vec3, f32)>,
-    /// The circle it stands on. Files from before 0.2.0 have none ([`RADIUS`]).
+    /// The circle it stands on.
     pub radius: Option<f32>,
 }
 
+impl<K> Default for Arrangement<K> {
+    fn default() -> Self {
+        Self {
+            placements: HashMap::new(),
+            sizes: HashMap::new(),
+            center: None,
+            radius: None,
+        }
+    }
+}
+
 impl Desk {
-    /// The arrangement `layout.txt` holds (of monitors and the PC's displays: window
-    /// panels are placed afresh when they appear, and never saved).
-    pub fn parse(text: &str) -> Self {
+    /// The arrangement `layout.txt` holds (of monitors and the PCs' own displays:
+    /// window panels are placed afresh when they appear, and never saved):
+    ///
+    /// ```text
+    /// format 2
+    /// center 0 1.6 0 0.25
+    /// radius 1.3
+    /// 0123456789abcdef:3 -0.6 1.6 -1.2 0 0.2 0 0.98 0.77 2560x1440
+    /// ```
+    ///
+    /// A file this version does not write so is not read at all.
+    pub fn parse(text: &str) -> Result<Self, LoadError> {
         let mut saved = Arrangement::default();
-        for line in text.lines() {
-            if let Some(center) = parse_center(line) {
-                saved.center = Some(center);
-            } else if let Some(r) = line
-                .strip_prefix("radius ")
-                .and_then(|r| r.trim().parse::<f32>().ok())
-                .filter(|r| r.is_finite() && *r > 0.1)
-            {
-                saved.radius = Some(r);
-            } else if let Some((id, p, size)) = parse_placement(line) {
-                saved.placements.insert(id, p);
-                if let Some(size) = size {
-                    saved.sizes.insert(id, size);
+        for (n, line) in persist::body(text)? {
+            let bad = LoadError::Line(n);
+            let (word, rest) = line.split_once(' ').ok_or(bad)?;
+            match word {
+                "center" if saved.center.is_none() => {
+                    saved.center = Some(parse_center(rest).ok_or(bad)?);
+                }
+                "radius" if saved.radius.is_none() => {
+                    saved.radius = Some(parse_radius(rest).ok_or(bad)?);
+                }
+                _ => {
+                    let key = DisplayKey::parse(word).ok_or(bad)?;
+                    let (p, size) = parse_place(rest, true).ok_or(bad)?;
+                    if saved.placements.insert(key, p).is_some() {
+                        return Err(bad);
+                    }
+                    if let Some(size) = size {
+                        saved.sizes.insert(key, size);
+                    }
                 }
             }
         }
-        Self { saved }
+        Ok(Self { saved })
     }
 
     /// The desk arrangement as last kept.
@@ -983,8 +992,8 @@ impl Desk {
     /// next.
     pub fn keep(
         &mut self,
-        placements: impl IntoIterator<Item = (ScreenId, Placement)>,
-        sizes: &HashMap<ScreenId, PixelSize>,
+        placements: impl IntoIterator<Item = (DisplayKey, Placement)>,
+        sizes: &HashMap<DisplayKey, PixelSize>,
         (center, radius): ((Vec3, f32), f32),
         cinema: bool,
     ) -> bool {
@@ -1006,44 +1015,60 @@ impl Desk {
         true
     }
 
-    /// The text of `layout.txt`, added to `out` (a buffer kept between saves). Older
-    /// readers skip the `radius` line.
+    /// The text of `layout.txt` (see [`Desk::parse`]), added to `out` (a buffer kept
+    /// between saves).
     pub fn write_text(&self, out: &mut String) {
         use std::fmt::Write as _;
         let saved = &self.saved;
+        persist::write_format(out);
         if let Some((eye, yaw)) = saved.center {
             let _ = writeln!(out, "center {} {} {} {yaw}", eye.x, eye.y, eye.z);
         }
         if let Some(radius) = saved.radius {
             let _ = writeln!(out, "radius {radius}");
         }
-        for id in ascending(&saved.placements) {
-            if let Some(p) = saved.placements.get(&id) {
-                write_placement(out, id, p, saved.sizes.get(&id).copied());
+        for key in ascending(&saved.placements) {
+            if let Some(p) = saved.placements.get(&key) {
+                let _ = write!(out, "{key}");
+                write_place(out, p, saved.sizes.get(&key).copied());
             }
         }
     }
 }
 
-/// Where the keyboard window lies, as `keyboard.txt` keeps it (one line, number 0).
-pub fn parse_keyboard(text: &str) -> Option<Placement> {
-    // The last such line, as before.
-    text.lines()
-        .rev()
-        .filter_map(parse_placement)
-        .find(|(id, _, _)| *id == 0)
-        .map(|(_, p, _)| p)
+/// Where the keyboard window lies, as `keyboard.txt` keeps it:
+///
+/// ```text
+/// format 2
+/// keyboard 0 0.8 -0.4 -0.71 0 0 0.71 0.42
+/// ```
+pub fn parse_keyboard(text: &str) -> Result<Placement, LoadError> {
+    let mut place = None;
+    let mut last = 1;
+    for (n, line) in persist::body(text)? {
+        last = n;
+        let p = line
+            .strip_prefix("keyboard ")
+            .and_then(|rest| parse_place(rest, false))
+            .filter(|_| place.is_none())
+            .ok_or(LoadError::Line(n))?;
+        place = Some(p.0);
+    }
+    place.ok_or(LoadError::Line(last + 1))
 }
 
-/// The text of `keyboard.txt` for the window at `place`, added to `out`.
+/// The text of `keyboard.txt` for the window at `place` (see [`parse_keyboard`]),
+/// added to `out`.
 pub fn write_keyboard(out: &mut String, place: &Placement) {
-    write_placement(out, 0, place, None);
+    persist::write_format(out);
+    out.push_str("keyboard");
+    write_place(out, place, None);
 }
 
-/// The numbers of `map` from the smallest up, without a sorted copy (an arrangement
-/// has a handful).
-fn ascending<V>(map: &HashMap<ScreenId, V>) -> impl Iterator<Item = ScreenId> + '_ {
-    let mut last: Option<ScreenId> = None;
+/// The keys of `map` from the smallest up, without a sorted copy (an arrangement has
+/// a handful).
+fn ascending<K: Key, V>(map: &HashMap<K, V>) -> impl Iterator<Item = K> + '_ {
+    let mut last: Option<K> = None;
     std::iter::from_fn(move || {
         let next = map
             .keys()
@@ -1055,14 +1080,14 @@ fn ascending<V>(map: &HashMap<ScreenId, V>) -> impl Iterator<Item = ScreenId> + 
     })
 }
 
-/// `id x y z qx qy qz qw width`, then the stream size it was placed for (`2560x1440`)
-/// when known, added to `out`. Older readers skip the size: it is not a number.
-fn write_placement(out: &mut String, id: ScreenId, p: &Placement, size: Option<PixelSize>) {
+/// ` x y z qx qy qz qw width`, then the stream size it was placed for (` 2560x1440`)
+/// when known, and the end of the line, added to `out`.
+pub(crate) fn write_place(out: &mut String, p: &Placement, size: Option<PixelSize>) {
     use std::fmt::Write as _;
     let (pos, q) = (p.position, p.rotation);
     let _ = write!(
         out,
-        "{id} {} {} {} {} {} {} {} {}",
+        " {} {} {} {} {} {} {} {}",
         pos.x, pos.y, pos.z, q.x, q.y, q.z, q.w, p.width
     );
     if let Some((w, h)) = size {
@@ -1071,48 +1096,54 @@ fn write_placement(out: &mut String, id: ScreenId, p: &Placement, size: Option<P
     out.push('\n');
 }
 
-fn parse_placement(line: &str) -> Option<(ScreenId, Placement, Option<PixelSize>)> {
-    let mut words = line.split_whitespace();
-    let id: ScreenId = words.next()?.parse().ok()?;
-    let v: Vec<f32> = words
-        .by_ref()
-        .take(8)
-        .map(|w| w.parse().ok())
-        .collect::<Option<_>>()?;
-    if v.len() != 8 {
-        return None;
-    }
+/// `x y z qx qy qz qw width`, then (when `sized`) the stream size it was placed for
+/// if there is one (`2560x1440`), as [`write_place`] writes them: a position and a
+/// turn that are numbers, a width above nothing.
+pub(crate) fn parse_place(text: &str, sized: bool) -> Option<(Placement, Option<PixelSize>)> {
+    let mut words = text.split(' ');
+    let n = numbers::<8>(&mut words)?;
     let size = match words.next() {
         None => None,
-        Some(w) => {
+        Some(w) if sized => {
             let (w, h) = w.split_once('x')?;
             Some((w.parse().ok()?, h.parse().ok()?))
         }
+        Some(_) => return None,
     };
     if words.next().is_some() {
         return None;
     }
     let p = Placement {
-        position: Vec3::new(v[0], v[1], v[2]),
-        rotation: Quat::from_xyzw(v[3], v[4], v[5], v[6]).normalize(),
-        width: v[7],
+        position: Vec3::new(n[0], n[1], n[2]),
+        rotation: Quat::from_xyzw(n[3], n[4], n[5], n[6]).normalize(),
+        width: n[7],
     };
-    (p.position.is_finite() && p.rotation.is_finite() && p.width.is_finite())
-        .then_some((id, p, size))
+    (p.position.is_finite() && p.rotation.is_finite() && p.width.is_finite() && p.width > 0.0)
+        .then_some((p, size))
 }
 
-/// `center x y z yaw`: where the arrangement was laid out around.
-pub(crate) fn parse_center(line: &str) -> Option<(Vec3, f32)> {
-    let rest = line.strip_prefix("center ")?;
-    let v: Vec<f32> = rest
-        .split_whitespace()
-        .map(|w| w.parse().ok())
-        .collect::<Option<_>>()?;
-    let [x, y, z, yaw] = v[..] else {
-        return None;
-    };
+/// The next `N` words as numbers, if they are.
+fn numbers<'a, const N: usize>(words: &mut impl Iterator<Item = &'a str>) -> Option<[f32; N]> {
+    let mut out = [0.0; N];
+    for n in &mut out {
+        *n = words.next()?.parse().ok()?;
+    }
+    Some(out)
+}
+
+/// `x y z yaw`: where the arrangement was laid out around.
+pub(crate) fn parse_center(text: &str) -> Option<(Vec3, f32)> {
+    let mut words = text.split(' ');
+    let [x, y, z, yaw] = numbers::<4>(&mut words)?;
     let eye = Vec3::new(x, y, z);
-    (eye.is_finite() && yaw.is_finite()).then_some((eye, yaw))
+    (words.next().is_none() && eye.is_finite() && yaw.is_finite()).then_some((eye, yaw))
+}
+
+/// A circle's radius: a number over 10 cm.
+pub(crate) fn parse_radius(text: &str) -> Option<f32> {
+    text.parse::<f32>()
+        .ok()
+        .filter(|r| r.is_finite() && *r > 0.1)
 }
 
 /// `p` for a stream now `now` pixels in size instead of `was`: the same size of a
@@ -1131,7 +1162,7 @@ pub fn refit(p: Placement, was: PixelSize, now: PixelSize) -> Placement {
 
 /// Which way an arrangement faces from `eye`: the mean direction of its monitors, in
 /// the yaw convention of `center` (0 is -Z, positive turns towards -X).
-pub fn facing_yaw(placements: &HashMap<ScreenId, Placement>, eye: Vec3) -> Option<f32> {
+pub fn facing_yaw<K: Key>(placements: &HashMap<K, Placement>, eye: Vec3) -> Option<f32> {
     let (sin, cos) = placements
         .values()
         .map(|p| {
@@ -1155,10 +1186,10 @@ pub const DRAW_HOLD: f32 = 0.05;
 /// starts from that order, the new ones after it, and two next to each other swap only
 /// where the one drawn later is further by more than [`DRAW_HOLD`]. Nothing is
 /// allocated.
-pub fn draw_order(order: &mut [(f32, ScreenId)], before: &[ScreenId]) {
-    let rank = |id: ScreenId| before.iter().position(|b| *b == id).unwrap_or(usize::MAX);
+pub fn draw_order<K: Key>(order: &mut [(f32, K)], before: &[K]) {
+    let rank = |id: K| before.iter().position(|b| *b == id).unwrap_or(usize::MAX);
     // As drawn before, the new ones after, far to near (an insertion sort: in place).
-    let first = |a: &(f32, ScreenId), b: &(f32, ScreenId)| (rank(a.1), b.0) < (rank(b.1), a.0);
+    let first = |a: &(f32, K), b: &(f32, K)| (rank(a.1), b.0) < (rank(b.1), a.0);
     for i in 1..order.len() {
         let mut j = i;
         while j > 0 && first(&order[j], &order[j - 1]) {
@@ -1196,10 +1227,10 @@ pub fn carried(p: &Placement, from: (Vec3, f32), to: (Vec3, f32)) -> Placement {
 /// The yaw "In front" brings straight ahead, seen from `eye`: the `primary` monitor's
 /// direction, else the mean direction of `monitors` (what the user arranged around
 /// them, not the layout's old forward, which placing by hand has long left behind).
-pub fn ahead(
-    placements: &HashMap<ScreenId, Placement>,
-    monitors: &[ScreenId],
-    primary: Option<ScreenId>,
+pub fn ahead<K: Key>(
+    placements: &HashMap<K, Placement>,
+    monitors: &[K],
+    primary: Option<K>,
     eye: Vec3,
 ) -> Option<f32> {
     let direction = |p: &Placement| {
@@ -1222,6 +1253,27 @@ pub fn ahead(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ids::PcId;
+
+    /// Display `n` of the one PC of these tests.
+    fn k(n: u32) -> DisplayKey {
+        DisplayKey::new(PcId([5; 8]), DisplayId(n))
+    }
+
+    /// `map`, by the displays of the PC of these tests.
+    fn keyed<V>(map: HashMap<u32, V>) -> HashMap<DisplayKey, V> {
+        map.into_iter().map(|(n, v)| (k(n), v)).collect()
+    }
+
+    /// `map`, by the numbers of its displays.
+    fn numbered<V: Clone>(map: &HashMap<DisplayKey, V>) -> HashMap<u32, V> {
+        map.iter().map(|(k, v)| (k.id.0, v.clone())).collect()
+    }
+
+    /// Every number as it is on the PC.
+    fn as_is(n: u32) -> Option<DisplayId> {
+        Some(DisplayId(n))
+    }
 
     #[test]
     fn arc_has_no_gaps_and_faces_user() {
@@ -1280,13 +1332,13 @@ mod tests {
                 .wrapping_mul(6364136223846793005)
                 .wrapping_add(1442695040888963407);
             let n = 1 + (seed >> 33) as usize % 10;
-            let mons: Vec<(ScreenId, u32, u32)> = (0..n)
+            let mons: Vec<(u32, u32, u32)> = (0..n)
                 .map(|i| {
                     let (w, h) = sizes[(seed >> (i * 3 % 30 + 2)) as usize % sizes.len()];
-                    (i as ScreenId, w, h)
+                    (i as u32, w, h)
                 })
                 .collect();
-            let primary = Some(((seed >> 7) as usize % n) as ScreenId);
+            let primary = Some(((seed >> 7) as usize % n) as u32);
             let l = arrange(Preset::Arc, &mons, primary, None, None);
             let spans: Vec<_> = mons
                 .iter()
@@ -1470,7 +1522,7 @@ mod tests {
         assert_eq!(cinema_choice(&monitors, None), Some(1));
         assert_eq!(cinema_choice(&monitors, Some(9)), Some(1));
         assert_eq!(cinema_choice(&[(4, 1440, 2560)], None), Some(4));
-        assert!(cinema(&[], None).is_empty());
+        assert!(cinema::<u32>(&[], None).is_empty());
     }
 
     #[test]
@@ -1533,11 +1585,11 @@ mod tests {
 
     /// The desktop for `placements` as the PC gets it, seen from straight ahead.
     fn desktop_of(
-        placements: &HashMap<ScreenId, Placement>,
-        m: &[(ScreenId, u32, u32)],
+        placements: &HashMap<u32, Placement>,
+        m: &[(u32, u32, u32)],
         preset: Preset,
-        primary: Option<ScreenId>,
-    ) -> Desktop {
+        primary: Option<u32>,
+    ) -> Desktop<u32> {
         Desktop::of(placements, m, (Vec3::ZERO, 0.0), preset, primary, None)
     }
 
@@ -1562,7 +1614,7 @@ mod tests {
         let desktop = desktop_of(&lifted, &three, Preset::Arc, Some(1));
         assert_eq!(desktop.rows, vec![vec![2], vec![0, 1]]);
         // It is seen right over the middle monitor, not over the right edge.
-        let rows = desktop.wire();
+        let rows = desktop.wire(as_is);
         let seen_at = |row: usize, i: usize| rows[row].entries[i].center.unwrap();
         let middle = seen_at(1, 1);
         assert!((seen_at(0, 0) - middle).abs() < 150, "{rows:?}");
@@ -1682,11 +1734,11 @@ mod tests {
     /// What the PC makes of `desktop` as `SetLayout` brings it (as
     /// `crates/prostir/src/displays/` does): boxes from the wire, planned again.
     fn on_the_pc(
-        desktop: &Desktop,
-        m: &[(ScreenId, u32, u32)],
-        primary: Option<ScreenId>,
-    ) -> Vec<Spot<ScreenId>> {
-        let size = |id: ScreenId| {
+        desktop: &Desktop<u32>,
+        m: &[(u32, u32, u32)],
+        primary: Option<u32>,
+    ) -> Vec<Spot<u32>> {
+        let size = |id: u32| {
             let &(_, w, h) = m.iter().find(|x| x.0 == id)?;
             Some(desk::Size {
                 w: w as i32,
@@ -1695,7 +1747,7 @@ mod tests {
         };
         let boxes = desk::Boxes::new(
             desktop
-                .wire()
+                .wire(as_is)
                 .iter()
                 .flat_map(|r| &r.entries)
                 .filter_map(|e| {
@@ -1716,14 +1768,14 @@ mod tests {
     }
 
     /// The PC's desktop is the map's, to the pixel.
-    fn same_on_the_pc(desktop: &Desktop, m: &[(ScreenId, u32, u32)], primary: Option<ScreenId>) {
+    fn same_on_the_pc(desktop: &Desktop<u32>, m: &[(u32, u32, u32)], primary: Option<u32>) {
         let mut mine = desktop.plan.clone();
         mine.sort_by_key(|s| s.id);
         assert_eq!(on_the_pc(desktop, m, primary), mine, "{:?}", desktop.rows);
     }
 
     /// Whether two monitors cover each other as seen from `center`.
-    fn covered(placements: &HashMap<ScreenId, Placement>, m: &[(ScreenId, u32, u32)]) -> bool {
+    fn covered(placements: &HashMap<u32, Placement>, m: &[(u32, u32, u32)]) -> bool {
         let all = placed(placements, m);
         let seen = prostir_layout::space::see(&frame((Vec3::ZERO, 0.0), Preset::Arc), &all);
         seen.iter().enumerate().any(|(i, a)| {
@@ -1734,13 +1786,13 @@ mod tests {
     }
 
     /// Every row of `desktop` lies on one line (tops, middles or bottoms), side by side.
-    fn rows_on_a_line(desktop: &Desktop) {
+    fn rows_on_a_line(desktop: &Desktop<u32>) {
         for row in &desktop.rows {
-            let spots: Vec<Spot<ScreenId>> = row
+            let spots: Vec<Spot<u32>> = row
                 .iter()
                 .filter_map(|id| desktop.plan.iter().find(|s| s.id == *id).copied())
                 .collect();
-            let line = |f: &dyn Fn(&Spot<ScreenId>) -> i32| {
+            let line = |f: &dyn Fn(&Spot<u32>) -> i32| {
                 spots.iter().all(|s| (f(s) - f(&spots[0])).abs() <= 1)
             };
             assert!(
@@ -1817,9 +1869,19 @@ mod tests {
             (4, 1440, 2560),
         ];
         let four = &m[..4];
-        let new = |p: &HashMap<ScreenId, Placement>, of: &[(ScreenId, u32, u32)], gaze: Vec3| {
+        let new = |p: &HashMap<u32, Placement>, of: &[(u32, u32, u32)], gaze: Vec3| {
             let id = of[of.len() - 1];
-            place_new(p, of, id, center, Preset::Arc, gaze, &[], RADIUS)
+            let others = &of[..of.len() - 1];
+            place_new(
+                p,
+                others,
+                (id.1, id.2),
+                center,
+                Preset::Arc,
+                gaze,
+                &[],
+                RADIUS,
+            )
         };
         // Two side by side, two more put over them by hand.
         let mut p = arrange(Preset::Arc, &m[..2], Some(0), None, None);
@@ -1832,7 +1894,7 @@ mod tests {
         let desktop = desktop_of(&p, four, Preset::Arc, Some(0));
         assert_eq!(desktop.rows.len(), 2, "{:?}", desktop.rows);
         same_on_the_pc(&desktop, four, Some(0));
-        let same = |q: &HashMap<ScreenId, Placement>, what: &str| {
+        let same = |q: &HashMap<u32, Placement>, what: &str| {
             let again = Desktop::of(q, four, center, Preset::Arc, Some(0), Some(&desktop));
             assert_eq!(again, desktop, "{what}");
         };
@@ -1844,7 +1906,7 @@ mod tests {
         }
         assert!(!covered(&with, &m), "the new one covers nothing");
         let five = Desktop::of(&with, &m, center, Preset::Arc, Some(0), Some(&desktop));
-        let kept: Vec<Vec<ScreenId>> = five
+        let kept: Vec<Vec<u32>> = five
             .rows
             .iter()
             .map(|r| r.iter().copied().filter(|id| *id != 4).collect::<Vec<_>>())
@@ -1860,8 +1922,8 @@ mod tests {
         same(&with, "removed");
         // The headset app restarted.
         let mut desk = Desk::default();
-        desk.keep(p.clone(), &HashMap::new(), (center, RADIUS), false);
-        same(&reread(&desk).saved.placements, "restarted");
+        desk.keep(keyed(p.clone()), &HashMap::new(), (center, RADIUS), false);
+        same(&numbered(&reread(&desk).saved.placements), "restarted");
         // Lined up again.
         same(
             &line_up(&p, four, center, Preset::Arc, Some(0), &desktop.rows, None),
@@ -1876,7 +1938,7 @@ mod tests {
             all[0] = profile;
             reread_profiles(&all)
         };
-        let back: HashMap<ScreenId, Placement> = four
+        let back: HashMap<u32, Placement> = four
             .iter()
             .map(|x| x.0)
             .zip(text[0].places.clone())
@@ -1886,17 +1948,16 @@ mod tests {
 
     /// `top`, moved up as a whole to stand over `below` with a hand's gap.
     fn raised(
-        top: &HashMap<ScreenId, Placement>,
-        below: &HashMap<ScreenId, Placement>,
-        m: &[(ScreenId, u32, u32)],
-    ) -> HashMap<ScreenId, Placement> {
-        let height = |p: &HashMap<ScreenId, Placement>, id: ScreenId| {
+        top: &HashMap<u32, Placement>,
+        below: &HashMap<u32, Placement>,
+        m: &[(u32, u32, u32)],
+    ) -> HashMap<u32, Placement> {
+        let height = |p: &HashMap<u32, Placement>, id: u32| {
             let (_, w, h) = m.iter().find(|x| x.0 == id).copied().unwrap();
             p[&id].width * h as f32 / w as f32
         };
-        let tallest = |p: &HashMap<ScreenId, Placement>| {
-            p.keys().map(|id| height(p, *id)).fold(0.0f32, f32::max)
-        };
+        let tallest =
+            |p: &HashMap<u32, Placement>| p.keys().map(|id| height(p, *id)).fold(0.0f32, f32::max);
         let lift = (tallest(top) + tallest(below)) / 2.0 + 0.05;
         let mut out = top.clone();
         for id in top.keys() {
@@ -1906,7 +1967,7 @@ mod tests {
     }
 
     /// Rows of `p` as the PC gets them, and the row that holds `id`.
-    fn row_of(rows: &[Vec<ScreenId>], id: ScreenId) -> usize {
+    fn row_of(rows: &[Vec<u32>], id: u32) -> usize {
         rows.iter().position(|r| r.contains(&id)).unwrap()
     }
 
@@ -1943,7 +2004,16 @@ mod tests {
             let mut with = p.clone();
             with.insert(
                 104,
-                place_new(&p, &m, m[5], center, Preset::Arc, gaze, &rows, RADIUS),
+                place_new(
+                    &p,
+                    &m[..5],
+                    (m[5].1, m[5].2),
+                    center,
+                    Preset::Arc,
+                    gaze,
+                    &rows,
+                    RADIUS,
+                ),
             );
             assert!(!covered(&with, &m), "it covers nothing");
             let after = desktop_of(&with, &m, Preset::Arc, Some(1)).rows;
@@ -1974,8 +2044,8 @@ mod tests {
         for n in [4, 5] {
             let at = place_new(
                 &p,
-                &m[..=n],
-                m[n],
+                &m[..n],
+                (m[n].1, m[n].2),
                 center,
                 Preset::Arc,
                 ahead,
@@ -2011,11 +2081,11 @@ mod tests {
     /// `placements` with monitor `id` turned `right` radians around the eye (to the
     /// right when positive) and moved `up` metres.
     fn moved(
-        placements: &HashMap<ScreenId, Placement>,
-        id: ScreenId,
+        placements: &HashMap<u32, Placement>,
+        id: u32,
         right: f32,
         up: f32,
-    ) -> HashMap<ScreenId, Placement> {
+    ) -> HashMap<u32, Placement> {
         let turn = Quat::from_rotation_y(-right);
         let mut out = placements.clone();
         let p = out.get_mut(&id).unwrap();
@@ -2035,11 +2105,11 @@ mod tests {
         let three = [(0, 2560, 1440), (1, 1440, 2560), (2, 2560, 1440)];
         let start = arrange(Preset::Arc, &three, Some(1), None, None);
         let mut rng = Rng(0x0f11);
-        let mut at: HashMap<ScreenId, (f32, f32)> = HashMap::new();
-        let mut sent: Option<Desktop> = None;
+        let mut at: HashMap<u32, (f32, f32)> = HashMap::new();
+        let mut sent: Option<Desktop<u32>> = None;
         let mut flips = 0;
         for drag in 0..60 {
-            let id = (drag % 3) as ScreenId;
+            let id = drag % 3;
             let from = at.get(&id).copied().unwrap_or_default();
             let to = (rng.float(-1.5, 1.5).to_radians(), rng.float(-0.08, 0.08));
             for f in 1..=20 {
@@ -2059,7 +2129,7 @@ mod tests {
                     flips += 1;
                 }
                 let pc = on_the_pc(&desktop, &three, Some(1));
-                let spot = |id: ScreenId| pc.iter().find(|s| s.id == id).copied().unwrap();
+                let spot = |id: u32| pc.iter().find(|s| s.id == id).copied().unwrap();
                 assert_eq!(
                     spot(0).crossing(&spot(1)),
                     Some(prostir_layout::space::Side::Right)
@@ -2077,10 +2147,10 @@ mod tests {
 
     /// `placements` turned by `turn` about the eye at `eye`.
     fn turned_about(
-        placements: &HashMap<ScreenId, Placement>,
+        placements: &HashMap<u32, Placement>,
         eye: Vec3,
         turn: Quat,
-    ) -> HashMap<ScreenId, Placement> {
+    ) -> HashMap<u32, Placement> {
         placements
             .iter()
             .map(|(id, p)| {
@@ -2118,7 +2188,7 @@ mod tests {
                     p.position += eye;
                     (id, p)
                 })
-                .collect::<HashMap<ScreenId, Placement>>()
+                .collect::<HashMap<u32, Placement>>()
             };
             for back in [10.0f32, 20.0, 35.0] {
                 let yaw = Quat::from_rotation_y(center.1);
@@ -2152,7 +2222,7 @@ mod tests {
                     );
                 }
                 for (a, b) in [(0u32, 1u32), (1, 2)] {
-                    let h = |id: ScreenId| {
+                    let h = |id: u32| {
                         let s = m.iter().find(|x| x.0 == id).unwrap();
                         out[&id].width * s.2 as f32 / s.1 as f32
                     };
@@ -2243,12 +2313,11 @@ mod tests {
         let three = [(0, 2560, 1440), (1, 1440, 2560), (2, 2560, 1440)];
         let memo = DesktopMemo::default();
         let mut p = arrange(Preset::Arc, &three, Some(1), None, None);
-        let of = |p: &HashMap<ScreenId, Placement>| {
+        let of = |p: &HashMap<u32, Placement>| {
             Desktop::of(p, &three, center, Preset::Arc, Some(1), None)
         };
-        let get = |p: &HashMap<ScreenId, Placement>| {
-            memo.get(p, &three, center, Preset::Arc, Some(1), None)
-        };
+        let get =
+            |p: &HashMap<u32, Placement>| memo.get(p, &three, center, Preset::Arc, Some(1), None);
         assert_eq!(get(&p), of(&p));
         assert_eq!(get(&p), of(&p));
         p.get_mut(&2).unwrap().position += Vec3::new(0.0, 0.3, 0.0);
@@ -2259,7 +2328,7 @@ mod tests {
     fn reread(desk: &Desk) -> Desk {
         let mut text = String::new();
         desk.write_text(&mut text);
-        Desk::parse(&text)
+        Desk::parse(&text).unwrap()
     }
 
     /// `profiles` written to their file and read back.
@@ -2279,14 +2348,15 @@ mod tests {
         let two = [(0, 2560, 1440), (1, 1920, 1080)];
         let sizes = HashMap::from([(0, (2560, 1440)), (1, (1920, 1080))]);
         let center = (Vec3::ZERO, 0.0);
+        let sizes = keyed(sizes);
         let mut arranged = arrange(Preset::Arc, &two, Some(0), None, None);
         arranged.get_mut(&1).unwrap().position += Vec3::new(0.1, 0.3, 0.0);
-        assert!(desk.keep(arranged.clone(), &sizes, (center, RADIUS), false));
-        assert!(!desk.keep(cinema(&two, None), &sizes, (center, RADIUS), true));
+        assert!(desk.keep(keyed(arranged.clone()), &sizes, (center, RADIUS), false));
+        assert!(!desk.keep(keyed(cinema(&two, None)), &sizes, (center, RADIUS), true));
         for kept in [desk.arrangement(), reread(&desk).arrangement()] {
             assert_eq!(kept.placements.len(), 2);
             for (id, p) in &arranged {
-                assert!(kept.placements[id].position.distance(p.position) < 1e-5);
+                assert!(kept.placements[&k(*id)].position.distance(p.position) < 1e-5);
             }
         }
     }
@@ -2298,13 +2368,13 @@ mod tests {
     #[test]
     fn cinema_in_one_pass_needs_no_file() {
         let two = [(0, 2560, 1440), (1, 1920, 1080)];
-        let sizes = HashMap::from([(0, (2560, 1440)), (1, (1920, 1080))]);
+        let sizes = keyed(HashMap::from([(0, (2560, 1440)), (1, (1920, 1080))]));
         let center = (Vec3::ZERO, 0.0);
         // Started with an older desk on disk.
         let mut desk = reread(&{
             let mut was = Desk::default();
             was.keep(
-                arrange(Preset::Wall, &two, Some(0), None, None),
+                keyed(arrange(Preset::Wall, &two, Some(0), None, None)),
                 &sizes,
                 (center, RADIUS),
                 false,
@@ -2314,15 +2384,15 @@ mod tests {
         let mut at_desk = arrange(Preset::Arc, &two, Some(0), None, None);
         at_desk.get_mut(&0).unwrap().position += Vec3::new(-0.2, 0.1, 0.0);
         // Cinema on: the desk is kept first (`Scene::set_cinema`).
-        assert!(desk.keep(at_desk.clone(), &sizes, (center, RADIUS), false));
+        assert!(desk.keep(keyed(at_desk.clone()), &sizes, (center, RADIUS), false));
         // The cinema view, moved by hand, kept as cinema is not.
-        let mut view = cinema(&two, None);
+        let mut view = keyed(cinema(&two, None));
         for p in view.values_mut() {
             p.position += Vec3::new(0.3, 0.0, -0.4);
         }
         assert!(!desk.keep(view.clone(), &sizes, (center, RADIUS), true));
         // Saved as a profile while in cinema.
-        let monitors = [(0, 2560, 1440), (1, 1920, 1080)];
+        let monitors = [(k(0), 2560, 1440), (k(1), 1920, 1080)];
         let settings = crate::settings::Settings {
             cinema: true,
             ..crate::settings::Settings::default()
@@ -2333,13 +2403,25 @@ mod tests {
             center: Some(center),
             radius: Some(RADIUS),
         };
-        let profile =
-            crate::profiles::Profile::of(&monitors, Some(0), false, settings, live, &[], &desk);
+        let profile = crate::profiles::Profile::of(
+            &monitors,
+            Some(k(0)),
+            false,
+            settings,
+            live,
+            &[],
+            desk.arrangement(),
+        );
         assert_eq!(profile.places.len(), 2);
         // Cinema off: what `Scene::adopt_desk` takes.
         let back = desk.arrangement();
         for (i, id) in [0, 1].iter().enumerate() {
-            assert!(back.placements[id].position.distance(at_desk[id].position) < 1e-6);
+            assert!(
+                back.placements[&k(*id)]
+                    .position
+                    .distance(at_desk[id].position)
+                    < 1e-6
+            );
             assert!(profile.places[i].position.distance(at_desk[id].position) < 1e-6);
         }
     }
@@ -2351,13 +2433,17 @@ mod tests {
         let mut desk = Desk::default();
         let two = [(0, 2560, 1440), (1, 1440, 2560)];
         let arranged = arrange(Preset::Arc, &two, Some(0), None, None);
-        let sizes = HashMap::from([(0, (2560, 1440)), (1, (1440, 2560)), (7, (800, 600))]);
+        let sizes = keyed(HashMap::from([
+            (0, (2560, 1440)),
+            (1, (1440, 2560)),
+            (7, (800, 600)),
+        ]));
         let center = (Vec3::new(0.1, 0.0, -0.2), 0.7);
-        desk.keep(arranged, &sizes, (center, RADIUS), false);
+        desk.keep(keyed(arranged), &sizes, (center, RADIUS), false);
         let reread = reread(&desk);
         for saved in [desk.arrangement(), reread.arrangement()] {
             assert_eq!(saved.sizes.len(), 2);
-            assert_eq!(saved.sizes[&1], (1440, 2560));
+            assert_eq!(saved.sizes[&k(1)], (1440, 2560));
             assert_eq!(saved.radius, Some(RADIUS));
             let (eye, yaw) = saved.center.unwrap();
             assert!(eye.distance(center.0) < 1e-6 && (yaw - center.1).abs() < 1e-6);
@@ -2371,21 +2457,18 @@ mod tests {
         assert_eq!(text, again);
         let ids: Vec<&str> = text
             .lines()
-            .skip(2)
+            .skip(3)
             .filter_map(|l| l.split(' ').next())
             .collect();
-        assert_eq!(ids, ["0", "1"]);
+        assert_eq!(ids, [k(0).to_string(), k(1).to_string()]);
     }
 
     /// The numbers of a map from the smallest up, each once.
     #[test]
     fn ascending_numbers() {
-        let map = HashMap::from([(9, ()), (0, ()), (4, ()), (ScreenId::MAX, ()), (2, ())]);
-        assert_eq!(
-            ascending(&map).collect::<Vec<_>>(),
-            [0, 2, 4, 9, ScreenId::MAX]
-        );
-        assert_eq!(ascending(&HashMap::<ScreenId, ()>::new()).count(), 0);
+        let map = HashMap::from([(9, ()), (0, ()), (4, ()), (u32::MAX, ()), (2, ())]);
+        assert_eq!(ascending(&map).collect::<Vec<_>>(), [0, 2, 4, 9, u32::MAX]);
+        assert_eq!(ascending(&HashMap::<u32, ()>::new()).count(), 0);
     }
 
     /// Where the keyboard window lies comes back as saved.
@@ -2402,33 +2485,92 @@ mod tests {
         assert!(back.position.distance(place.position) < 1e-6);
         assert!(back.rotation.angle_between(place.rotation) < 1e-4);
         assert!((back.width - place.width).abs() < 1e-6);
-        assert!(parse_keyboard("").is_none());
-        assert!(parse_keyboard("garbage\n").is_none());
+        assert_eq!(text.lines().next(), Some(persist::FORMAT));
+        assert_eq!(parse_keyboard(""), Err(LoadError::Format));
+        assert_eq!(
+            parse_keyboard("format 2\ngarbage\n"),
+            Err(LoadError::Line(2))
+        );
+        assert_eq!(parse_keyboard("format 2\n"), Err(LoadError::Line(2)));
+        let twice = format!("{text}{}", text.lines().nth(1).unwrap());
+        assert_eq!(
+            parse_keyboard(&format!("{twice}\n")),
+            Err(LoadError::Line(3))
+        );
+        // As 0.1 wrote it.
+        assert_eq!(
+            parse_keyboard("0 0.1 1.2 -0.4 -0.56 0 0 0.83 0.5\n"),
+            Err(LoadError::Format)
+        );
     }
 
-    /// A file written by 0.1.0 (no sizes, no center) still reads; and a 0.1.0 reader,
-    /// which keeps lines of exactly nine numbers, still reads ours.
+    /// What `layout.txt` holds in format 2 comes back; a file of 0.1 (lines of a
+    /// number and eight more) is not read, nor one with a line it does not write: a
+    /// display twice, a number without its PC, a center or a radius twice, a size
+    /// that is not one, a width of nothing, a turn of nothing, words after the size.
     #[test]
-    fn desk_reads_and_is_read_by_0_1_0() {
-        let mut desk = Desk::parse(
-            "0 -0.5 -0.08 -0.9 0 0.2 0 0.98 1.38\n1 0.5 -0.08 -0.9 0 -0.2 0 0.98 1.03\n",
-        );
-        let saved = desk.arrangement().clone();
+    fn desk_format_2() {
+        let text = "format 2\ncenter 0 1.6 0 0.25\nradius 1.3\n\
+                    0123456789abcdef:3 -0.5 1.5 -0.9 0 0.2 0 0.98 1.38 2560x1440\n\
+                    0123456789abcdef:12 0.5 1.5 -0.9 0 -0.2 0 0.98 1.03\n";
+        let desk = Desk::parse(text).unwrap();
+        let saved = desk.arrangement();
+        let pc = PcId::parse("0123456789abcdef").unwrap();
+        let three = DisplayKey::new(pc, DisplayId(3));
+        let twelve = DisplayKey::new(pc, DisplayId(12));
         assert_eq!(saved.placements.len(), 2);
-        assert!(saved.sizes.is_empty() && saved.center.is_none());
-        assert!((saved.placements[&1].width - 1.03).abs() < 1e-6);
-
-        let sizes = HashMap::from([(0, (2560, 1440))]);
-        desk.keep(saved.placements, &sizes, ((Vec3::ZERO, 0.3), 1.3), false);
-        let mut text = String::new();
-        desk.write_text(&mut text);
-        let old_reader = |line: &str| {
-            line.split_whitespace()
-                .filter_map(|w| w.parse::<f32>().ok())
-                .count()
-                == 9
-        };
-        assert_eq!(text.lines().filter(|l| old_reader(l)).count(), 2);
+        assert_eq!(saved.sizes.get(&three), Some(&(2560, 1440)));
+        assert_eq!(saved.sizes.get(&twelve), None);
+        assert!((saved.placements[&twelve].width - 1.03).abs() < 1e-6);
+        assert_eq!(saved.radius, Some(1.3));
+        assert_eq!(saved.center, Some((Vec3::new(0.0, 1.6, 0.0), 0.25)));
+        let mut again = String::new();
+        desk.write_text(&mut again);
+        let back = Desk::parse(&again).unwrap();
+        for (key, p) in &saved.placements {
+            let q = back.arrangement().placements[key];
+            assert!(q.position.distance(p.position) < 1e-6 && (q.width - p.width).abs() < 1e-6);
+            assert!(q.rotation.angle_between(p.rotation) < 1e-4);
+        }
+        assert!(again.starts_with("format 2\ncenter 0 1.6 0 0.25\nradius 1.3\n"));
+        let old = "0 -0.5 -0.08 -0.9 0 0.2 0 0.98 1.38\n1 0.5 -0.08 -0.9 0 -0.2 0 0.98 1.03\n";
+        assert_eq!(Desk::parse(old).err(), Some(LoadError::Format));
+        let place = "-0.5 1.5 -0.9 0 0.2 0 0.98 1.38";
+        for (bad, line) in [
+            (
+                format!("0123456789abcdef:3 {place}\n0123456789abcdef:3 {place}\n"),
+                3,
+            ),
+            (format!("3 {place}\n"), 2),
+            ("center 0 1.6 0 0\ncenter 0 1.6 0 0\n".to_owned(), 3),
+            ("radius 1.3\nradius 1.3\n".to_owned(), 3),
+            ("radius 0\n".to_owned(), 2),
+            ("center 0 1.6 0\n".to_owned(), 2),
+            (format!("0123456789abcdef:3 {place} 2560\n"), 2),
+            ("0123456789abcdef:3 0 0 -1 0 0 0 1 0\n".to_owned(), 2),
+            ("0123456789abcdef:3 0 0 -1 0 0 0 0 1\n".to_owned(), 2),
+            (format!("0123456789abcdef:3 {place} 2560x1440 more\n"), 2),
+            ("mirror on\n".to_owned(), 2),
+            ("\n".to_owned(), 2),
+        ] {
+            let text = format!("format 2\n{bad}");
+            assert_eq!(
+                Desk::parse(&text).err(),
+                Some(LoadError::Line(line)),
+                "{bad:?}"
+            );
+        }
+        // Nothing kept yet: only the format line.
+        let mut empty = String::new();
+        Desk::default().write_text(&mut empty);
+        assert_eq!(empty, "format 2\n");
+        assert!(
+            Desk::parse(&empty)
+                .unwrap()
+                .arrangement()
+                .placements
+                .is_empty()
+        );
     }
 
     /// A monitor that comes back with another resolution keeps the size of a pixel.
@@ -2455,7 +2597,7 @@ mod tests {
         );
         let yaw = 0.8f32;
         let turn = Quat::from_rotation_y(yaw);
-        let turned: HashMap<ScreenId, Placement> = row
+        let turned: HashMap<u32, Placement> = row
             .iter()
             .map(|(id, p)| {
                 (
@@ -2474,10 +2616,10 @@ mod tests {
 
     /// `p` with every monitor carried from `from` to `to` (see [`carried`]).
     fn carried_all(
-        p: &HashMap<ScreenId, Placement>,
+        p: &HashMap<u32, Placement>,
         from: (Vec3, f32),
         to: (Vec3, f32),
-    ) -> HashMap<ScreenId, Placement> {
+    ) -> HashMap<u32, Placement> {
         p.iter().map(|(k, q)| (*k, carried(q, from, to))).collect()
     }
 
@@ -2486,11 +2628,11 @@ mod tests {
     /// (metres): 0 when the user sees the one arrangement from the one eye as the other
     /// from the other.
     fn seen_apart(
-        a: &HashMap<ScreenId, Placement>,
+        a: &HashMap<u32, Placement>,
         ca: (Vec3, f32),
-        b: &HashMap<ScreenId, Placement>,
+        b: &HashMap<u32, Placement>,
         cb: (Vec3, f32),
-        m: &[(ScreenId, u32, u32)],
+        m: &[(u32, u32, u32)],
     ) -> f32 {
         let origin = (Vec3::ZERO, 0.0);
         let first = Some(m[0].0);
@@ -2513,13 +2655,13 @@ mod tests {
     /// `center` so the primary monitor is straight ahead of a head at `head` looking
     /// along `yaw`, and carried to it; the new center.
     fn in_front(
-        p: &HashMap<ScreenId, Placement>,
-        m: &[(ScreenId, u32, u32)],
-        primary: Option<ScreenId>,
+        p: &HashMap<u32, Placement>,
+        m: &[(u32, u32, u32)],
+        primary: Option<u32>,
         center: (Vec3, f32),
         head: (Vec3, f32),
-    ) -> (HashMap<ScreenId, Placement>, (Vec3, f32)) {
-        let ids: Vec<ScreenId> = m.iter().map(|x| x.0).collect();
+    ) -> (HashMap<u32, Placement>, (Vec3, f32)) {
+        let ids: Vec<u32> = m.iter().map(|x| x.0).collect();
         let ahead = ahead(p, &ids, primary, center.0).unwrap_or(center.1);
         (carried_all(p, (center.0, ahead), head), head)
     }
@@ -2527,14 +2669,14 @@ mod tests {
     /// `id` let go by the magnet over (`up` 1) or under (-1) `under`, its middle `along`
     /// metres to the right of `under`'s, a hand's 3 cm off: glued edge to edge.
     fn glued(
-        p: &mut HashMap<ScreenId, Placement>,
-        m: &[(ScreenId, u32, u32)],
-        id: ScreenId,
-        under: ScreenId,
+        p: &mut HashMap<u32, Placement>,
+        m: &[(u32, u32, u32)],
+        id: u32,
+        under: u32,
         up: f32,
         along: f32,
     ) {
-        let tall = |id: ScreenId, width: f32| {
+        let tall = |id: u32, width: f32| {
             let &(_, w, h) = m.iter().find(|x| x.0 == id).unwrap();
             width * h as f32 / w as f32
         };
@@ -2564,14 +2706,14 @@ mod tests {
     /// same rows, and every monitor within a few pixels of the same spot (the eye carried
     /// along leaves the last bits of the floats).
     fn same_desktop(
-        a: &HashMap<ScreenId, Placement>,
+        a: &HashMap<u32, Placement>,
         ca: (Vec3, f32),
-        b: &HashMap<ScreenId, Placement>,
+        b: &HashMap<u32, Placement>,
         cb: (Vec3, f32),
-        m: &[(ScreenId, u32, u32)],
-        primary: Option<ScreenId>,
+        m: &[(u32, u32, u32)],
+        primary: Option<u32>,
         what: &str,
-    ) -> Desktop {
+    ) -> Desktop<u32> {
         let (da, db) = (
             Desktop::of(a, m, ca, Preset::Arc, primary, None),
             Desktop::of(b, m, cb, Preset::Arc, primary, None),
@@ -2593,12 +2735,12 @@ mod tests {
     }
 
     /// Where each monitor stands.
-    type Placements = HashMap<ScreenId, Placement>;
+    type Placements = HashMap<u32, Placement>;
 
     /// The owner's monitors of 2026-11-21: 1440x2560 | 2560x1440 primary | 2560x1440 |
     /// 1440x2560 by the preset, and the 3840x2160 let go by the magnet over the seam of
     /// the two landscape ones.
-    fn owners_stack() -> (Vec<(ScreenId, u32, u32)>, Placements) {
+    fn owners_stack() -> (Vec<(u32, u32, u32)>, Placements) {
         let owner = vec![
             (2, 1440, 2560),
             (1, 2560, 1440),
@@ -2615,11 +2757,11 @@ mod tests {
     /// The profile of `placements` seen from `center` with the rows the PC has
     /// (`Scene::current_profile`), written to its file and read back.
     fn saved_profile(
-        m: &[(ScreenId, u32, u32)],
-        primary: Option<ScreenId>,
-        placements: &HashMap<ScreenId, Placement>,
+        m: &[(u32, u32, u32)],
+        primary: Option<u32>,
+        placements: &HashMap<u32, Placement>,
         center: (Vec3, f32),
-        rows: &[Vec<ScreenId>],
+        rows: &[Vec<u32>],
     ) -> crate::profiles::Profile {
         let live = Arrangement {
             placements: placements.clone(),
@@ -2634,7 +2776,7 @@ mod tests {
             crate::settings::Settings::default(),
             live,
             rows,
-            &Desk::default(),
+            &Arrangement::default(),
         );
         let mut all = std::array::from_fn(crate::profiles::Profile::default_for);
         all[0] = profile;
@@ -2647,10 +2789,10 @@ mod tests {
     /// placements and the rows the headset then has (`Scene::profile_made`).
     fn switched_to(
         profile: &crate::profiles::Profile,
-        m: &[(ScreenId, u32, u32)],
+        m: &[(u32, u32, u32)],
         now: (Vec3, f32),
-    ) -> (HashMap<ScreenId, Placement>, Option<Desktop>) {
-        let made: Vec<(ScreenId, Placement)> = m
+    ) -> (HashMap<u32, Placement>, Option<Desktop<u32>>) {
+        let made: Vec<(u32, Placement)> = m
             .iter()
             .map(|x| x.0)
             .zip(profile.places.iter().copied())
@@ -2735,7 +2877,7 @@ mod tests {
                     );
                 }
             }
-            let check = |p: &HashMap<ScreenId, Placement>, at: (Vec3, f32), what: &str| {
+            let check = |p: &HashMap<u32, Placement>, at: (Vec3, f32), what: &str| {
                 let off = seen_apart(p, at, &kept, saved_at, m);
                 assert!(off < 2e-3, "{name}, {what}: {off} m from how it was");
                 same_desktop(
@@ -2784,7 +2926,7 @@ mod tests {
     fn a_profile_without_its_center_stays_in_the_room() {
         let three = [(0, 2560, 1440), (1, 2560, 1440), (2, 2560, 1440)];
         let p = arrange(Preset::Arc, &three, Some(1), None, None);
-        let made: Vec<(ScreenId, Placement)> = three.iter().map(|x| (x.0, p[&x.0])).collect();
+        let made: Vec<(u32, Placement)> = three.iter().map(|x| (x.0, p[&x.0])).collect();
         let now = (Vec3::new(0.3, 1.1, 0.2), 0.9);
         let (placed, rows) = crate::profiles::standing(&made, None, &[], now);
         for ((_, place), (_, back)) in made.iter().zip(&placed) {
@@ -2798,13 +2940,17 @@ mod tests {
     /// center and circle), not the cinema view; otherwise the arrangement as it stands.
     #[test]
     fn in_cinema_a_profile_keeps_the_desk_saved_before_it() {
-        let mut desk = Desk::default();
         let three = [(0, 2560, 1440), (1, 2560, 1440), (2, 2560, 1440)];
         let at_desk = arrange(Preset::Arc, &three, Some(1), None, None);
         let desk_center = (Vec3::new(0.1, 1.2, 0.3), 0.5);
-        desk.keep(at_desk.clone(), &HashMap::new(), (desk_center, 1.3), false);
+        let desk = Arrangement {
+            placements: at_desk.clone(),
+            sizes: HashMap::new(),
+            center: Some(desk_center),
+            radius: Some(1.3),
+        };
         let view = cinema(&three, None);
-        let live = |placements: &HashMap<ScreenId, Placement>| Arrangement {
+        let live = |placements: &HashMap<u32, Placement>| Arrangement {
             placements: placements.clone(),
             sizes: HashMap::new(),
             center: Some((Vec3::ZERO, 0.0)),
@@ -2929,7 +3075,7 @@ mod tests {
     /// The gaps as seen between the owner's 3840x2160 (6) and each of the two landscape
     /// monitors under it (1, 3), in the middle of the edge each shares with it, as a
     /// share of that one's height (negative where they overlap).
-    fn seams_of_6(p: &Placements, owner: &[(ScreenId, u32, u32)]) -> Vec<f64> {
+    fn seams_of_6(p: &Placements, owner: &[(u32, u32, u32)]) -> Vec<f64> {
         use prostir_layout::desk::View;
         let all = placed(p, owner);
         let room = Room::new(&frame((Vec3::ZERO, 0.0), Preset::Arc), &all);
@@ -3003,7 +3149,7 @@ mod tests {
             );
             // Its ends overlap the two as seen, by no more than OVERLAP_MAX.
             let all = placed(&once, &owner);
-            let of = |id: ScreenId| *all.iter().find(|m| m.id == id).unwrap();
+            let of = |id: u32| *all.iter().find(|m| m.id == id).unwrap();
             let deepest = [1, 3]
                 .iter()
                 .flat_map(|&below| {
@@ -3035,7 +3181,7 @@ mod tests {
         }
         // Not glued: pushed clear as before, covering neither.
         let once = lined(&upright);
-        let corners = |p: &Placements, id: ScreenId| {
+        let corners = |p: &Placements, id: u32| {
             let &(_, w, h) = owner.iter().find(|m| m.0 == id).unwrap();
             let q = p[&id];
             Placement {
@@ -3064,7 +3210,7 @@ mod tests {
     }
 
     /// The farthest any corner of `a` is from the same corner in `b` (metres).
-    fn farthest_corner(a: &Placements, b: &Placements, m: &[(ScreenId, u32, u32)]) -> f32 {
+    fn farthest_corner(a: &Placements, b: &Placements, m: &[(u32, u32, u32)]) -> f32 {
         m.iter()
             .map(|&(id, w, h)| {
                 let (p, q) = (a[&id], b[&id]);
@@ -3084,9 +3230,9 @@ mod tests {
     /// all, and new ones go by distance.
     #[test]
     fn the_draw_order_holds_for_monitors_at_one_distance() {
-        let mut before: Vec<ScreenId> = Vec::new();
-        let mut order: Vec<(f32, ScreenId)> = Vec::new();
-        let mut draw = |d: &[(f32, ScreenId)], before: &mut Vec<ScreenId>| {
+        let mut before: Vec<u32> = Vec::new();
+        let mut order: Vec<(f32, u32)> = Vec::new();
+        let mut draw = |d: &[(f32, u32)], before: &mut Vec<u32>| {
             order.clear();
             order.extend_from_slice(d);
             draw_order(&mut order, before);

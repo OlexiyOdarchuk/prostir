@@ -26,6 +26,7 @@ use prostir_proto::stats::{Gaps, Period};
 use prostir_proto::{ClientMsg, Codec, HeadsetGoodbye, HostMsg, PcGoodbye};
 
 use crate::audio::{Gains, Player};
+use crate::ids::PcId;
 use crate::lang::{Lang, Texts};
 use crate::mic::{Mic, Recorder};
 use crate::outbox::{Lanes, Outbox};
@@ -148,9 +149,11 @@ pub struct FoundHost {
 }
 
 pub enum NetEvent {
-    /// Connected; the handle sends requests (add monitor…) to the host. `opened_with`:
-    /// the headset's state as `Open` carried it.
+    /// Connected; the handle sends requests (add monitor…) to the host. `pc`: which PC
+    /// it is, by its key from the handshake. `opened_with`: the headset's state as
+    /// `Open` carried it.
     Connected {
+        pc: PcId,
         addr: SocketAddr,
         name: Option<String>,
         feedback: Feedback,
@@ -1173,6 +1176,7 @@ fn run_session(
         feedback.start_pings();
         steering.opened(addr, &feedback);
         let _ = events.send(NetEvent::Connected {
+            pc: PcId::of(&peer.key),
             addr,
             name,
             feedback: feedback.clone(),

@@ -9,10 +9,65 @@
 //! (the newest text of a file replaces one still waiting). The texts are written by
 //! the parts they belong to: `Settings::write_text`, `layout::Desk::write_text`,
 //! `profiles::write_text`, `layout::write_keyboard`.
+//!
+//! Every file but `settings.txt` starts with [`FORMAT`]. Nothing older is carried
+//! over: a file this version does not read (an older version's, an empty one, one cut
+//! short) is set aside as `*.old` at the start, and the app starts without it.
 
 mod disk;
 
+use std::fmt;
+
 pub use disk::{Loaded, PersistEvent, Saver, start, write_now};
+
+/// The first line of the files this version writes in its own way (all but
+/// `settings.txt`, whose `key value` lines every version reads). A file without it is
+/// not read: it is set aside as `*.old` and the app starts without it, so the next
+/// change of a format is a new number here, not a guess at what a file holds.
+pub const FORMAT: &str = "format 2";
+
+/// Why a file is not read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadError {
+    /// It does not start with [`FORMAT`]: an older version's file, or an empty one.
+    Format,
+    /// Its last line is not whole: the file was cut short.
+    Cut,
+    /// Line `n` (from 1) is none that this version writes.
+    Line(usize),
+}
+
+impl fmt::Display for LoadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Format => write!(f, "not \"{FORMAT}\""),
+            Self::Cut => f.write_str("cut short"),
+            Self::Line(n) => write!(f, "line {n} is not read"),
+        }
+    }
+}
+
+/// The lines of `text` after its [`FORMAT`] line, each with its number (the first is
+/// 2); an error for a text that is not a whole file of this format. Empty lines are
+/// there too (between sections).
+pub fn body(text: &str) -> Result<impl Iterator<Item = (usize, &str)>, LoadError> {
+    let rest = text.strip_prefix(FORMAT).ok_or(LoadError::Format)?;
+    let rest = match rest.strip_prefix('\n') {
+        Some(rest) => rest,
+        None if rest.is_empty() => return Err(LoadError::Cut),
+        None => return Err(LoadError::Format),
+    };
+    if !rest.is_empty() && !rest.ends_with('\n') {
+        return Err(LoadError::Cut);
+    }
+    Ok(rest.lines().enumerate().map(|(i, line)| (i + 2, line)))
+}
+
+/// The [`FORMAT`] line, added to `out`: the first of a file.
+pub fn write_format(out: &mut String) {
+    out.push_str(FORMAT);
+    out.push('\n');
+}
 
 /// A file the headset keeps in its own folder, in the order they are written when
 /// several wait: what is hardest to make again first.
@@ -99,6 +154,24 @@ mod tests {
         );
         assert!(dirty.is_empty());
         assert_eq!(dirty.take().count(), 0);
+    }
+
+    /// A whole file of this format gives its lines after the first, numbered as an
+    /// editor numbers them; an older one, an empty one or one cut short gives none.
+    #[test]
+    fn the_format_line() {
+        let lines: Vec<(usize, &str)> = body("format 2\na\n\nb\n").unwrap().collect();
+        assert_eq!(lines, [(2, "a"), (3, ""), (4, "b")]);
+        assert_eq!(body("format 2\n").unwrap().count(), 0);
+        assert_eq!(body("").err(), Some(LoadError::Format));
+        assert_eq!(body("center 0 1 0 0\n").err(), Some(LoadError::Format));
+        assert_eq!(body("format 20\n").err(), Some(LoadError::Format));
+        assert_eq!(body("format 2").err(), Some(LoadError::Cut));
+        assert_eq!(body("format 2\na 1 2").err(), Some(LoadError::Cut));
+        let mut out = String::from("old");
+        out.clear();
+        write_format(&mut out);
+        assert_eq!(out, "format 2\n");
     }
 
     #[test]

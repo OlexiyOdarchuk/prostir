@@ -4,7 +4,7 @@
 
 use glam::{Quat, Vec3};
 
-use crate::layout::{self, Placement, ScreenId};
+use crate::layout::{self, Key, Placement};
 use crate::settings::{Background, Preset, Settings};
 
 pub const SLOTS: usize = 3;
@@ -68,25 +68,21 @@ impl Profile {
     /// `primary` one, whether the laptop screen is wanted, `settings`, and the desk
     /// arrangement `live` with the `rows` the PC has (by number). In cinema the desk
     /// is the one `desk` keeps in memory, kept before the cinema view replaced it.
-    pub fn of(
-        monitors: &[(ScreenId, u32, u32)],
-        primary: Option<ScreenId>,
+    pub fn of<K: Key>(
+        monitors: &[(K, u32, u32)],
+        primary: Option<K>,
         mirror: bool,
         settings: Settings,
-        live: layout::Arrangement,
-        rows: &[Vec<ScreenId>],
-        desk: &layout::Desk,
+        live: layout::Arrangement<K>,
+        rows: &[Vec<K>],
+        desk: &layout::Arrangement<K>,
     ) -> Self {
-        let arrangement = if settings.cinema {
-            desk.arrangement().clone()
-        } else {
-            live
-        };
+        let arrangement = if settings.cinema { desk.clone() } else { live };
         let places: Option<Vec<Placement>> = monitors
             .iter()
             .map(|m| arrangement.placements.get(&m.0).copied())
             .collect();
-        let index = |id: &ScreenId| monitors.iter().position(|m| m.0 == *id);
+        let index = |id: &K| monitors.iter().position(|m| m.0 == *id);
         let rows: Vec<Vec<usize>> = rows
             .iter()
             .map(|r| r.iter().filter_map(index).collect::<Vec<usize>>())
@@ -117,7 +113,7 @@ impl Profile {
         let mut places: Vec<(usize, Placement)> = Vec::new();
         let (mut center, mut radius, mut rows) = (None, None, Vec::new());
         for line in text.lines() {
-            if let Some(c) = layout::parse_center(line) {
+            if let Some(c) = line.strip_prefix("center ").and_then(layout::parse_center) {
                 center = Some(c);
                 continue;
             }
@@ -239,12 +235,12 @@ impl Profile {
 /// "Line up", "In front", the magnet) sees the profile as it was; a profile saved
 /// without one has its monitors where they were in the room. And its `rows` (by place
 /// in its sizes) by the PC's numbers.
-pub fn standing(
-    made: &[(ScreenId, Placement)],
+pub fn standing<K: Key>(
+    made: &[(K, Placement)],
     center: Option<(Vec3, f32)>,
     rows: &[Vec<usize>],
     now: (Vec3, f32),
-) -> (Vec<(ScreenId, Placement)>, Vec<Vec<ScreenId>>) {
+) -> (Vec<(K, Placement)>, Vec<Vec<K>>) {
     let from = center.unwrap_or(now);
     let placed = made
         .iter()
@@ -253,7 +249,7 @@ pub fn standing(
     let rows = rows
         .iter()
         .map(|r| r.iter().filter_map(|&i| made.get(i).map(|m| m.0)).collect())
-        .filter(|r: &Vec<ScreenId>| !r.is_empty())
+        .filter(|r: &Vec<K>| !r.is_empty())
         .collect();
     (placed, rows)
 }

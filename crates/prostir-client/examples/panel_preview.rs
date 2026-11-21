@@ -2,10 +2,16 @@
 //! cargo run -p prostir-client --example panel_preview -- panel.png [hover_x hover_y]
 //! Environment: WRIST=1 (the wrist menu), TAB=monitors|look|sound|language|pc|help (default: quick), LANG_UI=en|uk|qps (qps: the longer pseudo-language), PAIR=show|type|failed, OFFLINE=1, KEYPAD=…
 
+use prostir::ids::{DisplayKey, PcId};
 use prostir::lang::{BUILTIN, Known, Lang, Loader, Texts};
 use prostir::settings::Settings;
 use prostir::store::{NoStore, Store as _};
 use prostir::ui::{MonitorEntry, OfferWhy, PairingView, Panel, Place, Section, Tab, UiState};
+
+/// Display `n` of the PC of the preview.
+fn k(n: u32) -> DisplayKey {
+    DisplayKey::new(PcId([1; 8]), prostir_proto::state::DisplayId(n))
+}
 
 fn questmon_pairing(mode: &str) -> PairingView {
     PairingView {
@@ -59,7 +65,7 @@ fn main() {
         confirm_forget: None,
         windows: if std::env::var("WINDOWS").is_ok() {
             vec![MonitorEntry {
-                id: 10,
+                id: k(10),
                 label: "5".into(),
                 width: 1200,
                 height: 800,
@@ -124,7 +130,7 @@ fn main() {
         ip_input: std::env::var("KEYPAD").ok(),
         monitors: vec![
             MonitorEntry {
-                id: 0,
+                id: k(0),
                 label: "1".into(),
                 width: 2560,
                 height: 1440,
@@ -132,7 +138,7 @@ fn main() {
                 seen: Some([-1.0, 0.0, 0.5, 0.28]),
             },
             MonitorEntry {
-                id: 1,
+                id: k(1),
                 label: "2".into(),
                 width: 2560,
                 height: 1440,
@@ -140,7 +146,7 @@ fn main() {
                 seen: Some([0.0, 0.0, 0.5, 0.28]),
             },
             MonitorEntry {
-                id: 2,
+                id: k(2),
                 label: "3".into(),
                 width: 1440,
                 height: 2560,
@@ -148,7 +154,7 @@ fn main() {
                 seen: Some([0.78, 0.12, 0.28, 0.5]),
             },
         ],
-        primary: Some(1),
+        primary: Some(k(1)),
         selected: None,
         mirror_seen: Some([0.0, -0.55, 0.35, 0.22]),
         mirror_wanted: true,
@@ -162,7 +168,7 @@ fn main() {
         curve_available: true,
         keyboard_available: true,
         error: None,
-        confirm_remove: std::env::var("CONFIRM").is_ok().then_some(2),
+        confirm_remove: std::env::var("CONFIRM").is_ok().then_some(k(2)),
         intro: std::env::var("INTRO").is_ok(),
         update: std::env::var("UPDATE")
             .ok()
