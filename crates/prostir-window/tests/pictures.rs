@@ -136,6 +136,20 @@ fn each_state_of_the_other_pages() {
     let (mut h, _) = window(dark(Mock::waiting()), shot());
     open(&mut h, Page::Monitors);
     picture(&mut h, &mut all, "monitors-offline");
+    // Five monitors at mixed scales, upright ones among them: every tile's text inside
+    // it, the scale on the size line; in English too.
+    for (language, name) in [("uk", "monitors-mixed"), ("en", "monitors-mixed-en")] {
+        let (mut h, _) = window(dark(Mock::many_monitors()), Setup { language, ..shot() });
+        h.state_mut().ui.selected = Some(2);
+        open(&mut h, Page::Monitors);
+        picture(&mut h, &mut all, name);
+    }
+    // A monitor just added, not placed by the headset yet: a line under the map.
+    let (mut h, _) = window(dark(Mock::connected()), shot());
+    open(&mut h, Page::Monitors);
+    press(&mut h, "1920 × 1080");
+    h.run_steps(2);
+    picture(&mut h, &mut all, "monitors-placing");
 
     // Pairing: a headset shows a code; then a wrong code; a code from the PC; waiting.
     let (mut h, _) = window(dark(Mock::connected().pairing()), shot());

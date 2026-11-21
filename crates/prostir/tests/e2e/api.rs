@@ -707,6 +707,420 @@ fn monitors_scaled_and_placed_from_the_pc() {
     assert_eq!(error_name(&bad), "BadSize");
 }
 
+/// How long a monitor just added waits for the headset to place it (`PLACE_WAIT` in
+/// `displays/placing.rs`).
+const PLACE_WAIT: Duration = Duration::from_secs(4);
+
+/// A session whose headset placed its two monitors (640x360 and 480x272 side by side,
+/// tops level), the local API showing both on the desktop; with the
+/// arrangement sent.
+fn placed_session(
+    name: &str,
+) -> Option<(
+    TestDir,
+    Pc,
+    prostir_testkit::FakeHeadset,
+    Connection,
+    Vec<prostir_proto::state::Placed>,
+)> {
+    use prostir_proto::ClientMsg;
+    use prostir_proto::state::Row;
+    let (dir, pc, _keys, mut headset) = session(name, &Options::default());
+    let bus = pc.bus.as_ref()?.connect();
+    let order = headset.view().order();
+    let entries = vec![at(order[0], 320, 180), at(order[1], 880, 136)];
+    headset
+        .send(&ClientMsg::Arrange {
+            rows: vec![Row {
+                entries: entries.clone(),
+            }],
+        })
+        .unwrap();
+    let started = Instant::now();
+    loop {
+        let (_, state) = get_state(&bus);
+        if state.displays.iter().all(|d| d.desk.is_some()) {
+            break;
+        }
+        assert!(started.elapsed() < SOON, "not placed: {:?}", state.displays);
+        headset.take_for(Duration::from_millis(50)).unwrap();
+    }
+    Some((dir, pc, headset, bus, entries))
+}
+
+/// Where the headset has a display: its centre and middle in its stream's pixels.
+fn at(
+    id: prostir_proto::state::DisplayId,
+    center: i32,
+    middle: i32,
+) -> prostir_proto::state::Placed {
+    prostir_proto::state::Placed {
+        id,
+        center: Some(center),
+        middle: Some(middle),
+    }
+}
+
+/// Adds a 640x360 monitor through the local API: its id.
+fn add_monitor(bus: &Connection) -> u32 {
+    let reply: String = call(
+        bus,
+        "Call",
+        &(r#"{"request":"add_monitor","w":640,"h":360}"#,),
+    )
+    .unwrap()
+    .body()
+    .deserialize()
+    .unwrap();
+    let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    u32::try_from(reply["id"].as_u64().expect("the new monitor's id")).unwrap()
+}
+
+/// Where monitor `id` is on the desktop in every state that came, in order.
+fn places(changes: &mpsc::Receiver<(u32, State)>, id: u32) -> Vec<Option<prostir_api::DeskRect>> {
+    changes
+        .try_iter()
+        .filter_map(|(_, s)| s.display(id).map(|d| d.desk))
+        .collect()
+}
+
+/// A monitor added from the PC while the headset places the monitors: in every state
+/// the local API sends, it stands nowhere on the desktop until the headset placed it
+/// and the desktop was laid out so, then where it stays, never at the stand-in place
+/// the PC gave it before. One the headset does not place shows at the PC's place when
+/// the wait for it ends.
+#[test]
+fn a_monitor_added_from_the_pc_shows_where_the_headset_puts_it() {
+    use prostir_proto::ClientMsg;
+    use prostir_proto::state::{DisplayId, Row};
+    let Some((_dir, mut pc, mut headset, bus, mut entries)) = placed_session("api-adding") else {
+        return;
+    };
+    let changes = state_changes(&bus);
+    let before = pc.count_log("fake desktop: placed");
+    let new = add_monitor(&bus);
+    // Made and streaming, laid out by the PC meanwhile: still nowhere in the API.
+    headset
+        .wait(START, "the new monitor showing", View::all_monitors_show)
+        .unwrap();
+    pc.wait_log_after(SOON, "fake desktop: placed", before);
+    headset.take_for(Duration::from_millis(300)).unwrap();
+    let (_, state) = get_state(&bus);
+    let d = state.display(new).unwrap();
+    assert_eq!((d.desk, d.placing), (None, true));
+    // The headset puts it over the first one.
+    entries.insert(0, at(DisplayId(new), 320, -180));
+    headset
+        .send(&ClientMsg::Arrange {
+            rows: vec![
+                Row {
+                    entries: vec![entries[0]],
+                },
+                Row {
+                    entries: entries[1..].to_vec(),
+                },
+            ],
+        })
+        .unwrap();
+    let started = Instant::now();
+    let (r, state) = loop {
+        let (_, state) = get_state(&bus);
+        if let Some(r) = state.display(new).and_then(|d| d.desk) {
+            break (r, state);
+        }
+        assert!(started.elapsed() < SOON, "never on the desktop");
+        headset.take_for(Duration::from_millis(20)).unwrap();
+    };
+    let under = state.display(entries[1].id.0).unwrap().desk.unwrap();
+    assert!(r.y + r.h as i32 <= under.y, "{r:?} over {under:?}");
+    headset.take_for(Duration::from_millis(500)).unwrap();
+    let (_, state) = get_state(&bus);
+    let d = state.display(new).unwrap();
+    assert_eq!((d.desk, d.placing), (Some(r), false), "it did not move");
+    let seen = places(&changes, new);
+    assert!(seen.iter().any(Option::is_none), "{seen:?}");
+    assert!(
+        seen.iter().all(|p| p.is_none_or(|p| p == r)),
+        "only where it stays: {seen:?}"
+    );
+
+    // Not placed by the headset: where the PC put it, once the wait for it ends.
+    let added = Instant::now();
+    let other = add_monitor(&bus);
+    let after = loop {
+        let (_, state) = get_state(&bus);
+        if state.display(other).and_then(|d| d.desk).is_some() {
+            break added.elapsed();
+        }
+        assert!(added.elapsed() < START, "never on the desktop");
+        headset.take_for(Duration::from_millis(20)).unwrap();
+    };
+    assert!(
+        after >= PLACE_WAIT - Duration::from_millis(200)
+            && after < PLACE_WAIT + Duration::from_secs(1),
+        "shown after {after:?}"
+    );
+    // The wait over with no layout after it, the control loop sleeps between its
+    // clocks: it does not wake at once again and again.
+    let busy = control_loop_cpu(&pc);
+    headset.take_for(Duration::from_secs(2)).unwrap();
+    let spent = control_loop_cpu(&pc) - busy;
+    assert!(
+        spent < Duration::from_millis(500),
+        "the control loop ran {spent:?} of 2 s"
+    );
+}
+
+/// The processor time the PC app's control loop (its main thread) took so far.
+fn control_loop_cpu(pc: &Pc) -> Duration {
+    let pid = pc.pid();
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/stat")).unwrap();
+    // After the name in parentheses: state is field 3, utime and stime 14 and 15.
+    let fields: Vec<&str> = stat
+        .rsplit_once(')')
+        .unwrap()
+        .1
+        .split_whitespace()
+        .collect();
+    let ticks: u64 = fields[11].parse::<u64>().unwrap() + fields[12].parse::<u64>().unwrap();
+    // SAFETY: sysconf has no preconditions.
+    let per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as u64;
+    Duration::from_millis(ticks * 1000 / per_second)
+}
+
+/// The headset leaves before it placed a monitor added from the PC: the monitors stay
+/// (`--linger`) and the PC's place counts at once, without the wait for a headset.
+#[test]
+fn a_monitor_being_placed_shows_once_the_headset_left() {
+    let Some((_dir, mut pc, mut headset, bus, _)) = placed_session("api-adding-left") else {
+        return;
+    };
+    let before = pc.count_log("fake desktop: placed");
+    let added = Instant::now();
+    let new = add_monitor(&bus);
+    headset
+        .wait(START, "the new monitor showing", View::all_monitors_show)
+        .unwrap();
+    pc.wait_log_after(SOON, "fake desktop: placed", before);
+    let (_, state) = get_state(&bus);
+    assert_eq!(state.display(new).unwrap().desk, None);
+    headset.disconnect();
+    let left = Instant::now();
+    loop {
+        let (_, state) = get_state(&bus);
+        if state.display(new).and_then(|d| d.desk).is_some() {
+            break;
+        }
+        assert!(
+            left.elapsed() < Duration::from_secs(1) && added.elapsed() < PLACE_WAIT,
+            "not shown {:?} after the headset left",
+            left.elapsed()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// The volume set in the settings window: the headset's sound device goes there, the
+/// headset is asked once and its step stands on both sides and in the state.
+#[test]
+fn the_volume_from_the_pc_reaches_the_headset() {
+    let (_dir, mut pc, _keys, mut headset) = session("api-volume", &Options::default());
+    let Some(bus) = &pc.bus else {
+        return;
+    };
+    let bus = bus.connect();
+    crate::sound::wait_first_volume(&mut pc, &mut headset);
+    let (_, state) = get_state(&bus);
+    assert!(state.sound.volume.is_some(), "{:?}", state.sound);
+    let asks = headset.view().volume_asks.len();
+    // Not the first level's step (40), so the device moves.
+    let level = 73;
+    call(
+        &bus,
+        "Call",
+        &(format!(r#"{{"request":"volume","level":{level}}}"#).as_str(),),
+    )
+    .unwrap();
+    let step = prostir_testkit::quest_step(level);
+    headset
+        .wait(SOON, "the headset asked for the volume", |v| {
+            v.volume_asks.len() > asks
+        })
+        .unwrap();
+    crate::sound::wait_written(&pc, &mut headset, step);
+    assert_eq!(headset.volume(), Some(step));
+    assert_eq!(headset.view().volume_asks.len(), asks + 1, "asked once");
+    let started = Instant::now();
+    loop {
+        let (_, state) = get_state(&bus);
+        if state.sound.volume.map(|v| v.level) == Some(step) {
+            break;
+        }
+        assert!(started.elapsed() < SOON, "{:?}", state.sound);
+        headset.take_for(Duration::from_millis(50)).unwrap();
+    }
+    // Quiet after: the device's echo of the level asks nothing more.
+    headset.take_for(Duration::from_secs(1)).unwrap();
+    assert_eq!(headset.view().volume_asks.len(), asks + 1);
+
+    // Muted on the PC, then set from the settings: unmuted, as Plasma's slider does.
+    let volume = |bus: &Connection| get_state(bus).1.sound.volume.unwrap();
+    pc.desktop("volume 60 muted");
+    let started = Instant::now();
+    while !volume(&bus).muted {
+        assert!(started.elapsed() < SOON, "not muted: {:?}", volume(&bus));
+        headset.take_for(Duration::from_millis(50)).unwrap();
+    }
+    call(&bus, "Call", &(r#"{"request":"volume","level":20}"#,)).unwrap();
+    let step = prostir_testkit::quest_step(20);
+    let started = Instant::now();
+    while volume(&bus)
+        != (prostir_api::Volume {
+            level: step,
+            muted: false,
+        })
+    {
+        assert!(started.elapsed() < SOON, "{:?}", volume(&bus));
+        headset.take_for(Duration::from_millis(50)).unwrap();
+    }
+    assert_eq!(headset.volume(), Some(step));
+
+    // Not a level.
+    let bad = call(&bus, "Call", &(r#"{"request":"volume","level":101}"#,)).unwrap_err();
+    assert_eq!(error_name(&bad), "BadArgument");
+}
+
+/// A scale the desktop did not set (the call failed) is not taken for one given in its
+/// settings: the monitor keeps the scale chosen in Prostir, never seen on the desktop.
+#[test]
+fn a_scale_that_could_not_be_set_is_not_taken() {
+    let (_dir, mut pc, _keys, _headset) = session("api-refused-scale", &Options::default());
+    let Some(bus) = &pc.bus else {
+        return;
+    };
+    let bus = bus.connect();
+    let started = Instant::now();
+    let a = loop {
+        let (_, state) = get_state(&bus);
+        if let Some(d) = state.displays.first()
+            && d.state == prostir_api::DisplayState::Running
+        {
+            break d.clone();
+        }
+        assert!(started.elapsed() < SOON, "no monitor running");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let failed = pc.count_log("fake desktop: setting the scale of");
+    pc.desktop("refuse-scale");
+    pc.wait_log(SOON, "fake desktop: the next scale set fails");
+    let request = format!(r#"{{"request":"set_scale","id":{},"scale":150}}"#, a.id);
+    call(&bus, "Call", &(request.as_str(),)).unwrap();
+    pc.wait_log_after(SOON, "fake desktop: setting the scale of", failed);
+    // Ticks enough to take a scale seen twice.
+    std::thread::sleep(Duration::from_secs(3));
+    let (_, state) = get_state(&bus);
+    let d = state.display(a.id).unwrap();
+    assert_eq!(d.mode.scale, 150, "{d:?}");
+    assert_eq!(pc.count_log("given on the desktop, taken"), 0);
+}
+
+/// A scale given to a monitor in the desktop's own settings is taken: the local API and
+/// the set kept for next time have it, and the monitor's output stays as it is.
+#[test]
+fn a_scale_given_on_the_desktop_is_taken() {
+    let (dir, pc, _keys, _headset) = session("api-outside-scale", &Options::default());
+    let Some(bus) = &pc.bus else {
+        return;
+    };
+    let bus = bus.connect();
+    let started = Instant::now();
+    let a = loop {
+        let (_, state) = get_state(&bus);
+        if let Some(d) = state.displays.first()
+            && d.desk.is_some()
+            && d.state == prostir_api::DisplayState::Running
+        {
+            break d.clone();
+        }
+        assert!(started.elapsed() < SOON, "no monitor on the desktop");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(a.mode.scale, 100);
+    let made = pc.count_log(&format!("fake desktop: created {}", a.output));
+    pc.desktop(&format!("scale {} 150", a.output));
+    let want = (
+        (f64::from(a.mode.w) / 1.5).round() as u32,
+        (f64::from(a.mode.h) / 1.5).round() as u32,
+    );
+    let started = Instant::now();
+    loop {
+        let (_, state) = get_state(&bus);
+        let d = state.display(a.id).expect("the same id");
+        if d.mode.scale == 150 && d.desk.map(|r| (r.w, r.h)) == Some(want) {
+            break;
+        }
+        assert!(started.elapsed() < START, "not taken: {d:?}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        pc.count_log(&format!("fake desktop: created {}", a.output)),
+        made,
+        "the output was not made anew"
+    );
+    let started = Instant::now();
+    while !dir.saved("screens.txt").contains("@1.5") {
+        assert!(started.elapsed() < SOON, "{}", dir.saved("screens.txt"));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Back and forth between scales from the PC, 100 % among them: each one is applied,
+/// the monitor's place on the desktop as large as its pixels at that scale.
+#[test]
+fn every_scale_from_the_pc_is_applied_100_too() {
+    let (_dir, pc, _keys, _headset) = session("api-scales", &Options::default());
+    let Some(bus) = &pc.bus else {
+        return;
+    };
+    let bus = bus.connect();
+    let started = Instant::now();
+    let a = loop {
+        let (_, state) = get_state(&bus);
+        if let Some(d) = state.displays.first()
+            && d.desk.is_some()
+            && d.state == prostir_api::DisplayState::Running
+        {
+            break d.clone();
+        }
+        assert!(started.elapsed() < SOON, "no monitor on the desktop");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(a.mode.scale, 100);
+    for scale in [150u16, 100, 125, 100] {
+        let request = format!(r#"{{"request":"set_scale","id":{},"scale":{scale}}}"#, a.id);
+        call(&bus, "Call", &(request.as_str(),)).unwrap();
+        let logical = |px: u32| (f64::from(px) * 100.0 / f64::from(scale)).round() as u32;
+        let want = (logical(a.mode.w), logical(a.mode.h));
+        let started = Instant::now();
+        loop {
+            let (_, state) = get_state(&bus);
+            let d = state.display(a.id).expect("the same id");
+            let desk = d.desk.map(|r| (r.w, r.h));
+            if d.mode.scale == scale
+                && d.state == prostir_api::DisplayState::Running
+                && desk == Some(want)
+            {
+                break;
+            }
+            assert!(
+                started.elapsed() < START,
+                "{scale} %: {d:?}, on the desktop {desk:?}, not {want:?}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
 /// The laptop's lid closed (its panel kept as shown from before, not connected) and
 /// one monitor on HDMI: the monitor shows and hides as often as asked, from the
 /// headset and from the PC, the absent panel counting for no limit; the local API

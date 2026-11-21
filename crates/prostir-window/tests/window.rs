@@ -271,6 +271,32 @@ fn going_on_in_the_first_run_opens_pairing() {
     assert_eq!(handle.calls(), [Request::PairNewHeadset]);
 }
 
+/// A monitor just added stands nowhere until the headset placed it: a line under the
+/// map says so and can remove it; placed, it is on the map instead.
+#[test]
+fn a_monitor_being_placed_is_named_under_the_map() {
+    let (mut h, handle) = window(Mock::connected(), Setup::default());
+    open(&mut h, Page::Monitors);
+    press(&mut h, "1920 × 1080");
+    h.run_steps(2);
+    h.get_by_label("Prostir-4: розставляється…");
+    assert!(h.query_by_label("Prostir-4").is_none(), "not on the map");
+    press(&mut h, "Прибрати Prostir-4");
+    assert_eq!(
+        handle.calls().last(),
+        Some(&Request::RemoveMonitor { id: 5 })
+    );
+    assert!(h.query_by_label("Prostir-4: розставляється…").is_none());
+
+    press(&mut h, "2560 × 1440");
+    h.run_steps(2);
+    h.get_by_label("Prostir-4: розставляється…");
+    handle.place_new();
+    h.run_steps(3);
+    assert!(h.query_by_label("Prostir-4: розставляється…").is_none());
+    h.get_by_label("Prostir-4");
+}
+
 #[test]
 fn a_refused_request_says_why_until_closed() {
     let (mut h, handle) = window(Mock::connected(), Setup::default());
@@ -408,6 +434,67 @@ fn the_microphone_is_shown_not_switched_and_the_volume_waits() {
     );
     h.get_by_label("Вмикається й вимикається в шоломі.");
     h.get_by_label("Змінюється кнопками шолома.");
+}
+
+/// With a headset that shares its volume: a click and a drag on the slider each set it
+/// once, when let go, and the keys move it in steps of 5.
+#[test]
+fn the_volume_slider_sets_the_volume() {
+    let mock = Mock::connected().edit(|s| {
+        s.sound.volume = Some(prostir_window::api::Volume {
+            level: 40,
+            muted: false,
+        });
+    });
+    let (mut h, handle) = window(mock, Setup::default());
+    open(&mut h, Page::Sound);
+    h.get_by_label("Та сама, що на кнопках шолома і в системі.");
+    press_as(&mut h, Some(Role::Slider), "Гучність");
+    let Some(Request::Volume { level }) = handle.calls().last().cloned() else {
+        panic!("no volume asked: {:?}", handle.calls());
+    };
+    assert!((45..=55).contains(&level), "{level}");
+
+    let rect = h.get_by_role_and_label(Role::Slider, "Гучність").rect();
+    let button = |h: &mut egui_kittest::Harness<'static, prostir_window::App>, at, pressed| {
+        h.event(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+    };
+    let calls = handle.calls().len();
+    let from = rect.center();
+    h.hover_at(from);
+    h.run_steps(1);
+    button(&mut h, from, true);
+    h.run_steps(1);
+    for i in 1..=10 {
+        h.hover_at(from + egui::vec2(rect.width() * 0.04 * i as f32, 0.0));
+        h.run_steps(1);
+    }
+    assert_eq!(handle.calls().len(), calls, "nothing asked while dragged");
+    let to = from + egui::vec2(rect.width() * 0.4, 0.0);
+    button(&mut h, to, false);
+    h.run_steps(3);
+    assert_eq!(handle.calls().len(), calls + 1, "{:?}", handle.calls());
+    let Some(Request::Volume { level }) = handle.calls().last().cloned() else {
+        panic!("no volume asked: {:?}", handle.calls());
+    };
+    assert!(level >= 85, "{level}");
+
+    h.get_by_role_and_label(Role::Slider, "Гучність").focus();
+    h.run_steps(2);
+    let calls = handle.calls().len();
+    h.key_press(Key::ArrowLeft);
+    h.run_steps(3);
+    assert_eq!(handle.calls().len(), calls + 1, "{:?}", handle.calls());
+    let Some(Request::Volume { level: by_key }) = handle.calls().last().cloned() else {
+        panic!("no volume asked: {:?}", handle.calls());
+    };
+    assert_eq!(by_key % 5, 0);
+    assert!(by_key < level, "{by_key} after {level}");
 }
 
 #[test]
@@ -572,12 +659,12 @@ fn a_failed_monitor_is_named_once() {
             .iter_mut()
             .find(|d| d.name == "Prostir-4")
             .unwrap();
-        d.failure.as_mut().unwrap().text = "2560x1440 більше, ніж шолом декодує в H265".into();
+        d.failure.as_mut().unwrap().text = "2560x1440 більше, ніж шолом декодує в HEVC".into();
     });
     let (mut h, _handle) = window(mock, Setup::default());
     open(&mut h, Page::Overview);
     h.get_by_label(
-        "Prostir-4: 2560x1440 більше, ніж шолом декодує в H265. Решта моніторів працює.",
+        "Prostir-4: 2560x1440 більше, ніж шолом декодує в HEVC. Решта моніторів працює.",
     );
 }
 

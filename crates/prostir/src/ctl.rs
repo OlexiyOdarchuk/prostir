@@ -219,9 +219,9 @@ pub fn parse(args: &[String]) -> Result<(Ctl, bool), String> {
             takes = 1;
             let codec = match rest.first().copied() {
                 Some("h264") => CodecChoice::H264,
-                Some("h265") => CodecChoice::H265,
+                Some("hevc" | "h265") => CodecChoice::H265,
                 Some("auto") => CodecChoice::Auto,
-                _ => return Err("expected codec h264, h265 or auto".into()),
+                _ => return Err("expected codec h264, hevc or auto".into()),
             };
             ask(Request::SetCodec { codec, cpu })
         }
@@ -317,7 +317,7 @@ prostir ctl COMMAND [--json]
   monitor list | add WxH[@1.25|@125%] | remove ID | retry ID | primary ID
   screen show ID | screen hide ID
   screenshot ID                  a picture of a monitor: where it was saved
-  quality MBIT | sharp on|off | codec h264|h265|auto [--cpu]
+  quality MBIT | sharp on|off | codec h264|hevc|auto [--cpu]
   sound headset|pc
   pair | pair stop
   headsets | forget HEADSET | forget --all

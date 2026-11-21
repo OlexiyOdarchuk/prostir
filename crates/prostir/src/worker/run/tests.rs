@@ -1,6 +1,6 @@
 use super::super::WantedScreen;
 use super::encoders::kept_note;
-use super::place::{is_the_headsets, origin_at};
+use super::place::{follow_rescaled, is_the_headsets, origin_at};
 use super::*;
 use crate::encoder::Input;
 use crate::platform::{
@@ -247,8 +247,8 @@ fn a_kept_encoder_is_tried_again_later() {
     assert_eq!(
         kept_note(Codec::H264, Codec::H265),
         t(
-            "лишився H.264: H.265 не запустився",
-            "kept H.264: H.265 did not start"
+            "лишився H.264: HEVC не запустився",
+            "kept H.264: HEVC did not start"
         )
     );
 }
@@ -398,4 +398,57 @@ fn a_panel_is_tried_once() {
     with_panel.streaming = false;
     assert_eq!(harness.settle(with_panel), [], "not tried again");
     harness.end();
+}
+
+/// The scale of monitor `id` in `w`, in percent.
+fn percent_of(w: &Wanted, id: u32) -> Option<u16> {
+    w.screens.iter().find_map(|(i, s)| match &s.what {
+        What::Monitor { spec, .. } if *i == ScreenId::saved(id) => Some(spec.percent()),
+        _ => None,
+    })
+}
+
+fn with_scale(mut w: Wanted, id: u32, scale: f64) -> Wanted {
+    for (i, s) in &mut w.screens {
+        if let What::Monitor { spec, .. } = &mut s.what
+            && *i == ScreenId::saved(id)
+        {
+            spec.scale = scale;
+        }
+    }
+    w
+}
+
+/// A scale taken on the desktop stands in what the control loop sent before it heard
+/// of it, until it sends the new one, another chosen in Prostir, or no such monitor.
+#[test]
+fn a_scale_taken_on_the_desktop_stands_until_the_control_loop_has_it() {
+    let taken = || BTreeMap::from([(ScreenId::saved(1), (100, 150))]);
+    let mut rescaled = taken();
+    let mut w = wanted(&[(1, 1, 640), (2, 2, 640)]);
+    follow_rescaled(&mut rescaled, &mut w);
+    assert_eq!(
+        (percent_of(&w, 1), percent_of(&w, 2)),
+        (Some(150), Some(100))
+    );
+    assert_eq!(rescaled.len(), 1, "still followed");
+    let mut w = wanted(&[(1, 1, 640)]);
+    follow_rescaled(&mut rescaled, &mut w);
+    assert_eq!(percent_of(&w, 1), Some(150), "another sent before it heard");
+    assert_eq!(rescaled.len(), 1);
+
+    let mut w = with_scale(wanted(&[(1, 1, 640)]), 1, 1.5);
+    follow_rescaled(&mut rescaled, &mut w);
+    assert!(rescaled.is_empty(), "the control loop has it");
+
+    let mut rescaled = taken();
+    let mut w = with_scale(wanted(&[(1, 1, 640)]), 1, 1.25);
+    follow_rescaled(&mut rescaled, &mut w);
+    assert_eq!(percent_of(&w, 1), Some(125), "chosen in Prostir since");
+    assert!(rescaled.is_empty());
+
+    let mut rescaled = taken();
+    let mut w = wanted(&[(2, 2, 640)]);
+    follow_rescaled(&mut rescaled, &mut w);
+    assert!(rescaled.is_empty(), "no such monitor any more");
 }

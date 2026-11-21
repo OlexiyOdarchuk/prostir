@@ -135,7 +135,7 @@ pub(super) fn quality(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
     ui.add_space(tk.th.shape.section_gap);
     w::card(ui, tk, |ui| {
         let codecs = [CodecChoice::H264, CodecChoice::H265];
-        let labels = ["H.264", "H.265"];
+        let labels = ["H.264", "HEVC"];
         let sel = match e.codec {
             Codec::H264 => 0,
             Codec::H265 => 1,
@@ -172,7 +172,7 @@ pub(super) fn quality(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
             Some(u) => {
                 let codec = match u.codec {
                     Codec::H264 => "H.264",
-                    Codec::H265 => "H.265",
+                    Codec::H265 => "HEVC",
                     Codec::Av1 => "AV1",
                     Codec::Other => "?",
                 };

@@ -195,14 +195,15 @@ exist, monitor requests change the set kept for the next headset (its monitors s
 | `remove_monitor` | `id` | `LastDisplay` for the last one |
 | `retry_monitor` | `id` | a failed monitor tried again now; `UnknownDisplay` for no such monitor |
 | `show_physical` | `id`, `shown` (bool) | a display of the PC in the headset |
-| `set_scale` | `id`, `scale` (percent) | another scale for a monitor: its output is made anew under the same name and id (it stands `starting` meanwhile); `BadSize` for a scale the desktop does not give its size |
+| `set_scale` | `id`, `scale` (percent) | another scale for a monitor: its output is made anew under the same name and id (it stands `starting` meanwhile); `BadSize` for a scale the desktop does not give its size. A scale given to a monitor in the desktop's own display settings is taken as well, within about a second: the state and the set kept for next time follow it, the output stays as it is. Not taken: a scale the desktop does not give that size (it stays on the desktop, the state keeps the one before), and a scale the desktop never had the monitor at after it was made (one it could not set) |
 | `place` | `id`, `x`, `y` | moves a display on the desktop to about `x`, `y` (its top-left corner, logical pixels): into the row it is then in, between its neighbours left and right, or a row of its own above or under the others; the desktop's arrangement then lines it up. Only while the monitors are on the desktop (`Unsupported` otherwise). The main headset's next arrangement (when the person moves a monitor in the headset) replaces it; the headset's own 3D arrangement is not changed |
 | `set_primary` | `id` | the desktop's primary display |
 | `screenshot` | `id` | a picture of a virtual monitor or a window panel, saved as a PNG as the headset's screenshots are (`Prostir/<date and time to the millisecond>.png` in the Pictures folder, a name no other file there has); answers `path` (the whole path) and `whole`. Answered once the desktop took it (20 s at most, else `Desktop`): with `grim -o` on Hyprland; on KDE Plasma from the monitor's own stream while it streams to a headset, else Spectacle's picture of the whole desktop (`whole`: true). `UnknownDisplay` for no such monitor or a display of the PC, `Capture` when it could not be taken, `Unsupported` while no monitors are on the desktop, or when they leave it before the picture |
 | `set_quality` | `mbit` (5 to 100) | per monitor |
 | `set_sharp` | `on` | the slower encoder preset for clearer small text |
-| `set_codec` | `codec` (`h264`, `h265`, `auto`), `cpu` (bool, default false) | `auto` is the same as `h265` (H.265 where the PC and every headset can, else H.264), and the state shows it as `h265` |
+| `set_codec` | `codec` (`h264`, `h265`, `auto`), `cpu` (bool, default false) | `auto` is the same as `h265` (HEVC where the PC and every headset can, else H.264), and the state shows it as `h265` |
 | `sound_to_headset` | `on` | the PC's sound in the headset, or on the PC |
+| `volume` | `level` (0 to 100) | the main headset's volume, as a slider of it on the PC: the headset's sound device goes to that level, unmuted (as moving a volume slider in Plasma unmutes), and the headset is asked for it, as when the device's own slider moves; `sound.volume` then shows the level the headset took (its nearest step). `BadArgument` above 100; `Unsupported` while `sound.volume` is `null` (no headset connected, or one that does not tell its volume) |
 | `set_counting` | `on` | count this PC among users |
 | `autostart` | `on` | start with the session: with systemd, enables `prostir.socket` (and removes an autostart entry of 0.1), else an XDG autostart entry (`prostir serve`); `Unsupported` where it is not set from here (Hyprland, whose config starts it). On by default: the first start of Prostir for a user turns it on; the choice is kept in `settings.txt` (`autostart on` or `off`), so once turned off (here, the tray, `prostir ctl autostart off`) no later start or update turns it on again |
 | `pair_new_headset` | | opens the pairing window for 3 minutes (again from now if it is open), answers `seconds_left`: while it is open the PC answers every headset that asks for it, and the program stays running. It closes at its time, with `stop_pairing`, or once a headset pairs. A headset can pair over a connection (a typed address, USB) whether it is open or not; its code protects that |
@@ -214,14 +215,12 @@ exist, monitor requests change the set kept for the next headset (its monitors s
 | `show_settings` | | starts the settings window, `prostir window`, a process of its own (it keeps one window per user itself) |
 | `quit` | | Prostir quits after answering, as the tray's "Quit": nothing waits for the headset afterwards (the sockets' watcher quits too; under systemd the socket stops until the next login) |
 
-### Not yet
+### Not from the PC
 
-These read, and are answered `Unsupported` with a text saying why, until the step that
-brings them:
+This reads, and is answered `Unsupported` with a text saying why:
 
 | `request` | Arguments | |
 |---|---|---|
-| `volume` | `level` | the headset's volume from the PC (step 6.6, sound) |
 | `set_mic` | `on` | always: the headset microphone's switch is the headset user's, changed only in the headset; the state shows it (`session.mic_on`) |
 
 ## Answers
@@ -325,7 +324,8 @@ change older clients would misread.
 | `displays[].output` | the desktop's name for the output, while it has one |
 | `displays[].builtin`, `shown` | a display of the PC: the laptop's panel; shown in the headset |
 | `displays[].mode` | the stream's size and the scale in percent |
-| `displays[].desk` | where it is on the desktop, in logical pixels, while it is there |
+| `displays[].desk` | where it is on the desktop, in logical pixels. `null` when it is not there: a monitor kept for the next headset (no monitors on the desktop), one whose output could not be made, a display of the PC that is not connected; and for a monitor just added while the main headset places the monitors (it has sent where they stand this session), until the desktop has it where the headset put it, at most 4 s and no longer once no headset is connected, so a map never shows it at a stand-in place |
+| `displays[].placing` | `true` for a monitor just added that the headset is placing (its `desk` is `null` meanwhile, see above); left out when false |
 | `displays[].state` | `starting`, `running`, `failed` (see `failure`; it keeps its place and is tried again), `absent` (a display of the PC that is not connected now: the lid closed, the cable out), `kept` (a monitor of the set kept for the next headset, while no monitors are on the desktop) |
 | `primary` | the desktop's primary display |
 | `limits` | for the main headset while one is connected, else what any headset gets: `sizes` to offer `[w, h]`, `scales` (percent), `displays_max` (virtual monitors), `physical_max`, `streams_max`, `min` and `max` size |
@@ -366,7 +366,7 @@ prostir ctl preset N
 prostir ctl monitor list | add WxH[@1.25|@125%] | remove ID | retry ID | primary ID
 prostir ctl screen show|hide ID            # the PC's own displays
 prostir ctl screenshot ID                  # a picture of a monitor: where it was saved
-prostir ctl quality MBIT | sharp on|off | codec h264|h265|auto [--cpu]
+prostir ctl quality MBIT | sharp on|off | codec h264|hevc|auto [--cpu]
 prostir ctl sound headset|pc
 prostir ctl pair | pair stop
 prostir ctl headsets | forget HEADSET | forget --all

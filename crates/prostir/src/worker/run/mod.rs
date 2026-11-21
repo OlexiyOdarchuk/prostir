@@ -185,6 +185,10 @@ struct Slot {
     size_guard: SizeGuard,
     /// The desktop closing it was said.
     closed_told: bool,
+    /// A scale the desktop was seen to have it at on the last tick, not the one it was
+    /// made with; and whether it was seen at that one since it was made.
+    scale_seen: Option<u16>,
+    seen_own: bool,
 }
 
 impl Slot {
@@ -200,6 +204,8 @@ impl Slot {
             kept: None,
             size_guard: SizeGuard::default(),
             closed_told: false,
+            scale_seen: None,
+            seen_own: false,
         }
     }
 
@@ -269,6 +275,11 @@ pub struct Worker {
     /// After the desktop refused a layout: when to try again, and how many times it did.
     layout_retry: (Instant, u32),
     primary_checked: Instant,
+    /// Monitors whose scale given on the desktop was taken: old and new, in percent
+    /// (see [`place::follow_rescaled`]).
+    rescaled: BTreeMap<ScreenId, (u16, u16)>,
+    /// The scales taken on a tick, kept for the next.
+    scales_taken: Vec<(ScreenId, u16)>,
     panels_checked: Instant,
     physical_due: Instant,
 }
@@ -340,6 +351,8 @@ impl Worker {
             layout_waits: false,
             layout_retry: (now, 0),
             primary_checked: now,
+            rescaled: BTreeMap::new(),
+            scales_taken: Vec::new(),
             panels_checked: now,
             physical_due: now,
         }
@@ -386,7 +399,8 @@ impl Worker {
     }
 
     /// Takes the newest wanted state.
-    fn take(&mut self, wanted: Wanted) {
+    fn take(&mut self, mut wanted: Wanted) {
+        place::follow_rescaled(&mut self.rescaled, &mut wanted);
         let was = self.wanted.as_ref();
         if was.is_none_or(|w| w.layout != wanted.layout) {
             self.layout_due = true;
@@ -571,6 +585,7 @@ impl Worker {
     fn upkeep(&mut self) {
         self.begin("looking after the outputs");
         self.check_sizes();
+        self.check_scales();
         self.check_closed();
         self.retry_unopened();
         self.check_primary();

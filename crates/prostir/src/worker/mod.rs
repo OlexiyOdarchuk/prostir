@@ -268,8 +268,18 @@ pub enum Done {
     PanelGone {
         id: ScreenId,
     },
-    /// The desktop is laid out: where each output is.
-    Placed(BTreeMap<OutputKey, DeskRect>),
+    /// The desktop is laid out: where each output is, from what the worker took up
+    /// to `upto` (see `Inbox::want`).
+    Placed {
+        on_desk: BTreeMap<OutputKey, DeskRect>,
+        upto: u64,
+    },
+    /// The desktop has monitor `id` at another scale than it was made with, given in
+    /// the desktop's own settings: it is taken (in percent), the output stays.
+    Rescaled {
+        id: ScreenId,
+        percent: u16,
+    },
     /// The PC's own displays, connected and on now.
     Physical(Vec<PhysicalDisplay>),
     /// The output the user works on.
@@ -416,6 +426,12 @@ impl Desk {
     pub fn ask(&mut self, job: Job) {
         self.posted = self.inbox.ask(job);
         self.dog.sent();
+    }
+
+    /// How many things were handed over so far: a [`Done::Placed`] up to this count
+    /// laid out what was handed over by now.
+    pub fn posted(&self) -> u64 {
+        self.posted
     }
 
     /// The worker did all it was given up to `upto`: once that is all, it waits for

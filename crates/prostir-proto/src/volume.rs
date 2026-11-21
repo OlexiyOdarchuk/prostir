@@ -138,6 +138,17 @@ impl PcVolume {
         self.tick(now)
     }
 
+    /// The PC puts the device at `level` itself (its settings window's slider): asked
+    /// like a move of the device, whose echo of the level then asks nothing more.
+    pub fn set_here(&mut self, level: u8, muted: bool, now: Instant) -> Option<Act> {
+        let level = level.min(100);
+        // The device left any level written before, even one within an echo of this.
+        self.written = None;
+        let act = self.device(level, muted, now);
+        self.written = Some((level, muted));
+        act
+    }
+
     /// What is due at `now`: a waiting request once [`ASK_EVERY`] passed since the
     /// last one, or the headset's level once the device rested that long.
     pub fn tick(&mut self, now: Instant) -> Option<Act> {
@@ -356,6 +367,25 @@ mod tests {
                 last < dragged_until + 200 + 2 * latency,
                 "quiet after ({latency} ms)"
             );
+        }
+    }
+
+    /// The PC's settings window sets the level: one request, even a step of 1 from
+    /// what was written last, and the device's echo of it asks nothing more.
+    #[test]
+    fn the_pc_sets_the_level_itself() {
+        let mut w = World::new(5, 40);
+        w.run(100);
+        for level in [41, 71] {
+            let before = w.messages.len();
+            let act = w.pc.set_here(level, false, w.now());
+            w.act(act);
+            w.device = (level, false);
+            w.device_events.push((w.ms + 2, (level, false)));
+            w.run(w.ms + 400);
+            assert_eq!(w.headset.now().level, quest_step(level));
+            assert_eq!(w.device.0, quest_step(level), "the device on the step");
+            assert_eq!(w.messages.len() - before, 2, "one request, one answer");
         }
     }
 

@@ -54,6 +54,7 @@ impl Brain {
                     self.phase = Phase::Idle;
                 }
             }
+            DeskNews::Rescaled => keep_screens(&mut self.store, displays, true),
             DeskNews::Job(job, result, answer) => {
                 if self.shot_taken(generation, job, &result, &answer) {
                     return self.look_at_desk(Instant::now());
@@ -195,7 +196,9 @@ impl Brain {
             .iter()
             .filter_map(|r| r.dog.due(r.step().map(|(t, _)| t), now))
             .min();
-        crate::brain::earliest([dog, answers, retiring])
+        // A monitor's stand-in place counts: the local API shows it.
+        let placing = self.displays.as_ref().and_then(|d| d.placing_due(now));
+        crate::brain::earliest([dog, answers, retiring, placing])
     }
 
     /// Requests that waited for the desktop long enough fail.

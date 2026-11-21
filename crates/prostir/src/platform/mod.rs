@@ -161,7 +161,7 @@ pub struct MonitorSpec {
     pub width: u32,
     pub height: u32,
     /// Output scale (UI scaling on that monitor), in whole percent as the desktop gets
-    /// it ([`VirtualSpec::scale`]); 1.0 keeps what the desktop remembers.
+    /// it ([`VirtualSpec::scale`]).
     pub scale: f64,
 }
 

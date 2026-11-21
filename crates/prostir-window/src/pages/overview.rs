@@ -271,7 +271,7 @@ pub(super) fn tiles(
             Some(Tile {
                 id: d.id,
                 name: display_name(tk, d),
-                size: size(tk, &d.mode),
+                size: tile_size(tk, &d.mode),
                 rect,
                 pc: d.kind == DisplayKind::Physical,
                 // Dimmed: hidden from the headset, or not streaming to it.
