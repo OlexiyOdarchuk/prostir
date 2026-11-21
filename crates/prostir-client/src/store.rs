@@ -47,7 +47,7 @@ fn symbol<T>(lib: *mut c_void, name: &str) -> Option<T> {
 impl Entitlement {
     /// Initializes the platform and asks whether the user owns the app. `None` means
     /// the check could not even start: treat it as a failure.
-    pub fn start() -> Option<Self> {
+    pub fn start(app: &android_activity::AndroidApp) -> Option<Self> {
         let name = CString::new("libovrplatformloader.so").ok()?;
         // SAFETY: plain dlopen; the handle is kept for the life of the process.
         let lib = unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_NOW) };
@@ -64,13 +64,15 @@ impl Entitlement {
             free: symbol(lib, "ovr_FreeMessage")?,
             answer: None,
         };
-        let ctx = ndk_context::android_context();
-        // SAFETY: the VM and activity come from the running NativeActivity.
-        let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }.ok()?;
+        // The SDK wants the Activity. `ndk_context` holds the Application (that is
+        // what android-activity puts there), so the activity comes from the app.
+        // SAFETY: the VM comes from the running NativeActivity.
+        let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) }.ok()?;
         let env = vm.attach_current_thread_permanently().ok()?;
         let app_id = CString::new(APP_ID).ok()?;
-        // SAFETY: valid app id, activity and JNIEnv for this thread.
-        let result = unsafe { init(app_id.as_ptr(), ctx.context(), env.get_raw().cast()) };
+        // SAFETY: valid app id, the running activity's object and JNIEnv for this
+        // thread.
+        let result = unsafe { init(app_id.as_ptr(), app.activity_as_ptr(), env.get_raw().cast()) };
         if result != 0 {
             warn!("store: platform initialization failed ({result})");
             return None;

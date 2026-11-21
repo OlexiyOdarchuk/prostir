@@ -2240,7 +2240,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     let mut rings: Vec<(Vec3, Instant)> = Vec::new();
     // Store builds: the store requires checking the user owns the app at launch.
     #[cfg(feature = "store")]
-    let mut entitlement = crate::store::Entitlement::start();
+    let mut entitlement = crate::store::Entitlement::start(app);
     #[cfg(feature = "store")]
     let mut not_entitled_since: Option<Instant> = entitlement.is_none().then(Instant::now);
     let mut session_running = false;
@@ -2271,7 +2271,10 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         }
         #[cfg(feature = "store")]
         {
-            if entitlement.as_mut().and_then(|e| e.poll()) == Some(false)
+            if entitlement
+                .as_mut()
+                .and_then(crate::store::Entitlement::poll)
+                == Some(false)
                 && not_entitled_since.is_none()
             {
                 not_entitled_since = Some(Instant::now());
